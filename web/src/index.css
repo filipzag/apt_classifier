@@ -1,0 +1,195 @@
+@import "tailwindcss";
+
+/* Design tokens. Dark "operations centre" palette: deep navy surfaces, cyan for the
+   authoritative deterministic signal, violet for advisory AI output, amber for review,
+   rose for rejection. Never encode a state by colour alone; every badge carries a label. */
+@theme {
+  --font-sans: "Inter", ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+
+  --color-bg: #070b14;
+  --color-surface: #0d1424;
+  --color-surface-2: #121b2e;
+  --color-surface-3: #182339;
+  --color-border: #1f2b45;
+  --color-border-strong: #2c3b5e;
+  --color-text: #e6edf7;
+  --color-muted: #8b9bb4;
+  --color-faint: #5b6a86;
+
+  --color-accent: #22d3ee;
+  --color-accent-soft: rgba(34, 211, 238, 0.14);
+  --color-violet: #a78bfa;
+  --color-violet-soft: rgba(167, 139, 250, 0.16);
+  --color-emerald: #34d399;
+  --color-emerald-soft: rgba(52, 211, 153, 0.14);
+  --color-amber: #fbbf24;
+  --color-amber-soft: rgba(251, 191, 36, 0.14);
+  --color-rose: #fb7185;
+  --color-rose-soft: rgba(251, 113, 133, 0.14);
+  --color-sky: #60a5fa;
+
+  --radius-xl: 1rem;
+  --radius-2xl: 1.25rem;
+
+  --shadow-glow: 0 0 0 1px rgba(34, 211, 238, 0.25), 0 20px 60px -20px rgba(34, 211, 238, 0.35);
+  --shadow-card: 0 1px 0 0 rgba(255, 255, 255, 0.03) inset, 0 10px 40px -20px rgba(0, 0, 0, 0.8);
+}
+
+:root {
+  color-scheme: dark;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+}
+
+body {
+  margin: 0;
+  background-color: var(--color-bg);
+  color: var(--color-text);
+  font-family: var(--font-sans);
+  font-feature-settings: "cv02", "cv03", "cv04", "cv11", "ss01";
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+  background-image:
+    radial-gradient(1200px 600px at 10% -10%, rgba(34, 211, 238, 0.08), transparent 60%),
+    radial-gradient(900px 500px at 100% 0%, rgba(167, 139, 250, 0.07), transparent 55%);
+  background-attachment: fixed;
+}
+
+::selection {
+  background: rgba(34, 211, 238, 0.35);
+}
+
+* {
+  scrollbar-width: thin;
+  scrollbar-color: var(--color-border-strong) transparent;
+}
+
+*::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+*::-webkit-scrollbar-thumb {
+  background: var(--color-border-strong);
+  border-radius: 999px;
+  border: 3px solid transparent;
+  background-clip: padding-box;
+}
+
+/* Utilities that Tailwind does not ship */
+@utility grid-bg {
+  background-image:
+    linear-gradient(rgba(255, 255, 255, 0.025) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(255, 255, 255, 0.025) 1px, transparent 1px);
+  background-size: 32px 32px;
+}
+
+@utility card {
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.025), rgba(255, 255, 255, 0)) ,
+    var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-xl);
+  box-shadow: var(--shadow-card);
+}
+
+@utility mono {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+}
+
+@utility tabular {
+  font-variant-numeric: tabular-nums;
+}
+
+@utility focus-ring {
+  outline: none;
+  &:focus-visible {
+    box-shadow: 0 0 0 2px var(--color-bg), 0 0 0 4px var(--color-accent);
+  }
+}
+
+@keyframes shimmer {
+  0% {
+    background-position: -400px 0;
+  }
+  100% {
+    background-position: 400px 0;
+  }
+}
+
+@utility skeleton {
+  background: linear-gradient(90deg, var(--color-surface-2) 25%, var(--color-surface-3) 50%, var(--color-surface-2) 75%);
+  background-size: 800px 100%;
+  animation: shimmer 1.4s linear infinite;
+  border-radius: 0.5rem;
+}
+
+@keyframes pulse-ring {
+  0% {
+    transform: scale(0.9);
+    opacity: 0.8;
+  }
+  100% {
+    transform: scale(1.8);
+    opacity: 0;
+  }
+}
+
+@utility pulse-ring {
+  position: relative;
+  &::after {
+    content: "";
+    position: absolute;
+    inset: 0;
+    border-radius: 999px;
+    border: 1px solid currentColor;
+    animation: pulse-ring 1.6s ease-out infinite;
+  }
+}
+
+table.data {
+  width: 100%;
+  border-collapse: separate;
+  border-spacing: 0;
+  font-size: 0.8125rem;
+}
+table.data th {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  text-align: left;
+  font-weight: 600;
+  font-size: 0.6875rem;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--color-muted);
+  background: var(--color-surface-2);
+  padding: 0.55rem 0.75rem;
+  border-bottom: 1px solid var(--color-border);
+  white-space: nowrap;
+}
+table.data td {
+  padding: 0.55rem 0.75rem;
+  border-bottom: 1px solid var(--color-border);
+  vertical-align: top;
+  color: var(--color-text);
+}
+table.data tr:last-child td {
+  border-bottom: none;
+}
+table.data tbody tr:hover td {
+  background: rgba(255, 255, 255, 0.02);
+}
+table.data tr.selected td {
+  background: var(--color-accent-soft);
+}
+
+textarea,
+input,
+select {
+  color-scheme: dark;
+}

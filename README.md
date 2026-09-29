@@ -214,6 +214,26 @@ rate limit) or Chroma are reported in plain language and never lose the case sta
 
 `transformers==4.57.5` is intentionally pinned below v5 because ATTACK-BERT currently publishes a `.bin` checkpoint that transformers v5 cannot load reliably.
 
+### Web front end (FastAPI + React)
+
+The primary interface is a React single-page app served by a FastAPI backend; the Streamlit
+app remains available (`make run`, and unchanged on the `streamlit-stable` branch).
+
+```bash
+make web-install   # once: npm ci inside web/
+make api           # API on http://127.0.0.1:8100 (loads the embedder and Chroma at startup)
+make web-dev       # Vite dev server on http://127.0.0.1:5173, /api proxied to 8100
+make run-next      # production: build web/dist and serve API + app from port 8100
+```
+
+`make api-local` runs the same API without any OpenRouter call (local mode: sentence split, no
+verifier, no AI review). The API surface is documented at `/docs` (OpenAPI) when the server
+runs; every payload is produced by `api/serializers.py` from an `AnalysisState`, and every
+analyst operation (intake, technique decisions, interview, LLM steps, live intel, exports)
+goes through `apt_classifier/service.py`, the same headless service any other front end would
+use. Cases are saved automatically under `data/cases/` after every change. Docker builds the
+web bundle in a Node stage and serves it from the Python image (`docker compose up`, port 8100).
+
 ### Optional Elastic Agent Builder MCP
 
 The supported connector targets Elastic Agent Builder MCP on Elasticsearch 9.2+/9.3+ or Elastic Serverless, not the deprecated standalone Elasticsearch MCP server. Create an API key restricted to intended security indices with `read` and `view_index_metadata`, plus Kibana `feature_agentBuilder.read` access, then configure:

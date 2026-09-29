@@ -3,7 +3,8 @@
 - Create/update environment: `make setup`
 - Start local ChromaDB: `make up`
 - Download ATT&CK and build vector index: `make ingest`
-- Run Streamlit: `make run`
+- Run the web app: `make api` (FastAPI on 8100; ChromaDB owns 8000) plus `make web-dev` (Vite on 5173) for development, or `make run-next` (build + serve from one process); `make api-local` for no-LLM mode; `make web-check` (tsc + oxlint) before committing web changes
+- Run Streamlit (legacy UI, preserved on branch `streamlit-stable`): `make run`
 - Tests: `make test`
 - Lint: `make lint`
 - Validate Compose without the daemon: `docker compose config --quiet`
@@ -20,6 +21,9 @@ The project must use its `.venv`; system transformers v5 is incompatible with AT
 
 ## Key modules
 
+- `apt_classifier/service.py` — `CaseService`: headless engine + case store + every analyst operation; both front ends must go through it.
+- `apt_classifier/report.py` — shared Markdown/JSON/Navigator/Attack Flow export builders.
+- `api/` — FastAPI app (`app.py` routes and error mapping, `serializers.py` state → JSON, `main.py` ASGI entry). `web/` — React 19 + Vite + Tailwind v4 SPA (`src/api/types.ts` mirrors the serializers).
 - `app/ui/` — Streamlit UI package: `runtime` (per-session engine, analysis state, autosave), `cases` (on-disk case store), `guard` (`run_step` error boundary), `components` (status strip, stage glossary, frames), `sidebar`, `local_extract` (no-LLM sentence split) and `pages/` (intake, technique_review, interview, assessment, canvas, diamond, cyberre, intel). Pages expose `render(engine, settings, weights)`.
 - `apt_classifier/attack/parse.py` — ATT&CK STIX parser (techniques, groups, software, campaigns, detection strategies, analytics, data components).
 - `apt_classifier/attack/kb.py` — Knowledge base data model with defensive objects.

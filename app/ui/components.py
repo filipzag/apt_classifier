@@ -10,37 +10,13 @@ from typing import Any
 import pandas as pd
 import streamlit as st
 
+from apt_classifier import report
 from apt_classifier.classifiers.base import ClassifierResult
 from apt_classifier.session import AnalysisState, AttributionEngine
 
 # Stage vocabulary shown to analysts. Icons carry the meaning together with the label so the
 # state is never expressed by colour alone.
-STAGE_INFO: dict[str, dict[str, str]] = {
-    "insufficient_evidence": {
-        "label": "Insufficient evidence",
-        "icon": "⬜",
-        "summary": "Too little technique evidence to rank groups meaningfully.",
-        "advice": "Add concrete behaviour (commands, persistence, lateral movement) or logs.",
-    },
-    "unresolved_activity_cluster": {
-        "label": "Unresolved activity cluster",
-        "icon": "🔶",
-        "summary": "Techniques were mapped but no documented group stands out.",
-        "advice": "Treat this as an unattributed cluster; the shortlist is a starting point only.",
-    },
-    "known_group_shortlist": {
-        "label": "Known-group shortlist",
-        "icon": "🔷",
-        "summary": "Several documented groups overlap the evidence; none clears the naming bar.",
-        "advice": "Answer interview questions or add discriminating evidence to separate them.",
-    },
-    "known_group_hypothesis": {
-        "label": "Named group hypothesis",
-        "icon": "🟢",
-        "summary": "One documented group clears the maturity and margin bar.",
-        "advice": "Check the documented-overlap note and run the independent review before reporting.",
-    },
-}
+STAGE_INFO = report.STAGE_INFO
 
 CANDIDATE_STATE_INFO: dict[str, tuple[str, str]] = {
     "auto_accepted": ("✅", "Accepted"),
@@ -166,108 +142,10 @@ def candidate_counts(state: AnalysisState | None) -> dict[str, int]:
 
 
 def assessment_markdown(engine: AttributionEngine, state: AnalysisState) -> str:
-    """Analyst report. Works with or without the AI review; the deterministic result leads."""
-    decision = getattr(state, "attribution_decision", None)
-    lines = ["# APT attribution assessment", ""]
-    if decision is not None:
-        info = STAGE_INFO.get(decision.stage.value, {})
-        lines += [
-            f"**Attribution stage:** {info.get('label', decision.stage.value)}",
-            f"**Maturity:** {decision.maturity_score:.2f} · **Margin:** {decision.margin:.2f} · "
-            f"**Separation:** {float(getattr(decision, 'separation', 0.0) or 0.0):.2f}",
-        ]
-        runner = getattr(decision, "runner_up_group_id", None)
-        if runner:
-            lines.append(
-                f"**Best-supported alternative:** {group_name(engine, runner)}"
-                + (" (documented-related)" if getattr(decision, "runner_up_related", False) else "")
-            )
-        if decision.leading_group_name:
-            role = (
-                "Leading hypothesis"
-                if decision.stage.value == "known_group_hypothesis"
-                else "Closest documented group (not an attribution)"
-            )
-            lines.append(f"**{role}:** {decision.leading_group_name} ({decision.leading_group_id})")
-        related = getattr(decision, "related_leading_groups", {}) or {}
-        if related:
-            lines.append(
-                "**Documented overlap:** "
-                + "; ".join(
-                    f"{group_name(engine, gid)}: {reason}" for gid, reason in related.items()
-                )
-            )
-        decisive = getattr(state.context, "decisive_software", {}) or {}
-        if float(decisive.get("factor", 1.0) or 1.0) > 1.0:
-            lines.append(
-                "**Decisive tooling:** named malware documented for very few groups ("
-                + ", ".join(decisive.get("software_ids", []))
-                + f"); software vote weighted ×{float(decisive['factor']):.1f}."
-            )
-        lines += ["", decision.rationale, ""]
-    lines += [
-        "## Deterministic ranking (authoritative)",
-        "Family-aware reciprocal-rank fusion over the documented ATT&CK overlap. The relative "
-        "index compares candidates within this case; it is not a probability.",
-    ]
-    for entry in state.fusion.entries[:15]:
-        lines.append(
-            f"{entry.rank}. **{group_name(engine, entry.group_id)}** — relative index "
-            f"{entry.relative_score:.1f}{' (contested)' if entry.contested else ''}"
-        )
-    accepted = getattr(state.retrieval, "observed_techniques", {}) or {}
-    if accepted:
-        lines += ["", "## Accepted ATT&CK techniques"]
-        names = {m.technique_id: m.technique_name for m in getattr(state.retrieval, "matches", ())}
-        lines += [f"- {tid} {names.get(tid, '')}".rstrip() for tid in sorted(accepted)]
-    origin = state.origin_assessment.origin
-    threat_type = state.origin_assessment.threat_type
-    lines += [
-        "",
-        "## Origin and intrusion-type hypotheses (from ATT&CK reporting on the ranked groups)",
-        f"- Most supported origin: {origin.top_country or 'Unresolved'} ({origin.confidence})",
-        f"- Intrusion type: {threat_type.label} ({threat_type.confidence})",
-    ]
-    if state.review is not None:
-        final = state.review.final.parsed
-        lines += [
-            "",
-            f"## Independent AI review: {final.get('headline', '')}".rstrip(": "),
-            f"Confidence: {final.get('confidence_label', 'low')}",
-            "",
-            str(final.get("assessment", "")),
-        ]
-        advisory = final.get("advisory_ranking", [])
-        if advisory:
-            lines += ["", "Advisory ordering (not applied to the deterministic ranking):"]
-            lines += [
-                f"{item.get('rank')}. {group_name(engine, str(item.get('candidate_id', '')))} — "
-                f"{item.get('justification', '')}"
-                for item in advisory
-            ]
-        if final.get("limitations"):
-            lines += ["", "Limitations:"] + [f"- {item}" for item in final["limitations"]]
-        if final.get("disconfirmation_tests"):
-            lines += ["", "Disconfirmation tests:"] + [
-                f"- {item}" for item in final["disconfirmation_tests"]
-            ]
-    if state.threat_intel_snapshot is not None and state.threat_intel_matches:
-        items = state.threat_intel_snapshot.item_by_id()
-        lines += ["", "## Non-voting live threat-intelligence matches"]
-        lines += [
-            f"- [{items[m.item_id].source}] {items[m.item_id].title} ({m.verification}): "
-            f"{'; '.join(m.reasons)}"
-            for m in state.threat_intel_matches[:10]
-            if m.item_id in items
-        ]
-    lines += [
-        "",
-        "## Caveats",
-        "- Ranking measures overlap with documented ATT&CK tradecraft; shared tooling, reporting "
-        "gaps and false flags can invalidate attribution.",
-        "- Interview leads are predictions, not findings.",
-    ]
-    return "\n".join(lines)
+    """Analyst report (shared builder in ``apt_classifier.report``)."""
+    from app.ui.runtime import case_name
+
+    return report.assessment_markdown(engine.kb, state, case_name=case_name())
 
 
 def next_step(state: AnalysisState | None) -> tuple[str, str]:
@@ -321,12 +199,7 @@ def goto(page_key: str) -> None:
         st.switch_page(page)
 
 
-SHORT_STAGE = {
-    "insufficient_evidence": "Insufficient",
-    "unresolved_activity_cluster": "Cluster",
-    "known_group_shortlist": "Shortlist",
-    "known_group_hypothesis": "Named",
-}
+SHORT_STAGE = report.SHORT_STAGE
 
 
 def status_strip(engine: AttributionEngine, state: AnalysisState | None, case_name: str) -> None:

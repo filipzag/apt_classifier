@@ -252,6 +252,51 @@ flagged as *stale* on every page.
 
 ---
 
+### 4.5 HTTP API and React front end
+
+Since 2026-09-29 the primary interface is a React 19 + TypeScript + Vite + Tailwind v4 single-page
+app (`web/`) served by a FastAPI backend (`api/`). The Streamlit app is unchanged and remains
+runnable; the last Streamlit-only revision is preserved on the `streamlit-stable` branch.
+
+- `apt_classifier/service.py` — `CaseService`: one engine (knowledge base, embedder, vector
+  store, optional OpenRouter client), the on-disk `CaseStore`, in-memory `AnalysisState` per case
+  id (rebuilt from the saved ledger on first access), a per-case re-entrant lock plus one engine
+  lock (the embedder and Chroma client are shared), and every analyst operation: intake
+  (`IntakePayload` → LLM extraction or local sentence split → `analyze`), technique decisions,
+  interview (`interview()`, `answer()`, `restart_interview()`), LLM steps (review, zero-shot,
+  CyberRE) that raise `ServiceUnavailable` in local mode, live threat intelligence with a
+  30-minute snapshot cache, Elasticsearch MCP staging, dossier/canvas/diamond views and exports.
+  Re-analyses keep live-intel matches and CyberRE results for observations that still exist.
+- `apt_classifier/report.py` — headless `STAGE_INFO`, the Markdown assessment, the JSON audit
+  payload, Navigator layers and Attack Flow export (`export_document(kb, state, kind)`); the
+  Streamlit components delegate to it so the two front ends cannot drift.
+- `api/app.py` — `create_app(service=None, serve_web=True)`; the service is built in the lifespan
+  when not injected (tests inject a stub or a local-mode service). Error mapping:
+  `CaseNotFound` → 404, `ValueError` → 400, `ServiceUnavailable` → 409, anything else → 500 with a
+  plain-language `detail` (402 credit exhaustion is recognised). Synchronous handlers run in the
+  thread pool, so a minute-long review does not block other requests. When `web/dist` exists the
+  app is served at `/` with SPA fallback; `/api/*` never falls through to it.
+- `api/serializers.py` — pure reads of `AnalysisState` into JSON: observations, candidates (with
+  the acceptance probability, evidence items and verifier verdict), accepted techniques, ranking
+  entries with the per-channel discrimination, the decision with thresholds and gate mode,
+  origin, behaviour and strategic matches, the classifier rank matrix, review, zero-shot,
+  CyberRE, live-intel matches, and the "next step" hint. Group ids always carry the ATT&CK name.
+- Endpoints: `GET /api/system`, `/api/sample`, `/api/techniques?q=`; `GET|POST /api/cases`,
+  `GET|PATCH|DELETE /api/cases/{id}`; `POST …/decisions`, `…/weights`; `GET …/interview`,
+  `POST …/interview/answer`, `…/interview/restart`; `POST …/review`, `…/zero-shot`, `…/cyberre`;
+  `POST …/elastic/search`, `…/elastic/import`; `GET …/dossier/{group}`, `…/canvas`, `…/diamond`,
+  `…/intel`, `…/export/{markdown|json|navigator|attack-flow}`.
+- Web app: routes `/` (cases), `/new` (intake), `/cases/:id` (assessment), `…/evidence`,
+  `…/techniques`, `…/interview`, `…/canvas`, `…/diamond`, `…/intel`, `…/review`. TanStack Query
+  caches the case payload; mutations write the returned payload straight into the cache.
+  Visual language: cyan for the deterministic ranking, violet for advisory AI output, amber for
+  review, rose for rejection; every state carries a label, never colour alone. The canvas and
+  diamond use one deterministic layered SVG layout (`LayeredGraph.tsx`), so the picture is
+  identical on every render.
+- Commands: `make api` (8100; 8000 is Chroma), `make api-local`, `make web-dev` (5173, proxy),
+  `make web-build`, `make web-check` (tsc + oxlint), `make run-next`. Tests: `tests/test_api.py`
+  (stub-service error mapping; a real local-mode flow that skips without the index).
+
 ## 5. Evidence ingestion and normalization
 
 All incoming evidence is represented in an `EvidenceLedger`.

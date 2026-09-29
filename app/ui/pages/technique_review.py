@@ -214,7 +214,7 @@ def render(engine: AttributionEngine, settings: Settings, weights: dict[str, flo
         disabled=not decisions or bool(problems),
     ):
         for decision in decisions:
-            state.ledger.add_technique_review(decision)
+            state.ledger.record_technique_review(decision)
         with st.spinner("Recomputing technique mappings and the group ranking…"):
             result = run_step(
                 "Re-ranking", runtime.reanalyze, engine, state.ledger, state.weights, previous=state

@@ -7,7 +7,7 @@ EVIDENCEFORGE_CLINIC_DIR ?= ../evidenceforge_clinic
 PUBLIC_BASELINE ?= data/audits/public_heldout_baseline.json
 PUBLIC_CURRENT ?= data/audits/public_heldout_current.json
 
-.PHONY: setup up down ingest run run-local test lint evidenceforge-eval evidenceforge-eval-all benchmark-public benchmark-curated verify-results check-regression fit-acceptance benchmark-attribution train-reranker generate-synthetic benchmark-cti-hal benchmark-cti-hal-production benchmark-attribution-production
+.PHONY: api api-dev api-local web-install web-dev web-build web-check run-next setup up down ingest run run-local test lint evidenceforge-eval evidenceforge-eval-all benchmark-public benchmark-curated verify-results check-regression fit-acceptance benchmark-attribution train-reranker generate-synthetic benchmark-cti-hal benchmark-cti-hal-production benchmark-attribution-production
 
 setup:
 	python3 -m venv --system-site-packages .venv
@@ -35,8 +35,8 @@ test:
 	PYTHONPATH=. $(PYTHON) -m pytest
 
 lint:
-	$(PYTHON) -m ruff check apt_classifier app tests scripts
-	$(PYTHON) -m ruff format --check apt_classifier app tests scripts
+	$(PYTHON) -m ruff check apt_classifier app api tests scripts
+	$(PYTHON) -m ruff format --check apt_classifier app api tests scripts
 
 evidenceforge-eval:
 	PYTHONPATH=. .venv/bin/python scripts/evidenceforge_eval.py \
@@ -101,3 +101,27 @@ benchmark-cti-hal-production:
 
 benchmark-attribution-production:
 	PYTHONPATH=. $(PYTHON) scripts/attribution_benchmark.py --pipeline production --output data/audits/attribution_heldout_production.json
+
+# ----- modern front end (FastAPI + React) -----
+api:
+	PYTHONPATH=. $(PYTHON) -m uvicorn api.main:app --host 127.0.0.1 --port 8100
+
+api-dev:
+	PYTHONPATH=. $(PYTHON) -m uvicorn api.main:app --host 127.0.0.1 --port 8100 --reload --reload-dir api --reload-dir apt_classifier
+
+api-local:
+	OPENROUTER_API_KEY= PYTHONPATH=. $(PYTHON) -m uvicorn api.main:app --host 127.0.0.1 --port 8100
+
+web-install:
+	cd web && npm ci
+
+web-dev:
+	cd web && npm run dev
+
+web-build:
+	cd web && npm run build
+
+web-check:
+	cd web && npx tsc -b && npm run lint
+
+run-next: web-build api

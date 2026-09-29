@@ -1,0 +1,174 @@
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+import { toast } from 'sonner'
+
+import { api, ApiError } from './client'
+import type { CasePayload, DecisionInput, InterviewState } from './types'
+
+export const keys = {
+  system: ['system'] as const,
+  cases: ['cases'] as const,
+  case: (id: string) => ['case', id] as const,
+  interview: (id: string) => ['interview', id] as const,
+  dossier: (id: string, group: string) => ['dossier', id, group] as const,
+  canvas: (id: string, g: number, e: number) => ['canvas', id, g, e] as const,
+  diamond: (id: string, g: number, c: number, i: number) => ['diamond', id, g, c, i] as const,
+  intel: (id: string, d: number, c: boolean) => ['intel', id, d, c] as const,
+}
+
+export function describe(error: unknown): string {
+  if (error instanceof ApiError) return error.message
+  if (error instanceof Error) return error.message
+  return String(error)
+}
+
+export function useSystem() {
+  return useQuery({ queryKey: keys.system, queryFn: api.system, staleTime: 60_000 })
+}
+
+export function useCases() {
+  return useQuery({ queryKey: keys.cases, queryFn: api.cases })
+}
+
+export function useCase(id: string | undefined) {
+  return useQuery({
+    queryKey: keys.case(id ?? ''),
+    queryFn: () => api.case(id!),
+    enabled: Boolean(id),
+    staleTime: 30_000,
+  })
+}
+
+export function useInterview(id: string | undefined) {
+  return useQuery({
+    queryKey: keys.interview(id ?? ''),
+    queryFn: () => api.interview(id!),
+    enabled: Boolean(id),
+    staleTime: 15_000,
+  })
+}
+
+export function useDossier(id: string | undefined, group: string | null) {
+  return useQuery({
+    queryKey: keys.dossier(id ?? '', group ?? ''),
+    queryFn: () => api.dossier(id!, group!),
+    enabled: Boolean(id && group),
+    staleTime: 60_000,
+  })
+}
+
+/** Writes the case payload returned by a mutation into the cache and refreshes dependants. */
+export function useCaseWriter(id: string) {
+  const client = useQueryClient()
+  return (payload: CasePayload) => {
+    client.setQueryData(keys.case(id), payload)
+    void client.invalidateQueries({ queryKey: ['interview', id] })
+    void client.invalidateQueries({ queryKey: ['dossier', id] })
+    void client.invalidateQueries({ queryKey: ['canvas', id] })
+    void client.invalidateQueries({ queryKey: ['diamond', id] })
+    void client.invalidateQueries({ queryKey: keys.cases })
+  }
+}
+
+export function useApplyDecisions(id: string) {
+  const write = useCaseWriter(id)
+  return useMutation({
+    mutationFn: (decisions: DecisionInput[]) => api.decisions(id, decisions),
+    onSuccess: (payload, decisions) => {
+      write(payload)
+      toast.success(`Applied ${decisions.length} decision${decisions.length === 1 ? '' : 's'}`, {
+        description: 'Technique mappings and the group ranking were recomputed.',
+      })
+    },
+    onError: (error) => toast.error('Could not apply decisions', { description: describe(error) }),
+  })
+}
+
+export function useRescore(id: string) {
+  const write = useCaseWriter(id)
+  return useMutation({
+    mutationFn: (weights: Record<string, number>) => api.weights(id, weights),
+    onSuccess: (payload) => {
+      write(payload)
+      toast.success('Ranking recomputed with the new weights')
+    },
+    onError: (error) => toast.error('Re-score failed', { description: describe(error) }),
+  })
+}
+
+export function useInterviewMutations(id: string) {
+  const client = useQueryClient()
+  const settle = (state: InterviewState) => {
+    client.setQueryData(keys.interview(id), state)
+    void client.invalidateQueries({ queryKey: keys.case(id) })
+    void client.invalidateQueries({ queryKey: keys.cases })
+  }
+  const answer = useMutation({
+    mutationFn: ({ status, text }: { status: string; text?: string }) => api.answer(id, status, text),
+    onSuccess: settle,
+    onError: (error) => toast.error('Answer not recorded', { description: describe(error) }),
+  })
+  const restart = useMutation({
+    mutationFn: () => api.restart(id),
+    onSuccess: (state) => {
+      settle(state)
+      toast.success('Interview restarted')
+    },
+    onError: (error) => toast.error('Restart failed', { description: describe(error) }),
+  })
+  return { answer, restart }
+}
+
+export function useLlmStep(id: string, kind: 'review' | 'zero-shot') {
+  const write = useCaseWriter(id)
+  return useMutation({
+    mutationFn: () => (kind === 'review' ? api.review(id) : api.zeroShot(id)),
+    onSuccess: (payload) => {
+      write(payload)
+      toast.success(kind === 'review' ? 'Independent review complete' : 'Zero-shot vote recorded')
+    },
+    onError: (error) =>
+      toast.error(kind === 'review' ? 'Review failed' : 'Zero-shot vote failed', {
+        description: describe(error),
+      }),
+  })
+}
+
+export function useCyberRE(id: string) {
+  const write = useCaseWriter(id)
+  return useMutation({
+    mutationFn: ({ observationId, usePrefilter }: { observationId: string | null; usePrefilter: boolean }) =>
+      api.cyberre(id, observationId, usePrefilter),
+    onSuccess: (payload) => {
+      write(payload)
+      toast.success('CyberRE scan complete')
+    },
+    onError: (error) => toast.error('CyberRE scan failed', { description: describe(error) }),
+  })
+}
+
+export function useRename(id: string) {
+  const client = useQueryClient()
+  return useMutation({
+    mutationFn: (name: string) => api.rename(id, name),
+    onSuccess: (result) => {
+      client.setQueryData<CasePayload | undefined>(keys.case(id), (old) =>
+        old ? { ...old, name: result.name } : old,
+      )
+      void client.invalidateQueries({ queryKey: keys.cases })
+    },
+    onError: (error) => toast.error('Rename failed', { description: describe(error) }),
+  })
+}
+
+export function useDeleteCase() {
+  const client = useQueryClient()
+  return useMutation({
+    mutationFn: (id: string) => api.remove(id),
+    onSuccess: (_, id) => {
+      client.removeQueries({ queryKey: keys.case(id) })
+      void client.invalidateQueries({ queryKey: keys.cases })
+      toast.success('Case deleted')
+    },
+    onError: (error) => toast.error('Delete failed', { description: describe(error) }),
+  })
+}
