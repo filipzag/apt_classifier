@@ -383,6 +383,7 @@ class AttributionEngine:
         *,
         weights: dict[str, float] | None = None,
         prior_verifications: dict[tuple[str, str], TechniqueVerification] | None = None,
+        prior_zero_shot: ZeroShotResult | None = None,
     ) -> AnalysisState:
         retrieval, technique_verifications = self.map_techniques(
             ledger, prior_verifications=prior_verifications
@@ -418,7 +419,7 @@ class AttributionEngine:
             telemetry_profile=self.telemetry_profile,
             deterministic_fusion=fusion,
         )
-        self._apply_zero_shot_vote(state, merged_weights)
+        self._apply_zero_shot_vote(state, merged_weights, prior=prior_zero_shot)
         state.attribution_decision = self._assess_stage(state)
         return state
 
@@ -493,7 +494,9 @@ class AttributionEngine:
             {
                 "verifier_reused": int(diagnostics.get("verifier_reused", 0) or 0),
                 "verifier_mode": scope,
-                "verifier_calls": len(results),
+                # observations that produced a model request (an observation whose remaining
+                # candidates need no verification costs nothing and is not a call)
+                "verifier_calls": sum(1 for result in results.values() if result.prompt),
                 "verifier_errors": sum(result.error is not None for result in results.values()),
                 "verifier_cost_usd": sum(result.usage.cost_usd for result in results.values()),
             }
@@ -527,36 +530,48 @@ class AttributionEngine:
         state.attribution_decision = self._assess_stage(state)
         return state
 
-    def _apply_zero_shot_vote(self, state: AnalysisState, merged_weights: dict[str, float]) -> None:
+    def _apply_zero_shot_vote(
+        self,
+        state: AnalysisState,
+        merged_weights: dict[str, float],
+        *,
+        prior: ZeroShotResult | None = None,
+    ) -> None:
         """Run the LLM zero-shot against the deterministic fusion and re-fuse.
 
         The LLM zero-shot is a bounded voting member of the ensemble. It runs
         after the deterministic classifiers produce an initial ranking, ranks
         only the top-N candidates from that ranking, and is then folded back
         into RRF with its own family budget so it can rerank but not dominate.
-        The independent reviewer remains blinded to this vote.
+        The independent reviewer remains blinded to this vote. A ``prior`` vote
+        (saved with the case) is folded in instead of asking the model again.
         """
         if merged_weights.get(ZERO_SHOT_CLASSIFIER_NAME, 0.0) <= 0:
             return
         if not state.fusion.entries:
             return
-        top_n = min(10, len(state.fusion.entries))
-        payload = build_review_payload(
-            self.kb,
-            state.ledger,
-            state.classifier_results,
-            state.fusion,
-            top_n=top_n,
-        )
-        try:
-            zero_shot = run_zero_shot_guess(
-                self.llm,
-                payload,
-                model=self.settings.extract_model,
-                effort=self.settings.question_effort,
+        if prior is not None:
+            zero_shot = prior
+        else:
+            if self.llm is None:
+                return
+            top_n = min(10, len(state.fusion.entries))
+            payload = build_review_payload(
+                self.kb,
+                state.ledger,
+                state.classifier_results,
+                state.fusion,
+                top_n=top_n,
             )
-        except Exception:
-            return
+            try:
+                zero_shot = run_zero_shot_guess(
+                    self.llm,
+                    payload,
+                    model=self.settings.extract_model,
+                    effort=self.settings.question_effort,
+                )
+            except Exception:
+                return
         state.zero_shot = zero_shot
         zero_shot_result = zero_shot.to_classifier_result()
         if not zero_shot_result.applicable:

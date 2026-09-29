@@ -13,10 +13,12 @@ from __future__ import annotations
 import re
 from typing import Any
 
+from apt_classifier.memo import ObjectMemo
+
 RARE_SOFTWARE_MAX_USERS = 3
 MIN_NAME_LENGTH = 4
 
-_RELATED_CACHE: dict[int, tuple[tuple[str, int], dict[str, dict[str, str]]]] = {}
+_RELATED_CACHE: ObjectMemo[dict[str, dict[str, str]]] = ObjectMemo()
 
 
 def _group_names(group: Any) -> list[str]:
@@ -31,9 +33,9 @@ def related_groups(
     """Map each group id to ``{related_group_id: reason}``; symmetric; memoized per KB."""
     groups = getattr(kb, "groups", {}) or {}
     stamp = (str(getattr(kb, "version", "")), len(groups))
-    cached = _RELATED_CACHE.get(id(kb))
-    if cached is not None and cached[0] == stamp:
-        return cached[1]
+    cached = _RELATED_CACHE.get(kb, stamp)
+    if cached is not None:
+        return cached
     result: dict[str, dict[str, str]] = {group_id: {} for group_id in groups}
 
     def link(a: str, b: str, reason: str) -> None:
@@ -78,8 +80,7 @@ def related_groups(
                     f"{getattr(group, 'name', group_id)} description references "
                     f"{getattr(groups[other_id], 'name', other_id)}",
                 )
-    _RELATED_CACHE[id(kb)] = (stamp, result)
-    return result
+    return _RELATED_CACHE.put(kb, stamp, result)
 
 
 def related_to(kb: Any, group_id: str) -> dict[str, str]:

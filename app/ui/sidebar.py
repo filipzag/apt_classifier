@@ -9,6 +9,7 @@ import streamlit as st
 
 from app.ui import runtime
 from app.ui.guard import run_step
+from apt_classifier.classifiers.llm_zeroshot import ZeroShotResult
 from apt_classifier.config import Settings
 from apt_classifier.presets import PRESETS, apply_preset, preset_choices
 from apt_classifier.session import AttributionEngine, verifications_from_records
@@ -93,6 +94,7 @@ def _render_case_manager(
                         prior_verifications=verifications_from_records(
                             payload.get("verifications")
                         ),
+                        prior_zero_shot=ZeroShotResult.from_dict(payload.get("zero_shot")),
                     )
                 if loaded.ok:
                     st.session_state[runtime.CASE_NAME_KEY] = payload["name"]

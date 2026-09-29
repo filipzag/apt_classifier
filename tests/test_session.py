@@ -525,3 +525,23 @@ def test_prior_verifications_are_reused_without_calling_the_verifier():
     # records that are not final verdicts are ignored
     assert verifications_from_records([{**records[0], "verdict": "error"}, {"bad": 1}]) == {}
     assert collect_verifications(offline)  # the applied verdict is collected again
+
+
+def test_saved_zero_shot_vote_is_folded_in_without_calling_the_model():
+    """A vote saved with the case is reused on reopen: the model is not asked (FakeLLM raises
+    on any call) and the vote still enters the ensemble."""
+    prior = ZeroShotResult(
+        ranking=({"candidate_id": "G2", "rank": 1, "reason": "saved"},),
+        model="saved-model",
+        usage=LLMUsage(1, 1, 0.01),
+        prompt="",
+        response="",
+    )
+    engine = AttributionEngine(_settings(llm_zero_shot_weight=0.5), _kb(), FakeStore(), FakeLLM())
+    state = engine.analyze(
+        _ledger("PowerShell executed an encoded command."), prior_zero_shot=prior
+    )
+    assert state.zero_shot is prior
+    assert any(r.classifier == "llm_zero_shot" for r in state.classifier_results)
+    assert ZeroShotResult.from_dict(prior.to_dict()) == prior
+    assert ZeroShotResult.from_dict({"nope": 1}) is None and ZeroShotResult.from_dict(None) is None

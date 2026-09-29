@@ -272,7 +272,9 @@ runnable; the last Streamlit-only revision is preserved on the `streamlit-stable
   by `map_techniques(prior_verifications=...)` in both production and local mode before any
   verifier call; candidates that carry a saved verdict are never sent to the verifier again, so
   reopening a case is deterministic and costs nothing (`retrieval_diagnostics.verifier_reused`).
-  `not_run` and `error` are not verdicts and are retried.
+  `not_run` and `error` are not verdicts and are retried. The bounded zero-shot vote is saved the
+  same way (`zero_shot`) and folded back in on reopen instead of being asked again; decisions and
+  interview answers still re-cast it because the evidence changed.
 - `apt_classifier/report.py` — headless `STAGE_INFO`, the Markdown assessment, the JSON audit
   payload, Navigator layers and Attack Flow export (`export_document(kb, state, kind)`); the
   Streamlit components delegate to it so the two front ends cannot drift.

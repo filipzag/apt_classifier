@@ -38,8 +38,9 @@ from apt_classifier.classifiers.software import (
     software_rarity_weights,
 )
 from apt_classifier.fusion import FusionResult
+from apt_classifier.memo import ObjectMemo
 
-_DOC_COUNT_CACHE: dict[int, tuple[tuple[str, int], dict[str, int]]] = {}
+_DOC_COUNT_CACHE: ObjectMemo[dict[str, int]] = ObjectMemo()
 
 
 @dataclass(frozen=True)
@@ -112,15 +113,14 @@ def technique_document_counts(kb: Any) -> dict[str, int]:
     """Number of groups documenting each technique, memoized per knowledge-base object."""
     groups = kb_mapping(kb, "groups")
     stamp = (str(getattr(kb, "version", "")), len(groups))
-    cached = _DOC_COUNT_CACHE.get(id(kb))
-    if cached is not None and cached[0] == stamp:
-        return cached[1]
+    cached = _DOC_COUNT_CACHE.get(kb, stamp)
+    if cached is not None:
+        return cached
     counts: dict[str, int] = {}
     for technique_ids in kb_mapping(kb, "group_techniques").values():
         for technique_id in set(technique_ids):
             counts[technique_id] = counts.get(technique_id, 0) + 1
-    _DOC_COUNT_CACHE[id(kb)] = (stamp, counts)
-    return counts
+    return _DOC_COUNT_CACHE.put(kb, stamp, counts)
 
 
 def _exclusivity(documenting: int, candidate_count: int) -> float:

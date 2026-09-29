@@ -12,6 +12,7 @@ from apt_classifier.attack.kb import AttackKnowledgeBase
 from apt_classifier.attack.parse import split_sentences, strip_attack_citations
 from apt_classifier.config import Settings
 from apt_classifier.embeddings import Embedder
+from apt_classifier.memo import ObjectMemo
 
 TECHNIQUE_COLLECTION = "attack_techniques"
 GROUP_COLLECTION = "attack_groups"
@@ -82,7 +83,7 @@ def _sanitize_procedure(
     return re.sub(r"\s+", " ", text).strip()
 
 
-_PROCEDURE_CACHE: dict[int, tuple[tuple[str, int, int], dict[str, list[str]]]] = {}
+_PROCEDURE_CACHE: ObjectMemo[dict[str, list[str]]] = ObjectMemo()
 
 
 def _procedure_sentences(knowledge_base: AttackKnowledgeBase) -> dict[str, list[str]]:
@@ -97,9 +98,9 @@ def _procedure_sentences(knowledge_base: AttackKnowledgeBase) -> dict[str, list[
         len(knowledge_base.groups),
         len(knowledge_base.techniques),
     )
-    cached = _PROCEDURE_CACHE.get(id(knowledge_base))
-    if cached is not None and cached[0] == stamp:
-        return cached[1]
+    cached = _PROCEDURE_CACHE.get(knowledge_base, stamp)
+    if cached is not None:
+        return cached
     names = tuple(
         sorted(
             {
@@ -125,8 +126,7 @@ def _procedure_sentences(knowledge_base: AttackKnowledgeBase) -> dict[str, list[
                     continue
                 seen[technique_id].add(normalized)
                 procedures.setdefault(technique_id, []).append(text)
-    _PROCEDURE_CACHE[id(knowledge_base)] = (stamp, procedures)
-    return procedures
+    return _PROCEDURE_CACHE.put(knowledge_base, stamp, procedures)
 
 
 def procedure_sentences_by_technique(knowledge_base: Any) -> dict[str, list[str]]:

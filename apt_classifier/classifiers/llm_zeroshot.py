@@ -26,6 +26,27 @@ class ZeroShotResult:
             "response": self.response,
         }
 
+    @classmethod
+    def from_dict(cls, payload: Any) -> "ZeroShotResult | None":
+        """Inverse of :meth:`to_dict`; ``None`` for anything that is not a saved vote."""
+        if not isinstance(payload, dict) or not isinstance(payload.get("ranking"), list):
+            return None
+        usage = payload.get("usage") or {}
+        try:
+            return cls(
+                ranking=tuple(item for item in payload["ranking"] if isinstance(item, dict)),
+                model=str(payload.get("model") or ""),
+                usage=LLMUsage(
+                    int(usage.get("prompt_tokens", 0) or 0),
+                    int(usage.get("completion_tokens", 0) or 0),
+                    float(usage.get("cost_usd", 0.0) or 0.0),
+                ),
+                prompt=str(payload.get("prompt") or ""),
+                response=str(payload.get("response") or ""),
+            )
+        except (TypeError, ValueError):
+            return None
+
     def to_classifier_result(self) -> ClassifierResult:
         """Convert the LLM ranking into a voting ClassifierResult for RRF."""
         entries = []

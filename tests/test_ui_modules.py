@@ -146,9 +146,18 @@ def test_case_store_roundtrips_verifier_verdicts(tmp_path):
         "completion_tokens": 5,
         "cost_usd": 0.0,
     }
-    store.save(case_id="abc", name="n", ledger=ledger, verifications=[record])
+    vote = {
+        "ranking": [{"candidate_id": "G1", "rank": 1}],
+        "model": "m",
+        "usage": {},
+        "prompt": "",
+        "response": "",
+    }
+    store.save(case_id="abc", name="n", ledger=ledger, verifications=[record], zero_shot=vote)
     loaded = store.load("abc")
     assert loaded["verifications"] == [record]
+    assert loaded["zero_shot"] == vote
     # older files without the field load with an empty list
     store.save(case_id="old", name="n", ledger=ledger)
     assert store.load("old")["verifications"] == []
+    assert store.load("old")["zero_shot"] is None
