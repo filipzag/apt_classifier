@@ -1,0 +1,842 @@
+"""Text-in, group-out attribution benchmark over the real pipeline.
+
+For every ATT&CK group with enough documented procedure sentences, a fraction of its
+(technique, sentence) behaviours is held out, anonymized (actor names -> "the adversary")
+and fed as free-text observations through ``AttributionEngine.analyze``. ``--pipeline local``
+(default) is deterministic: verifier off, LLM zero-shot vote off, no OpenRouter calls.
+``--pipeline production`` runs the shipped pipeline: the configured technique verifier on
+the ambiguous candidates and the bounded zero-shot vote folded into RRF, with call counts,
+errors and cost recorded per fold. The benchmark then asks whether the originating group is
+recovered by the fused ranking (``rank``: what the analyst sees; ``deterministic_rank``:
+before the LLM vote) and which attribution stage is reached (always from the deterministic
+fusion; LLM votes never raise the stage).
+
+Leak control per fold (``FoldStore``):
+- technique-index hits whose text equals a held-out sentence are dropped (the dense index
+  embeds the same anonymized sentences);
+- the held-out group's actor-behaviour documents for the held-out techniques are dropped;
+- in the *unknown-actor* arm the group is removed from the knowledge base and every one of
+  its documents is hidden, so the correct answer is "no named group".
+
+What it does not control: group technique lists, technique-profile centroids and
+descriptions still include the held-out techniques; that is the documented ATT&CK answer
+key every classifier scores against, so this remains a self-consistency check, not
+field attribution accuracy. It replaces the technique-ID version in
+``scripts/ensemble_benchmark.py`` as the attribution gate because it exercises retrieval,
+acceptance, eligibility, family weights and the stage decision as the product does.
+"""
+
+from __future__ import annotations
+
+import argparse
+import copy
+import json
+import random
+import sys
+import time
+from dataclasses import dataclass
+from datetime import UTC, datetime
+from pathlib import Path
+from statistics import fmean
+from typing import Any
+
+from apt_classifier.attack.kb import AttackKnowledgeBase
+from apt_classifier.attack.related import related_groups
+from apt_classifier.attribution import AttributionStage
+from apt_classifier.config import Settings
+from apt_classifier.embeddings import SentenceTransformerEmbedder
+from apt_classifier.evaluation import (
+    AttributionEvaluationCase,
+    AttributionPrediction,
+    bootstrap_interval,
+    evaluate_attribution_predictions,
+    pipeline_fingerprint,
+    source_fingerprint,
+    write_artifact,
+)
+from apt_classifier.evidence.models import EvidenceLedger, Observation, Provenance
+from apt_classifier.llm import OpenRouterClient
+from apt_classifier.session import AttributionEngine
+from apt_classifier.vectorstore import (
+    ChromaVectorStore,
+    VectorHit,
+    _actor_name_pattern,
+    _sanitize_procedure,
+    normalize_procedure_text,
+)
+
+REPO_ROOT = Path(__file__).resolve().parent.parent
+FINGERPRINTED_SOURCES = (
+    REPO_ROOT / "apt_classifier" / "fusion.py",
+    REPO_ROOT / "apt_classifier" / "attribution.py",
+    REPO_ROOT / "apt_classifier" / "session.py",
+    REPO_ROOT / "apt_classifier" / "retrieve.py",
+    REPO_ROOT / "apt_classifier" / "classifiers" / "base.py",
+    REPO_ROOT / "apt_classifier" / "classifiers" / "naive_bayes.py",
+    REPO_ROOT / "apt_classifier" / "classifiers" / "software.py",
+    REPO_ROOT / "apt_classifier" / "classifiers" / "strategic_context.py",
+)
+
+
+@dataclass(frozen=True)
+class Fold:
+    group_id: str
+    held_out_techniques: frozenset[str]
+    observations: tuple[str, ...]
+    held_out_texts: frozenset[str]
+    report_id: str = ""
+
+
+class FoldStore:
+    """Vector-store proxy that hides one group's own evidence for a fold."""
+
+    def __init__(
+        self,
+        store: Any,
+        *,
+        group_id: str,
+        held_out_techniques: frozenset[str],
+        held_out_texts: frozenset[str],
+        hide_group_entirely: bool = False,
+    ) -> None:
+        self._store = store
+        self.group_id = group_id
+        self.held_out_techniques = held_out_techniques
+        self.held_out_texts = held_out_texts
+        self.hide_group_entirely = hide_group_entirely
+        self.dropped = {"technique": 0, "behavior": 0, "profile": 0}
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._store, name)
+
+    def query_techniques(
+        self, texts: list[str], *, n_results: int = 10, fields: tuple[str, ...] | None = None
+    ) -> list[list[VectorHit]]:
+        extra = len(self.held_out_texts)
+        raw = self._store.query_techniques(texts, n_results=n_results + extra, fields=fields)
+        output: list[list[VectorHit]] = []
+        for hits in raw:
+            kept = []
+            for hit in hits:
+                if normalize_procedure_text(hit.document) in self.held_out_texts:
+                    self.dropped["technique"] += 1
+                    continue
+                kept.append(hit)
+            output.append(kept[:n_results])
+        return output
+
+    def _hides_behavior(self, hit: VectorHit) -> bool:
+        if str(hit.metadata.get("group_id") or "") != self.group_id:
+            return False
+        if self.hide_group_entirely:
+            return True
+        technique_id = str(hit.metadata.get("technique_id") or "")
+        return technique_id in self.held_out_techniques or (
+            normalize_procedure_text(hit.document) in self.held_out_texts
+        )
+
+    def query_group_behaviors(
+        self, texts: list[str], *, n_results: int = 20
+    ) -> list[list[VectorHit]]:
+        raw = self._store.query_group_behaviors(texts, n_results=n_results * 2)
+        output: list[list[VectorHit]] = []
+        for hits in raw:
+            kept = []
+            for hit in hits:
+                if self._hides_behavior(hit):
+                    self.dropped["behavior"] += 1
+                    continue
+                kept.append(hit)
+            output.append(kept[:n_results])
+        return output
+
+    def query_group_profile(
+        self, texts: list[str], *, document_type: str, n_results: int = 20
+    ) -> list[VectorHit]:
+        hits = self._store.query_group_profile(
+            texts, document_type=document_type, n_results=n_results + 1
+        )
+        if not self.hide_group_entirely:
+            return hits[:n_results]
+        kept = []
+        for hit in hits:
+            if str(hit.metadata.get("group_id") or "") == self.group_id:
+                self.dropped["profile"] += 1
+                continue
+            kept.append(hit)
+        return kept[:n_results]
+
+
+def build_folds(
+    kb: AttackKnowledgeBase,
+    *,
+    coverage: float,
+    seed: int,
+    min_behaviors: int,
+    min_techniques: int,
+    max_observations: int,
+    limit: int | None = None,
+) -> list[Fold]:
+    names = tuple(
+        sorted(
+            {
+                name.strip()
+                for group in kb.groups.values()
+                for name in (group.name, *group.aliases)
+                if name and name.strip()
+            },
+            key=lambda item: (-len(item), item.casefold()),
+        )
+    )
+    pattern = _actor_name_pattern(names)
+    rng = random.Random(seed)
+    folds: list[Fold] = []
+    for group_id in sorted(kb.groups):
+        group = kb.groups[group_id]
+        pairs = [
+            (technique_id, sentence)
+            for technique_id, sentences in sorted(group.technique_behaviors.items())
+            if technique_id in kb.techniques
+            for sentence in sentences
+        ]
+        if len(pairs) < min_behaviors or len(group.technique_ids) < min_techniques:
+            continue
+        rng.shuffle(pairs)
+        count = max(1, round(coverage * len(pairs)))
+        held = pairs[:count][:max_observations]
+        texts = tuple(_sanitize_procedure(sentence, names, pattern=pattern) for _, sentence in held)
+        texts = tuple(text for text in texts if len(text.split()) >= 3)
+        if not texts:
+            continue
+        folds.append(
+            Fold(
+                group_id=group_id,
+                held_out_techniques=frozenset(technique_id for technique_id, _ in held),
+                observations=texts,
+                held_out_texts=frozenset(normalize_procedure_text(text) for text in texts),
+            )
+        )
+        if limit is not None and len(folds) >= limit:
+            break
+    return folds
+
+
+def load_report_folds(path: Path, *, max_observations: int) -> list[Fold]:
+    """Real-report folds from ``scripts/prepare_cti_hal.py`` output (one fold per report).
+
+    Observations are the report's human-annotated statements; the expected group is the
+    report's subject. Nothing is hidden from the store: these sentences were never indexed,
+    and the group's own documented behaviour is legitimate evidence for a real report.
+    """
+    folds: list[Fold] = []
+    for line in Path(path).read_text(encoding="utf-8").splitlines():
+        if not line.strip():
+            continue
+        row = json.loads(line)
+        texts = tuple(
+            str(item["text"]).strip()
+            for item in row.get("statements", [])
+            if len(str(item.get("text", "")).split()) >= 3
+        )[:max_observations]
+        if not texts:
+            continue
+        techniques = frozenset(
+            technique_id
+            for item in row.get("statements", [])
+            for technique_id in item.get("technique_ids", [])
+        )
+        folds.append(
+            Fold(
+                group_id=str(row["group_id"]),
+                held_out_techniques=techniques,
+                observations=texts,
+                held_out_texts=frozenset(),
+                report_id=str(row.get("report_id") or ""),
+            )
+        )
+    return folds
+
+
+def sample_folds(folds: list[Fold], count: int, seed: int) -> list[Fold]:
+    """Seeded sample of ``count`` folds, round-robin over groups so no group dominates."""
+    if count >= len(folds):
+        return list(folds)
+    rng = random.Random(seed)
+    by_group: dict[str, list[Fold]] = {}
+    for fold in folds:
+        by_group.setdefault(fold.group_id, []).append(fold)
+    for members in by_group.values():
+        rng.shuffle(members)
+    chosen: list[Fold] = []
+    while len(chosen) < count:
+        for group_id in sorted(by_group):
+            if by_group[group_id] and len(chosen) < count:
+                chosen.append(by_group[group_id].pop())
+    return chosen
+
+
+def _ledger(fold: Fold) -> EvidenceLedger:
+    return EvidenceLedger(
+        observations=[
+            Observation(text=text, provenance=Provenance(source="attribution_benchmark"))
+            for text in fold.observations
+        ]
+    )
+
+
+def _llm_accounting(state: Any, client: OpenRouterClient | None, cost_before: float) -> dict:
+    diagnostics = dict(getattr(state.retrieval, "diagnostics", None) or {})
+    zero_shot = getattr(state, "zero_shot", None)
+    return {
+        "verifier_calls": int(diagnostics.get("verifier_calls", 0) or 0),
+        "verifier_errors": int(diagnostics.get("verifier_errors", 0) or 0),
+        "verifier_cost_usd": round(float(diagnostics.get("verifier_cost_usd", 0.0) or 0.0), 6),
+        "zero_shot_applied": zero_shot is not None,
+        "zero_shot_cost_usd": round(
+            float(getattr(getattr(zero_shot, "usage", None), "cost_usd", 0.0) or 0.0), 6
+        ),
+        "cost_usd": round(
+            (client.total_usage.cost_usd - cost_before) if client is not None else 0.0, 6
+        ),
+    }
+
+
+class LLMUnavailableError(RuntimeError):
+    """Every LLM call of the first production fold failed: refuse to produce an artifact."""
+
+
+def _all_llm_calls_failed(accounting: dict[str, Any]) -> bool:
+    calls = int(accounting.get("verifier_calls", 0) or 0)
+    errors = int(accounting.get("verifier_errors", 0) or 0)
+    return calls > 0 and errors == calls and not accounting.get("zero_shot_applied", False)
+
+
+def _separation_fields(state: Any, truth: str | None, decision: Any) -> dict[str, Any]:
+    """Per-row separation diagnostics: the decision's separation, the leader's evidence
+    specificity, the best-supported alternative, and the raw per-channel discrimination of the
+    top-K so channel weights, floors and bars can be replayed offline
+    (``scripts/attribution_gate_sweep.py``)."""
+    discrimination = getattr(state.context, "discrimination", None)
+    candidates = discrimination.to_dict()["candidates"] if discrimination is not None else []
+    ordered = sorted(candidates, key=lambda item: -float(item["total"]))
+    truth_rank = next(
+        (index for index, item in enumerate(ordered, 1) if truth and item["group_id"] == truth),
+        None,
+    )
+    return {
+        "separation": float(getattr(decision, "separation", 0.0) or 0.0) if decision else None,
+        "leader_specificity": (
+            float((decision.separation_factors or {}).get("leader_specificity", 0.0))
+            if decision
+            else None
+        ),
+        "runner_up": getattr(decision, "runner_up_group_id", None) if decision else None,
+        "runner_up_related": bool(getattr(decision, "runner_up_related", False))
+        if decision
+        else False,
+        "maturity_factors": dict(getattr(decision, "maturity_factors", {}) or {})
+        if decision
+        else {},
+        "discriminative_truth_rank": truth_rank,
+        "topk": candidates,
+    }
+
+
+def _rank_of(fusion: Any, group_id: str) -> int | None:
+    ranked = [entry.group_id for entry in fusion.entries]
+    return ranked.index(group_id) + 1 if group_id in ranked else None
+
+
+def run_known(
+    engine: AttributionEngine,
+    folds: list[Fold],
+    *,
+    hide_evidence: bool = True,
+    client: OpenRouterClient | None = None,
+) -> tuple[list[dict[str, Any]], dict]:
+    rows: list[dict[str, Any]] = []
+    base_store = engine.store
+    related = related_groups(engine.kb)
+    dropped_total = {"technique": 0, "behavior": 0, "profile": 0}
+    try:
+        for fold in folds:
+            proxy = FoldStore(
+                base_store,
+                group_id=fold.group_id,
+                held_out_techniques=fold.held_out_techniques if hide_evidence else frozenset(),
+                held_out_texts=fold.held_out_texts if hide_evidence else frozenset(),
+            )
+            engine.store = proxy
+            cost_before = client.total_usage.cost_usd if client is not None else 0.0
+            state = engine.analyze(_ledger(fold))
+            # ``fusion`` is what the analyst sees (includes the LLM vote in production);
+            # ``deterministic_fusion`` is the ranking before the vote and drives the stage.
+            fusion = state.fusion
+            deterministic = state.deterministic_fusion or state.fusion
+            ranked = [entry.group_id for entry in fusion.entries]
+            decision = state.attribution_decision
+            observed = set(state.context.observed_techniques)
+            accounting = _llm_accounting(state, client, cost_before)
+            truth_ranks = {
+                result.classifier: (
+                    result.by_group()[fold.group_id].rank
+                    if fold.group_id in result.by_group()
+                    else None
+                )
+                for result in state.classifier_results
+                if result.applicable
+            }
+            if client is not None and _all_llm_calls_failed(accounting):
+                label = fold.report_id or fold.group_id
+                if not rows:
+                    raise LLMUnavailableError(
+                        f"all {accounting['verifier_calls']} verifier calls failed on the first "
+                        f"fold ({label}) and the zero-shot vote was not applied; check the "
+                        "OpenRouter key/credit before running the production pipeline"
+                    )
+                # Credit or the API went away mid-run: keep the folds that were measured with
+                # the LLM and stop, rather than silently appending local-only folds.
+                dropped_total["llm_unavailable_at"] = label  # type: ignore[assignment]
+                print(f"stopping: all LLM calls failed at {label}", file=sys.stderr)
+                break
+            rows.append(
+                {
+                    "group_id": fold.group_id,
+                    "report_id": fold.report_id,
+                    "observations": len(fold.observations),
+                    "held_out_techniques": sorted(fold.held_out_techniques),
+                    "accepted_techniques": sorted(observed),
+                    "technique_recall": (
+                        len(observed & fold.held_out_techniques) / len(fold.held_out_techniques)
+                        if fold.held_out_techniques
+                        else 0.0
+                    ),
+                    "rank": ranked.index(fold.group_id) + 1 if fold.group_id in ranked else None,
+                    "deterministic_rank": _rank_of(deterministic, fold.group_id),
+                    "llm": accounting,
+                    "classifier_truth_ranks": truth_ranks,
+                    "software_ids": sorted(state.context.software_ids),
+                    **_separation_fields(state, fold.group_id, decision),
+                    "soft_techniques": len(getattr(state.context, "soft_techniques", {}) or {}),
+                    "technique_recall_soft": (
+                        len(
+                            (observed | set(getattr(state.context, "soft_techniques", {}) or {}))
+                            & fold.held_out_techniques
+                        )
+                        / len(fold.held_out_techniques)
+                        if fold.held_out_techniques
+                        else 0.0
+                    ),
+                    "eligible_groups": (
+                        len(state.context.eligible_group_ids)
+                        if state.context.eligible_group_ids is not None
+                        else None
+                    ),
+                    "leader_related_groups": sorted(
+                        (getattr(decision, "related_leading_groups", {}) or {}).keys()
+                    )
+                    if decision
+                    else [],
+                    "leader_related_to_truth": bool(
+                        ranked
+                        and ranked[0] != fold.group_id
+                        and ranked[0] in related.get(fold.group_id, {})
+                    ),
+                    "candidates": len(ranked),
+                    "top3": ranked[:3],
+                    "stage": decision.stage.value if decision else None,
+                    "margin": decision.margin if decision else None,
+                    "maturity": decision.maturity_score if decision else None,
+                    "leading": decision.leading_group_id if decision else None,
+                }
+            )
+            for key, value in proxy.dropped.items():
+                dropped_total[key] += value
+    finally:
+        engine.store = base_store
+    return rows, dropped_total
+
+
+def run_unknown(
+    settings: Settings,
+    kb: AttackKnowledgeBase,
+    store: ChromaVectorStore,
+    folds: list[Fold],
+    *,
+    client: OpenRouterClient | None = None,
+) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    for fold in folds:
+        reduced = copy.deepcopy(kb)
+        del reduced.groups[fold.group_id]
+        for campaign in reduced.campaigns.values():
+            if fold.group_id in getattr(campaign, "group_ids", []):
+                campaign.group_ids = [g for g in campaign.group_ids if g != fold.group_id]
+        for software in reduced.software.values():
+            if fold.group_id in getattr(software, "group_ids", []):
+                software.group_ids = [g for g in software.group_ids if g != fold.group_id]
+        reduced.recompute_statistics()
+        proxy = FoldStore(
+            store,
+            group_id=fold.group_id,
+            held_out_techniques=fold.held_out_techniques,
+            held_out_texts=fold.held_out_texts,
+            hide_group_entirely=True,
+        )
+        engine = AttributionEngine(settings, reduced, proxy, client)  # type: ignore[arg-type]
+        cost_before = client.total_usage.cost_usd if client is not None else 0.0
+        state = engine.analyze(_ledger(fold))
+        fusion = state.fusion
+        decision = state.attribution_decision
+        rows.append(
+            {
+                "group_id": fold.group_id,
+                "observations": len(fold.observations),
+                "llm": _llm_accounting(state, client, cost_before),
+                **_separation_fields(state, None, decision),
+                "stage": decision.stage.value if decision else None,
+                "leading": decision.leading_group_id if decision else None,
+                "margin": decision.margin if decision else None,
+                "maturity": decision.maturity_score if decision else None,
+                "top3": [entry.group_id for entry in fusion.entries[:3]],
+            }
+        )
+    return rows
+
+
+def _case_id(prefix: str, index: int, row: dict[str, Any]) -> str:
+    # Real-report mode yields several folds per group, so ids must not collapse by group.
+    return f"{prefix}:{index}:{row['group_id']}:{row.get('report_id', '')}"
+
+
+def summarize(
+    known_rows: list[dict[str, Any]], unknown_rows: list[dict[str, Any]]
+) -> dict[str, Any]:
+    named = AttributionStage.KNOWN_GROUP_HYPOTHESIS.value
+    cases = [
+        AttributionEvaluationCase(
+            case_id=_case_id("known", index, row),
+            document_id=row.get("report_id") or row["group_id"],
+            expected_group_id=row["group_id"],
+        )
+        for index, row in enumerate(known_rows)
+    ] + [
+        AttributionEvaluationCase(
+            case_id=_case_id("unknown", index, row),
+            document_id=row.get("report_id") or row["group_id"],
+            expected_group_id=None,
+        )
+        for index, row in enumerate(unknown_rows)
+    ]
+    predictions = [
+        AttributionPrediction(
+            _case_id("known", index, row), tuple(row["top3"]), row["stage"] == named
+        )
+        for index, row in enumerate(known_rows)
+    ] + [
+        AttributionPrediction(
+            _case_id("unknown", index, row), tuple(row["top3"]), row["stage"] == named
+        )
+        for index, row in enumerate(unknown_rows)
+    ]
+    # ranks beyond the stored top-3 are still needed for top-5 / MRR: recompute from rows.
+    ranks = [row["rank"] for row in known_rows]
+    metrics = evaluate_attribution_predictions(cases, predictions)
+    metrics["top1"] = fmean(1.0 if rank == 1 else 0.0 for rank in ranks) if ranks else 0.0
+    metrics["cluster_top1"] = (
+        fmean(
+            1.0 if row["rank"] == 1 or row.get("leader_related_to_truth") else 0.0
+            for row in known_rows
+        )
+        if known_rows
+        else 0.0
+    )
+    named_rows = [row for row in known_rows if row["stage"] == named]
+    metrics["named_risk_cluster_aware"] = (
+        fmean(
+            0.0 if row["rank"] == 1 or row.get("leader_related_to_truth") else 1.0
+            for row in named_rows
+        )
+        if named_rows
+        else 0.0
+    )
+    metrics["top5"] = fmean(1.0 if rank and rank <= 5 else 0.0 for rank in ranks) if ranks else 0.0
+    metrics["mrr"] = fmean(1.0 / rank if rank else 0.0 for rank in ranks) if ranks else 0.0
+    _, low, high = bootstrap_interval(
+        ranks, lambda values: fmean(1.0 if r == 1 else 0.0 for r in values)
+    )
+    metrics["top1_ci95"] = [round(low, 4), round(high, 4)]
+    metrics["median_rank"] = (
+        sorted(r if r else 10**6 for r in ranks)[len(ranks) // 2] if ranks else None
+    )
+    metrics["mean_technique_recall"] = (
+        fmean(row["technique_recall"] for row in known_rows) if known_rows else 0.0
+    )
+    metrics["named_correct"] = sum(1 for row in named_rows if row["rank"] == 1)
+    if known_rows and all(row.get("separation") is not None for row in known_rows):
+        metrics["separation_auc"] = _auc(
+            [float(row["separation"]) for row in known_rows if row["rank"] == 1],
+            [float(row["separation"]) for row in known_rows if row["rank"] != 1],
+        )
+        metrics["margin_auc"] = _auc(
+            [float(row["margin"] or 0.0) for row in known_rows if row["rank"] == 1],
+            [float(row["margin"] or 0.0) for row in known_rows if row["rank"] != 1],
+        )
+    if known_rows and all("deterministic_rank" in row for row in known_rows):
+        det = [row["deterministic_rank"] for row in known_rows]
+        metrics["deterministic_top1"] = fmean(1.0 if r == 1 else 0.0 for r in det)
+        metrics["deterministic_top5"] = fmean(1.0 if r and r <= 5 else 0.0 for r in det)
+        metrics["deterministic_mrr"] = fmean(1.0 / r if r else 0.0 for r in det)
+    all_rows = known_rows + unknown_rows
+    if all_rows and any("llm" in row for row in all_rows):
+        llm_rows = [row["llm"] for row in all_rows if "llm" in row]
+        metrics["llm"] = {
+            "verifier_calls": sum(item["verifier_calls"] for item in llm_rows),
+            "verifier_errors": sum(item["verifier_errors"] for item in llm_rows),
+            "zero_shot_applied": sum(1 for item in llm_rows if item["zero_shot_applied"]),
+            "cost_usd": round(sum(item["cost_usd"] for item in llm_rows), 4),
+        }
+    stages: dict[str, dict[str, int]] = {"known": {}, "unknown": {}}
+    for row in known_rows:
+        stages["known"][row["stage"]] = stages["known"].get(row["stage"], 0) + 1
+    for row in unknown_rows:
+        stages["unknown"][row["stage"]] = stages["unknown"].get(row["stage"], 0) + 1
+    metrics["stage_distribution"] = stages
+    return metrics
+
+
+def _auc(positives: list[float], negatives: list[float]) -> float | None:
+    """Rank-based AUC of a score for separating two groups (0.5 = uninformative)."""
+    if not positives or not negatives:
+        return None
+    wins = 0.0
+    for positive in positives:
+        for negative in negatives:
+            wins += 1.0 if positive > negative else 0.5 if positive == negative else 0.0
+    return wins / (len(positives) * len(negatives))
+
+
+def _coerce(value: str) -> Any:
+    lowered = value.strip().lower()
+    if lowered in {"true", "false"}:
+        return lowered == "true"
+    try:
+        return int(value)
+    except ValueError:
+        pass
+    try:
+        return float(value)
+    except ValueError:
+        return value
+
+
+def pipeline_overrides(pipeline: str, set_args: list[str]) -> dict[str, Any]:
+    """Settings overrides for a pipeline; explicit ``--set KEY=VALUE`` items win.
+
+    ``local`` never touches OpenRouter (``local_only`` preset, zero-shot vote weight 0);
+    ``production`` keeps the configured preset, verifier and zero-shot weight. CyberRE is analyst-triggered in the
+    product and is excluded from both.
+    """
+    if pipeline == "local":
+        # ``AttributionEngine`` applies the mapping preset on top of the settings, and the
+        # ``balanced`` preset forces the verifier to ``ambiguous``; ``local_only`` is the
+        # same preset with the verifier off, so this is the only override that sticks.
+        overrides: dict[str, Any] = {
+            "llm_zero_shot_weight": 0.0,
+            "cyberre_weight": 0.0,
+            "technique_mapping_preset": "local_only",
+        }
+    elif pipeline == "production":
+        overrides = {"cyberre_weight": 0.0}
+    else:
+        raise ValueError(f"unknown pipeline {pipeline!r}")
+    for item in set_args:
+        key, _, value = item.partition("=")
+        if not key or not value:
+            raise ValueError(f"invalid --set {item!r}; expected KEY=VALUE")
+        overrides[key] = _coerce(value)
+    return overrides
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--coverage", type=float, default=0.4)
+    parser.add_argument("--seed", type=int, default=7)
+    parser.add_argument("--min-behaviors", type=int, default=5)
+    parser.add_argument("--min-techniques", type=int, default=5)
+    parser.add_argument("--max-observations", type=int, default=12)
+    parser.add_argument("--unknown", type=int, default=25, help="unknown-actor folds to run")
+    parser.add_argument("--limit", type=int, help="known folds to run (default all eligible)")
+    parser.add_argument(
+        "--sample",
+        type=int,
+        help="real-report mode: run a seeded random sample of this many reports "
+        "(spread across groups) instead of the first --limit",
+    )
+    parser.add_argument("--output", type=Path, help="artifact path (default depends on --pipeline)")
+    parser.add_argument(
+        "--pipeline",
+        choices=("local", "production"),
+        default="local",
+        help="local: verifier and LLM vote off, no OpenRouter calls (default); "
+        "production: configured verifier + zero-shot vote, costs recorded",
+    )
+    parser.add_argument("--quiet", action="store_true")
+    parser.add_argument(
+        "--cti-hal",
+        type=Path,
+        help="reports.jsonl from scripts/prepare_cti_hal.py: run real-report attribution "
+        "instead of the held-out ATT&CK folds (no unknown-actor arm, no evidence hiding)",
+    )
+    parser.add_argument(
+        "--set",
+        action="append",
+        default=[],
+        metavar="KEY=VALUE",
+        help="override a Settings field for this run (e.g. --set technique_family_weight=2.0)",
+    )
+    args = parser.parse_args(argv)
+    if args.output is None:
+        suffix = "production" if args.pipeline == "production" else "current"
+        args.output = REPO_ROOT / "data" / "audits" / f"attribution_heldout_{suffix}.json"
+
+    try:
+        overrides = pipeline_overrides(args.pipeline, args.set)
+    except ValueError as error:
+        parser.error(str(error))
+    settings = Settings(**overrides)
+    production = args.pipeline == "production"
+    client = OpenRouterClient(settings) if production else None
+    kb = AttackKnowledgeBase.load(settings.kb_path)
+    embedder = SentenceTransformerEmbedder.from_settings(settings)
+    store = ChromaVectorStore(settings, embedder)
+    real_reports = args.cti_hal is not None
+    if real_reports:
+        folds = load_report_folds(args.cti_hal, max_observations=max(args.max_observations, 30))
+        if args.sample is not None:
+            folds = sample_folds(folds, args.sample, args.seed)
+        elif args.limit is not None:
+            folds = folds[: args.limit]
+    else:
+        folds = build_folds(
+            kb,
+            coverage=args.coverage,
+            seed=args.seed,
+            min_behaviors=args.min_behaviors,
+            min_techniques=args.min_techniques,
+            max_observations=args.max_observations,
+            limit=args.limit,
+        )
+    if not folds:
+        parser.error("no eligible groups")
+    engine = AttributionEngine(settings, kb, store, client)  # type: ignore[arg-type]
+    started = time.time()
+    try:
+        known_rows, dropped = run_known(
+            engine, folds, hide_evidence=not real_reports, client=client
+        )
+    except LLMUnavailableError as error:
+        print(f"aborted: {error}", file=sys.stderr)
+        if client is not None:
+            client.close()
+        return 2
+    known_seconds = time.time() - started
+    unknown_folds = (
+        []
+        if real_reports
+        else random.Random(args.seed).sample(folds, min(args.unknown, len(folds)))
+    )
+    started = time.time()
+    unknown_rows = (
+        run_unknown(settings, kb, store, unknown_folds, client=client) if unknown_folds else []
+    )
+    if client is not None:
+        client.close()
+    unknown_seconds = time.time() - started
+    metrics = summarize(known_rows, unknown_rows)
+    fingerprint_inputs = {
+        "attack_version": kb.version,
+        "embedding_model": settings.embedding_model,
+        "embedding_revision": settings.embedding_model_revision,
+        "weights": engine.default_weights(),
+        "family_weights": engine.family_weights(),
+        "rrf_k": settings.rrf_k,
+        "thresholds": engine.attribution_thresholds.__dict__,
+        "acceptance_model": engine.acceptance_model_status,
+        "source_fingerprint": source_fingerprint(FINGERPRINTED_SOURCES),
+        "pipeline": args.pipeline,
+        "verifier_mode": str(getattr(settings, "technique_verifier_mode", "ambiguous")),
+        "verifier_model": (
+            str(getattr(settings, "technique_verifier_model", settings.extract_model))
+            if production
+            else None
+        ),
+        "zero_shot_model": settings.extract_model if production else None,
+    }
+    report = {
+        "generated_at": datetime.now(UTC).isoformat(),
+        "benchmark": "attribution_cti_hal_reports" if real_reports else "attribution_text_heldout",
+        "source": str(args.cti_hal)
+        if real_reports
+        else "ATT&CK procedure sentences (held out per group)",
+        "attack_version": kb.version,
+        "parameters": {
+            "pipeline": args.pipeline,
+            "settings_overrides": {k: v for k, v in overrides.items()},
+            "coverage": args.coverage,
+            "seed": args.seed,
+            "min_behaviors": args.min_behaviors,
+            "min_techniques": args.min_techniques,
+            "max_observations": args.max_observations,
+            "known_folds": len(known_rows),
+            "unknown_folds": len(unknown_rows),
+            "sample": args.sample,
+            "limit": args.limit,
+            "truncated_at": dropped.get("llm_unavailable_at"),
+        },
+        "pipeline_fingerprint": pipeline_fingerprint(fingerprint_inputs),
+        "fingerprint_inputs": fingerprint_inputs,
+        "leak_control": {"dropped_hits": dropped},
+        "runtime_seconds": {"known": round(known_seconds, 1), "unknown": round(unknown_seconds, 1)},
+        "metrics": metrics,
+        "known": known_rows,
+        "unknown": unknown_rows,
+    }
+    destination = write_artifact(args.output, report)
+    if not args.quiet:
+        print(
+            f"known folds {len(known_rows)} ({known_seconds:.0f}s), unknown folds {len(unknown_rows)} ({unknown_seconds:.0f}s)"
+        )
+        for key in (
+            "top1",
+            "cluster_top1",
+            "top5",
+            "mrr",
+            "median_rank",
+            "mean_technique_recall",
+            "unknown_recall",
+            "false_named_attribution_rate",
+            "named_coverage",
+            "named_risk",
+            "named_correct",
+            "separation_auc",
+            "margin_auc",
+        ):
+            if key in metrics:
+                print(f"  {key:30s} {metrics[key]}")
+        print("  top1 ci95", metrics["top1_ci95"])
+        print("  stages:", metrics["stage_distribution"])
+        if "deterministic_top1" in metrics:
+            print(
+                f"  deterministic (before LLM vote): top1 {metrics['deterministic_top1']:.3f} "
+                f"top5 {metrics['deterministic_top5']:.3f} mrr {metrics['deterministic_mrr']:.3f}"
+            )
+        if "llm" in metrics:
+            print("  llm:", metrics["llm"])
+        print("  leak-control dropped hits:", dropped)
+        print(f"wrote {destination}")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

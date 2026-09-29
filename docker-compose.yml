@@ -1,0 +1,40 @@
+services:
+  chroma:
+    image: chromadb/chroma:1.5.0
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    environment:
+      IS_PERSISTENT: "TRUE"
+      PERSIST_DIRECTORY: /data
+      ANONYMIZED_TELEMETRY: "FALSE"
+    volumes:
+      - chroma_data:/data
+    healthcheck:
+      test: ["CMD-SHELL", "kill -0 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 20s
+
+  app:
+    build: .
+    image: apt-attribution-assistant:local
+    restart: unless-stopped
+    depends_on:
+      chroma:
+        condition: service_healthy
+    env_file:
+      - .env
+    environment:
+      CHROMA_HOST: chroma
+      CHROMA_PORT: "8000"
+      DATA_DIR: /data
+    ports:
+      - "127.0.0.1:8501:8501"
+    volumes:
+      - app_data:/data
+
+volumes:
+  chroma_data:
+  app_data:

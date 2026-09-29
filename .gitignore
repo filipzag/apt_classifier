@@ -1,0 +1,25 @@
+.env
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+data/raw/*.json
+data/kb/*.json
+data/audits/
+data/benchmarks/
+data/models/
+data/clusters/
+.huggingface/
+.streamlit/secrets.toml
+
+# added 2026-09-29
+data/cases/
+data/hf-cache/
+scratchpad/
+node_modules/
+web/dist/
+web/node_modules/
+.claude/launch.json

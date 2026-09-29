@@ -1,0 +1,1 @@
+A Microsoft Word process spawned PowerShell with an encoded command. The endpoint then accessed LSASS and made periodic HTTPS connections to a newly registered domain. A scheduled task was created for persistence.

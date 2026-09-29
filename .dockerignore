@@ -1,0 +1,16 @@
+.venv
+.git
+__pycache__
+**/__pycache__
+*.pyc
+.pytest_cache
+.ruff_cache
+data/raw
+data/kb
+data/chroma
+data/cases
+data/audits/*.json
+data/models/technique-reranker*
+data/hf-cache
+scratchpad
+.env
