@@ -485,3 +485,43 @@ def test_rerank_top_k_contrasts_a_longer_shortlist_but_the_gate_keeps_its_own(mo
     assert {e.group_id for e in b.deterministic_fusion.entries[:4]} == set(order[:4])
     assert [e.group_id for e in b.deterministic_fusion.entries[4:]] == order[4:]
     assert b.deterministic_fusion.entries[0].relative_score == pytest.approx(100.0)
+
+
+def test_prior_verifications_are_reused_without_calling_the_verifier():
+    """Verdicts saved with a case are applied on re-analysis (in production and local mode) and
+    the covered candidates are never sent to the verifier again."""
+    from apt_classifier.session import collect_verifications, verifications_from_records
+
+    text = "Files were copied to the network share of the file server."
+    first = VerifierLLM("T1003.001", "copied to the network share")
+    engine = AttributionEngine(
+        _settings(technique_mapping_preset="balanced"), _kb(), FakeStore(), first
+    )
+    retrieval, _ = engine.map_techniques(_ledger(text), mode="production")
+    assert len(first.payloads) == 1
+    records = collect_verifications(retrieval)
+    assert [(r["technique_id"], r["verdict"]) for r in records] == [("T1003.001", "supported")]
+    assert records[0]["observation_id"] == retrieval.candidates[0].observation_id
+    prior = verifications_from_records(records)
+    assert set(prior) == {(records[0]["observation_id"], "T1003.001")}
+
+    # a second engine whose verifier would contradict the saved verdict is never asked
+    second = VerifierLLM("T1021.002", "copied")
+    replay = AttributionEngine(
+        _settings(technique_mapping_preset="balanced"), _kb(), FakeStore(), second
+    )
+    again, _ = replay.map_techniques(_ledger(text), mode="production", prior_verifications=prior)
+    assert second.payloads == []
+    states = {item.technique_id: item.state.value for item in again.candidates}
+    assert states["T1003.001"] == "auto_accepted"
+    assert again.diagnostics["verifier_reused"] == 1
+    assert set(again.observed_techniques) == {"T1021.002", "T1003.001"}
+    # local mode (no client) applies the saved verdict too
+    local = AttributionEngine(_settings(), _kb(), FakeStore(), None)  # type: ignore[arg-type]
+    offline, _ = local.map_techniques(_ledger(text), mode="local", prior_verifications=prior)
+    assert {i.technique_id: i.state.value for i in offline.candidates}[
+        "T1003.001"
+    ] == "auto_accepted"
+    # records that are not final verdicts are ignored
+    assert verifications_from_records([{**records[0], "verdict": "error"}, {"bad": 1}]) == {}
+    assert collect_verifications(offline)  # the applied verdict is collected again

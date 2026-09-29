@@ -19,7 +19,7 @@ from typing import Any
 
 from apt_classifier.evidence.models import EvidenceLedger
 
-CASE_SCHEMA_VERSION = 1
+CASE_SCHEMA_VERSION = 2  # 2: verifier verdicts saved with the case
 _CASE_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 
 
@@ -94,6 +94,7 @@ class CaseStore:
         weights: dict[str, float] | None = None,
         settings_overrides: dict[str, Any] | None = None,
         summary: dict[str, Any] | None = None,
+        verifications: list[dict[str, Any]] | None = None,
     ) -> Path:
         self.directory.mkdir(parents=True, exist_ok=True)
         path = self._path(case_id)
@@ -114,6 +115,9 @@ class CaseStore:
             "weights": dict(weights or {}),
             "settings_overrides": dict(settings_overrides or {}),
             "summary": dict(summary or {}),
+            # verifier verdicts (observation id, technique id, verdict, reason, span, model,
+            # tokens, cost) so reopening the case never re-spends on the verifier
+            "verifications": [dict(item) for item in (verifications or [])],
         }
         tmp = path.with_suffix(".json.tmp")
         tmp.write_text(json.dumps(payload, indent=2, default=str), encoding="utf-8")
@@ -133,6 +137,11 @@ class CaseStore:
             "ledger": ledger,
             "weights": dict(payload.get("weights") or {}),
             "settings_overrides": dict(payload.get("settings_overrides") or {}),
+            "verifications": [
+                dict(item)
+                for item in (payload.get("verifications") or [])
+                if isinstance(item, dict)
+            ],
             "created_at": payload.get("created_at"),
             "updated_at": payload.get("updated_at"),
         }

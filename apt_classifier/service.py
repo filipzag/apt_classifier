@@ -38,7 +38,12 @@ from apt_classifier.llm import OpenRouterClient
 from apt_classifier.questions import parse_interview_answer
 from apt_classifier.report import export_document
 from apt_classifier.separation import discriminate, distinguishing_techniques
-from apt_classifier.session import AnalysisState, AttributionEngine
+from apt_classifier.session import (
+    AnalysisState,
+    AttributionEngine,
+    collect_verifications,
+    verifications_from_records,
+)
 from apt_classifier.threat_intel import PublicThreatIntelClient, ThreatIntelSnapshot
 from apt_classifier.vectorstore import ChromaVectorStore
 
@@ -241,9 +246,17 @@ class CaseService:
         ledger: EvidenceLedger,
         weights: dict[str, float] | None,
         previous: AnalysisState | None,
+        *,
+        prior_verifications: dict[tuple[str, str], Any] | None = None,
     ) -> AnalysisState:
+        if prior_verifications is None and previous is not None:
+            prior_verifications = verifications_from_records(
+                collect_verifications(previous.retrieval)
+            )
         with self._engine_lock:
-            state = self.engine.analyze(ledger, weights=weights or None)
+            state = self.engine.analyze(
+                ledger, weights=weights or None, prior_verifications=prior_verifications or None
+            )
             if previous is not None:
                 if previous.threat_intel_snapshot is not None:
                     self.engine.attach_threat_intel(state, previous.threat_intel_snapshot)
@@ -280,6 +293,7 @@ class CaseService:
             ledger=state.ledger,
             weights=state.weights,
             summary=self.summary_for(state),
+            verifications=collect_verifications(state.retrieval),
         )
         record = next((r for r in self.store.list() if r.case_id == case_id), None)
         if record is not None:
@@ -317,7 +331,13 @@ class CaseService:
                     payload = self.store.load(case_id)
                 except (FileNotFoundError, ValueError) as exc:
                     raise CaseNotFound(case_id) from exc
-                state = self._reanalyze(payload["ledger"], payload.get("weights") or None, None)
+                saved_records = list(payload.get("verifications") or [])
+                state = self._reanalyze(
+                    payload["ledger"],
+                    payload.get("weights") or None,
+                    None,
+                    prior_verifications=verifications_from_records(saved_records),
+                )
                 self._states[case_id] = state
                 self._meta[case_id] = CaseMeta(
                     case_id=case_id,
@@ -325,6 +345,13 @@ class CaseService:
                     created_at=payload.get("created_at"),
                     updated_at=payload.get("updated_at"),
                 )
+                # A case saved before verdict persistence (or with new candidates) just paid
+                # for verifier calls: keep those verdicts so the next reopen is free.
+                fresh = collect_verifications(state.retrieval)
+                if fresh and {(r["observation_id"], r["technique_id"]) for r in fresh} - {
+                    (r.get("observation_id"), r.get("technique_id")) for r in saved_records
+                }:
+                    self._save(case_id)
             return self._states[case_id], self._meta[case_id]
 
     def rename(self, case_id: str, name: str) -> CaseMeta:

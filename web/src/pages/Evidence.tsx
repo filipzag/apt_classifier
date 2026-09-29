@@ -39,6 +39,14 @@ export function EvidencePage() {
                 <div className="mt-1 text-xs text-muted">
                   {ingestion.normalization ? 'local sentence split (no LLM)' : 'LLM-normalised'}
                 </div>
+                {'verifier_mode' in data.retrieval_diagnostics ? (
+                  <div className="mt-1 text-[11px] text-faint">
+                    verifier: {String(data.retrieval_diagnostics.verifier_calls ?? 0)} call(s)
+                    {Number(data.retrieval_diagnostics.verifier_reused ?? 0) > 0
+                      ? ` · ${String(data.retrieval_diagnostics.verifier_reused)} verdict(s) reused from the saved case`
+                      : ''}
+                  </div>
+                ) : null}
               </Card>
               <Card>
                 <Label>Structured ingestion</Label>

@@ -227,7 +227,7 @@ def test_imported_mcp_observations_are_reanalyzed_and_keep_live_intel():
     )
     updated = SimpleNamespace(ledger=None)
     calls = []
-    engine.analyze = lambda value, weights: calls.append((value, weights)) or updated
+    engine.analyze = lambda value, weights, **_: calls.append((value, weights)) or updated
     engine.attach_threat_intel = lambda value, intel: calls.append((value, intel))
     imported = Observation(text="Elasticsearch event: event.code=4104", kind="elastic_mcp")
     result = engine.import_observations(state, [imported])

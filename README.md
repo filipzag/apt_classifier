@@ -234,7 +234,7 @@ verifier, no AI review). The API surface is documented at `/docs` (OpenAPI) when
 runs; every payload is produced by `api/serializers.py` from an `AnalysisState`, and every
 analyst operation (intake, technique decisions, interview, LLM steps, live intel, exports)
 goes through `apt_classifier/service.py`, the same headless service any other front end would
-use. Cases are saved automatically under `data/cases/` after every change. Docker builds the
+use. Cases are saved automatically under `data/cases/` after every change, including the verifier's verdicts, so reopening a case replays them instead of calling the model again. Docker builds the
 web bundle in a Node stage and serves it from the Python image (`docker compose up`, port 8100).
 
 ### Optional Elastic Agent Builder MCP

@@ -1,6 +1,8 @@
 from dataclasses import dataclass, field, replace
 from typing import Any
 
+from pydantic import ValidationError
+
 from apt_classifier.acceptance import load_acceptance_model
 from apt_classifier.attack.kb import AttackKnowledgeBase
 from apt_classifier.attribution import (
@@ -30,6 +32,8 @@ from apt_classifier.evidence.models import (
     EvidenceStatus,
     Observation,
     QuestionAnswer,
+    TechniqueVerification,
+    TechniqueVerificationVerdict,
 )
 from apt_classifier.fusion import FusionResult, reciprocal_rank_fusion
 from apt_classifier.llm import OpenRouterClient
@@ -123,6 +127,74 @@ class AnalysisState:
     attribution_decision: AttributionDecision | None = None
 
 
+_FINAL_VERDICTS = frozenset(
+    {
+        TechniqueVerificationVerdict.SUPPORTED,
+        TechniqueVerificationVerdict.UNSUPPORTED,
+        TechniqueVerificationVerdict.UNCERTAIN,
+    }
+)
+
+
+def collect_verifications(retrieval: Any) -> list[dict[str, Any]]:
+    """Verifier verdicts worth keeping with a case: one record per (observation, technique)
+    that received a final verdict. ``not_run`` and ``error`` are not verdicts and are left out
+    so the next analysis retries them."""
+    records: list[dict[str, Any]] = []
+    for candidate in getattr(retrieval, "candidates", ()) or ():
+        verification = getattr(candidate, "verification", None)
+        if verification is None or verification.verdict not in _FINAL_VERDICTS:
+            continue
+        records.append(
+            {
+                "observation_id": candidate.observation_id,
+                "technique_id": candidate.technique_id,
+                **verification.to_dict(),
+            }
+        )
+    return records
+
+
+def verifications_from_records(
+    records: Any,
+) -> dict[tuple[str, str], TechniqueVerification]:
+    """Inverse of :func:`collect_verifications`; malformed or non-final records are skipped."""
+    prior: dict[tuple[str, str], TechniqueVerification] = {}
+    for record in records or []:
+        if not isinstance(record, dict):
+            continue
+        payload = {k: v for k, v in record.items() if k not in {"observation_id", "technique_id"}}
+        try:
+            verification = TechniqueVerification.model_validate(payload)
+        except ValidationError:
+            continue
+        if verification.verdict not in _FINAL_VERDICTS:
+            continue
+        key = (str(record.get("observation_id", "")), str(record.get("technique_id", "")).upper())
+        if all(key):
+            prior[key] = verification
+    return prior
+
+
+def _apply_prior_verifications(
+    retrieval: Any, prior: dict[tuple[str, str], TechniqueVerification]
+) -> tuple[Any, int]:
+    """Attach stored verdicts to the matching candidates (observation ids are content hashes,
+    so a verdict follows its observation across re-analyses)."""
+    updated = []
+    reused = 0
+    for candidate in retrieval.candidates:
+        verification = prior.get((candidate.observation_id, candidate.technique_id))
+        if verification is None:
+            updated.append(candidate)
+            continue
+        updated.append(candidate.model_copy(update={"verification": verification}))
+        reused += 1
+    diagnostics = dict(retrieval.diagnostics or {})
+    diagnostics["verifier_reused"] = reused
+    return replace(retrieval, candidates=tuple(updated), diagnostics=diagnostics), reused
+
+
 class AttributionEngine:
     def __init__(
         self,
@@ -200,13 +272,17 @@ class AttributionEngine:
         *,
         verify: bool | None = None,
         mode: str = "production",
+        prior_verifications: dict[tuple[str, str], TechniqueVerification] | None = None,
     ) -> tuple[RetrievalResult, dict[str, TechniqueCandidateVerificationResult]]:
         """Map a ledger through one shared local or production pipeline.
 
         ``local`` is deterministic and never calls OpenRouter. ``production``
         uses the configured verifier unless the caller explicitly supplies
         ``verify``.  Both modes collect identical retrieval evidence and pass
-        through the same final acceptance gate.
+        through the same final acceptance gate. ``prior_verifications`` (verdicts saved with
+        the case, keyed by observation and technique id) are applied in both modes before any
+        verifier call, and candidates that carry one are never sent to the verifier again, so
+        reopening a case is deterministic and free.
         """
         if mode not in {"local", "production"}:
             raise ValueError("mapping mode must be 'local' or 'production'")
@@ -258,8 +334,20 @@ class AttributionEngine:
         # says: only candidates still NEEDS_REVIEW after deterministic acceptance are sent.
         # Verdicts are then folded in by a second, idempotent finalization pass.
         retrieval = self._finalize(retrieval, ledger)
+        reused: set[tuple[str, str]] = set()
+        if prior_verifications:
+            retrieval, count = _apply_prior_verifications(retrieval, prior_verifications)
+            if count:
+                reused = {
+                    (c.observation_id, c.technique_id)
+                    for c in retrieval.candidates
+                    if (c.observation_id, c.technique_id) in prior_verifications
+                }
+                retrieval = self._finalize(retrieval, ledger)
         if verify:
-            retrieval, verifications = self._verify_retrieval_candidates(ledger, retrieval)
+            retrieval, verifications = self._verify_retrieval_candidates(
+                ledger, retrieval, exclude=reused
+            )
             retrieval = self._finalize(retrieval, ledger)
         retrieval = apply_candidate_decisions(retrieval, ledger, self.kb)
         return retrieval, verifications
@@ -290,9 +378,15 @@ class AttributionEngine:
         )
 
     def analyze(
-        self, ledger: EvidenceLedger, *, weights: dict[str, float] | None = None
+        self,
+        ledger: EvidenceLedger,
+        *,
+        weights: dict[str, float] | None = None,
+        prior_verifications: dict[tuple[str, str], TechniqueVerification] | None = None,
     ) -> AnalysisState:
-        retrieval, technique_verifications = self.map_techniques(ledger)
+        retrieval, technique_verifications = self.map_techniques(
+            ledger, prior_verifications=prior_verifications
+        )
         context = build_classifier_context(
             self.kb,
             ledger,
@@ -356,6 +450,8 @@ class AttributionEngine:
         self,
         ledger: EvidenceLedger,
         retrieval: RetrievalResult,
+        *,
+        exclude: set[tuple[str, str]] | None = None,
     ) -> tuple[RetrievalResult, dict[str, TechniqueCandidateVerificationResult]]:
         scope = str(getattr(self.settings, "technique_verifier_mode", "ambiguous"))
         if scope == "off" or not retrieval.candidates:
@@ -363,6 +459,8 @@ class AttributionEngine:
         observations = {observation.id: observation for observation in ledger.observations}
         by_observation: dict[str, list[Any]] = {}
         for candidate in retrieval.candidates:
+            if exclude and (candidate.observation_id, candidate.technique_id) in exclude:
+                continue  # verdict already on file
             by_observation.setdefault(candidate.observation_id, []).append(candidate)
         replacements: dict[tuple[str, str], Any] = {}
         results: dict[str, TechniqueCandidateVerificationResult] = {}
@@ -393,6 +491,7 @@ class AttributionEngine:
         diagnostics = dict(retrieval.diagnostics or {})
         diagnostics.update(
             {
+                "verifier_reused": int(diagnostics.get("verifier_reused", 0) or 0),
                 "verifier_mode": scope,
                 "verifier_calls": len(results),
                 "verifier_errors": sum(result.error is not None for result in results.values()),
@@ -484,7 +583,13 @@ class AttributionEngine:
         self, state: AnalysisState, observations: list[Observation] | tuple[Observation, ...]
     ) -> AnalysisState:
         state.ledger.extend_observations(observations)
-        updated = self.analyze(state.ledger, weights=state.weights)
+        updated = self.analyze(
+            state.ledger,
+            weights=state.weights,
+            prior_verifications=verifications_from_records(
+                collect_verifications(getattr(state, "retrieval", None))
+            ),
+        )
         if state.threat_intel_snapshot is not None:
             self.attach_threat_intel(updated, state.threat_intel_snapshot)
         return updated

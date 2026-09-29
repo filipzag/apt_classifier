@@ -11,7 +11,7 @@ from app.ui import runtime
 from app.ui.guard import run_step
 from apt_classifier.config import Settings
 from apt_classifier.presets import PRESETS, apply_preset, preset_choices
-from apt_classifier.session import AttributionEngine
+from apt_classifier.session import AttributionEngine, verifications_from_records
 
 _HEALTH_TTL_SECONDS = 60.0
 
@@ -90,6 +90,9 @@ def _render_case_manager(
                         payload["ledger"],
                         payload.get("weights") or weights,
                         previous=None,
+                        prior_verifications=verifications_from_records(
+                            payload.get("verifications")
+                        ),
                     )
                 if loaded.ok:
                     st.session_state[runtime.CASE_NAME_KEY] = payload["name"]

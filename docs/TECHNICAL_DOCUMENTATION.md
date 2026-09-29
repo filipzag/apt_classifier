@@ -266,7 +266,13 @@ runnable; the last Streamlit-only revision is preserved on the `streamlit-stable
   interview (`interview()`, `answer()`, `restart_interview()`), LLM steps (review, zero-shot,
   CyberRE) that raise `ServiceUnavailable` in local mode, live threat intelligence with a
   30-minute snapshot cache, Elasticsearch MCP staging, dossier/canvas/diamond views and exports.
-  Re-analyses keep live-intel matches and CyberRE results for observations that still exist.
+  Re-analyses keep live-intel matches and CyberRE results for observations that still exist,
+  and **verifier verdicts are saved with the case** (`verifications` in the case file, schema 2:
+  observation id, technique id, verdict, reason, support span, model, tokens, cost) and replayed
+  by `map_techniques(prior_verifications=...)` in both production and local mode before any
+  verifier call; candidates that carry a saved verdict are never sent to the verifier again, so
+  reopening a case is deterministic and costs nothing (`retrieval_diagnostics.verifier_reused`).
+  `not_run` and `error` are not verdicts and are retried.
 - `apt_classifier/report.py` — headless `STAGE_INFO`, the Markdown assessment, the JSON audit
   payload, Navigator layers and Attack Flow export (`export_document(kb, state, kind)`); the
   Streamlit components delegate to it so the two front ends cannot drift.

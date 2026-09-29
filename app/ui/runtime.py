@@ -21,7 +21,12 @@ from apt_classifier.config import Settings, get_settings
 from apt_classifier.embeddings import SentenceTransformerEmbedder
 from apt_classifier.evidence.models import EvidenceLedger
 from apt_classifier.llm import OpenRouterClient
-from apt_classifier.session import AnalysisState, AttributionEngine
+from apt_classifier.session import (
+    AnalysisState,
+    AttributionEngine,
+    collect_verifications,
+    verifications_from_records,
+)
 from apt_classifier.vectorstore import ChromaVectorStore
 
 STATE_KEY = "analysis_state"
@@ -122,6 +127,7 @@ def autosave(settings: Settings, state: AnalysisState) -> None:
             ledger=state.ledger,
             weights=state.weights,
             summary=summary_for(state),
+            verifications=collect_verifications(state.retrieval),
         )
     except Exception as exc:  # noqa: BLE001 - saving must never break the analysis
         st.toast(f"Case was not saved to disk: {exc}", icon="⚠️")
@@ -133,14 +139,18 @@ def reanalyze(
     weights: dict[str, float],
     *,
     previous: AnalysisState | None,
+    prior_verifications: dict[tuple[str, str], Any] | None = None,
 ) -> AnalysisState:
     """Full analysis of ``ledger`` that keeps what is still valid from ``previous``.
 
     Live threat-intel matches are re-attached, CyberRE scans for observations that still
-    exist are kept and re-fused, the interview cursor is rebuilt by the engine. The
-    independent AI review is dropped: it was written for the old ranking.
+    exist are kept and re-fused, verifier verdicts are reused (from ``previous`` or from the
+    saved case), the interview cursor is rebuilt by the engine. The independent AI review is
+    dropped: it was written for the old ranking.
     """
-    state = engine.analyze(ledger, weights=weights)
+    if prior_verifications is None and previous is not None:
+        prior_verifications = verifications_from_records(collect_verifications(previous.retrieval))
+    state = engine.analyze(ledger, weights=weights, prior_verifications=prior_verifications or None)
     if previous is not None:
         if previous.threat_intel_snapshot is not None:
             engine.attach_threat_intel(state, previous.threat_intel_snapshot)

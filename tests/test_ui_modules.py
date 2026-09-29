@@ -128,3 +128,27 @@ def test_next_step_guides_through_the_workflow():
         )[1]
         == "Assessment"
     )
+
+
+def test_case_store_roundtrips_verifier_verdicts(tmp_path):
+    from apt_classifier.evidence.models import EvidenceLedger
+
+    store = CaseStore(tmp_path / "cases")
+    ledger = EvidenceLedger(observations=[{"text": "PowerShell ran an encoded command."}])
+    record = {
+        "observation_id": ledger.observations[0].id,
+        "technique_id": "T1059.001",
+        "verdict": "supported",
+        "reason": "encoded PowerShell",
+        "support_span": "encoded command",
+        "model": "test",
+        "prompt_tokens": 10,
+        "completion_tokens": 5,
+        "cost_usd": 0.0,
+    }
+    store.save(case_id="abc", name="n", ledger=ledger, verifications=[record])
+    loaded = store.load("abc")
+    assert loaded["verifications"] == [record]
+    # older files without the field load with an empty list
+    store.save(case_id="old", name="n", ledger=ledger)
+    assert store.load("old")["verifications"] == []

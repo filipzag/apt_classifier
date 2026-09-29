@@ -194,6 +194,42 @@ def test_local_flow_end_to_end(local_client: TestClient) -> None:
         assert response.status_code == 200, kind
         assert "attachment" in response.headers["content-disposition"]
     assert local_client.post(f"/api/cases/{case_id}/review").status_code == 409
+
+    # verifier verdicts saved with the case are replayed when it is reopened, even in local mode
+    service = local_client.app.state.service
+    current = local_client.get(f"/api/cases/{case_id}").json()
+    pending_again = next(c for c in current["candidates"] if c["state"] == "needs_review")
+    saved = service.store.load(case_id)
+    service.store.save(
+        case_id=case_id,
+        name=saved["name"],
+        ledger=saved["ledger"],
+        weights=saved["weights"],
+        verifications=[
+            {
+                "observation_id": pending_again["observation_id"],
+                "technique_id": pending_again["technique_id"],
+                "verdict": "supported",
+                "reason": "test verdict",
+                "support_span": "",
+                "model": "test",
+                "prompt_tokens": 0,
+                "completion_tokens": 0,
+                "cost_usd": 0.0,
+            }
+        ],
+    )
+    service._states.pop(case_id, None)  # noqa: SLF001 - force a reload from disk
+    service._meta.pop(case_id, None)  # noqa: SLF001
+    reopened = local_client.get(f"/api/cases/{case_id}").json()
+    replayed = next(c for c in reopened["candidates"] if c["key"] == pending_again["key"])
+    assert replayed["verification"] == {"verdict": "supported", "reason": "test verdict"}
+    assert replayed["state"] == "auto_accepted"
+    assert reopened["retrieval_diagnostics"]["verifier_reused"] == 1
+    assert (
+        service.store.load(case_id)["verifications"][0]["technique_id"]
+        == pending_again["technique_id"]
+    )
     renamed = local_client.patch(f"/api/cases/{case_id}", json={"name": "Renamed"}).json()
     assert renamed["name"] == "Renamed"
     rescored = local_client.post(
