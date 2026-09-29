@@ -13,8 +13,9 @@ from __future__ import annotations
 import io
 import threading
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 from uuid import uuid4
 
@@ -36,6 +37,7 @@ from apt_classifier.evidence.models import (
 from apt_classifier.llm import OpenRouterClient
 from apt_classifier.questions import parse_interview_answer
 from apt_classifier.report import export_document
+from apt_classifier.separation import discriminate, distinguishing_techniques
 from apt_classifier.session import AnalysisState, AttributionEngine
 from apt_classifier.threat_intel import PublicThreatIntelClient, ThreatIntelSnapshot
 from apt_classifier.vectorstore import ChromaVectorStore
@@ -583,6 +585,214 @@ class CaseService:
             self._elastic_batches.pop(key, None)
             self._save(case_id)
         return updated
+
+    # ----- distinguishing the shortlist -----
+    def distinguish(self, case_id: str, *, top_k: int = 10, limit: int = 12) -> dict[str, Any]:
+        """What separates the top-K, and which pending candidates or interview leads would
+        change the separation the most (counterfactual replays of the discrimination)."""
+        state, _ = self.get(case_id)
+        kb = self.engine.kb
+        settings = self.engine.settings
+        fusion = state.deterministic_fusion or state.fusion
+        k = max(2, min(int(top_k), 15))
+        weights = self.engine.discrimination_weights
+        options = {
+            "top_k": k,
+            "floor": float(getattr(settings, "attribution_separation_floor", 1.0)),
+            "tool_weight_cap": float(getattr(settings, "software_tool_weight_cap", 1.5)),
+            "behavior_threshold": float(settings.behavior_similarity_threshold),
+        }
+        context = state.context
+        soft = dict(getattr(context, "contrast_techniques", {}) or {})
+        # The stage decision scores the shortlist in the fusion order *before* the discriminative
+        # re-ranking (the leader is the ensemble's rank 1). Replay on that same order so the
+        # separation shown here equals the decision's; the recorded discrimination keeps it.
+        recorded = getattr(context, "discrimination", None)
+        recorded_order = [item.group_id for item in recorded.scores] if recorded is not None else []
+        top_entries = list(fusion.entries[:k])
+        if recorded_order and {e.group_id for e in top_entries} >= set(recorded_order):
+            position = {gid: index for index, gid in enumerate(recorded_order)}
+            top_entries.sort(key=lambda e: (position.get(e.group_id, len(position)), e.rank))
+        basis = replace(fusion, entries=tuple(top_entries) + tuple(fusion.entries[k:]))
+        names = {
+            gid: (g.name if g else gid)
+            for gid, g in ((e.group_id, kb.groups.get(e.group_id)) for e in basis.entries[:k])
+        }
+
+        def replay(
+            extra_observed: dict[str, float] | None = None,
+            extra_negative: set[str] | None = None,
+        ):
+            observed = dict(context.observed_techniques)
+            observed.update(extra_observed or {})
+            negative = set(context.negative_techniques) | set(extra_negative or ())
+            view = SimpleNamespace(
+                observed_techniques=observed,
+                negative_techniques=negative,
+                parent_policy=context.parent_policy,
+                specific_behavior_matches=getattr(context, "specific_behavior_matches", ()),
+                software_ids=context.software_ids,
+                decisive_software=getattr(context, "decisive_software", {}),
+            )
+            soft_view = {
+                tid: v for tid, v in soft.items() if tid not in observed and tid not in negative
+            }
+            return discriminate(
+                kb, basis, view, weights, soft_techniques=soft_view or None, **options
+            )
+
+        base = replay()
+        rows = distinguishing_techniques(kb, basis, context, top_k=k, soft_techniques=soft or None)
+        techniques = kb.techniques
+        technique_name = lambda tid: getattr(techniques.get(tid), "name", "") or ""  # noqa: E731
+
+        def delta(result) -> float:
+            return round(result.separation - base.separation, 4)
+
+        def strongest(result) -> str | None:
+            return (
+                max(result.scores, key=lambda c: (c.total, -c.rrf_score)).group_id
+                if result.scores
+                else None
+            )
+
+        # pending candidates, one row per technique (best probability), ranked by |delta|
+        texts = {o.id: o.text for o in state.ledger.observations}
+        best: dict[str, Any] = {}
+        for candidate in getattr(state.retrieval, "candidates", ()) or ():
+            if candidate.state.value != "needs_review":
+                continue
+            tid = candidate.technique_id
+            if tid in context.observed_techniques or tid in context.negative_techniques:
+                continue
+            if candidate.evidence_for("hierarchy_parent") is not None:
+                continue
+            evidence = candidate.evidence_for("acceptance_model")
+            probability = (
+                float(evidence.score)
+                if evidence is not None and evidence.score is not None
+                else 0.0
+            )
+            if tid not in best or probability > best[tid][0]:
+                best[tid] = (probability, candidate)
+        pending = []
+        for tid, (probability, candidate) in best.items():
+            result = replay({tid: 1.0})
+            row_match = next((r for r in rows if r.technique_id == tid), None)
+            if row_match is None:
+                # below the contrast floor: probe the technique's place in the shortlist
+                probe = distinguishing_techniques(
+                    kb, basis, context, top_k=k, soft_techniques={tid: 1.0}
+                )
+                row_match = next((r for r in probe if r.technique_id == tid), None)
+            if row_match is None or not row_match.documented_by:
+                continue
+            documented_by = list(row_match.documented_by)
+            exclusivity, specificity = row_match.exclusivity, row_match.specificity
+            pending.append(
+                {
+                    "technique_id": tid,
+                    "technique_name": candidate.technique_name or technique_name(tid),
+                    "probability": round(probability, 3),
+                    "observation_id": candidate.observation_id,
+                    "observation": texts.get(candidate.observation_id, candidate.observation_id)[
+                        :200
+                    ],
+                    "documented_by": [
+                        {"group_id": gid, "name": names.get(gid, gid)} for gid in documented_by
+                    ],
+                    "exclusivity": round(exclusivity, 3),
+                    "specificity": round(specificity, 3),
+                    "delta_separation": delta(result),
+                    "new_leader_id": strongest(result),
+                    "new_leader_name": names.get(strongest(result) or "", strongest(result)),
+                    "keeps_leader": strongest(result) in (None, base.leader_id),
+                }
+            )
+        # expected change: the size of the move weighted by how likely the mapping is
+        pending.sort(
+            key=lambda item: (
+                -abs(item["delta_separation"]) * max(item["probability"], 0.01),
+                -item["probability"],
+            )
+        )
+
+        # interview leads: what a yes or a no would do to the separation
+        leads = []
+        with self._lock(case_id), self._engine_lock:
+            shortlist_leads = self.engine.question_shortlist(state) if fusion.entries else []
+        for lead in shortlist_leads[:10]:
+            yes = replay({lead.technique_id: 1.0})
+            no = replay(None, {lead.technique_id})
+            leads.append(
+                {
+                    "technique_id": lead.technique_id,
+                    "technique_name": lead.technique_name,
+                    "priority": round(float(lead.investigation_priority), 3),
+                    "profile_support": round(float(lead.profile_support), 3),
+                    "supporting_group_count": lead.supporting_group_count,
+                    "candidate_group_count": lead.candidate_group_count,
+                    "delta_yes": delta(yes),
+                    "delta_no": delta(no),
+                    "leader_after_yes": names.get(strongest(yes) or "", strongest(yes)),
+                    "first_step": lead.investigation_steps[0] if lead.investigation_steps else "",
+                }
+            )
+        leads.sort(key=lambda item: -max(abs(item["delta_yes"]), abs(item["delta_no"])))
+
+        by_group = base.by_group()
+        return {
+            "top_k": k,
+            "separation": round(base.separation, 4),
+            "leader_total": round(base.leader_total, 4),
+            "leader": {
+                "group_id": base.leader_id,
+                "name": names.get(base.leader_id or "", base.leader_id),
+            },
+            "runner_up": {
+                "group_id": base.runner_up_id,
+                "name": names.get(base.runner_up_id or "", base.runner_up_id),
+            },
+            "runner_up_related": bool(base.runner_up_related),
+            "thresholds": {
+                "separation": float(getattr(settings, "attribution_hypothesis_separation", 0.5)),
+                "min_discriminative": float(
+                    getattr(settings, "attribution_hypothesis_min_discriminative", 3.0)
+                ),
+                "gate_mode": str(getattr(settings, "attribution_gate_mode", "separation")),
+            },
+            "contrast_enabled": bool(soft),
+            "shortlist": [
+                {
+                    "group_id": e.group_id,
+                    "name": names.get(e.group_id, e.group_id),
+                    "rank": int(e.rank),
+                    "relative_score": round(float(e.relative_score), 1),
+                    **(
+                        {
+                            key: round(float(getattr(by_group[e.group_id], key)), 4)
+                            for key in (
+                                "technique",
+                                "behavior",
+                                "software",
+                                "soft",
+                                "negative",
+                                "total",
+                            )
+                        }
+                        if e.group_id in by_group
+                        else {}
+                    ),
+                }
+                for e in basis.entries[:k]
+            ],
+            "techniques": [
+                {**row.to_dict(), "technique_name": technique_name(row.technique_id)}
+                for row in rows
+            ],
+            "pending": pending[: max(1, limit)],
+            "leads": leads[:8],
+        }
 
     # ----- views and exports -----
     def dossier(self, case_id: str, group_id: str) -> dict[str, Any]:

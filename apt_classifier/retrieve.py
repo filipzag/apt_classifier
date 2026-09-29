@@ -2108,6 +2108,8 @@ def build_classifier_context(
     soft_min_probability: float = 0.0,
     soft_weight: float = 1.0,
     soft_max_groups: int = 0,
+    contrast_min_probability: float = 0.0,
+    contrast_weight: float = 1.0,
 ) -> ClassifierContext:
     observed = dict(retrieval.observed_techniques)
     technique_observations = dict(retrieval.technique_observations)
@@ -2147,6 +2149,17 @@ def build_classifier_context(
     )
     context.soft_techniques = soft
     context.soft_technique_observations = soft_observations
+    # Contrastive near misses: same qualification as soft evidence, but they only reach the
+    # candidate-relative separation (exclusivity-weighted), never the classifiers.
+    context.contrast_techniques, context.contrast_technique_observations = soft_technique_evidence(
+        retrieval,
+        observed=observed,
+        negative=negative,
+        min_probability=contrast_min_probability,
+        weight=contrast_weight,
+        max_groups=0,
+        kb=kb,
+    )
     context.strategic_context = ledger.strategic_context
     context.specific_behavior_scores = retrieval.specific_behavior_scores
     context.specific_behavior_signals = retrieval.specific_behavior_signals

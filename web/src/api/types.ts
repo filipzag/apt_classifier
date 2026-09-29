@@ -300,6 +300,8 @@ export interface CasePayload {
   decisions: AppliedDecision[]
   techniques: AcceptedTechnique[]
   ranking: RankingEntry[]
+  ranking_includes_llm_vote: boolean
+  deterministic_leader: string | null
   decision: DecisionInfo | null
   origin: OriginInfo
   behaviour_matches: BehaviourMatch[]
@@ -411,4 +413,70 @@ export interface ElasticSearchResult {
     event_id: string | null
     text: string
   }[]
+}
+
+export interface DistinguishTechnique {
+  technique_id: string
+  technique_name: string
+  confidence: number
+  pending: boolean
+  documented_by: string[]
+  exclusivity: number
+  specificity: number
+  weight: number
+  contributions: Record<string, number>
+}
+
+export interface DistinguishPending {
+  technique_id: string
+  technique_name: string
+  probability: number
+  observation_id: string
+  observation: string
+  documented_by: { group_id: string; name: string }[]
+  exclusivity: number
+  specificity: number
+  delta_separation: number
+  new_leader_id: string | null
+  new_leader_name: string | null
+  keeps_leader: boolean
+}
+
+export interface DistinguishLead {
+  technique_id: string
+  technique_name: string
+  priority: number
+  profile_support: number
+  supporting_group_count: number
+  candidate_group_count: number
+  delta_yes: number
+  delta_no: number
+  leader_after_yes: string | null
+  first_step: string
+}
+
+export interface DistinguishResponse {
+  top_k: number
+  separation: number
+  leader_total: number
+  leader: { group_id: string | null; name: string | null }
+  runner_up: { group_id: string | null; name: string | null }
+  runner_up_related: boolean
+  thresholds: { separation: number; min_discriminative: number; gate_mode: string }
+  contrast_enabled: boolean
+  shortlist: {
+    group_id: string
+    name: string
+    rank: number
+    relative_score: number
+    technique?: number
+    behavior?: number
+    software?: number
+    soft?: number
+    negative?: number
+    total?: number
+  }[]
+  techniques: DistinguishTechnique[]
+  pending: DistinguishPending[]
+  leads: DistinguishLead[]
 }

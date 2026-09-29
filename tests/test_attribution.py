@@ -415,3 +415,55 @@ def test_maturity_gate_mode_ignores_separation_and_both_requires_both():
     )
     assert both.stage is AttributionStage.KNOWN_GROUP_SHORTLIST
     assert "separation 0.00 < 0.50" in both.rationale
+
+
+def test_separation_gate_never_names_a_group_promoted_above_the_scored_leader():
+    from apt_classifier.separation import discriminate
+
+    kb = _separation_kb()
+    thresholds = MaturityThresholds(
+        min_techniques=2,
+        min_independent_evidence_families=2,
+        min_maturity_score=0.3,
+        hypothesis_maturity_score=0.99,
+        hypothesis_margin=0.0,
+        gate_mode="separation",
+        hypothesis_separation=0.5,
+        hypothesis_min_discriminative=0.2,
+    )
+    context = _context(techniques={"T1": 1.0, "T2": 1.0})
+    fusion = _two_candidates()
+    scored = discriminate(kb, fusion, context)  # leader G1, exclusive T1 -> clears the bar
+    assert scored.leader_id == "G1" and scored.separation >= 0.5
+    # a re-ranking that put G2 first while the separation still describes G1
+    swapped = FusionResult(
+        entries=tuple(
+            FusionEntry(
+                group_id=entry.group_id,
+                score=entry.score,
+                relative_score=entry.relative_score,
+                rank=2 if entry.group_id == "G1" else 1,
+                classifier_ranks=entry.classifier_ranks,
+                rank_min=entry.rank_min,
+                rank_max=entry.rank_max,
+                rank_std=entry.rank_std,
+                contested=entry.contested,
+            )
+            for entry in sorted(fusion.entries, key=lambda e: e.group_id != "G2")
+        ),
+        active_classifiers=fusion.active_classifiers,
+        correlations=fusion.correlations,
+        k=fusion.k,
+        effective_weights=fusion.effective_weights,
+    )
+    decision = assess_attribution(
+        kb, swapped, context, thresholds=thresholds, discrimination=scored
+    )
+    assert decision.leading_group_id == "G2"
+    assert decision.stage is AttributionStage.KNOWN_GROUP_SHORTLIST
+    assert "re-ranking placed G2 above G1" in decision.rationale
+    # the consistent case still names
+    consistent = assess_attribution(
+        kb, fusion, context, thresholds=thresholds, discrimination=scored
+    )
+    assert consistent.stage is AttributionStage.KNOWN_GROUP_HYPOTHESIS

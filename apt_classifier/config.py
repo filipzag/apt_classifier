@@ -179,6 +179,16 @@ class Settings(BaseSettings):
     attribution_hypothesis_specificity: float = 0.0
     # Blend the discriminative mass into the RRF score of the top-K (0 = pure RRF order).
     attribution_rerank_blend: float = 0.5
+    # Shortlist size for the discriminative re-ranking; 0 = the gate's shortlist
+    # (ATTRIBUTION_SEPARATION_TOP_K). Adopted at 10 on 2026-09-29: folds top-5 0.804 -> 0.915,
+    # CTI-HAL top-1 0.455 -> 0.509, every named group still correct on both sets (docs 21.3.8).
+    attribution_rerank_top_k: int = 10
+    # Contrastive near misses: NEEDS_REVIEW candidates with acceptance probability >= this enter
+    # the separation's ``soft`` channel (exclusivity- and specificity-weighted, never a
+    # classifier vote). 0 disables. Off until measured on both attribution benchmarks.
+    attribution_contrast_min_probability: float = 0.0
+    attribution_contrast_weight: float = 1.0
+    attribution_separation_soft_weight: float = 1.0
     # Activity clustering (opt-in)
     activity_clusters_enabled: bool = False
     activity_clusters_db_path: Path = PROJECT_ROOT / "data" / "activity_clusters.db"

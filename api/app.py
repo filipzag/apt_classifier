@@ -316,6 +316,12 @@ def create_app(service: CaseService | None = None, *, serve_web: bool = True) ->
         payload["name"] = serializers._name(svc.engine.kb, group_id.upper())  # noqa: SLF001
         return payload
 
+    @app.get("/api/cases/{case_id}/distinguish")
+    def distinguish(
+        case_id: str, top_k: int = 10, svc: CaseService = Depends(get_service)
+    ) -> dict[str, Any]:
+        return svc.distinguish(case_id, top_k=top_k)
+
     @app.get("/api/cases/{case_id}/canvas")
     def canvas(
         case_id: str,

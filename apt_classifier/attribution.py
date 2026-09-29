@@ -327,6 +327,13 @@ def assess_attribution(
             ),
         )
     failed = _hypothesis_gate_failures(thresholds, maturity, margin, discrimination)
+    # The separation was scored for the ensemble's rank-1 candidate. If a re-ranking put another
+    # group first, that group's separation is unknown here: never name it on borrowed evidence.
+    if discrimination.leader_id and discrimination.leader_id != leading.group_id:
+        failed.append(
+            f"the re-ranking placed {leading.group_id} above {discrimination.leader_id}, "
+            "whose evidence the separation was scored for"
+        )
     if failed:
         return AttributionDecision(
             stage=AttributionStage.KNOWN_GROUP_SHORTLIST,

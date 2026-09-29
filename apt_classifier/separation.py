@@ -48,6 +48,8 @@ class DiscriminationWeights:
     behavior: float = 2.0
     software: float = 1.5
     negative: float = 0.3
+    # contrastive near-miss techniques (unaccepted candidates that split the shortlist)
+    soft: float = 1.0
 
 
 @dataclass(frozen=True)
@@ -59,6 +61,7 @@ class CandidateDiscrimination:
     software: float
     negative: float
     total: float
+    soft: float = 0.0
 
     def to_dict(self) -> dict[str, float | str]:
         return {
@@ -68,6 +71,7 @@ class CandidateDiscrimination:
             "behavior": round(self.behavior, 4),
             "software": round(self.software, 4),
             "negative": round(self.negative, 4),
+            "soft": round(self.soft, 4),
             "total": round(self.total, 4),
         }
 
@@ -136,8 +140,15 @@ def discriminate(
     floor: float = 1.0,
     tool_weight_cap: float = COMMODITY_TOOL_WEIGHT_CAP,
     behavior_threshold: float = 0.55,
+    soft_techniques: dict[str, float] | None = None,
 ) -> DiscriminationResult:
-    """Score the top-K fused candidates by the evidence the other candidates do not explain."""
+    """Score the top-K fused candidates by the evidence the other candidates do not explain.
+
+    ``soft_techniques`` (technique id -> weight in [0, 1]) are near-miss candidates that were not
+    accepted; they enter a separate ``soft`` channel with the same exclusivity and specificity
+    weighting, so a generic near miss shared by the shortlist still counts for nobody while a
+    distinctive one sharpens the separation. Accepted techniques are never double counted.
+    """
     weights = weights or DiscriminationWeights()
     candidates = [entry for entry in fusion.entries[: max(int(top_k), 1)]]
     if not candidates:
@@ -179,6 +190,36 @@ def discriminate(
             technique_score[group_id] += float(confidence) * factor * x * s
             specificity_sum[group_id] += float(confidence) * s
             confidence_sum[group_id] += float(confidence)
+
+    # --- contrastive near-miss techniques ---
+    soft_score: dict[str, float] = dict.fromkeys(ids, 0.0)
+    soft_items = {
+        tid: float(value)
+        for tid, value in (soft_techniques or {}).items()
+        if tid not in observed and float(value) > 0
+    }
+    if soft_items:
+        soft_view = SimpleNamespace(
+            kb=kb, parent_policy=view.parent_policy, observed_techniques=soft_items
+        )
+        soft_factors: dict[str, dict[str, float]] = {}
+        for group_id in ids:
+            matches = hierarchy_matches_for(
+                soft_view, group_id, observed_techniques=set(soft_items)
+            )
+            soft_factors[group_id] = {tid: float(m.factor) for tid, m in matches.items()}
+        for technique_id, value in soft_items.items():
+            documenting = sum(
+                1 for group_id in ids if soft_factors[group_id].get(technique_id, 0.0) > 0
+            )
+            if documenting == 0:
+                continue
+            x = _exclusivity(documenting, count)
+            s = specificity(technique_id)
+            for group_id in ids:
+                factor = soft_factors[group_id].get(technique_id, 0.0)
+                if factor > 0:
+                    soft_score[group_id] += value * factor * x * s
 
     # --- negative evidence ---
     negative_score: dict[str, float] = dict.fromkeys(ids, 0.0)
@@ -243,6 +284,7 @@ def discriminate(
             weights.technique * technique_score[gid]
             + weights.behavior * behavior_score[gid]
             + weights.software * software_score[gid]
+            + weights.soft * soft_score[gid]
             - weights.negative * negative_score[gid]
         )
         scores.append(
@@ -254,6 +296,7 @@ def discriminate(
                 software=software_score[gid],
                 negative=negative_score[gid],
                 total=max(0.0, total),
+                soft=soft_score[gid],
             )
         )
     leader = scores[0]
@@ -320,3 +363,92 @@ def apply_discriminative_rerank(
         for rank, (score, _, entry) in enumerate(adjusted, 1)
     )
     return replace(fusion, entries=entries)
+
+
+@dataclass(frozen=True)
+class TechniqueContrast:
+    """One technique's contribution to separating the shortlist."""
+
+    technique_id: str
+    confidence: float
+    pending: bool
+    documented_by: tuple[str, ...]
+    exclusivity: float
+    specificity: float
+    weight: float
+    contributions: dict[str, float]
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "technique_id": self.technique_id,
+            "confidence": round(self.confidence, 4),
+            "pending": self.pending,
+            "documented_by": list(self.documented_by),
+            "exclusivity": round(self.exclusivity, 4),
+            "specificity": round(self.specificity, 4),
+            "weight": round(self.weight, 4),
+            "contributions": {k: round(v, 4) for k, v in self.contributions.items()},
+        }
+
+
+def distinguishing_techniques(
+    kb: Any,
+    fusion: FusionResult,
+    context: Any,
+    *,
+    top_k: int = 10,
+    soft_techniques: dict[str, float] | None = None,
+) -> list[TechniqueContrast]:
+    """Per-technique view of what separates the top-K: which shortlist groups document it, its
+    exclusivity among them, its documented specificity and the resulting weight. Accepted
+    techniques and pending near misses are both listed (``pending`` marks the latter). Sorted by
+    weight, so the first rows are the techniques the ranking is decided by."""
+    candidates = [entry for entry in fusion.entries[: max(int(top_k), 1)]]
+    ids = [entry.group_id for entry in candidates]
+    count = len(ids)
+    if not ids:
+        return []
+    total_groups = len(kb_mapping(kb, "groups")) or 1
+    doc_counts = technique_document_counts(kb)
+    observed: dict[str, float] = dict(getattr(context, "observed_techniques", {}) or {})
+    items: list[tuple[str, float, bool]] = [(tid, float(c), False) for tid, c in observed.items()]
+    items += [
+        (tid, float(value), True)
+        for tid, value in (soft_techniques or {}).items()
+        if tid not in observed and float(value) > 0
+    ]
+    if not items:
+        return []
+    view = SimpleNamespace(
+        kb=kb,
+        parent_policy=str(getattr(context, "parent_policy", "ancestor_compatible")),
+        observed_techniques={tid: value for tid, value, _ in items},
+    )
+    factors: dict[str, dict[str, float]] = {}
+    for group_id in ids:
+        matches = hierarchy_matches_for(
+            view, group_id, observed_techniques=set(view.observed_techniques)
+        )
+        factors[group_id] = {tid: float(match.factor) for tid, match in matches.items()}
+    rows: list[TechniqueContrast] = []
+    for technique_id, confidence, pending in items:
+        documented = tuple(gid for gid in ids if factors[gid].get(technique_id, 0.0) > 0)
+        x = _exclusivity(len(documented), count) if documented else 0.0
+        s = max(0.0, 1.0 - doc_counts.get(technique_id, 0) / total_groups)
+        weight = confidence * x * s if documented else 0.0
+        rows.append(
+            TechniqueContrast(
+                technique_id=technique_id,
+                confidence=confidence,
+                pending=pending,
+                documented_by=documented,
+                exclusivity=x,
+                specificity=s,
+                weight=weight,
+                contributions={
+                    gid: confidence * factors[gid][technique_id] * x * s for gid in documented
+                },
+            )
+        )
+    rows.sort(key=lambda row: (-row.weight, row.pending, row.technique_id))
+    return rows

@@ -171,6 +171,12 @@ def test_local_flow_end_to_end(local_client: TestClient) -> None:
         assert updated.status_code == 200, updated.text
         assert updated.json()["decisions"][0]["action"] == "confirm"
 
+    distinguish = local_client.get(f"/api/cases/{case_id}/distinguish?top_k=10").json()
+    assert distinguish["top_k"] == 10 and len(distinguish["shortlist"]) <= 10
+    assert {"separation", "techniques", "pending", "leads", "leader"} <= set(distinguish)
+    assert all("delta_separation" in item for item in distinguish["pending"])
+    assert all({"delta_yes", "delta_no"} <= set(item) for item in distinguish["leads"])
+
     top = case["ranking"][0]["group_id"]
     dossier = local_client.get(f"/api/cases/{case_id}/dossier/{top}").json()
     assert dossier["group_id"] == top and "matched_techniques" in dossier

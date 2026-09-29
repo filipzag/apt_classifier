@@ -49,7 +49,7 @@ function InterviewView({ caseId, data }: { caseId: string; data: CasePayload }) 
   return (
     <div className="space-y-5">
       <PageHeader
-        step="Step 3 · Interview"
+        step="Step 4 · Interview"
         title="Separate the shortlist"
         lead="Each question is the unconfirmed ATT&CK behaviour with the highest expected information gain across the current candidates, phrased as a neutral collection lead. Answers are recorded as evidence and the ranking is recomputed."
         action={

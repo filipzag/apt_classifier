@@ -5,6 +5,7 @@ import { AssessmentPage } from './pages/Assessment'
 import { CanvasPage } from './pages/Canvas'
 import { DashboardPage } from './pages/Dashboard'
 import { DiamondPage } from './pages/Diamond'
+import { DistinguishPage } from './pages/Distinguish'
 import { EvidencePage } from './pages/Evidence'
 import { IntakePage } from './pages/Intake'
 import { IntelPage } from './pages/Intel'
@@ -21,6 +22,7 @@ export default function App() {
         <Route path="cases/:id" element={<AssessmentPage />} />
         <Route path="cases/:id/evidence" element={<EvidencePage />} />
         <Route path="cases/:id/techniques" element={<TechniquesPage />} />
+        <Route path="cases/:id/distinguish" element={<DistinguishPage />} />
         <Route path="cases/:id/interview" element={<InterviewPage />} />
         <Route path="cases/:id/canvas" element={<CanvasPage />} />
         <Route path="cases/:id/diamond" element={<DiamondPage />} />

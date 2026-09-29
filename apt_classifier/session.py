@@ -303,6 +303,10 @@ class AttributionEngine:
             ),
             soft_weight=float(getattr(self.settings, "attribution_soft_evidence_weight", 1.0)),
             soft_max_groups=int(getattr(self.settings, "attribution_soft_evidence_max_groups", 0)),
+            contrast_min_probability=float(
+                getattr(self.settings, "attribution_contrast_min_probability", 0.0)
+            ),
+            contrast_weight=float(getattr(self.settings, "attribution_contrast_weight", 1.0)),
         )
         merged_weights = self.default_weights()
         merged_weights.update(weights or {})
@@ -751,13 +755,30 @@ class AttributionEngine:
             floor=float(getattr(self.settings, "attribution_separation_floor", 1.0)),
             tool_weight_cap=float(getattr(self.settings, "software_tool_weight_cap", 1.5)),
             behavior_threshold=float(self.settings.behavior_similarity_threshold),
+            soft_techniques=getattr(context, "contrast_techniques", None) or None,
         )
         context.discrimination = discrimination
         blend = float(getattr(self.settings, "attribution_rerank_blend", 0.5))
         if blend > 0:
+            # The re-ranking may contrast a longer shortlist than the naming gate scores
+            # (ATTRIBUTION_RERANK_TOP_K); 0 means "same shortlist as the gate".
+            rerank_k = int(getattr(self.settings, "attribution_rerank_top_k", 0) or 0)
+            rerank_basis = discrimination
+            if rerank_k > 0 and rerank_k != discrimination.top_k:
+                rerank_basis = discriminate(
+                    self.kb,
+                    fusion,
+                    context,
+                    self.discrimination_weights,
+                    top_k=rerank_k,
+                    floor=float(getattr(self.settings, "attribution_separation_floor", 1.0)),
+                    tool_weight_cap=float(getattr(self.settings, "software_tool_weight_cap", 1.5)),
+                    behavior_threshold=float(self.settings.behavior_similarity_threshold),
+                    soft_techniques=getattr(context, "contrast_techniques", None) or None,
+                )
             fusion = apply_discriminative_rerank(
                 fusion,
-                discrimination,
+                rerank_basis,
                 blend,
                 float(getattr(self.settings, "attribution_separation_floor", 1.0)),
             )
@@ -770,6 +791,7 @@ class AttributionEngine:
             behavior=float(getattr(self.settings, "attribution_separation_behavior_weight", 2.0)),
             software=float(getattr(self.settings, "attribution_separation_software_weight", 1.0)),
             negative=float(getattr(self.settings, "attribution_separation_negative_weight", 0.3)),
+            soft=float(getattr(self.settings, "attribution_separation_soft_weight", 1.0)),
         )
 
     def _decisive_evidence_weights(

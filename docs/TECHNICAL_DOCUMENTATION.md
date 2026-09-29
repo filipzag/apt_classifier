@@ -1265,6 +1265,41 @@ cluster-aware 0.60, MRR 0.65 -> 0.71, top-5 unchanged; real reports top-1 0.44 -
 0.45, cluster-aware 0.56 -> 0.60, MRR 0.55 -> 0.57; named risk 0 on both, no removed
 actor named. `ATTRIBUTION_GATE_MODE=maturity` restores the 10.6 behaviour.
 
+### 10.8 Distinguishing the shortlist (2026-09-29)
+
+A step after the ensemble has picked its shortlist, with three parts.
+
+1. **Contrastive re-ranking over a longer shortlist** (`ATTRIBUTION_RERANK_TOP_K`, default 10).
+   The discriminative re-ranking of 10.7 used the same five candidates the naming gate scores.
+   The re-ranking now contrasts the top-K of the ensemble order for its own K while the gate keeps
+   scoring its five, so the gate's tuned bars and their measured naming behaviour are unchanged
+   (`_fuse` computes a second `discriminate` when the two sizes differ; 0 means "same as the gate").
+   Adoption numbers are in 21.3.8.
+2. **Contrastive near misses** (`ATTRIBUTION_CONTRAST_MIN_PROBABILITY`, default 0 = off).
+   NEEDS_REVIEW candidates whose calibrated acceptance probability clears the floor enter a
+   separate `soft` channel of the discrimination (`DiscriminationWeights.soft`,
+   `ATTRIBUTION_SEPARATION_SOFT_WEIGHT`) with the same exclusivity × specificity weighting as
+   accepted techniques, and never reach a classifier. A generic near miss shared by the shortlist
+   still counts for nobody; a distinctive one sharpens the separation. Measured and not adopted
+   (21.3.8): no ranking gain and one fewer correct name on the folds. The channel is recorded per
+   row (`topk[].soft`) so `scripts/attribution_gate_sweep.py --soft-grid` can replay it offline.
+3. **Leader consistency guard.** The separation is scored for the ensemble's rank-1 candidate.
+   If a re-ranking places another group first, `assess_attribution` refuses to name it on that
+   borrowed separation and the rationale says so. With K equal to the gate's this cannot happen
+   (a candidate overtakes only when it has more discriminative mass, which makes the scored
+   separation negative); with a longer re-ranking shortlist it can, so the guard is what keeps
+   the naming gate's promise.
+
+The analyst sees the step as **Distinguish** (web app step 3; `GET /api/cases/{id}/distinguish`,
+`CaseService.distinguish`): the technique × shortlist matrix with each technique's exclusivity,
+documented specificity and weight (`separation.distinguishing_techniques`), the current
+separation and discriminative mass against their bars, and two counterfactual lists produced by
+replaying `discriminate` on the decision's shortlist order: pending candidates ranked by expected
+change (|Δ separation| × acceptance probability) with confirm/reject in place, and interview
+leads with the effect of a yes and of a no, flagging any change that would put another group in
+front. Confirming or answering records evidence through the normal paths; nothing in the view
+changes weights by itself.
+
 ## 11. Origin and intrusion-type assessment
 
 `apt_classifier/origin.py` performs a separate post-fusion assessment.
@@ -2582,6 +2617,34 @@ from cue tables that do not transfer to the public held-out data (hybrid top-1 w
 cues: 15/30).
 
 ---
+
+#### 21.3.8 Distinguishing the shortlist: contrastive re-ranking and near misses (2026-09-29)
+
+Both attribution benchmarks, local pipeline, shipped acceptance model. "Named" counts known
+rows that reached `known_group_hypothesis`; every named row was correct in every run and no
+removed actor was named (0/25). Leader consistency: 0 named rows in any run had a re-ranked
+leader different from the scored one.
+
+| variant | folds top-1 | folds top-5 | folds MRR | folds named | CTI-HAL top-1 | CTI-HAL top-5 | CTI-HAL MRR | CTI-HAL named |
+|---|---|---|---|---|---|---|---|---|
+| before (gate K=5, re-rank K=5) | 0.595 | 0.804 | 0.710 | 35 | 0.455 | 0.655 | 0.568 | 12 |
+| gate and re-rank K=10 | 0.601 | 0.915 | 0.737 | 27 | 0.509 | 0.745 | 0.617 | 8 |
+| contrastive near misses (p ≥ 0.2), K=5 | 0.601 | 0.804 | 0.713 | 34 | 0.436 | 0.655 | 0.556 | 12 |
+| near misses + K=10 | 0.601 | 0.915 | 0.739 | 26 | 0.509 | 0.745 | 0.613 | 7 |
+| **re-rank K=10, gate K=5 (adopted)** | **0.601** | **0.915** | **0.737** | **35** | **0.509** | **0.745** | **0.617** | **12** |
+| re-rank K=15, gate K=5 | 0.608 | 0.922 | 0.738 | 35 | 0.509 | 0.745 | 0.619 | 12 |
+
+Reading: contrasting ten candidates instead of five is what moves the ranking (fold top-5
++0.11, real-report top-1 +0.05), but scoring the *gate* over ten shrinks every exclusivity
+weight and drops named coverage (35 → 27, 12 → 8) because the bars were tuned for five; an
+offline sweep over the K=10 rows found clean rules only with a guard band of 0.02–0.04, so the
+gate keeps its five. Near misses sharpen the separation AUC slightly on real reports (0.789 →
+0.812) but cost ranking (top-1 0.455 → 0.436) and one fold name; they stay off
+(`ATTRIBUTION_CONTRAST_MIN_PROBABILITY=0`). Re-ranking over fifteen is within noise of ten;
+ten is shipped (`ATTRIBUTION_RERANK_TOP_K=10`). The `separation_auc` diagnostic falls with the
+longer re-ranking (real 0.789 → 0.719) because it scores the gate's rank-1 candidate while
+"correct" now refers to the re-ranked leader; the naming gate is unaffected by construction
+(10.8, leader consistency guard).
 
 ## 22. Failure modes and troubleshooting
 

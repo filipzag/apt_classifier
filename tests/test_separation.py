@@ -215,3 +215,64 @@ def test_document_counts_are_memoized_per_kb():
     first = technique_document_counts(kb)
     assert first["T2"] == 3 and first["T1"] == 1
     assert technique_document_counts(kb) is first
+
+
+def test_contrastive_soft_channel_is_exclusivity_weighted_and_never_double_counts():
+    kb = _kb()
+    fusion = _fusion("G1", "G2", "G3")
+    # T2 is shared by every candidate -> a soft T2 counts for nobody; T1 is exclusive to G1
+    context = _context(observed_techniques={"T2": 1.0})
+    base = discriminate(kb, fusion, context, DiscriminationWeights(software=0.0))
+    soft = discriminate(
+        kb,
+        fusion,
+        context,
+        DiscriminationWeights(software=0.0),
+        soft_techniques={"T2": 0.6, "T1": 0.5},
+    )
+    by_group = soft.by_group()
+    assert by_group["G2"].soft == pytest.approx(0.0)
+    assert by_group["G3"].soft == pytest.approx(0.0)
+    assert by_group["G1"].soft == pytest.approx(0.5 * 1.0 * (1 - 1 / 3))  # p * x * s(T1)
+    assert by_group["G1"].total > base.by_group()["G1"].total
+    assert soft.separation > base.separation
+    # an accepted technique offered as soft is ignored (no double counting)
+    observed_context = _context(observed_techniques={"T1": 1.0})
+    with_dup = discriminate(kb, fusion, observed_context, soft_techniques={"T1": 0.9})
+    without = discriminate(kb, fusion, observed_context)
+    assert with_dup.by_group()["G1"].total == pytest.approx(without.by_group()["G1"].total)
+    # a zero channel weight reproduces the accepted-only result exactly
+    zero = discriminate(
+        kb,
+        fusion,
+        context,
+        DiscriminationWeights(software=0.0, soft=0.0),
+        soft_techniques={"T1": 0.5},
+    )
+    assert zero.by_group()["G1"].total == pytest.approx(base.by_group()["G1"].total)
+    assert zero.to_dict()["candidates"][0]["soft"] == pytest.approx(0.5 * (1 - 1 / 3), abs=1e-4)
+
+
+def test_distinguishing_techniques_lists_weights_and_pending_rows():
+    from apt_classifier.separation import distinguishing_techniques
+
+    kb = _kb()
+    fusion = _fusion("G1", "G2", "G3")
+    context = _context(observed_techniques={"T1": 0.8, "T2": 1.0})
+    rows = distinguishing_techniques(
+        kb, fusion, context, top_k=3, soft_techniques={"T3.001": 0.4, "T2": 0.3}
+    )
+    by_id = {row.technique_id: row for row in rows}
+    assert rows[0].technique_id == "T1" and not rows[0].pending
+    assert by_id["T1"].documented_by == ("G1",)
+    assert by_id["T1"].exclusivity == pytest.approx(1.0)
+    assert by_id["T1"].weight == pytest.approx(0.8 * (1 - 1 / 3))
+    assert by_id["T2"].weight == pytest.approx(0.0) and by_id["T2"].documented_by == (
+        "G1",
+        "G2",
+        "G3",
+    )
+    assert by_id["T3.001"].pending and by_id["T3.001"].documented_by == ("G1", "G2")
+    assert "T2" in by_id and sum(1 for r in rows if r.technique_id == "T2") == 1  # accepted wins
+    assert set(by_id["T1"].contributions) == {"G1"}
+    assert distinguishing_techniques(kb, _fusion(), context) == []

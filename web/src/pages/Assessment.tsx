@@ -29,7 +29,7 @@ function AssessmentView({ caseId, data }: { caseId: string; data: CasePayload })
   return (
     <div className="space-y-6">
       <PageHeader
-        step="Step 4 · Assessment"
+        step="Step 5 · Assessment"
         title="Attribution assessment"
         lead="The stage decision, the deterministic ranking and the evidence behind it. Nothing here is a probability; the relative index compares candidates within this case only."
         action={
@@ -192,6 +192,12 @@ function AssessmentView({ caseId, data }: { caseId: string; data: CasePayload })
         >
           Candidate groups
         </SectionTitle>
+        {data.ranking_includes_llm_vote ? (
+          <Callout tone="violet" className="mb-4" title="This ranking includes the LLM zero-shot vote">
+            The bounded model vote re-ordered the list. The stage decision above uses the deterministic
+            ranking only, whose leader is {data.ranking.find((e) => e.group_id === data.deterministic_leader)?.name ?? data.deterministic_leader}.
+          </Callout>
+        ) : null}
         {!data.ranking.length ? (
           <Callout tone="danger">No candidate has documented technical support. Add evidence in Intake.</Callout>
         ) : rankingView === 'bars' ? (

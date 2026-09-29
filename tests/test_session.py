@@ -453,3 +453,35 @@ def test_zero_shot_refusion_carries_the_boosted_software_weight(monkeypatch):
     post_vote = state.fusion.effective_weights.get("software_tools")
     if deterministic is not None:
         assert post_vote == pytest.approx(deterministic)
+
+
+def test_rerank_top_k_contrasts_a_longer_shortlist_but_the_gate_keeps_its_own(monkeypatch):
+    """ATTRIBUTION_RERANK_TOP_K re-ranks over a longer shortlist than the naming gate scores:
+    the recorded discrimination (gate) still has ATTRIBUTION_SEPARATION_TOP_K candidates, the
+    re-ranked top-K set is the RRF top-K set, and 0 means the same shortlist as the gate."""
+    text = "PowerShell executed an encoded command."
+    plain = AttributionEngine(
+        _settings(attribution_rerank_blend=0.0), _kb(), FakeStore(), FakeLLM()
+    )
+    same = AttributionEngine(
+        _settings(attribution_rerank_blend=1.0, attribution_rerank_top_k=0),
+        _kb(),
+        FakeStore(),
+        FakeLLM(),
+    )
+    longer = AttributionEngine(
+        _settings(attribution_rerank_blend=1.0, attribution_rerank_top_k=4),
+        _kb(),
+        FakeStore(),
+        FakeLLM(),
+    )
+    rrf = plain.analyze(_ledger(text))
+    a = same.analyze(_ledger(text))
+    b = longer.analyze(_ledger(text))
+    gate_k = int(getattr(longer.settings, "attribution_separation_top_k", 5))
+    assert a.context.discrimination.top_k == min(gate_k, len(rrf.deterministic_fusion.entries))
+    assert b.context.discrimination.top_k == min(gate_k, len(rrf.deterministic_fusion.entries))
+    order = [e.group_id for e in rrf.deterministic_fusion.entries]
+    assert {e.group_id for e in b.deterministic_fusion.entries[:4]} == set(order[:4])
+    assert [e.group_id for e in b.deterministic_fusion.entries[4:]] == order[4:]
+    assert b.deterministic_fusion.entries[0].relative_score == pytest.approx(100.0)

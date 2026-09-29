@@ -37,9 +37,18 @@ def auc(positives: list[float], negatives: list[float]) -> float | None:
 
 
 def recombine(
-    row: dict[str, Any], *, w_t: float, w_b: float, w_s: float, w_n: float, floor: float, k: int
+    row: dict[str, Any],
+    *,
+    w_t: float,
+    w_b: float,
+    w_s: float,
+    w_n: float,
+    floor: float,
+    k: int,
+    w_soft: float = 1.0,
 ) -> tuple[float, float]:
-    """(separation, leader total) from the recorded raw channels with new weights."""
+    """(separation, leader total) from the recorded raw channels with new weights. Rows
+    recorded before the contrastive ``soft`` channel existed replay with soft = 0."""
     candidates = list(row.get("topk") or [])[: max(k, 1)]
     if not candidates:
         return 0.0, 0.0
@@ -49,6 +58,7 @@ def recombine(
             w_t * float(c["technique"])
             + w_b * float(c["behavior"])
             + w_s * float(c["software"])
+            + w_soft * float(c.get("soft", 0.0) or 0.0)
             - w_n * float(c["negative"]),
         )
         for c in candidates
@@ -70,6 +80,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--max-unknown-named", type=int, default=1)
     parser.add_argument("--top", type=int, default=15, help="rules to print")
     parser.add_argument("--weights-grid", default="0,0.5,1,2", help="values for w_b and w_s")
+    parser.add_argument(
+        "--soft-grid", default="1", help="values for the contrastive soft channel weight w_soft"
+    )
     parser.add_argument("--json", action="store_true")
     args = parser.parse_args(argv)
     sets = load(args.artifacts)
@@ -99,8 +112,11 @@ def main(argv: list[str] | None = None) -> int:
 
     # 2. rule sweep over recombined channels
     grid = [float(v) for v in args.weights_grid.split(",")]
+    soft_grid = [float(v) for v in args.soft_grid.split(",")]
     results = []
-    for w_b, w_s, floor, k in itertools.product(grid, grid, (0.5, 1.0, 2.0), (3, 5)):
+    for w_b, w_s, w_soft, floor, k in itertools.product(
+        grid, grid, soft_grid, (0.5, 1.0, 2.0), (3, 5, 10)
+    ):
         for sep_bar, d_bar, margin_bar in itertools.product(
             (0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9),
             (0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 5.0, 6.0),
@@ -112,7 +128,9 @@ def main(argv: list[str] | None = None) -> int:
                 named = correct = 0
                 worst_wrong = -1.0
                 for r in rows:
-                    sep, leader = recombine(r, w_t=1.0, w_b=w_b, w_s=w_s, w_n=0.3, floor=floor, k=k)
+                    sep, leader = recombine(
+                        r, w_t=1.0, w_b=w_b, w_s=w_s, w_n=0.3, floor=floor, k=k, w_soft=w_soft
+                    )
                     margin = float(r.get("margin") or 0.0)
                     if sep >= sep_bar and leader >= d_bar and margin >= margin_bar:
                         named += 1
@@ -130,7 +148,9 @@ def main(argv: list[str] | None = None) -> int:
             unknown_named = 0
             for rows in unknown.values():
                 for r in rows:
-                    sep, leader = recombine(r, w_t=1.0, w_b=w_b, w_s=w_s, w_n=0.3, floor=floor, k=k)
+                    sep, leader = recombine(
+                        r, w_t=1.0, w_b=w_b, w_s=w_s, w_n=0.3, floor=floor, k=k, w_soft=w_soft
+                    )
                     if (
                         sep >= sep_bar
                         and leader >= d_bar
@@ -142,6 +162,7 @@ def main(argv: list[str] | None = None) -> int:
                     {
                         "w_b": w_b,
                         "w_s": w_s,
+                        "w_soft": w_soft,
                         "floor": floor,
                         "k": k,
                         "sep": sep_bar,
@@ -159,14 +180,14 @@ def main(argv: list[str] | None = None) -> int:
         f"\n== clean rules (no wrong name on any known arm, unknown named <= {args.max_unknown_named}): {len(results)}"
     )
     print(
-        f"{'w_b':>4s} {'w_s':>4s} {'flr':>4s} {'k':>2s} {'sep':>4s} {'d':>4s} {'mrg':>5s} | named(correct) per set | unk | guard"
+        f"{'w_b':>4s} {'w_s':>4s} {'w_sf':>4s} {'flr':>4s} {'k':>2s} {'sep':>4s} {'d':>4s} {'mrg':>5s} | named(correct) per set | unk | guard"
     )
     for item in results[: args.top]:
         sets_text = " ".join(
             f"{name[:12]}={v['named']}({v['correct']})" for name, v in item["sets"].items()
         )
         print(
-            f"{item['w_b']:4.1f} {item['w_s']:4.1f} {item['floor']:4.1f} {item['k']:2d} "
+            f"{item['w_b']:4.1f} {item['w_s']:4.1f} {item['w_soft']:4.1f} {item['floor']:4.1f} {item['k']:2d} "
             f"{item['sep']:4.1f} {item['d']:4.1f} {item['margin']:5.2f} | {sets_text} | "
             f"{item['unknown_named']} | {item['min_guard']:.2f}"
         )

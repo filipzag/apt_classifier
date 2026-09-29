@@ -21,7 +21,8 @@ The project must use its `.venv`; system transformers v5 is incompatible with AT
 
 ## Key modules
 
-- `apt_classifier/service.py` — `CaseService`: headless engine + case store + every analyst operation; both front ends must go through it.
+- `apt_classifier/service.py` — `CaseService`: headless engine + case store + every analyst operation (incl. `distinguish`, the counterfactual separation replay); both front ends must go through it.
+- `apt_classifier/separation.py` — candidate-relative discrimination (`discriminate`, contrastive `soft` channel, `distinguishing_techniques`) and the re-ranking blend; the naming gate lives in `attribution.py`.
 - `apt_classifier/report.py` — shared Markdown/JSON/Navigator/Attack Flow export builders.
 - `api/` — FastAPI app (`app.py` routes and error mapping, `serializers.py` state → JSON, `main.py` ASGI entry). `web/` — React 19 + Vite + Tailwind v4 SPA (`src/api/types.ts` mirrors the serializers).
 - `app/ui/` — Streamlit UI package: `runtime` (per-session engine, analysis state, autosave), `cases` (on-disk case store), `guard` (`run_step` error boundary), `components` (status strip, stage glossary, frames), `sidebar`, `local_extract` (no-LLM sentence split) and `pages/` (intake, technique_review, interview, assessment, canvas, diamond, cyberre, intel). Pages expose `render(engine, settings, weights)`.

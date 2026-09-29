@@ -217,7 +217,10 @@ rate limit) or Chroma are reported in plain language and never lose the case sta
 ### Web front end (FastAPI + React)
 
 The primary interface is a React single-page app served by a FastAPI backend; the Streamlit
-app remains available (`make run`, and unchanged on the `streamlit-stable` branch).
+app remains available (`make run`, and unchanged on the `streamlit-stable` branch). The workflow
+is Evidence → Technique review → Distinguish (which techniques separate the shortlist, and which
+pending mappings or interview leads would sharpen or challenge the leader) → Interview →
+Assessment, plus the canvas, diamond, live-intelligence and AI-review views.
 
 ```bash
 make web-install   # once: npm ci inside web/

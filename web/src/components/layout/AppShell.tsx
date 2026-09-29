@@ -152,8 +152,18 @@ function Sidebar({
                 Technique review
               </NavItem>
               <NavItem
-                to={`/cases/${caseId}/interview`}
+                to={`/cases/${caseId}/distinguish`}
                 step={3}
+                icon={<Crosshair className="size-4" />}
+                trailing={
+                  data?.decision ? `sep ${data.decision.separation.toFixed(2)}` : undefined
+                }
+              >
+                Distinguish
+              </NavItem>
+              <NavItem
+                to={`/cases/${caseId}/interview`}
+                step={4}
                 icon={<MessageSquare className="size-4" />}
                 trailing={
                   data
@@ -165,7 +175,7 @@ function Sidebar({
               >
                 Interview
               </NavItem>
-              <NavItem to={`/cases/${caseId}`} end step={4} icon={<ShieldAlert className="size-4" />}>
+              <NavItem to={`/cases/${caseId}`} end step={5} icon={<ShieldAlert className="size-4" />}>
                 Assessment
               </NavItem>
             </div>

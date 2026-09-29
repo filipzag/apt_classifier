@@ -69,6 +69,9 @@ class ClassifierContext:
     # candidate-relative discrimination result of the last fusion (see separation.py).
     specific_behavior_matches: tuple[Any, ...] = ()
     discrimination: Any = None
+    # near-miss candidates that only enter the candidate-relative separation (never a classifier)
+    contrast_techniques: dict[str, float] = field(default_factory=dict)
+    contrast_technique_observations: dict[str, tuple[str, ...]] = field(default_factory=dict)
 
 
 class Classifier(Protocol):

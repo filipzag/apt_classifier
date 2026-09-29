@@ -524,6 +524,18 @@ def case_payload(
         "decisions": decisions(state),
         "techniques": techniques(state),
         "ranking": ranking(kb, state),
+        "ranking_includes_llm_vote": bool(
+            getattr(state, "zero_shot", None) is not None
+            and getattr(state, "deterministic_fusion", None) is not None
+            and [e.group_id for e in state.deterministic_fusion.entries[:15]]
+            != [e.group_id for e in state.fusion.entries[:15]]
+        ),
+        "deterministic_leader": (
+            state.deterministic_fusion.entries[0].group_id
+            if getattr(state, "deterministic_fusion", None) is not None
+            and state.deterministic_fusion.entries
+            else None
+        ),
         "decision": decision(kb, state, thresholds),
         "origin": origin(kb, state),
         "behaviour_matches": behaviour_matches(kb, state),

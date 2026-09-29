@@ -1735,6 +1735,12 @@ def test_soft_technique_evidence_extracts_near_misses_only():
     context = build_classifier_context(kb, ledger, result, soft_min_probability=0.2)
     assert context.soft_techniques == {"T1059.001": pytest.approx(0.3)}
     assert set(context.observed_techniques) == {"T1003.001"}
+    # contrastive near misses use the same qualification but live on their own field
+    assert context.contrast_techniques == {}
+    context = build_classifier_context(kb, ledger, result, contrast_min_probability=0.2)
+    assert context.soft_techniques == {}
+    assert context.contrast_techniques == {"T1059.001": pytest.approx(0.3)}
+    assert context.contrast_technique_observations["T1059.001"] == (ledger.observations[0].id,)
 
 
 def test_accept_by_corroboration_requires_independent_observations():

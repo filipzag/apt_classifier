@@ -2,6 +2,7 @@ import type {
   CaseListItem,
   CasePayload,
   DecisionInput,
+  DistinguishResponse,
   Dossier,
   ElasticSearchResult,
   Graph,
@@ -79,6 +80,8 @@ export const api = {
       `/api/cases/${id}/cyberre`,
       json({ observation_id: observationId, use_prefilter: usePrefilter }),
     ),
+  distinguish: (id: string, topK: number) =>
+    request<DistinguishResponse>(`/api/cases/${id}/distinguish?top_k=${topK}`),
   dossier: (id: string, groupId: string) => request<Dossier>(`/api/cases/${id}/dossier/${groupId}`),
   canvas: (id: string, topGroups: number, maxEvidence: number) =>
     request<Graph>(`/api/cases/${id}/canvas?top_groups=${topGroups}&max_evidence=${maxEvidence}`),
