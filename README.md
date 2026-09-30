@@ -16,7 +16,7 @@ See [`docs/TECHNICAL_DOCUMENTATION.md`](docs/TECHNICAL_DOCUMENTATION.md) for the
 2. Parse supported Windows/Sysmon events deterministically without sending bulk logs to an LLM.
 3. Embed observations with `basel/ATTACK-BERT` and retrieve sentence-level ATT&CK techniques plus actor-specific behavior sentences from local ChromaDB.
 4. Capture optional strategic context: target geography, industry, motivation, intended objective, and independently supported sponsor/origin.
-5. Rank groups with deterministic classifiers (the ensemble makes no LLM call unless the analyst runs CyberRE):
+5. Rank groups with deterministic classifiers plus the analyst-requested CyberRE-LLM vote (the LLM zero-shot vote was removed; the LLM extraction, technique verifier and independent review in steps 1 and 7 remain):
    - Bernoulli Naive Bayes
    - TF-IDF cosine
    - weighted Jaccard

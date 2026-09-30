@@ -32,7 +32,7 @@ function ReviewView({ caseId, data }: { caseId: string; data: CasePayload }) {
     <div className="space-y-6">
       <PageHeader
         title="AI review and CyberRE-LLM"
-        lead="Model passes that run only when you ask. The independent review is advisory and blinded from live intelligence; CyberRE-LLM adds a bounded vote to the ranking. The ensemble itself is deterministic."
+        lead="LLM passes you run on demand: the independent review is advisory and blinded from live intelligence; CyberRE-LLM adds a bounded vote to the ranking. Extraction and the technique verifier run with every analysis."
       />
       {local ? (
         <Callout tone="warning" title="Unavailable in local mode">
