@@ -75,6 +75,8 @@ FINGERPRINTED_SOURCES = (
     REPO_ROOT / "apt_classifier" / "classifiers" / "naive_bayes.py",
     REPO_ROOT / "apt_classifier" / "classifiers" / "software.py",
     REPO_ROOT / "apt_classifier" / "classifiers" / "strategic_context.py",
+    REPO_ROOT / "apt_classifier" / "combiner.py",
+    REPO_ROOT / "apt_classifier" / "separation.py",
 )
 
 
@@ -342,6 +344,21 @@ def _separation_fields(state: Any, truth: str | None, decision: Any) -> dict[str
     }
 
 
+def _combiner_fields(state: Any, truth: str | None) -> dict[str, Any]:
+    """Learned-combiner diagnostics per row: the truth's rank in the RRF order the combiner
+    started from, the probability it assigned to its leader, and its status."""
+    info = getattr(state.context, "combiner", None)
+    if not isinstance(info, dict):
+        return {"rrf_rank": None, "combiner_leader_probability": None, "combiner_status": None}
+    ranks = info.get("rrf_ranks") or {}
+    return {
+        "rrf_rank": ranks.get(truth) if truth else None,
+        "combiner_leader_probability": info.get("leader_probability"),
+        "combiner_null_probability": info.get("null_probability"),
+        "combiner_status": info.get("status"),
+    }
+
+
 def _rank_of(fusion: Any, group_id: str) -> int | None:
     ranked = [entry.group_id for entry in fusion.entries]
     return ranked.index(group_id) + 1 if group_id in ranked else None
@@ -413,6 +430,7 @@ def run_known(
                     ),
                     "rank": ranked.index(fold.group_id) + 1 if fold.group_id in ranked else None,
                     "deterministic_rank": _rank_of(deterministic, fold.group_id),
+                    **_combiner_fields(state, fold.group_id),
                     "llm": accounting,
                     "classifier_truth_ranks": truth_ranks,
                     "software_ids": sorted(state.context.software_ids),
@@ -494,6 +512,7 @@ def run_unknown(
                 "observations": len(fold.observations),
                 "llm": _llm_accounting(state, client, cost_before),
                 **_separation_fields(state, None, decision),
+                **_combiner_fields(state, None),
                 "stage": decision.stage.value if decision else None,
                 "leading": decision.leading_group_id if decision else None,
                 "margin": decision.margin if decision else None,
@@ -581,6 +600,36 @@ def summarize(
         metrics["margin_auc"] = _auc(
             [float(row["margin"] or 0.0) for row in known_rows if row["rank"] == 1],
             [float(row["margin"] or 0.0) for row in known_rows if row["rank"] != 1],
+        )
+    with_software = [row for row in known_rows if row.get("software_ids")]
+    without_software = [row for row in known_rows if not row.get("software_ids")]
+    metrics["top1_with_software"] = (
+        fmean(1.0 if row["rank"] == 1 else 0.0 for row in with_software) if with_software else None
+    )
+    metrics["top1_without_software"] = (
+        fmean(1.0 if row["rank"] == 1 else 0.0 for row in without_software)
+        if without_software
+        else None
+    )
+    metrics["software_present_count"] = len(with_software)
+    probabilities = [
+        row for row in known_rows if row.get("combiner_leader_probability") is not None
+    ]
+    if probabilities:
+        metrics["leader_probability_auc"] = _auc(
+            [
+                float(row["combiner_leader_probability"])
+                for row in probabilities
+                if row["rank"] == 1
+            ],
+            [
+                float(row["combiner_leader_probability"])
+                for row in probabilities
+                if row["rank"] != 1
+            ],
+        )
+        metrics["rrf_top1"] = fmean(
+            1.0 if row.get("rrf_rank") == 1 else 0.0 for row in probabilities
         )
     if known_rows and all("deterministic_rank" in row for row in known_rows):
         det = [row["deterministic_rank"] for row in known_rows]
@@ -763,6 +812,7 @@ def main(argv: list[str] | None = None) -> int:
         "rrf_k": settings.rrf_k,
         "thresholds": engine.attribution_thresholds.__dict__,
         "acceptance_model": engine.acceptance_model_status,
+        "combiner": engine.combiner_status,
         "source_fingerprint": source_fingerprint(FINGERPRINTED_SOURCES),
         "pipeline": args.pipeline,
         "verifier_mode": str(getattr(settings, "technique_verifier_mode", "ambiguous")),

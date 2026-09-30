@@ -149,6 +149,8 @@ export interface DecisionInfo {
   rationale: string
   cluster_id: string | null
   gate_mode: string
+  calibrated_probability: number | null
+  calibration_note: string
   thresholds: {
     maturity: number
     margin: number

@@ -15,6 +15,7 @@
 - Ensemble benchmark: `PYTHONPATH=. .venv/bin/python scripts/ensemble_benchmark.py --coverage 0.4 --seed 7`
 - Synthetic technique sentences: `make generate-synthetic` (OpenRouter, ~$2 for ~575 techniques; resumable), then `make ingest`; ablate with `TECHNIQUE_INCLUDE_SYNTHETIC=false`.
 - CTI-HAL benchmarks (local evaluation only, no licence published): `scripts/prepare_cti_hal.py --source <clone>` then `make benchmark-cti-hal` (statement-level mapping + real-report attribution over 55 reports / 6 groups); `make benchmark-cti-hal-production` runs the same reports through the verifier + LLM vote (spends OpenRouter credit, never the adoption gate).
+- Learned attribution combiner: `make fit-combiner` (ATT&CK folds only, ~1 h local, no credit; writes `data/models/combiner/attribution_combiner.json` + `data/audits/attribution_combiner_cv.json`), then both attribution benchmarks with `--set attribution_combiner_enabled=true` before any default flip
 - Compose the verification artifact from benchmark outputs: `make verify-results` (or `scripts/collect_verification.py`; never hand-edit `verification_results_current.json`)
 
 The project must use its `.venv`; system transformers v5 is incompatible with ATTACK-BERT's `.bin` checkpoint. Tests mock OpenRouter and do not require an API key. The Streamlit application runs in local mode without `OPENROUTER_API_KEY` (no LLM steps). Benchmarks and `tests/test_app_flow.py` require a running ChromaDB with ingested ATT&CK data (the flow test skips otherwise).
@@ -22,6 +23,7 @@ The project must use its `.venv`; system transformers v5 is incompatible with AT
 ## Key modules
 
 - `apt_classifier/service.py` — `CaseService`: headless engine + case store + every analyst operation (incl. `distinguish`, the counterfactual separation replay); both front ends must go through it.
+- `apt_classifier/combiner.py` — learned listwise combiner over the shortlist (features only, fail-closed artifact); `scripts/fit_attribution_combiner.py` fits it.
 - `apt_classifier/separation.py` — candidate-relative discrimination (`discriminate`, contrastive `soft` channel, `distinguishing_techniques`) and the re-ranking blend; the naming gate lives in `attribution.py`.
 - `apt_classifier/report.py` — shared Markdown/JSON/Navigator/Attack Flow export builders.
 - `api/` — FastAPI app (`app.py` routes and error mapping, `serializers.py` state → JSON, `auth.py` Google sign-in / sessions / user admin, `main.py` ASGI entry); `apt_classifier/users.py` — SQLite user store and allowlist policy. Tests run with sign-in off; `tests/test_api_auth.py` fakes the Google exchange. `web/` — React 19 + Vite + Tailwind v4 SPA (`src/api/types.ts` mirrors the serializers).

@@ -43,23 +43,14 @@ def _rerank_result(result: ClassifierResult) -> ClassifierResult:
     return rerank(result)
 
 
-def reciprocal_rank_fusion(
+def filter_eligible_results(
     results: tuple[ClassifierResult, ...] | list[ClassifierResult],
-    weights: dict[str, float] | None = None,
-    k: int = 60,
-    eligible_group_ids: set[str] | None = None,
-    classifier_families: dict[str, str] | None = None,
-    family_weights: dict[str, float] | None = None,
-    tie_breaker: dict[str, float] | None = None,
-) -> FusionResult:
-    """Family-aware reciprocal rank fusion.
-
-    ``tie_breaker`` maps group ids to a value sorted ascending on equal fused scores
-    (the engine passes ATT&CK prominence, so the *less*-reported group wins a tie);
-    without it ties fall back to the group id, which favours older ``G####`` ids.
-    """
-    if k <= 0:
-        raise ValueError("k must be positive")
+    weights: dict[str, float] | None,
+    eligible_group_ids: set[str] | None,
+) -> list[ClassifierResult]:
+    """The classifier results fusion actually consumes: applicable, non-empty, positively
+    weighted, restricted to the eligible groups and dense-reranked after the restriction.
+    Shared with the learned combiner so both see identical inputs."""
     weights = weights or {}
     active = [
         result
@@ -78,6 +69,28 @@ def reciprocal_rank_fusion(
         ]
         active = [result for result in active if result.entries]
         active = [_rerank_result(result) for result in active]
+    return active
+
+
+def reciprocal_rank_fusion(
+    results: tuple[ClassifierResult, ...] | list[ClassifierResult],
+    weights: dict[str, float] | None = None,
+    k: int = 60,
+    eligible_group_ids: set[str] | None = None,
+    classifier_families: dict[str, str] | None = None,
+    family_weights: dict[str, float] | None = None,
+    tie_breaker: dict[str, float] | None = None,
+) -> FusionResult:
+    """Family-aware reciprocal rank fusion.
+
+    ``tie_breaker`` maps group ids to a value sorted ascending on equal fused scores
+    (the engine passes ATT&CK prominence, so the *less*-reported group wins a tie);
+    without it ties fall back to the group id, which favours older ``G####`` ids.
+    """
+    if k <= 0:
+        raise ValueError("k must be positive")
+    weights = weights or {}
+    active = filter_eligible_results(results, weights, eligible_group_ids)
     if not active:
         return FusionResult((), (), {}, k)
     effective_weights = _effective_classifier_weights(

@@ -19,6 +19,12 @@ from apt_classifier.classifiers.llm_zeroshot import (
 from apt_classifier.classifiers.naive_bayes import posterior
 from apt_classifier.classifiers.registry import default_classifiers, run_classifiers
 from apt_classifier.classifiers.software import decisive_software_factor
+from apt_classifier.combiner import (
+    apply_combiner_order,
+    combiner_inputs,
+    load_attribution_combiner,
+    pipeline_fingerprint,
+)
 from apt_classifier.config import Settings
 from apt_classifier.cyberre import (
     CYBERRE_CLASSIFIER_NAME,
@@ -244,6 +250,14 @@ class AttributionEngine:
         self.acceptance_model, self.acceptance_model_status = load_acceptance_model(
             self.settings, knowledge_base
         )
+        self.combiner_fingerprint = pipeline_fingerprint(
+            rrf_k=int(self.settings.rrf_k),
+            weights=self.default_weights(),
+            family_weights=self.family_weights(),
+        )
+        self.combiner, self.combiner_status = load_attribution_combiner(
+            self.settings, knowledge_base, fingerprint=self.combiner_fingerprint
+        )
         self.attribution_thresholds = MaturityThresholds(
             min_techniques=int(getattr(self.settings, "attribution_min_techniques", 2)),
             min_independent_evidence_families=int(
@@ -432,6 +446,7 @@ class AttributionEngine:
             thresholds=self.attribution_thresholds,
             classifier_families=_CLASSIFIER_FAMILIES,
             discrimination=getattr(state.context, "discrimination", None),
+            combiner=getattr(state.context, "combiner", None),
         )
 
     def set_telemetry_profile(self, profile: Any) -> None:
@@ -878,6 +893,81 @@ class AttributionEngine:
             soft_techniques=getattr(context, "contrast_techniques", None) or None,
         )
         context.discrimination = discrimination
+        if self.combiner is not None and fusion.entries:
+            # Learned ordering of the shortlist: features from the same inputs RRF used, then
+            # the discrimination is recomputed on the new order so the gate scores the leader
+            # it will see (leader-consistency guard). The discriminative blend is skipped: its
+            # channels are combiner features already.
+            top_n = int(getattr(self.settings, "attribution_combiner_top_n", 20))
+            basis = discriminate(
+                self.kb,
+                fusion,
+                context,
+                self.discrimination_weights,
+                top_k=top_n,
+                floor=float(getattr(self.settings, "attribution_separation_floor", 1.0)),
+                tool_weight_cap=float(getattr(self.settings, "software_tool_weight_cap", 1.5)),
+                behavior_threshold=float(self.settings.behavior_similarity_threshold),
+                soft_techniques=getattr(context, "contrast_techniques", None) or None,
+            )
+            inputs = combiner_inputs(
+                results,
+                fusion,
+                basis,
+                context,
+                self.kb,
+                top_n=top_n,
+                weights=fused_weights,
+                tool_weight_cap=float(getattr(self.settings, "software_tool_weight_cap", 1.5)),
+            )
+            probabilities, null_probability = self.combiner.probabilities(inputs)
+            rrf_ranks = {entry.group_id: int(entry.rank) for entry in fusion.entries[:top_n]}
+            fusion = apply_combiner_order(
+                fusion,
+                probabilities,
+                blend=float(getattr(self.settings, "attribution_combiner_blend", 1.0)),
+                top_n=top_n,
+            )
+            leader = fusion.entries[0].group_id if fusion.entries else None
+            context.combiner = {
+                "status": self.combiner_status,
+                "top_n": top_n,
+                "probabilities": {gid: round(p, 4) for gid, p in probabilities.items()},
+                "leader_probability": (
+                    round(probabilities.get(leader, 0.0), 4) if leader is not None else None
+                ),
+                "null_probability": (
+                    round(null_probability, 4) if null_probability is not None else None
+                ),
+                "rrf_ranks": rrf_ranks,
+            }
+            # The gate compares the new leader against the union of both shortlists (the
+            # RRF top-K and the combiner top-K): a competitor the re-ordering pushed down must
+            # still count as shared evidence, or a promoted leader could look falsely exclusive.
+            gate_k = int(getattr(self.settings, "attribution_separation_top_k", 5))
+            rrf_top = [gid for gid, rank in sorted(rrf_ranks.items(), key=lambda i: i[1])][:gate_k]
+            combined_top = [entry.group_id for entry in fusion.entries[:gate_k]]
+            gate_ids = []
+            for gid in combined_top + rrf_top:
+                if gid not in gate_ids:
+                    gate_ids.append(gid)
+            by_id = {entry.group_id: entry for entry in fusion.entries}
+            gate_fusion = replace(
+                fusion, entries=tuple(by_id[gid] for gid in gate_ids if gid in by_id)
+            )
+            context.discrimination = discriminate(
+                self.kb,
+                gate_fusion,
+                context,
+                self.discrimination_weights,
+                top_k=len(gate_ids),
+                floor=float(getattr(self.settings, "attribution_separation_floor", 1.0)),
+                tool_weight_cap=float(getattr(self.settings, "software_tool_weight_cap", 1.5)),
+                behavior_threshold=float(self.settings.behavior_similarity_threshold),
+                soft_techniques=getattr(context, "contrast_techniques", None) or None,
+            )
+            return fusion
+        context.combiner = None
         blend = float(getattr(self.settings, "attribution_rerank_blend", 0.5))
         if blend > 0:
             # The re-ranking may contrast a longer shortlist than the naming gate scores

@@ -189,6 +189,17 @@ class Settings(BaseSettings):
     attribution_contrast_min_probability: float = 0.0
     attribution_contrast_weight: float = 1.0
     attribution_separation_soft_weight: float = 1.0
+    # Learned combiner (apt_classifier/combiner.py): orders the shortlist by a conditional-logit
+    # model over per-classifier ranks, discrimination channels and evidence-regime features,
+    # blended half-and-half with the RRF order; the naming gate then scores the leader against
+    # the union of both shortlists. Adopted 2026-09-30 (docs 21.3.9): folds top-1 0.601 -> 0.830,
+    # CTI-HAL 0.509 -> 0.527, every named group correct on both sets. Loads fail-closed.
+    attribution_combiner_enabled: bool = True
+    attribution_combiner_path: Path = (
+        PROJECT_ROOT / "data" / "models" / "combiner" / "attribution_combiner.json"
+    )
+    attribution_combiner_top_n: int = 20
+    attribution_combiner_blend: float = 0.5
     # Activity clustering (opt-in)
     activity_clusters_enabled: bool = False
     activity_clusters_db_path: Path = PROJECT_ROOT / "data" / "activity_clusters.db"

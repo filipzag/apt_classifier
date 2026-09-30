@@ -7,7 +7,7 @@ EVIDENCEFORGE_CLINIC_DIR ?= ../evidenceforge_clinic
 PUBLIC_BASELINE ?= data/audits/public_heldout_baseline.json
 PUBLIC_CURRENT ?= data/audits/public_heldout_current.json
 
-.PHONY: api api-dev api-local api-auth-demo web-install web-dev web-build web-check run-next setup up down ingest run run-local test lint evidenceforge-eval evidenceforge-eval-all benchmark-public benchmark-curated verify-results check-regression fit-acceptance benchmark-attribution train-reranker generate-synthetic benchmark-cti-hal benchmark-cti-hal-production benchmark-attribution-production
+.PHONY: fit-combiner api api-dev api-local api-auth-demo web-install web-dev web-build web-check run-next setup up down ingest run run-local test lint evidenceforge-eval evidenceforge-eval-all benchmark-public benchmark-curated verify-results check-regression fit-acceptance benchmark-attribution train-reranker generate-synthetic benchmark-cti-hal benchmark-cti-hal-production benchmark-attribution-production
 
 setup:
 	python3 -m venv --system-site-packages .venv
@@ -68,6 +68,11 @@ check-regression:
 	PYTHONPATH=. $(PYTHON) scripts/check_regression.py --baseline $(PUBLIC_BASELINE) --current $(PUBLIC_CURRENT)
 
 # Fit the calibrated technique-acceptance model on the public dev splits (never test).
+# Learned attribution combiner: ATT&CK folds only (training seeds), randomised evidence regimes,
+# unknown-actor lists, group-level CV; writes data/models/combiner/attribution_combiner.json.
+fit-combiner:
+	PYTHONPATH=. $(PYTHON) scripts/fit_attribution_combiner.py --seeds 11 23 37 --variants 5 --unknown-all
+
 fit-acceptance:
 	PYTHONPATH=. $(PYTHON) scripts/fit_acceptance_model.py
 

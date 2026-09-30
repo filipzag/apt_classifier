@@ -254,6 +254,7 @@ def assess_attribution(
     classifier_families: dict[str, str] | None = None,
     calibration_artifact: Any = None,
     discrimination: Any = None,
+    combiner: Any = None,
 ) -> AttributionDecision:
     """Assess the attribution stage from the fusion result.
 
@@ -262,12 +263,14 @@ def assess_attribution(
     Otherwise, only qualitative maturity is reported.
     """
     thresholds = thresholds or MaturityThresholds()
+    calibration = _combiner_calibration(combiner)
     observations = getattr(context, "observed_techniques", {})
     technique_count = len(observations)
     # Check for insufficient evidence
     if not fusion.entries or technique_count < thresholds.min_techniques:
         return AttributionDecision(
             stage=AttributionStage.INSUFFICIENT_EVIDENCE,
+            **calibration,
             cluster_id=None,
             leading_group_id=None,
             gate_mode=thresholds.gate_mode,
@@ -308,6 +311,7 @@ def assess_attribution(
         cluster_id = _generate_cluster_id(fusion, context)
         return AttributionDecision(
             stage=AttributionStage.UNRESOLVED_ACTIVITY_CLUSTER,
+            **calibration,
             cluster_id=cluster_id,
             leading_group_id=leading.group_id,
             leading_group_name=leading_name,
@@ -352,12 +356,22 @@ def assess_attribution(
                 f"{discrimination.separation:.2f}, but does not meet the naming bar "
                 f"({'; '.join(failed)})."
             ),
+            **calibration,
         )
-    # Check calibration
+    # Check calibration: the learned combiner's leader probability when available, else a
+    # legacy calibration artifact (placeholder path).
     is_calibrated = False
     calibrated_probability = None
     calibration_note = "No calibration artifact provided; maturity is qualitative only."
-    if calibration_artifact is not None:
+    leader_probability = combiner.get("leader_probability") if isinstance(combiner, dict) else None
+    if leader_probability is not None:
+        is_calibrated = True
+        calibrated_probability = float(leader_probability)
+        calibration_note = (
+            "Combiner probability that the leading candidate is the true group "
+            "(pipeline-bound, fitted on ATT&CK folds with group-level cross-validation)."
+        )
+    elif calibration_artifact is not None:
         valid, note = _validate_calibration_artifact(calibration_artifact, kb, fusion)
         if valid:
             is_calibrated = True
@@ -389,6 +403,20 @@ def assess_attribution(
         calibrated_probability=calibrated_probability,
         calibration_note=calibration_note,
     )
+
+
+def _combiner_calibration(combiner: Any) -> dict[str, Any]:
+    """Calibrated leader probability from the learned combiner (empty when absent)."""
+    if not isinstance(combiner, dict) or combiner.get("leader_probability") is None:
+        return {}
+    return {
+        "is_calibrated": True,
+        "calibrated_probability": float(combiner["leader_probability"]),
+        "calibration_note": (
+            "Combiner probability that the leading candidate is the true group "
+            "(pipeline-bound, fitted on ATT&CK folds with group-level cross-validation)."
+        ),
+    }
 
 
 def _separation_factors(discrimination: Any) -> dict[str, Any]:

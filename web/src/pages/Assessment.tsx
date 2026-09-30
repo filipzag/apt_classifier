@@ -150,6 +150,18 @@ function AssessmentView({ caseId, data }: { caseId: string; data: CasePayload })
                   help="Evidence the leader has that its best alternative cannot explain, as a share of the leader's discriminative evidence (−1 to 1). Shared evidence counts for neither side."
                 />
               </div>
+              {decision.calibrated_probability !== null ? (
+                <div className="rounded-xl border border-violet/30 bg-violet-soft px-4 py-3">
+                  <div className="flex items-baseline justify-between gap-2">
+                    <Label>Leader probability</Label>
+                    <span className="text-[11px] text-faint">learned combiner</span>
+                  </div>
+                  <div className="mt-1 text-2xl font-semibold tracking-tight tabular text-violet">
+                    {pct(decision.calibrated_probability, 0)}
+                  </div>
+                  <p className="mt-1 text-[11px] leading-relaxed text-faint">{decision.calibration_note}</p>
+                </div>
+              ) : null}
               <div className="rounded-xl border border-border bg-surface-2/60 px-4 py-3">
                 <div className="flex items-center justify-between">
                   <Label>Maturity factors</Label>

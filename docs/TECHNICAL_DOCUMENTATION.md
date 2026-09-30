@@ -1331,6 +1331,58 @@ leads with the effect of a yes and of a no, flagging any change that would put a
 front. Confirming or answering records evidence through the normal paths; nothing in the view
 changes weights by itself.
 
+### 10.9 Learned attribution combiner (2026-09-30)
+
+`apt_classifier/combiner.py`. Reciprocal-rank fusion weights every classifier the same way in
+every case, but the evidence regime is not the same: on real reports technique recall is low and
+the technique-profile classifiers collapse (CTI-HAL top-1: Naive Bayes 0.13, IDF 0.04) while
+software (0.86 when it applies) and actor behaviour (0.61 when it applies) decide the answer. At
+least one classifier already ranks the true group first in 93% of the ATT&CK folds and 73% of
+the real reports against 60% and 51% for the fused ranking, so the combiner is the largest lever.
+
+- **Model.** A conditional logit (listwise softmax) over the top-N fused candidates (N = 20):
+  every candidate gets a utility from *features only*, never from its identity, so a removed or
+  never-seen group needs no special case. Fitted by damped Newton's method in numpy, the same
+  conventions as the acceptance model (JSON artifact with kind, feature schema version, feature
+  names, means/scales, ATT&CK version, pipeline fingerprint; `from_dict` rejects mismatches;
+  `load_attribution_combiner` fails closed). An optional **null option** (utility from the
+  evidence-regime features, trained on unknown-actor lists) gives P(no documented group).
+- **Features** (73 + 8 null): per deterministic classifier `present`, `inv_rank`, `score_rel`;
+  RRF `rel`, `inv_rank`, `support`, `rank_std`, `contested`; the discrimination channels of 10.7
+  (technique, behaviour, software, soft, negative, total relative to the shortlist maximum);
+  candidate facts (`matched_share`, `matched_distinctive_share`, `exclusive_software`,
+  `log_group_techniques`, `log_prominence`); and interactions of nine channel ranks with three
+  regime variables (`distinctive_share`, `software_rarity_max`, `log_accepted`). Regime main
+  effects cancel in a softmax and enter only the null utility. Inputs are exactly what RRF
+  consumes (`fusion.filter_eligible_results`).
+- **Training data** (`scripts/fit_attribution_combiner.py`, `make fit-combiner`): the fold
+  machinery of `scripts/attribution_benchmark.py` with training seeds 11, 23, 37 (seed 7 stays
+  evaluation-only); per fold one clean list plus five randomised regimes built by re-scoring a
+  perturbed context (a 30-80% subset of accepted techniques, false-positive techniques injected
+  from an empirical pool to a precision of 30-80%, software dropped with p 0.3, behaviour matches
+  thinned with p 0.3); an unknown-actor list for every group. Group-level five-fold
+  cross-validation reports out-of-fold top-1/top-5/MRR against the RRF order of the same lists
+  and the AUC/Brier of P(leader); L2 is chosen on the mixed MRR; the artifact records the CV.
+  CTI-HAL is never training data.
+- **Integration** (`AttributionEngine._fuse`): RRF -> discrimination over the top-N -> combiner
+  probabilities -> `apply_combiner_order` (top-N reordered by `(1 - blend) * rrf_rel + blend * P`,
+  scores mapped into the head's RRF range so the top-N set and the tail never change) ->
+  discrimination recomputed for the gate over the **union of the RRF top-K and the combiner
+  top-K** with the new leader first (a competitor the re-ordering pushed down must still count as
+  shared evidence: with the gate scored on the combiner's own top-5 alone, Carbanak dropped out of
+  FIN7's window on one real report and FIN7 was named on evidence the two share) -> stage. The
+  discriminative blend of 10.7 is skipped when the combiner runs (its channels are features).
+  The shipped blend is 0.5: a full blend (pure combiner order) lost top-5 and MRR on the real
+  reports, the half blend keeps the fold gains and restores them (21.3.9). `context.combiner` carries the
+  probabilities, the RRF ranks of the shortlist and the status; the decision exposes the leader
+  probability as `calibrated_probability` (the naming gate is unchanged). Settings:
+  `ATTRIBUTION_COMBINER_ENABLED`, `_PATH`, `_TOP_N`, `_BLEND`. Benchmark rows record `rrf_rank`,
+  `combiner_leader_probability`, `combiner_null_probability`, `combiner_status`; the summary adds
+  `rrf_top1`, `leader_probability_auc` and top-1 with/without software.
+- **Adoption rule.** Group-CV out-of-fold top-1 and MRR at or above RRF on the same lists; the
+  seed-7 folds and CTI-HAL (run once on the frozen artifact) with no wrong named group, at most
+  1/25 removed actors named and no top-1/MRR regression. Results in 21.3.9.
+
 ## 11. Origin and intrusion-type assessment
 
 `apt_classifier/origin.py` performs a separate post-fusion assessment.
@@ -2676,6 +2728,45 @@ ten is shipped (`ATTRIBUTION_RERANK_TOP_K=10`). The `separation_auc` diagnostic 
 longer re-ranking (real 0.789 → 0.719) because it scores the gate's rank-1 candidate while
 "correct" now refers to the re-ranked leader; the naming gate is unaffected by construction
 (10.8, leader consistency guard).
+
+#### 21.3.9 Learned attribution combiner (2026-09-30)
+
+Artifact `data/models/combiner/attribution_combiner.json` (fit on seeds 11/23/37, 2,609 known
+lists of which 458 clean and 2,151 randomised, 153 unknown-actor lists; L2 0.3 chosen on the
+mixed out-of-fold MRR). Group-level five-fold cross-validation, out of fold, against the RRF order
+of the same lists:
+
+| lists | combiner top-1 | RRF top-1 | combiner top-5 | RRF top-5 | combiner MRR | RRF MRR |
+|---|---|---|---|---|---|---|
+| clean (458) | 0.878 | 0.544 | 0.983 | 0.812 | 0.923 | 0.661 |
+| randomised (2,151) | 0.714 | 0.403 | 0.932 | 0.724 | 0.809 | 0.549 |
+| mixed | 0.742 | 0.428 | 0.941 | 0.740 | 0.829 | 0.569 |
+
+Leader-probability AUC 0.863 (Brier 0.13); the null option separates unknown-actor lists from
+known ones with AUC 0.77 (mean null probability 0.19 vs 0.05). Largest weights: weighted-Jaccard
+relative score (+2.3), software relative score (+1.4), centroid relative score (+1.3), documented
+profile size (+0.8), the discrimination's software and behaviour channels (+0.7, +0.5).
+
+Benchmarks (seed-7 folds never trained on; CTI-HAL run once per configuration):
+
+| configuration | folds top-1 | folds top-5 | folds MRR | folds named | unknown named | CTI-HAL top-1 | CTI-HAL top-5 | CTI-HAL MRR | CTI-HAL named |
+|---|---|---|---|---|---|---|---|---|---|
+| before (RRF + discriminative re-rank) | 0.601 | 0.915 | 0.737 | 35 (all correct) | 0/25 | 0.509 | 0.745 | 0.617 | 12 (all correct) |
+| combiner, full blend, gate on its own top-5 | 0.830 | 0.974 | 0.891 | 44 (all correct) | 1/25 | 0.527 | 0.655 | 0.587 | 17, **1 wrong** (Carbanak named FIN7) |
+| combiner, full blend, union gate | 0.830 | 0.974 | 0.891 | 31 (all correct) | 0/25 | 0.527 | 0.655 | 0.587 | 14 (all correct) |
+| combiner, half blend, gate on its own top-5 | 0.830 | 0.954 | 0.880 | 37 (all correct) | 0/25 | 0.527 | 0.745 | 0.623 | 14 (all correct) |
+| **combiner, half blend, union gate (adopted)** | **0.830** | **0.954** | **0.880** | **36 (all correct)** | **0/25** | **0.527** | **0.745** | **0.623** | **14 (all correct)** |
+
+Reading: the combiner transfers to real reports far less than the cross-validation suggests
+(top-1 +0.02 instead of +0.31), and a pure combiner order costs top-5 and MRR there: ten reports
+got worse against five better, mostly reports with two to six accepted techniques and the
+Carbanak/FIN7 pair. The half blend keeps RRF's say and restores those metrics; the union gate
+keeps the naming promise (the wrong name had leader probability 0.87, so a probability bar could
+not have caught it). Real reports with software: top-1 0.667 (was 0.641); without: 0.188
+(unchanged). Leader-probability AUC on the folds 0.952, on real reports 0.82; it is shown on the
+assessment page as the calibrated probability and is informational (the gate is unchanged). A
+harsher randomisation (recall 15-60%, precision 25-60%, generic false positives) was fitted as a
+second artifact for comparison; its numbers are recorded below when available.
 
 ## 22. Failure modes and troubleshooting
 

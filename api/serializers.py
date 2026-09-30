@@ -187,6 +187,12 @@ def decision(kb: Any, state: Any, thresholds: Any) -> dict[str, Any] | None:
         "rationale": item.rationale,
         "cluster_id": item.cluster_id,
         "gate_mode": str(getattr(item, "gate_mode", "maturity")),
+        "calibrated_probability": (
+            float(item.calibrated_probability)
+            if getattr(item, "is_calibrated", False) and item.calibrated_probability is not None
+            else None
+        ),
+        "calibration_note": str(getattr(item, "calibration_note", "") or ""),
         "thresholds": {
             "maturity": float(getattr(thresholds, "hypothesis_maturity_score", 0.0)),
             "margin": float(getattr(thresholds, "hypothesis_margin", 0.0)),

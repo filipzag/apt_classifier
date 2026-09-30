@@ -545,3 +545,70 @@ def test_saved_zero_shot_vote_is_folded_in_without_calling_the_model():
     assert any(r.classifier == "llm_zero_shot" for r in state.classifier_results)
     assert ZeroShotResult.from_dict(prior.to_dict()) == prior
     assert ZeroShotResult.from_dict({"nope": 1}) is None and ZeroShotResult.from_dict(None) is None
+
+
+def test_combiner_orders_the_shortlist_and_the_gate_scores_the_new_leader(monkeypatch, tmp_path):
+    """With a combiner loaded the shortlist follows its probabilities, the discrimination is
+    recomputed on that order (leader-consistency guard never fires spuriously), the stage
+    carries the calibrated leader probability, and disabling it restores the RRF path."""
+    import numpy as np
+
+    from apt_classifier.combiner import FEATURE_NAMES, NULL_FEATURE_NAMES, AttributionCombiner
+    from apt_classifier.combiner import pipeline_fingerprint as fingerprint_of
+
+    text = "PowerShell executed an encoded command."
+    plain = AttributionEngine(
+        _settings(attribution_combiner_enabled=False), _kb(), FakeStore(), FakeLLM()
+    )
+    baseline = plain.analyze(_ledger(text))
+    assert plain.combiner is None and plain.combiner_status == "disabled"
+    assert baseline.context.combiner is None
+    # a hand-made combiner that prefers the *last* RRF candidate (negative weight on rrf_rel)
+    weights = np.zeros(len(FEATURE_NAMES))
+    weights[FEATURE_NAMES.index("rrf_rel")] = -8.0
+    model = AttributionCombiner(
+        weights=weights,
+        means=np.zeros(len(FEATURE_NAMES)),
+        scales=np.ones(len(FEATURE_NAMES)),
+        attack_version="test",
+        pipeline_fingerprint=fingerprint_of(
+            rrf_k=int(plain.settings.rrf_k),
+            weights=plain.default_weights(),
+            family_weights=plain.family_weights(),
+        ),
+        null_weights=np.zeros(len(NULL_FEATURE_NAMES)),
+    )
+    path = model.save(tmp_path / "combiner.json")
+    engine = AttributionEngine(
+        _settings(
+            attribution_combiner_enabled=True,
+            attribution_combiner_path=path,
+            attribution_combiner_blend=1.0,
+        ),
+        _kb(),
+        FakeStore(),
+        FakeLLM(),
+    )
+    assert engine.combiner is not None and engine.combiner_status == "active"
+    state = engine.analyze(_ledger(text))
+    info = state.context.combiner
+    assert info is not None and info["status"] == "active"
+    rrf_order = [g for g, _ in sorted(info["rrf_ranks"].items(), key=lambda item: item[1])]
+    combined = [e.group_id for e in state.deterministic_fusion.entries[: len(rrf_order)]]
+    assert set(combined) == set(rrf_order)
+    if len(rrf_order) > 1:
+        assert combined[0] == rrf_order[-1]  # the model's preference wins over RRF
+    assert abs(sum(info["probabilities"].values()) + (info["null_probability"] or 0.0) - 1.0) < 0.01
+    assert state.context.discrimination.leader_id == state.deterministic_fusion.entries[0].group_id
+    decision = state.attribution_decision
+    assert decision.is_calibrated and decision.calibrated_probability == info["leader_probability"]
+    # a stale fingerprint disables the combiner fail-closed
+    stale = AttributionCombiner.from_dict({**model.to_dict(), "pipeline_fingerprint": "old"})
+    stale_path = stale.save(tmp_path / "stale.json")
+    disabled = AttributionEngine(
+        _settings(attribution_combiner_enabled=True, attribution_combiner_path=stale_path),
+        _kb(),
+        FakeStore(),
+        FakeLLM(),
+    )
+    assert disabled.combiner is None and "fingerprint" in disabled.combiner_status

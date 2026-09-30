@@ -72,6 +72,8 @@ class ClassifierContext:
     # near-miss candidates that only enter the candidate-relative separation (never a classifier)
     contrast_techniques: dict[str, float] = field(default_factory=dict)
     contrast_technique_observations: dict[str, tuple[str, ...]] = field(default_factory=dict)
+    # learned combiner output for the last fusion: probabilities, leader/null probability, status
+    combiner: Any = None
 
 
 class Classifier(Protocol):

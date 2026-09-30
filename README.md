@@ -218,6 +218,18 @@ rate limit) or Chroma are reported in plain language and never lose the case sta
 
 `transformers==4.57.5` is intentionally pinned below v5 because ATTACK-BERT currently publishes a `.bin` checkpoint that transformers v5 cannot load reliably.
 
+### Learned attribution combiner
+
+The shortlist is ordered by a learned combiner (`apt_classifier/combiner.py`): a conditional-logit
+model over per-classifier ranks, the discrimination channels and the case's evidence regime,
+blended half-and-half with reciprocal-rank fusion. It is fitted only on ATT&CK-derived folds
+(`make fit-combiner`, no credit, about an hour) and loads fail-closed on an ATT&CK-version or
+pipeline mismatch. On the held-out ATT&CK folds it lifts top-1 from 0.60 to 0.83 and on the 55
+CTI-HAL real reports from 0.51 to 0.53 with every named group still correct; the naming gate scores
+the leader against the union of both shortlists so a re-ordering cannot hide a competitor. The
+assessment page shows its calibrated leader probability. Disable with
+`ATTRIBUTION_COMBINER_ENABLED=false`.
+
 ### Web front end (FastAPI + React)
 
 The primary interface is a React single-page app served by a FastAPI backend; the Streamlit
