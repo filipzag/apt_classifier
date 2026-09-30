@@ -512,6 +512,89 @@ def test_cti_hal_converter_builds_cases_and_reports(tmp_path: Path):
     assert folds[0].held_out_texts == frozenset()
 
 
+def test_report_folds_anonymize_actor_names_and_count_lost_software(tmp_path: Path):
+    from apt_classifier.attack.kb import AttackKnowledgeBase, Group, Software
+    from scripts.attribution_benchmark import anonymize_report_folds, load_report_folds, main
+
+    # "Carbanak" is a group (G0008) and a malware (S0030), as in ATT&CK
+    kb = AttackKnowledgeBase(
+        version="t",
+        groups={
+            "G0008": Group(id="G0008", name="Carbanak", aliases=["Anunak"]),
+            "G0037": Group(id="G0037", name="FIN6", aliases=["ITG08"]),
+            "G0046": Group(id="G0046", name="FIN7"),
+        },
+        software={
+            "S0030": Software(
+                id="S0030", name="Carbanak", software_type="malware", aliases=["Anunak"]
+            ),
+            "S0002": Software(id="S0002", name="Mimikatz", software_type="tool"),
+        },
+    )
+
+    def statement(text: str) -> dict:
+        return {"text": text, "technique_ids": ["T1059"]}
+
+    reports = tmp_path / "reports.jsonl"
+    rows = [
+        {
+            "report_id": "fin6-r1",
+            "group_id": "G0037",
+            "statements": [
+                statement("FIN6 used Mimikatz to dump credentials"),
+                statement("ITG08's operators staged the archives on a share"),
+                statement("The FIN7 group reused the same loader"),
+                statement("data  compressed with 7-Zip"),
+            ],
+        },
+        {
+            "report_id": "fin7-r1",
+            "group_id": "G0046",
+            "statements": [
+                statement("the loader launched the CARBANAK DLL from the registry"),
+                statement("scheduled tasks ran the loader nightly"),
+            ],
+        },
+    ]
+    reports.write_text("\n".join(json.dumps(row) for row in rows) + "\n", encoding="utf-8")
+    folds = load_report_folds(reports, max_observations=30)
+
+    anonymized, records, totals = anonymize_report_folds(folds, kb)
+
+    fin6, fin7 = anonymized
+    assert fin6.observations == (
+        "the adversary used Mimikatz to dump credentials",
+        "the adversary's operators staged the archives on a share",
+        "the adversary group reused the same loader",
+        "data  compressed with 7-Zip",  # no name: left byte-identical
+    )
+    assert fin7.observations == (
+        "the loader launched the adversary DLL from the registry",
+        "scheduled tasks ran the loader nightly",
+    )
+    assert (fin6.group_id, fin6.report_id) == ("G0037", "fin6-r1")
+    assert fin6.held_out_techniques == folds[0].held_out_techniques
+    assert folds[0].observations[0].startswith("FIN6")  # the input folds are not modified
+    assert records[0] == {
+        "statements_changed": 3,
+        "replacements": 3,
+        "names": {"fin6": 1, "fin7": 1, "itg08": 1},
+        "own_group_named": True,
+        "software_matches_removed": 0,  # Mimikatz is not a group name and stays
+        "software_ids_removed": [],
+    }
+    # the FIN7 report only names Carbanak, and that mention is the malware
+    assert records[1]["own_group_named"] is False
+    assert records[1]["software_matches_removed"] == 1
+    assert records[1]["software_ids_removed"] == ["S0030"]
+    assert totals["reports_changed"] == 2 and totals["reports_naming_own_group"] == 1
+    assert (totals["statements"], totals["statements_changed"], totals["replacements"]) == (6, 4, 4)
+    assert totals["software_matches_removed"] == 1
+    assert totals["software_ids_removed"] == {"S0030": 1}
+    with pytest.raises(SystemExit):  # the ATT&CK folds are always anonymized
+        main(["--anonymize-actors"])
+
+
 def test_attribution_summary_keeps_multiple_reports_per_group_distinct():
     from scripts.attribution_benchmark import summarize
 
@@ -655,6 +738,44 @@ def test_collector_summarizes_production_attribution_artifact():
     assert summary["parameters"]["pipeline"] == "production"
     assert summary["llm"]["verifier_errors"] == 0
     assert summary["deterministic_mrr"] == 0.666
+
+
+def test_collector_keeps_as_reported_cti_hal_beside_the_anonymized_headline():
+    from scripts.collect_verification import compose, cti_hal_headline_warning
+
+    def artifact(top1: float, actor_names: str | None = None) -> dict:
+        parameters: dict = {"known_folds": 55}
+        if actor_names:
+            parameters["actor_names"] = actor_names
+        return {"parameters": parameters, "metrics": {"known_count": 55, "top1": top1}}
+
+    def report(headline: dict) -> dict:
+        return compose(
+            public=None,
+            curated=None,
+            evidenceforge={},
+            public_path=Path("missing.json"),
+            curated_path=Path("missing.json"),
+            gates=None,
+            cti_hal_attribution=headline,
+            cti_hal_attribution_path=Path("attribution_cti_hal_current.json"),
+            cti_hal_attribution_as_reported=artifact(0.545, "as_reported"),
+            cti_hal_attribution_as_reported_path=Path("attribution_cti_hal_as_reported.json"),
+        )
+
+    current = report(artifact(0.436, "anonymized"))
+    assert current["cti_hal_attribution"]["top1"] == 0.436
+    assert current["cti_hal_attribution"]["parameters"]["actor_names"] == "anonymized"
+    assert current["cti_hal_attribution_as_reported"]["top1"] == 0.545
+    assert current["sources"]["cti_hal_attribution_as_reported"]["path"].endswith(
+        "as_reported.json"
+    )
+    assert "warnings" not in current
+    # artifacts from before 2026-09-30 have no actor_names: they read the names as reported
+    stale = report(artifact(0.545))
+    assert stale["warnings"] == [cti_hal_headline_warning(artifact(0.545))]
+    assert cti_hal_headline_warning(artifact(0.545, "as_reported")) is not None
+    assert cti_hal_headline_warning(None) is None
 
 
 def test_attribution_summary_reports_separation_auc_and_named_correct():

@@ -24,6 +24,13 @@ key every classifier scores against, so this remains a self-consistency check, n
 field attribution accuracy. It replaces the technique-ID version in
 ``scripts/ensemble_benchmark.py`` as the attribution gate because it exercises retrieval,
 acceptance, eligibility, family weights and the stage decision as the product does.
+
+Real-report mode (``--cti-hal``) feeds each report's statements unchanged. About half of the
+CTI-HAL reports name their own group in them, which name-sensitive signals (group-description
+similarity, actor-behaviour retrieval) can match without reading any tradecraft;
+``--anonymize-actors`` applies the folds' replacement to the statements first and records what it
+removed, including the software matches lost where a group alias is also a software name
+(Carbanak is both G0008 and S0030).
 """
 
 from __future__ import annotations
@@ -34,7 +41,8 @@ import json
 import random
 import sys
 import time
-from dataclasses import dataclass
+from collections import Counter
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
 from statistics import fmean
@@ -54,6 +62,7 @@ from apt_classifier.evaluation import (
     source_fingerprint,
     write_artifact,
 )
+from apt_classifier.evidence.iocs import match_software_aliases
 from apt_classifier.evidence.models import EvidenceLedger, Observation, Provenance
 from apt_classifier.llm import OpenRouterClient
 from apt_classifier.session import AttributionEngine
@@ -169,17 +178,9 @@ class FoldStore:
         return kept[:n_results]
 
 
-def build_folds(
-    kb: AttackKnowledgeBase,
-    *,
-    coverage: float,
-    seed: int,
-    min_behaviors: int,
-    min_techniques: int,
-    max_observations: int,
-    limit: int | None = None,
-) -> list[Fold]:
-    names = tuple(
+def actor_names(kb: AttackKnowledgeBase) -> tuple[str, ...]:
+    """Every ATT&CK group name and alias, longest first, as the replacement pattern needs."""
+    return tuple(
         sorted(
             {
                 name.strip()
@@ -190,6 +191,19 @@ def build_folds(
             key=lambda item: (-len(item), item.casefold()),
         )
     )
+
+
+def build_folds(
+    kb: AttackKnowledgeBase,
+    *,
+    coverage: float,
+    seed: int,
+    min_behaviors: int,
+    min_techniques: int,
+    max_observations: int,
+    limit: int | None = None,
+) -> list[Fold]:
+    names = actor_names(kb)
     pattern = _actor_name_pattern(names)
     rng = random.Random(seed)
     folds: list[Fold] = []
@@ -257,6 +271,88 @@ def load_report_folds(path: Path, *, max_observations: int) -> list[Fold]:
             )
         )
     return folds
+
+
+def anonymize_report_folds(
+    folds: list[Fold], kb: AttackKnowledgeBase
+) -> tuple[list[Fold], list[dict[str, Any]], dict[str, Any]]:
+    """Replace every ATT&CK group name and alias in the report statements with "the adversary".
+
+    The replacement is the held-out folds' (``_sanitize_procedure`` over all names), applied
+    after the statements were selected, so both arms read the same statements; a statement
+    without a name stays byte-identical. Some aliases are also software names (Carbanak is
+    G0008 and S0030), so the software matches the replacement removes are counted with the
+    engine's own matcher over the joined narrative, as the classifier context reads it.
+    Returns the folds, one record per fold, and the totals.
+    """
+    names = actor_names(kb)
+    pattern = _actor_name_pattern(names)
+    owners: dict[str, set[str]] = {}
+    for group in kb.groups.values():
+        for name in (group.name, *group.aliases):
+            if name and name.strip():
+                owners.setdefault(name.strip().casefold(), set()).add(group.id)
+    anonymized: list[Fold] = []
+    records: list[dict[str, Any]] = []
+    for fold in folds:
+        texts: list[str] = []
+        replaced: Counter[str] = Counter()
+        changed = 0
+        for text in fold.observations:
+            found = list(pattern.finditer(text)) if pattern is not None else []
+            if not found:
+                texts.append(text)
+                continue
+            changed += 1
+            replaced.update(
+                match.group(0).removesuffix(match.group("possessive") or "").casefold()
+                for match in found
+            )
+            texts.append(_sanitize_procedure(text, names, pattern=pattern))
+        removed: Counter[str] = Counter()
+        lost: set[str] = set()
+        if changed:
+            before = Counter(
+                match.software_id
+                for match in match_software_aliases(" ".join(fold.observations), kb)
+                if match.software_id
+            )
+            after = Counter(
+                match.software_id
+                for match in match_software_aliases(" ".join(texts), kb)
+                if match.software_id
+            )
+            removed, lost = before - after, set(before) - set(after)
+        records.append(
+            {
+                "statements_changed": changed,
+                "replacements": sum(replaced.values()),
+                "names": dict(sorted(replaced.items())),
+                "own_group_named": any(fold.group_id in owners.get(name, ()) for name in replaced),
+                "software_matches_removed": sum(removed.values()),
+                "software_ids_removed": sorted(lost),
+            }
+        )
+        anonymized.append(replace(fold, observations=tuple(texts)))
+    names_replaced: Counter[str] = Counter()
+    software_reports: Counter[str] = Counter()
+    for record in records:
+        names_replaced.update(record["names"])
+        software_reports.update(record["software_ids_removed"])
+    totals = {
+        "replacement": "the adversary",
+        "reports": len(folds),
+        "reports_changed": sum(1 for record in records if record["statements_changed"]),
+        "reports_naming_own_group": sum(1 for record in records if record["own_group_named"]),
+        "statements": sum(len(fold.observations) for fold in folds),
+        "statements_changed": sum(record["statements_changed"] for record in records),
+        "replacements": sum(names_replaced.values()),
+        "names": dict(names_replaced.most_common()),
+        "software_matches_removed": sum(record["software_matches_removed"] for record in records),
+        # software id -> number of reports in which it is no longer detected
+        "software_ids_removed": dict(sorted(software_reports.items())),
+    }
+    return anonymized, records, totals
 
 
 def sample_folds(folds: list[Fold], count: int, seed: int) -> list[Fold]:
@@ -731,6 +827,12 @@ def main(argv: list[str] | None = None) -> int:
         "instead of the held-out ATT&CK folds (no unknown-actor arm, no evidence hiding)",
     )
     parser.add_argument(
+        "--anonymize-actors",
+        action="store_true",
+        help="real-report mode: replace every ATT&CK group name and alias in the statements with "
+        '"the adversary" before analysis, as the held-out folds do (default: statements as reported)',
+    )
+    parser.add_argument(
         "--set",
         action="append",
         default=[],
@@ -738,6 +840,8 @@ def main(argv: list[str] | None = None) -> int:
         help="override a Settings field for this run (e.g. --set technique_family_weight=2.0)",
     )
     args = parser.parse_args(argv)
+    if args.anonymize_actors and args.cti_hal is None:
+        parser.error("--anonymize-actors needs --cti-hal; the ATT&CK folds are always anonymized")
     if args.output is None:
         suffix = "production" if args.pipeline == "production" else "current"
         args.output = REPO_ROOT / "data" / "audits" / f"attribution_heldout_{suffix}.json"
@@ -753,12 +857,16 @@ def main(argv: list[str] | None = None) -> int:
     embedder = SentenceTransformerEmbedder.from_settings(settings)
     store = ChromaVectorStore(settings, embedder)
     real_reports = args.cti_hal is not None
+    actor_records: list[dict[str, Any]] = []
+    actor_totals: dict[str, Any] | None = None
     if real_reports:
         folds = load_report_folds(args.cti_hal, max_observations=max(args.max_observations, 30))
         if args.sample is not None:
             folds = sample_folds(folds, args.sample, args.seed)
         elif args.limit is not None:
             folds = folds[: args.limit]
+        if args.anonymize_actors:
+            folds, actor_records, actor_totals = anonymize_report_folds(folds, kb)
     else:
         folds = build_folds(
             kb,
@@ -783,6 +891,9 @@ def main(argv: list[str] | None = None) -> int:
             client.close()
         return 2
     known_seconds = time.time() - started
+    # rows follow the folds in order (a truncated production run keeps a prefix)
+    for row, record in zip(known_rows, actor_records, strict=False):
+        row["actor_name_replacement"] = record
     unknown_folds = (
         []
         if real_reports
@@ -835,10 +946,17 @@ def main(argv: list[str] | None = None) -> int:
             "sample": args.sample,
             "limit": args.limit,
             "truncated_at": dropped.get("llm_unavailable_at"),
+            # the ATT&CK folds are always anonymized; real reports only with --anonymize-actors
+            "actor_names": (
+                "as_reported" if real_reports and not args.anonymize_actors else "anonymized"
+            ),
         },
         "pipeline_fingerprint": pipeline_fingerprint(fingerprint_inputs),
         "fingerprint_inputs": fingerprint_inputs,
-        "leak_control": {"dropped_hits": dropped},
+        "leak_control": {
+            "dropped_hits": dropped,
+            **({"actor_name_replacement": actor_totals} if actor_totals is not None else {}),
+        },
         "runtime_seconds": {"known": round(known_seconds, 1), "unknown": round(unknown_seconds, 1)},
         "metrics": metrics,
         "known": known_rows,
@@ -876,6 +994,14 @@ def main(argv: list[str] | None = None) -> int:
         if "llm" in metrics:
             print("  llm:", metrics["llm"])
         print("  leak-control dropped hits:", dropped)
+        if actor_totals is not None:
+            print(
+                f"  actor names anonymized: {actor_totals['reports_changed']}/"
+                f"{actor_totals['reports']} reports ({actor_totals['reports_naming_own_group']} "
+                f"name their own group), {actor_totals['statements_changed']} statements, "
+                f"{actor_totals['replacements']} names; software matches removed "
+                f"{actor_totals['software_matches_removed']} {actor_totals['software_ids_removed']}"
+            )
         print(f"wrote {destination}")
     return 0
 

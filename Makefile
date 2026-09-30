@@ -101,16 +101,19 @@ generate-synthetic:
 
 # CTI-HAL (dessertlab/CTI-HAL, no licence published: local evaluation only). Convert with
 # scripts/prepare_cti_hal.py --source <clone>, then run statement-level mapping and real-report
-# attribution.
+# attribution. The attribution headline replaces every ATT&CK group name and alias in the
+# statements with "the adversary", as the ATT&CK folds do (docs 21.3.4b); the run on the
+# statements as reported is kept beside it.
 CTI_HAL_ROOT ?= data/benchmarks/cti_hal
 benchmark-cti-hal:
 	PYTHONPATH=. $(PYTHON) scripts/benchmark_mapping.py --root $(CTI_HAL_ROOT) --datasets cti_hal --output data/audits/cti_hal_mapping_current.json
-	PYTHONPATH=. $(PYTHON) scripts/attribution_benchmark.py --cti-hal $(CTI_HAL_ROOT)/reports.jsonl --output data/audits/attribution_cti_hal_current.json
+	PYTHONPATH=. $(PYTHON) scripts/attribution_benchmark.py --cti-hal $(CTI_HAL_ROOT)/reports.jsonl --anonymize-actors --output data/audits/attribution_cti_hal_current.json
+	PYTHONPATH=. $(PYTHON) scripts/attribution_benchmark.py --cti-hal $(CTI_HAL_ROOT)/reports.jsonl --output data/audits/attribution_cti_hal_as_reported.json
 
-# Production pipeline (OpenRouter verifier on ambiguous candidates);
+# Production pipeline (OpenRouter verifier on ambiguous candidates), anonymized like the headline;
 # spends credit and records calls/errors/cost per report. Never used as the adoption gate.
 benchmark-cti-hal-production:
-	PYTHONPATH=. $(PYTHON) scripts/attribution_benchmark.py --pipeline production --cti-hal $(CTI_HAL_ROOT)/reports.jsonl --output data/audits/attribution_cti_hal_production.json
+	PYTHONPATH=. $(PYTHON) scripts/attribution_benchmark.py --pipeline production --cti-hal $(CTI_HAL_ROOT)/reports.jsonl --anonymize-actors --output data/audits/attribution_cti_hal_production.json
 
 benchmark-attribution-production:
 	PYTHONPATH=. $(PYTHON) scripts/attribution_benchmark.py --pipeline production --output data/audits/attribution_heldout_production.json

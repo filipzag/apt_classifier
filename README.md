@@ -65,9 +65,9 @@ CISA KEV and CISA Alerts & Advisories are labeled authoritative for what CISA re
 
 When no named group meets the evidence bar (stages below *known group hypothesis*), the Assessment
 view says so explicitly and labels the leader as the closest documented group, not an attribution;
-on the attribution benchmarks every named known group was correct (15 of 15 on the ATT&CK folds,
-3 of 3 on the CTI-HAL real reports, where the bar was set) and 24 of 25 actors removed from ATT&CK
-were correctly left unnamed. When the leader has documented overlap with another
+on the attribution benchmarks every named known group was correct (33 of 33 on the ATT&CK folds; 8 of 8
+on the CTI-HAL real reports with the group names removed from the text, 13 of 13 with them left in) and
+all 25 actors removed from ATT&CK were correctly left unnamed. When the leader has documented overlap with another
 group (ATT&CK cross-references or rarely shared tooling, for example Carbanak and FIN7), the view says
 so, because the evidence usually cannot separate them.
 
@@ -105,6 +105,9 @@ typed by hand.
 - `scripts/prepare_cti_hal.py` + `make benchmark-cti-hal` — CTI-HAL (dessertlab): 968 human-annotated
   statements from 55 real reports on six named groups, used for statement-level mapping and the only
   real-report attribution measurement (local evaluation only; the corpus publishes no licence).
+  The attribution headline first replaces every ATT&CK group name and alias in the statements with
+  "the adversary", as the ATT&CK folds do (`--anonymize-actors`); the run on the statements as reported
+  is kept beside it (docs 21.3.4b).
 
 #### Current results (artifacts regenerated 2026-09-22, local pipeline, no LLM verifier)
 
@@ -154,11 +157,17 @@ measured before the exemplars) narrative micro-F1 was 0.53, recall 0.56.
 all correct, and 0/25 removed actors are named (was 4): named risk 0.00 (was 0.56) at 19% coverage.
 
 **CTI-HAL real reports (55 reports, 6 groups; local evaluation only):** statement mapping F1 0.38 (was 0.32 before the
-exemplars), recall 0.34 (was 0.25), hit@1 0.38 (was 0.33); median accepted-technique recall per report 0.42 (was 0.31);
-attribution top-1 0.55 (was 0.36 before the tool cap, decisive-malware boost, discriminative re-ranking, combiner and
-exemplars), cluster-aware top-1 0.67, top-5 0.75, MRR 0.63; 13 reports reached a named hypothesis, all correct (was 3
-under the maturity gate; at the previous bar of 0.78 the gate named 7 and 3 were wrong, which is why the bar was
-raised). Ordinary-word software aliases (ATT&CK lists "Page" for Elise) now match only in their exact spelling;
+exemplars), recall 0.34 (was 0.25), hit@1 0.38 (was 0.33); median accepted-technique recall per report 0.42 (was 0.31).
+Attribution, with every ATT&CK group name and alias in the statements replaced by "the adversary" as in the ATT&CK
+folds: **top-1 0.44**, cluster-aware top-1 0.55, top-5 0.65, MRR 0.53; 8 reports reached a named hypothesis, all
+correct. With the statements as reported (27 of the 55 reports name their own group in them) the same pipeline gives
+top-1 0.55 (was 0.36 before the tool cap, decisive-malware boost, discriminative re-ranking, combiner and exemplars),
+cluster-aware top-1 0.67, top-5 0.75, MRR 0.63, and 13 named, all correct (was 3 under the maturity gate; at the
+previous bar of 0.78 the gate named 7 and 3 were wrong, which is why the bar was raised); every earlier before/after
+comparison in this README and the docs was measured that way. Four of the six top-1 answers lost to the replacement
+are malware evidence removed with the name (Carbanak is both a group and its malware; a diagnostic run keeping such
+aliases gives top-1 0.51), so attribution from tradecraft alone lies between 0.44 and 0.51 (docs 21.3.4b).
+Ordinary-word software aliases (ATT&CK lists "Page" for Elise) now match only in their exact spelling;
 before that fix the exemplar change named Lotus Blossom on a FIN6 report (docs 5.5). With the production pipeline as measured on 2026-09-28 (verifier plus the since-removed LLM vote; 10-report sample, $3.37) technique
 recall on the statements doubles (0.23 -> 0.48, precision 0.49 -> 0.40) while ranking and naming stay the
 same. This is the only attribution number measured on real report text. Refitting the
@@ -231,7 +240,7 @@ model over per-classifier ranks, the discrimination channels and the case's evid
 blended half-and-half with reciprocal-rank fusion. It is fitted only on ATT&CK-derived folds
 (`make fit-combiner`, no credit, about an hour) and loads fail-closed on an ATT&CK-version or
 pipeline mismatch. On the held-out ATT&CK folds it lifts top-1 from 0.60 to 0.83 and on the 55
-CTI-HAL real reports from 0.51 to 0.53 with every named group still correct; the naming gate scores
+CTI-HAL real reports (statements as reported) from 0.51 to 0.53 with every named group still correct; the naming gate scores
 the leader against the union of both shortlists so a re-ordering cannot hide a competitor. The
 assessment page shows its calibrated leader probability. Disable with
 `ATTRIBUTION_COMBINER_ENABLED=false`.
