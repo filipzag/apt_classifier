@@ -3,6 +3,7 @@ import { ArrowRight, Crosshair, FolderOpen, Plus, Sparkles } from 'lucide-react'
 import { Link, useNavigate } from 'react-router-dom'
 
 import { describe, useCases, useSystem } from '../api/hooks'
+import { TAGLINE } from '../components/Brand'
 import { STAGE_META, StageBadge } from '../components/StageBadge'
 import { Button, Callout, EmptyState, Skeleton } from '../components/ui'
 import { relativeTime } from '../lib/utils'
@@ -20,7 +21,7 @@ export function DashboardPage() {
         <div className="relative flex flex-wrap items-end justify-between gap-6">
           <div className="max-w-2xl">
             <div className="mb-3 inline-flex items-center gap-2 rounded-full border border-accent/30 bg-accent-soft px-3 py-1 text-[11px] font-medium text-accent">
-              <Sparkles className="size-3" /> Evidence-first attribution workbench
+              <Sparkles className="size-3" /> {TAGLINE}
             </div>
             <h1 className="text-3xl font-semibold tracking-tight">
               Map observations to ATT&CK, rank documented groups, name only what the evidence supports.

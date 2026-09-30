@@ -27,7 +27,7 @@ async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
     headers: {
       Accept: 'application/json',
       // marks requests from our own script; the API refuses state changes without it
-      'X-Requested-With': 'APTAA',
+      'X-Requested-With': 'Vestige',
       ...(init.body && !(init.body instanceof FormData)
         ? { 'Content-Type': 'application/json' }
         : {}),

@@ -116,7 +116,7 @@ def create_app(
             app.state.service = CaseService()
         yield
 
-    app = FastAPI(title="APT Attribution Assistant API", version="2.0", lifespan=lifespan)
+    app = FastAPI(title="Vestige API", version="2.0", lifespan=lifespan)
     app.state.service = service
     install_auth(app, settings or get_settings(), users=users)
 

@@ -32,6 +32,7 @@ import { useMe } from '../AuthGate'
 import { Avatar } from '../../pages/Users'
 import type { CasePayload, SystemInfo } from '../../api/types'
 import { cn, fmt } from '../../lib/utils'
+import { VestigeMark, Wordmark } from '../Brand'
 import { StageBadge } from '../StageBadge'
 import { Badge, Button, Tip } from '../ui'
 
@@ -113,13 +114,8 @@ function Sidebar({
   return (
     <aside className="sticky top-0 hidden h-screen w-[248px] shrink-0 flex-col border-r border-border bg-surface/80 backdrop-blur md:flex">
       <Link to="/" className="flex items-center gap-2.5 px-4 pt-5 pb-4 focus-ring rounded-lg">
-        <span className="grid size-8 place-items-center rounded-lg bg-accent-soft text-accent ring-1 ring-accent/40">
-          <Crosshair className="size-4" />
-        </span>
-        <span className="leading-tight">
-          <span className="block text-[13px] font-semibold tracking-tight">APT Attribution</span>
-          <span className="block text-[11px] text-muted">Assistant</span>
-        </span>
+        <VestigeMark size={34} />
+        <Wordmark />
       </Link>
       <nav className="flex-1 space-y-5 overflow-y-auto px-2.5 pb-4">
         <div>
@@ -321,7 +317,7 @@ function TopBar({
   return (
     <header className="sticky top-0 z-30 flex h-14 items-center gap-3 border-b border-border bg-bg/75 px-6 backdrop-blur lg:px-8">
       <Link to="/" className="md:hidden">
-        <Crosshair className="size-5 text-accent" />
+        <VestigeMark size={28} />
       </Link>
       {caseId ? (
         <>

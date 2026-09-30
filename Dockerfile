@@ -1,4 +1,4 @@
-# APT Attribution Assistant — API + React front end in one image.
+# Vestige — API + React front end in one image.
 #
 # Build:  docker compose build app
 # Run:    docker compose up        (starts Chroma and the app; ingest once with

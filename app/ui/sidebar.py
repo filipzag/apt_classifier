@@ -115,7 +115,7 @@ def render_sidebar(
     settings: Settings, engine: AttributionEngine
 ) -> tuple[Settings, dict[str, float], bool]:
     """Returns (settings with sidebar overrides, classifier weights, rescore requested)."""
-    st.sidebar.markdown("### APT Attribution Assistant")
+    st.sidebar.markdown("### Vestige")
     if runtime.local_only(settings):
         st.sidebar.warning(
             "**Local mode.** No OpenRouter key is configured: free text is split into sentences "

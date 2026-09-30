@@ -24,9 +24,9 @@ from apt_classifier.users import LOCAL_USER, ROLES, User, UserStore, email_allow
 
 log = logging.getLogger("apt_classifier.api.auth")
 GOOGLE_METADATA_URL = "https://accounts.google.com/.well-known/openid-configuration"
-SESSION_COOKIE = "aptaa_session"
+SESSION_COOKIE = "vestige_session"
 CSRF_HEADER = "x-requested-with"
-CSRF_VALUE = "APTAA"
+CSRF_VALUE = "Vestige"
 MUTATING = {"POST", "PUT", "PATCH", "DELETE"}
 
 
@@ -108,7 +108,7 @@ def _state(request: Request) -> AuthState:
 
 def current_user(request: Request) -> User:
     """The signed-in user (or the local analyst when sign-in is off). Mutating requests must
-    carry the ``X-Requested-With: APTAA`` header; a browser only adds it from our own script."""
+    carry the ``X-Requested-With: Vestige`` header; a browser only adds it from our own script."""
     state = _state(request)
     if not state.google:
         return LOCAL_USER

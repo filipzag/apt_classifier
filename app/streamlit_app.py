@@ -1,4 +1,4 @@
-"""APT Attribution Assistant — Streamlit entry point.
+"""Vestige — Streamlit entry point (legacy UI).
 
 Bootstraps settings, the knowledge base and the per-session engine, then hands off to the
 page modules under ``app/ui/pages``. Workflow order: Intake → Technique Review → Interview →
@@ -32,12 +32,12 @@ from app.ui.sidebar import render_sidebar  # noqa: E402
 from apt_classifier.config import get_settings  # noqa: E402
 from apt_classifier.ingest import ingest  # noqa: E402
 
-st.set_page_config(page_title="APT Attribution Assistant", layout="wide", page_icon="🛡️")
+st.set_page_config(page_title="Vestige", layout="wide", page_icon="🛡️")
 
 settings = get_settings()
 settings.ensure_directories()
 
-st.title("APT Attribution Assistant")
+st.title("Vestige")
 st.caption(
     "Ranks hypotheses by overlap with documented ATT&CK tradecraft and says when the evidence "
     "does not support a name. Shared tooling, reporting gaps and false flags can invalidate "

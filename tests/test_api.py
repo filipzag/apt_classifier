@@ -193,6 +193,7 @@ def test_local_flow_end_to_end(local_client: TestClient) -> None:
         response = local_client.get(f"/api/cases/{case_id}/export/{kind}")
         assert response.status_code == 200, kind
         assert "attachment" in response.headers["content-disposition"]
+        assert "vestige-" in response.headers["content-disposition"]
     assert local_client.post(f"/api/cases/{case_id}/review").status_code == 409
 
     # verifier verdicts saved with the case are replayed when it is reopened, even in local mode

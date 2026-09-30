@@ -1,4 +1,4 @@
-# APT Attribution Assistant — web front end
+# Vestige — web front end
 
 React 19 + TypeScript + Vite + Tailwind v4 single-page app served by the FastAPI backend in
 `../api`. The API is the source of truth for every payload; `src/api/types.ts` mirrors

@@ -19,7 +19,7 @@ services:
 
   app:
     build: .
-    image: apt-attribution-assistant:local
+    image: vestige:local
     restart: unless-stopped
     depends_on:
       chroma:

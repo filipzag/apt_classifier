@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "apt-classifier"
 version = "0.1.0"
-description = "Evidence-driven APT attribution assistant using MITRE ATT&CK"
+description = "Vestige: evidence-first APT attribution using MITRE ATT&CK"
 requires-python = ">=3.11,<3.14"
 
 [tool.setuptools.packages.find]

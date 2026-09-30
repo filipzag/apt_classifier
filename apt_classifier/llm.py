@@ -75,7 +75,7 @@ class OpenRouterClient:
             "Authorization": f"Bearer {self.api_key}",
             "Content-Type": "application/json",
             "HTTP-Referer": "https://localhost/apt-classifier",
-            "X-Title": "APT Attribution Assistant",
+            "X-Title": "Vestige",
         }
         attempts = 2 if schema is not None else 1
         last_finish_reason = "unknown"

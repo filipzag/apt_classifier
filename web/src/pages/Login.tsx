@@ -1,6 +1,7 @@
-import { Crosshair, ShieldCheck } from 'lucide-react'
+import { ShieldCheck } from 'lucide-react'
 
 import type { AuthInfo } from '../api/types'
+import { TAGLINE, VestigeMark } from '../components/Brand'
 import { Callout } from '../components/ui'
 
 const ERRORS: Record<string, string> = {
@@ -17,12 +18,10 @@ export function LoginPage({ auth, error }: { auth: AuthInfo | null; error: strin
         <div className="card relative overflow-hidden p-8">
           <div className="pointer-events-none absolute -right-16 -top-16 size-48 rounded-full bg-accent/10 blur-3xl" />
           <div className="flex items-center gap-3">
-            <span className="grid size-10 place-items-center rounded-xl bg-accent-soft text-accent ring-1 ring-accent/40">
-              <Crosshair className="size-5" />
-            </span>
+            <VestigeMark size={44} />
             <div>
-              <div className="text-base font-semibold tracking-tight">APT Attribution Assistant</div>
-              <div className="text-xs text-muted">Evidence-first attribution workbench</div>
+              <div className="text-lg font-semibold uppercase tracking-[0.2em]">Vestige</div>
+              <div className="text-xs text-muted">{TAGLINE}</div>
             </div>
           </div>
           <h1 className="mt-6 text-xl font-semibold tracking-tight">Sign in to your workspace</h1>

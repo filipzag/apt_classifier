@@ -63,7 +63,7 @@ def software_name(kb: Any, software_id: str) -> str:
 def assessment_markdown(kb: Any, state: Any, *, case_name: str = "") -> str:
     """Analyst report. Works with or without the AI review; the deterministic result leads."""
     decision = getattr(state, "attribution_decision", None)
-    title = "# APT attribution assessment" + (f": {case_name}" if case_name else "")
+    title = "# Vestige attribution assessment" + (f": {case_name}" if case_name else "")
     lines = [title, ""]
     if decision is not None:
         info = STAGE_INFO.get(decision.stage.value, {})
@@ -217,7 +217,7 @@ EXPORT_KINDS = ("markdown", "json", "navigator", "attack-flow")
 
 def export_document(kb: Any, state: Any, kind: str, *, case_name: str = "") -> tuple[str, str, str]:
     """(content, media type, file name) for one export kind."""
-    stem = f"apt-{case_name or state.ledger.case_id}".replace(" ", "-")
+    stem = f"vestige-{case_name or state.ledger.case_id}".replace(" ", "-")
     if kind == "markdown":
         return assessment_markdown(kb, state, case_name=case_name), "text/markdown", f"{stem}.md"
     if kind == "json":

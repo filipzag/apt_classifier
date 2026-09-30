@@ -50,7 +50,7 @@ def test_intake_analyses_sample_in_local_mode_and_saves_the_case(local_mode):
     app = AppTest.from_file(str(ROOT / "app" / "streamlit_app.py"), default_timeout=300)
     app.run()
     _assert_clean(app)
-    assert app.title[0].value == "APT Attribution Assistant"
+    assert app.title[0].value == "Vestige"
     assert any("Local mode" in item.value for item in app.sidebar.warning)
     narrative = next(area for area in app.text_area if area.key == "intake_narrative")
     narrative.set_value(SAMPLE.read_text(encoding="utf-8"))

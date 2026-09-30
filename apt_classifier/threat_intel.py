@@ -114,7 +114,7 @@ class PublicThreatIntelClient:
         self._client = client or httpx.Client(
             timeout=timeout,
             follow_redirects=True,
-            headers={"User-Agent": "APT-Attribution-Assistant/0.1 public-feed-reader"},
+            headers={"User-Agent": "Vestige/2.0 public-feed-reader"},
         )
 
     def close(self) -> None:

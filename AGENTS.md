@@ -1,4 +1,4 @@
-# Project commands
+# Vestige (package `apt_classifier`): project commands
 
 - Create/update environment: `make setup`
 - Start local ChromaDB: `make up`

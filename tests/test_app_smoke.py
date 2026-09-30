@@ -11,6 +11,6 @@ def test_app_starts_and_requests_initial_ingestion(monkeypatch, tmp_path):
     get_settings.cache_clear()
     app = AppTest.from_file(str(Path("app/streamlit_app.py"))).run(timeout=20)
     assert not app.exception
-    assert app.title[0].value == "APT Attribution Assistant"
+    assert app.title[0].value == "Vestige"
     assert any("not been ingested" in item.value for item in app.info)
     get_settings.cache_clear()

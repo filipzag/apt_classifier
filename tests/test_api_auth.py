@@ -14,7 +14,7 @@ from apt_classifier.service import CaseNotFound
 from apt_classifier.users import UserStore
 from tests.test_api import StubService
 
-HEADERS = {"X-Requested-With": "APTAA"}
+HEADERS = {"X-Requested-With": "Vestige"}
 
 
 def google_settings(**overrides: Any) -> Settings:

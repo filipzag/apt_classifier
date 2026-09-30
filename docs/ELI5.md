@@ -1,4 +1,4 @@
-# APT Attribution Assistant — Explain It Like I'm Five
+# Vestige — Explain It Like I'm Five
 
 ## What is this thing?
 

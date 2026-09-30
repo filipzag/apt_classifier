@@ -1,8 +1,8 @@
-# APT Attribution Assistant — Technical Documentation
+# Vestige — Technical Documentation
 
 ## 1. Document purpose
 
-This document describes the current implementation of the APT Attribution Assistant: its architecture, data flow, evidence model, retrieval and ranking algorithms, live threat-intelligence enrichment, analyst Canvas, Diamond Model intrusion analysis, interview workflow, isolated AI review, deployment, security boundaries, verification, and limitations.
+This document describes the current implementation of Vestige (the `apt_classifier` package and its front ends): its architecture, data flow, evidence model, retrieval and ranking algorithms, live threat-intelligence enrichment, analyst Canvas, Diamond Model intrusion analysis, interview workflow, isolated AI review, deployment, security boundaries, verification, and limitations.
 
 The document is an implementation reference, not a claim of attribution accuracy. The application produces ranked hypotheses about overlap with documented MITRE ATT&CK tradecraft. It does not prove the identity, nationality, sponsorship, or intent of an attacker.
 
@@ -318,7 +318,7 @@ least one required or the server refuses to start) and creates or refreshes the 
 `data/users.db` (`apt_classifier/users.py`: id, address, name, picture, role, active, sign-in
 times, Google subject). The first user and every `AUTH_ADMIN_EMAILS` address are admins.
 `current_user` is the dependency behind `get_service`, so every `/api` route is authenticated;
-state-changing requests must also carry `X-Requested-With: APTAA` (the SPA adds it; a
+state-changing requests must also carry `X-Requested-With: Vestige` (the SPA adds it; a
 cross-site form cannot), which closes the CSRF hole a cookie session opens. `/api/me` returns
 the user and the auth mode; `/api/auth` is public and tells the login page how sign-in works;
 admins list and edit users (`/api/users`; an admin cannot demote or deactivate themselves, and

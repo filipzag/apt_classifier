@@ -1,4 +1,8 @@
-# APT Attribution Assistant
+# Vestige
+
+**Attribution from the traces left behind.** Vestige maps incident observations to MITRE
+ATT&CK, ranks documented threat groups, and names one only when the evidence separates it from
+every alternative. (Python package: `apt_classifier`.)
 
 A local, evidence-driven Streamlit application for ranking threat-group hypotheses from mixed incident evidence. It accepts analyst observations, EDR/SIEM alerts, Windows/Sysmon JSON, IOCs, and named tools.
 
