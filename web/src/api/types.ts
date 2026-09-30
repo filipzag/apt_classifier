@@ -19,6 +19,7 @@ export interface SystemInfo {
   preset: string
   gate_mode: string
   acceptance_model: unknown
+  combiner: string
   index: {
     ok: boolean
     technique_sentences?: number

@@ -267,6 +267,7 @@ function SystemFooter({ system }: { system?: SystemInfo }) {
               <div>Embedder {system.embedding_model}</div>
               {!local ? <div>Extraction {system.extract_model} · review {system.review_model}</div> : null}
               <div>Preset {system.preset} · gate {system.gate_mode}</div>
+              <div>Learned combiner: {system.combiner}</div>
             </div>
           }
         >

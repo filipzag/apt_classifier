@@ -568,8 +568,11 @@ def pipeline_fingerprint(
     family_weights: Mapping[str, float],
     sources: Iterable[Path] | None = None,
 ) -> str:
-    """Hash of the fusion pipeline the combiner was fitted against: the fusion, separation and
-    combiner modules, every classifier module, and the effective weight settings."""
+    """Hash of the fusion pipeline the combiner was fitted against: the fusion and separation
+    modules, every classifier module, and the deterministic weight settings. The LLM vote and
+    CyberRE weights are excluded on purpose: the features read only the deterministic
+    classifiers, and a production run (vote on) must accept an artifact fitted by the local
+    pipeline (vote off). Feature changes in this module are guarded by the schema version."""
     root = Path(__file__).resolve().parent
     files = (
         list(sources)
@@ -577,7 +580,6 @@ def pipeline_fingerprint(
         else [
             root / "fusion.py",
             root / "separation.py",
-            root / "combiner.py",
             *sorted((root / "classifiers").glob("*.py")),
         ]
     )
@@ -585,12 +587,20 @@ def pipeline_fingerprint(
     for path in files:
         digest.update(path.name.encode())
         digest.update(path.read_bytes() if path.is_file() else b"")
+
+    def deterministic(mapping: Mapping[str, float]) -> dict[str, float]:
+        return {
+            key: float(value)
+            for key, value in sorted(mapping.items())
+            if "llm" not in key and "cyberre" not in key
+        }
+
     digest.update(
         json.dumps(
             {
                 "rrf_k": int(rrf_k),
-                "weights": dict(sorted(weights.items())),
-                "family_weights": dict(sorted(family_weights.items())),
+                "weights": deterministic(weights),
+                "family_weights": deterministic(family_weights),
             },
             sort_keys=True,
         ).encode()
