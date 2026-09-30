@@ -649,8 +649,8 @@ def test_combiner_orders_the_shortlist_and_the_gate_scores_the_new_leader(monkey
 def test_profile_forest_members_are_wired_and_swappable():
     engine = AttributionEngine(_settings(), _kb(), FakeStore(), FakeLLM())
     weights = engine.default_weights()
-    # both members are wired; the votes stay at 0 by default (docs 21.3.11)
-    assert weights["profile_forest"] == 0.0 and weights["source_country"] == 0.0
+    # both members are wired; the source-country vote is on by default, the group forest silent
+    assert weights["profile_forest"] == 0.0 and weights["source_country"] == 1.0
     assert {"learned_profile", "origin"} <= set(engine.family_weights())
     members = [c for c in engine.classifiers if c.name in {"profile_forest", "source_country"}]
     assert len(members) == 2 and all(c.model is None for c in members)

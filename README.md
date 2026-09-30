@@ -28,9 +28,9 @@ See [`docs/TECHNICAL_DOCUMENTATION.md`](docs/TECHNICAL_DOCUMENTATION.md) for the
    - campaign-profile overlap
    - software/tool links
    - source-country random forest: predicts the source-country class (China, Russia, Iran, North Korea,
-     another state, no documented state origin) from the mapped techniques, motivation and target; its vote for
-     each group through the group's documented country is an opt-in (real reports improve, the ATT&CK folds lose one case; docs 9.13, 21.3.11). Trained on the GPU from
-     ATT&CK profiles.
+     another state, no documented state origin) from the mapped techniques, motivation and target, and votes
+     for each group through the group's documented country (default since 2026-10-01: real reports improve, the
+     ATT&CK folds lose one case; docs 9.13, 21.3.11). Trained on the GPU from ATT&CK profiles.
    - group random forest over the same features (wired at weight 0: it helped the ATT&CK folds but hurt real reports)
    - opt-in CyberRE-LLM technique filtering and ranking
 6. Fuse applicable classifiers with family-aware Reciprocal Rank Fusion. Naive Bayes, TF-IDF, Jaccard, and the technique centroid share one technique-overlap budget instead of casting four full correlated votes. Actor-specific behavior, software, and campaign classifiers have their own family budgets. Context, motivation, and description signals may rerank only candidates with documented technical support; the analyst-requested CyberRE vote has its own low family budget and cannot introduce a candidate. Abstaining classifiers cast no vote. Groups with zero technical overlap are excluded from authoritative RRF.
@@ -157,17 +157,19 @@ development bundles narrated telemetry loses some ranking, so structured-telemet
 `TECHNIQUE_EXEMPLARS_ENABLED=false` (docs 21.3.10). With the OpenRouter verifier enabled (production pipeline,
 measured before the exemplars) narrative micro-F1 was 0.53, recall 0.56.
 
-**Attribution (text in, group out; 153 held-out groups):** top-1 0.84 (was 0.38 before the fusion work and
-0.60 before the learned combiner), top-5 0.97, MRR 0.88. With the separation gate 33 known groups are named,
-all correct, and 0/25 removed actors are named (was 4): named risk 0.00 (was 0.56) at 19% coverage.
+**Attribution (text in, group out; 153 held-out groups):** top-1 0.83 (was 0.38 before the fusion work and
+0.60 before the learned combiner; 0.84 before the source-country vote, which costs one fold here and gains on real
+reports), top-5 0.96, MRR 0.88. With the separation gate 32 known groups are named, all correct, and 0/25 removed
+actors are named (was 4): named risk 0.00 (was 0.56) at 18% coverage.
 
 **CTI-HAL real reports (55 reports, 6 groups; local evaluation only):** statement mapping F1 0.38 (was 0.32 before the
 exemplars), recall 0.34 (was 0.25), hit@1 0.38 (was 0.33); median accepted-technique recall per report 0.42 (was 0.31).
 Attribution, with every ATT&CK group name and alias in the statements replaced by "the adversary" as in the ATT&CK
-folds: **top-1 0.44**, cluster-aware top-1 0.55, top-5 0.65, MRR 0.53; 8 reports reached a named hypothesis, all
-correct. With the statements as reported (27 of the 55 reports name their own group in them) the same pipeline gives
-top-1 0.55 (was 0.36 before the tool cap, decisive-malware boost, discriminative re-ranking, combiner and exemplars),
-cluster-aware top-1 0.67, top-5 0.75, MRR 0.63, and 13 named, all correct (was 3 under the maturity gate; at the
+folds: **top-1 0.46** (0.44 before the source-country vote), cluster-aware top-1 0.58, top-5 0.64, MRR 0.53; 10 reports
+reached a named hypothesis, all correct (8 before). With the statements as reported (27 of the 55 reports name their own
+group in them) the same pipeline gives top-1 0.56 (was 0.36 before the tool cap, decisive-malware boost, discriminative
+re-ranking, combiner, exemplars and country vote), cluster-aware top-1 0.71, top-5 0.73, MRR 0.64, and 15 named, all
+correct (was 3 under the maturity gate; at the
 previous bar of 0.78 the gate named 7 and 3 were wrong, which is why the bar was raised); every earlier before/after
 comparison in this README and the docs was measured that way. Four of the six top-1 answers lost to the replacement
 are malware evidence removed with the name (Carbanak is both a group and its malware; a diagnostic run keeping such
@@ -349,9 +351,9 @@ All settings are environment variables documented in `.env.example`. Important v
 - `TECHNIQUE_INCLUDE_SYNTHETIC=false` (LLM-generated observation sentences per technique in the index;
   `make generate-synthetic` then `make ingest`; off until the full set is generated and measured, see
   docs 7.3 and 21.3.6)
-- `SOURCE_COUNTRY_WEIGHT=0.0`, `PROFILE_FOREST_WEIGHT=0.0` (random-forest votes off by default; `make fit-forest` trains
-  both on the GPU when available, `PROFILE_FOREST_DEVICE=cpu` otherwise). To enable the measured source-country vote set
-  `SOURCE_COUNTRY_WEIGHT=1.0` and `ATTRIBUTION_COMBINER_PATH=data/models/combiner/attribution_combiner_source_country.json`
+- `SOURCE_COUNTRY_WEIGHT=1.0`, `PROFILE_FOREST_WEIGHT=0.0` (source-country vote on, group forest silent; `make fit-forest`
+  trains both on the GPU when available, `PROFILE_FOREST_DEVICE=cpu` otherwise). To turn the country vote off set
+  `SOURCE_COUNTRY_WEIGHT=0.0` and `ATTRIBUTION_COMBINER_PATH=data/models/combiner/attribution_combiner_no_country.json`
   (docs 9.13 and 21.3.11)
 - `TECHNIQUE_EXEMPLARS_ENABLED=true` (labelled public report sentences as acceptance evidence, `make exemplars`
   then `make fit-acceptance`; CTI-HAL median accepted-technique recall per report 0.31 -> 0.42; `false` restores

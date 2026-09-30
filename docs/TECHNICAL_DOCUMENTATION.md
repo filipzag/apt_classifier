@@ -1174,12 +1174,14 @@ accepted techniques. Neither can make a group eligible, because eligibility stil
 deterministic technical classifiers. They share one forest prediction per scoring pass, and each
 has its own family budget (`learned_profile`, `origin`). The country forest's estimate is not shown
 to analysts: on its own it is weaker than the origin aggregated from the ranked groups (11.1; macro-F1
-0.36 against 0.80 on the ATT&CK folds, 0.18 against 0.52 on the real reports, 21.3.11). Both vote at weight 0 by
-default (21.3.11). The measured source-country configuration is one switch away:
-`SOURCE_COUNTRY_WEIGHT=1.0` with
-`ATTRIBUTION_COMBINER_PATH=data/models/combiner/attribution_combiner_source_country.json`, the combiner
-refitted with the vote as a feature (feature schema 2). In the attribution benchmark's
-unknown-actor arm, the voting forest is refitted on the knowledge base without the removed actor,
+0.36 against 0.80 on the ATT&CK folds, 0.18 against 0.52 on the real reports, 21.3.11).
+
+The group forest votes at weight 0. The source-country vote is on by default since 2026-10-01
+(`SOURCE_COUNTRY_WEIGHT=1.0`), together with the combiner refitted with it as a feature (feature
+schema 2, `data/models/combiner/attribution_combiner.json`). To turn it off, set
+`SOURCE_COUNTRY_WEIGHT=0` with
+`ATTRIBUTION_COMBINER_PATH=data/models/combiner/attribution_combiner_no_country.json`, the previous
+schema-1 combiner. In the attribution benchmark's unknown-actor arm, the voting forest is refitted on the knowledge base without the removed actor,
 because masking the actor's output would still leak its profile into the other votes. The combiner
 fit's unknown lists do the same.
 
@@ -1282,7 +1284,7 @@ Other default weights include:
 | Campaign profile | 0.00 |
 | CyberRE-LLM | 0.35 |
 | Group forest (`profile_forest`) | 0.00 (not adopted, 21.3.11) |
-| Source-country forest (`source_country`) | 0.00 (1.00 opt-in, 21.3.11) |
+| Source-country forest (`source_country`) | 1.00 (default since 2026-10-01, 21.3.11) |
 
 The effective weights are displayed in Assessment and stored in the fusion result.
 
@@ -1467,8 +1469,8 @@ the real reports against 60% and 51% for the fused ranking, so the combiner is t
 Feature schema 2 (2026-09-30) adds the random-forest `source_country` vote (9.13) to the
 per-classifier features, and the fit's unknown-actor lists refit the country forest without the
 removed actor. An artifact lists the features it was fitted on and is scored on those columns, so
-the schema-1 default artifact and the schema-2 opt-in artifact
-(`attribution_combiner_source_country.json`, fitted with the country vote at 1.0) both load; a
+the schema-2 default artifact (`attribution_combiner.json`, fitted with the country vote at 1.0)
+and the schema-1 opt-out artifact (`attribution_combiner_no_country.json`) both load; a
 newer schema, unknown feature names or mismatched vectors are still refused.
 
 - **Model.** A conditional logit (listwise softmax) over the top-N fused candidates (N = 20):
@@ -3138,9 +3140,10 @@ Real reports improve (as reported: cluster-aware top-1 0.673 -> 0.709, reports w
 0.222 -> 0.278; anonymized: cluster-aware top-1 0.545 -> 0.582, without software 0.125 -> 0.167), so the
 gain does not come from actor names, and no wrong name appears anywhere, but the folds lose one top-1 case and 0.003 MRR. Seven of the nine
 worse folds were already fine in the rank fusion and worsened only in the refitted combiner's order.
-Under the no-regression rule for both attribution benchmarks this is not a default: the country vote
-stays at 0 with the previous combiner (whose inputs are unchanged, re-stamped with a note), and the
-measured configuration is kept as an opt-in (9.13).
+Under the no-regression rule for both attribution benchmarks this was first kept as an opt-in. On
+2026-10-01 the product owner made it the default, accepting the one-fold loss on the ATT&CK folds for
+the real-report gains, which hold on the anonymized headline. The previous configuration remains as
+an opt-out (9.13); the published attribution artifacts were regenerated with the new default.
 
 ## 22. Failure modes and troubleshooting
 

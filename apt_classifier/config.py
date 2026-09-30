@@ -127,11 +127,12 @@ class Settings(BaseSettings):
     profile_forest_device: str = "auto"
     profile_forest_weight: float = 0.0
     profile_forest_family_weight: float = 1.0
-    # Measured 2026-09-30 (docs 21.3.11): at 1.0 with its own refitted combiner
-    # (ATTRIBUTION_COMBINER_PATH=data/models/combiner/attribution_combiner_source_country.json) real
-    # reports improve but the ATT&CK folds lose one top-1 case, so the default stays 0 under the
-    # no-regression rule. The group forest hurts real reports at every weight tried.
-    source_country_weight: float = 0.0
+    # Default since 2026-10-01 by the product owner's decision (docs 21.3.11): real reports improve
+    # (anonymized top-1 0.436 -> 0.455, 8 -> 10 names) at the cost of one ATT&CK fold (0.837 -> 0.830).
+    # It needs the combiner fitted with it (data/models/combiner/attribution_combiner.json); to turn it
+    # off use 0.0 with attribution_combiner_no_country.json. The group forest stays at 0: it hurts
+    # real reports at every weight tried.
+    source_country_weight: float = 1.0
     source_country_family_weight: float = 1.0
     cyberre_model: str = "openai/gpt-5.6-sol"
     cyberre_effort: str = "low"
