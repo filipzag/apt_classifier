@@ -46,6 +46,7 @@ export interface CaseListItem {
   name: string
   created_at: string | null
   updated_at: string | null
+  owner: CaseOwner | null
   summary: CaseSummary
 }
 
@@ -290,6 +291,7 @@ export interface CasePayload {
   name: string
   created_at: string | null
   updated_at: string | null
+  owner: CaseOwner | null
   ingestion: Record<string, unknown>
   summary: CaseSummary
   next_step: NextStep
@@ -479,4 +481,32 @@ export interface DistinguishResponse {
   techniques: DistinguishTechnique[]
   pending: DistinguishPending[]
   leads: DistinguishLead[]
+}
+
+export interface User {
+  id: string
+  email: string
+  name: string
+  picture: string
+  role: 'admin' | 'analyst'
+  active: boolean
+  created_at: string
+  last_login_at: string | null
+}
+
+export interface AuthInfo {
+  mode: 'off' | 'google'
+  provider: string | null
+  allowlist_configured: boolean
+}
+
+export interface Me {
+  user: User
+  auth: AuthInfo
+}
+
+export interface CaseOwner {
+  id: string
+  name: string
+  email: string
 }

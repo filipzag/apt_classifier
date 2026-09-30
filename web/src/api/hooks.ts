@@ -184,3 +184,32 @@ export function useDeleteCase() {
     onError: (error) => toast.error('Delete failed', { description: describe(error) }),
   })
 }
+
+export function useUsers(enabled = true) {
+  return useQuery({ queryKey: ['users'], queryFn: api.users, enabled, staleTime: 30_000 })
+}
+
+export function useUpdateUser() {
+  const client = useQueryClient()
+  return useMutation({
+    mutationFn: ({ id, ...patch }: { id: string; role?: string; active?: boolean }) =>
+      api.updateUser(id, patch),
+    onSuccess: () => {
+      void client.invalidateQueries({ queryKey: ['users'] })
+      toast.success('User updated')
+    },
+    onError: (error) => toast.error('User not updated', { description: describe(error) }),
+  })
+}
+
+export function useLogout() {
+  const client = useQueryClient()
+  return useMutation({
+    mutationFn: api.logout,
+    onSuccess: () => {
+      client.clear()
+      window.location.assign('/login')
+    },
+    onError: (error) => toast.error('Sign-out failed', { description: describe(error) }),
+  })
+}

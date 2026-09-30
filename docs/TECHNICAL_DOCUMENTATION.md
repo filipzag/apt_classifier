@@ -305,6 +305,29 @@ runnable; the last Streamlit-only revision is preserved on the `streamlit-stable
   `make web-build`, `make web-check` (tsc + oxlint), `make run-next`. Tests: `tests/test_api.py`
   (stub-service error mapping; a real local-mode flow that skips without the index).
 
+### 4.6 Users and sign-in (2026-09-30)
+
+`api/auth.py` installs one of two modes from the settings (`Settings.resolved_auth_mode()`):
+**off** (no `GOOGLE_CLIENT_ID`): every request runs as `LOCAL_USER`, a local analyst with admin
+rights, so single-user and test runs need no credentials; **google**: a signed session cookie
+(Starlette `SessionMiddleware`, `AUTH_SECRET_KEY`, `AUTH_SESSION_HOURS`, SameSite=Lax,
+`AUTH_COOKIE_SECURE` behind HTTPS) plus an Authlib OpenID Connect client for Google.
+`/auth/login` redirects to Google, `/auth/callback` verifies the id token, checks
+`email_verified`, applies the allowlist (`AUTH_ALLOWED_DOMAINS` / `AUTH_ALLOWED_EMAILS`, at
+least one required or the server refuses to start) and creates or refreshes the user in
+`data/users.db` (`apt_classifier/users.py`: id, address, name, picture, role, active, sign-in
+times, Google subject). The first user and every `AUTH_ADMIN_EMAILS` address are admins.
+`current_user` is the dependency behind `get_service`, so every `/api` route is authenticated;
+state-changing requests must also carry `X-Requested-With: APTAA` (the SPA adds it; a
+cross-site form cannot), which closes the CSRF hole a cookie session opens. `/api/me` returns
+the user and the auth mode; `/api/auth` is public and tells the login page how sign-in works;
+admins list and edit users (`/api/users`; an admin cannot demote or deactivate themselves, and
+the last active admin cannot be removed). Cases record their creator (`owner` in the case file
+and in the API payloads); everyone in the workspace can read and work on any case, deletion is
+limited to the owner or an admin. Identity data is never logged. The web app wraps its routes
+in `AuthGate`, which renders the sign-in page on a 401 and otherwise provides the user to the
+shell (user chip, sign-out, the admin-only *Users* page, owner on case cards).
+
 ## 5. Evidence ingestion and normalization
 
 All incoming evidence is represented in an `EvidenceLedger`.

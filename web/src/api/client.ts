@@ -8,7 +8,9 @@ import type {
   Graph,
   IntelResponse,
   InterviewState,
+  Me,
   SystemInfo,
+  User,
 } from './types'
 
 export class ApiError extends Error {
@@ -24,6 +26,8 @@ async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
     ...init,
     headers: {
       Accept: 'application/json',
+      // marks requests from our own script; the API refuses state changes without it
+      'X-Requested-With': 'APTAA',
       ...(init.body && !(init.body instanceof FormData)
         ? { 'Content-Type': 'application/json' }
         : {}),
@@ -51,6 +55,12 @@ async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
 const json = (body: unknown): RequestInit => ({ method: 'POST', body: JSON.stringify(body) })
 
 export const api = {
+  me: () => request<Me>('/api/me'),
+  authInfo: () => request<{ mode: 'off' | 'google'; provider: string | null; allowlist_configured: boolean }>('/api/auth'),
+  logout: () => request<void>('/auth/logout', { method: 'POST' }),
+  users: () => request<User[]>('/api/users'),
+  updateUser: (id: string, patch: { role?: string; active?: boolean }) =>
+    request<User>(`/api/users/${id}`, { method: 'PATCH', body: JSON.stringify(patch) }),
   system: () => request<SystemInfo>('/api/system'),
   sample: () => request<{ text: string }>('/api/sample'),
   techniques: (q: string) =>

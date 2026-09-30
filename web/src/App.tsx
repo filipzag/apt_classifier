@@ -1,5 +1,6 @@
 import { Navigate, Route, Routes } from 'react-router-dom'
 
+import { AuthGate } from './components/AuthGate'
 import { AppShell } from './components/layout/AppShell'
 import { AssessmentPage } from './pages/Assessment'
 import { CanvasPage } from './pages/Canvas'
@@ -12,10 +13,13 @@ import { IntelPage } from './pages/Intel'
 import { InterviewPage } from './pages/Interview'
 import { ReviewPage } from './pages/Review'
 import { TechniquesPage } from './pages/Techniques'
+import { UsersPage } from './pages/Users'
 
 export default function App() {
   return (
-    <Routes>
+    <AuthGate>
+      <Routes>
+        <Route path="login" element={<Navigate to="/" replace />} />
       <Route element={<AppShell />}>
         <Route index element={<DashboardPage />} />
         <Route path="new" element={<IntakePage />} />
@@ -28,8 +32,10 @@ export default function App() {
         <Route path="cases/:id/diamond" element={<DiamondPage />} />
         <Route path="cases/:id/intel" element={<IntelPage />} />
         <Route path="cases/:id/review" element={<ReviewPage />} />
+        <Route path="admin/users" element={<UsersPage />} />
         <Route path="*" element={<Navigate to="/" replace />} />
       </Route>
-    </Routes>
+      </Routes>
+    </AuthGate>
   )
 }

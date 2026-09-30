@@ -76,6 +76,11 @@ class CaseMeta:
     created_at: str | None = None
     updated_at: str | None = None
     ingestion: dict[str, Any] = field(default_factory=dict)
+    owner: dict[str, Any] | None = None  # {"id", "name", "email"} of the creating user
+
+    @property
+    def owner_id(self) -> str | None:
+        return str(self.owner.get("id")) if self.owner and self.owner.get("id") else None
 
 
 @dataclass
@@ -300,6 +305,7 @@ class CaseService:
             summary=self.summary_for(state),
             verifications=collect_verifications(state.retrieval),
             zero_shot=state.zero_shot.to_dict() if state.zero_shot is not None else None,
+            owner=meta.owner,
         )
         record = next((r for r in self.store.list() if r.case_id == case_id), None)
         if record is not None:
@@ -309,7 +315,7 @@ class CaseService:
     def list_cases(self) -> list[CaseRecord]:
         return self.store.list()
 
-    def create_case(self, payload: IntakePayload) -> str:
+    def create_case(self, payload: IntakePayload, *, owner: dict[str, Any] | None = None) -> str:
         if not payload.has_input():
             raise ValueError("add at least one observation, alert, indicator or evidence file")
         diagnostics: dict[str, Any] = {}
@@ -326,7 +332,9 @@ class CaseService:
         name = payload.name.strip()[:120] or f"case-{case_id[:8]}"
         with self._lock(case_id):
             self._states[case_id] = state
-            self._meta[case_id] = CaseMeta(case_id=case_id, name=name, ingestion=diagnostics)
+            self._meta[case_id] = CaseMeta(
+                case_id=case_id, name=name, ingestion=diagnostics, owner=dict(owner or {}) or None
+            )
             self._save(case_id)
         return case_id
 
@@ -352,6 +360,7 @@ class CaseService:
                     name=payload["name"],
                     created_at=payload.get("created_at"),
                     updated_at=payload.get("updated_at"),
+                    owner=payload.get("owner"),
                 )
                 # A case saved before verdict persistence (or with new candidates) just paid
                 # for verifier calls: keep those verdicts so the next reopen is free.

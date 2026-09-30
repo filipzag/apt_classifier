@@ -134,9 +134,12 @@ export function DashboardPage() {
                     <p className="mt-2 line-clamp-2 text-xs leading-relaxed text-faint">
                       {meta?.summary ?? 'Not analysed.'}
                     </p>
-                    <div className="mt-auto flex items-center justify-between pt-3 text-[11px] text-faint">
-                      <span>{item.summary.observations ?? 0} observations</span>
-                      <span>updated {relativeTime(item.updated_at)}</span>
+                    <div className="mt-auto flex items-center justify-between gap-2 pt-3 text-[11px] text-faint">
+                      <span className="truncate">
+                        {item.summary.observations ?? 0} observations
+                        {item.owner ? ` · ${item.owner.name}` : ''}
+                      </span>
+                      <span className="shrink-0">updated {relativeTime(item.updated_at)}</span>
                     </div>
                   </Link>
                 </motion.div>

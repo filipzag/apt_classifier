@@ -196,6 +196,23 @@ class Settings(BaseSettings):
     data_dir: Path = PROJECT_ROOT / "data"
     model_cache_dir: Path = PROJECT_ROOT / ".huggingface"
 
+    # ----- users and sign-in (web app) -----
+    # "auto" = Google sign-in when GOOGLE_CLIENT_ID is set, otherwise a single local analyst.
+    auth_mode: str = "auto"  # auto | off | google
+    google_client_id: str | None = None
+    google_client_secret: SecretStr | None = None
+    # Signs the session cookie; generate one (python -c "import secrets;print(secrets.token_urlsafe(48))").
+    auth_secret_key: SecretStr | None = None
+    # Who may sign in: comma-separated e-mail domains and/or addresses (at least one required).
+    auth_allowed_domains: str = ""
+    auth_allowed_emails: str = ""
+    # Administrators (comma-separated addresses); the first user to sign in is an admin too.
+    auth_admin_emails: str = ""
+    auth_session_hours: int = 8
+    auth_cookie_secure: bool = False  # true behind HTTPS
+    # External origin the OAuth redirect must use when behind a proxy (e.g. https://apt.example.com).
+    auth_public_url: str | None = None
+
     @property
     def raw_dir(self) -> Path:
         return self.data_dir / "raw"
@@ -222,6 +239,16 @@ class Settings(BaseSettings):
                 "OPENROUTER_API_KEY is required. Add it to .env before starting the app."
             )
         return self.openrouter_api_key.get_secret_value()
+
+    @property
+    def users_db_path(self) -> Path:
+        return self.data_dir / "users.db"
+
+    def resolved_auth_mode(self) -> str:
+        mode = str(self.auth_mode or "auto").lower()
+        if mode == "auto":
+            return "google" if self.google_client_id else "off"
+        return mode if mode in {"off", "google"} else "off"
 
     def ensure_directories(self) -> None:
         for path in (self.raw_dir, self.kb_dir, self.audit_dir, self.model_cache_dir):

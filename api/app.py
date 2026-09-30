@@ -20,6 +20,8 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from api import serializers
+from api.auth import current_user, install_auth
+from apt_classifier.config import Settings, get_settings
 from apt_classifier.report import EXPORT_KINDS
 from apt_classifier.service import (
     CaseNotFound,
@@ -28,6 +30,7 @@ from apt_classifier.service import (
     ServiceUnavailable,
     UploadedBlob,
 )
+from apt_classifier.users import User, UserStore
 
 log = logging.getLogger("apt_classifier.api")
 WEB_DIST = Path(__file__).resolve().parents[1] / "web" / "dist"
@@ -84,14 +87,28 @@ def describe_error(exc: BaseException) -> str:
     return f"{type(exc).__name__}: {text[:300]}"
 
 
-def get_service(request: Request) -> CaseService:
+def get_service(request: Request, user: User = Depends(current_user)) -> CaseService:
+    """The case service for an authenticated request (every /api route goes through here)."""
+    del user  # authentication is the point; the user object is requested where it is needed
     service = getattr(request.app.state, "service", None)
     if service is None:
         raise HTTPException(503, "the analysis service is still starting")
     return service
 
 
-def create_app(service: CaseService | None = None, *, serve_web: bool = True) -> FastAPI:
+def owner_of(user: User) -> dict[str, Any] | None:
+    if user.id == "local":
+        return None
+    return {"id": user.id, "name": user.name, "email": user.email}
+
+
+def create_app(
+    service: CaseService | None = None,
+    *,
+    serve_web: bool = True,
+    settings: Settings | None = None,
+    users: UserStore | None = None,
+) -> FastAPI:
     @asynccontextmanager
     async def lifespan(app: FastAPI):
         if getattr(app.state, "service", None) is None:
@@ -101,6 +118,7 @@ def create_app(service: CaseService | None = None, *, serve_web: bool = True) ->
 
     app = FastAPI(title="APT Attribution Assistant API", version="2.0", lifespan=lifespan)
     app.state.service = service
+    install_auth(app, settings or get_settings(), users=users)
 
     @app.exception_handler(CaseNotFound)
     async def _not_found(_: Request, exc: CaseNotFound) -> JSONResponse:
@@ -153,6 +171,11 @@ def create_app(service: CaseService | None = None, *, serve_web: bool = True) ->
                 "name": r.name,
                 "created_at": r.created_at,
                 "updated_at": r.updated_at,
+                "owner": (
+                    {"id": r.owner_id, "name": r.owner_name, "email": r.owner_email}
+                    if r.owner_id
+                    else None
+                ),
                 "summary": {
                     "observations": r.observations,
                     "stage": r.stage,
@@ -181,6 +204,7 @@ def create_app(service: CaseService | None = None, *, serve_web: bool = True) ->
         suspected_origins: str = Form(""),
         files: list[UploadFile] = File(default=[]),
         svc: CaseService = Depends(get_service),
+        user: User = Depends(current_user),
     ) -> dict[str, Any]:
         try:
             phase_map = json.loads(phases or "{}")
@@ -209,7 +233,7 @@ def create_app(service: CaseService | None = None, *, serve_web: bool = True) ->
         # the analysis is CPU/LLM bound: run it off the event loop
         from starlette.concurrency import run_in_threadpool
 
-        case_id = await run_in_threadpool(svc.create_case, payload)
+        case_id = await run_in_threadpool(svc.create_case, payload, owner=owner_of(user))
         return await run_in_threadpool(_case, svc, case_id)
 
     @app.get("/api/cases/{case_id}")
@@ -224,7 +248,14 @@ def create_app(service: CaseService | None = None, *, serve_web: bool = True) ->
         return {"case_id": meta.case_id, "name": meta.name, "updated_at": meta.updated_at}
 
     @app.delete("/api/cases/{case_id}", status_code=204)
-    def delete_case(case_id: str, svc: CaseService = Depends(get_service)) -> Response:
+    def delete_case(
+        case_id: str,
+        svc: CaseService = Depends(get_service),
+        user: User = Depends(current_user),
+    ) -> Response:
+        _, meta = svc.get(case_id)
+        if meta.owner_id and meta.owner_id != user.id and not user.is_admin:
+            raise HTTPException(403, "only the case owner or an administrator can delete it")
         if not svc.delete(case_id):
             raise HTTPException(404, f"case {case_id} was not found")
         return Response(status_code=204)

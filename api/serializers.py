@@ -510,6 +510,7 @@ def case_payload(
         "name": meta.name,
         "created_at": meta.created_at,
         "updated_at": meta.updated_at,
+        "owner": dict(meta.owner) if getattr(meta, "owner", None) else None,
         "ingestion": dict(meta.ingestion or {}),
         "summary": summary,
         "next_step": next_step(state),

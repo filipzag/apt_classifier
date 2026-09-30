@@ -33,6 +33,9 @@ class CaseRecord:
     stage: str | None
     leading_group: str | None
     path: Path
+    owner_id: str | None = None
+    owner_name: str | None = None
+    owner_email: str | None = None
 
     @property
     def label(self) -> str:
@@ -70,6 +73,7 @@ class CaseStore:
             if not isinstance(payload, dict) or payload.get("kind") != "apt_case":
                 continue
             summary = payload.get("summary") or {}
+            owner = payload.get("owner") if isinstance(payload.get("owner"), dict) else {}
             records.append(
                 CaseRecord(
                     case_id=str(payload.get("case_id") or path.stem),
@@ -80,6 +84,9 @@ class CaseStore:
                     stage=summary.get("stage"),
                     leading_group=summary.get("leading_group"),
                     path=path,
+                    owner_id=owner.get("id"),
+                    owner_name=owner.get("name"),
+                    owner_email=owner.get("email"),
                 )
             )
         records.sort(key=lambda item: item.updated_at, reverse=True)
@@ -96,6 +103,7 @@ class CaseStore:
         summary: dict[str, Any] | None = None,
         verifications: list[dict[str, Any]] | None = None,
         zero_shot: dict[str, Any] | None = None,
+        owner: dict[str, Any] | None = None,
     ) -> Path:
         self.directory.mkdir(parents=True, exist_ok=True)
         path = self._path(case_id)
@@ -121,6 +129,8 @@ class CaseStore:
             "verifications": [dict(item) for item in (verifications or [])],
             # the bounded LLM zero-shot vote, replayed on reopen instead of asked again
             "zero_shot": dict(zero_shot) if zero_shot else None,
+            # who created the case (web app users); absent for cases made before sign-in existed
+            "owner": dict(owner) if owner else None,
         }
         tmp = path.with_suffix(".json.tmp")
         tmp.write_text(json.dumps(payload, indent=2, default=str), encoding="utf-8")
@@ -148,6 +158,7 @@ class CaseStore:
             "zero_shot": payload.get("zero_shot")
             if isinstance(payload.get("zero_shot"), dict)
             else None,
+            "owner": payload.get("owner") if isinstance(payload.get("owner"), dict) else None,
             "created_at": payload.get("created_at"),
             "updated_at": payload.get("updated_at"),
         }

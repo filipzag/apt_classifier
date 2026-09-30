@@ -17,3 +17,5 @@ ruff==0.12.12
 fastapi==0.142.0
 uvicorn[standard]==0.37.0
 python-multipart==0.0.20
+authlib==1.8.0
+itsdangerous==2.2.0

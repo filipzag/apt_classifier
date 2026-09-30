@@ -20,12 +20,16 @@ import {
   Radio,
   ShieldAlert,
   Trash2,
+  LogOut,
+  Users,
 } from 'lucide-react'
 import { useState } from 'react'
 import { Link, NavLink, Outlet, useMatch, useNavigate } from 'react-router-dom'
 
 import { api } from '../../api/client'
-import { useCase, useDeleteCase, useRename, useSystem } from '../../api/hooks'
+import { useCase, useDeleteCase, useLogout, useRename, useSystem } from '../../api/hooks'
+import { useMe } from '../AuthGate'
+import { Avatar } from '../../pages/Users'
 import type { CasePayload, SystemInfo } from '../../api/types'
 import { cn, fmt } from '../../lib/utils'
 import { StageBadge } from '../StageBadge'
@@ -128,6 +132,7 @@ function Sidebar({
           <NavItem to="/new" icon={<Plus className="size-4" />}>
             New case
           </NavItem>
+          <AdminNav />
         </div>
         {caseId ? (
           <>
@@ -199,8 +204,49 @@ function Sidebar({
           </>
         ) : null}
       </nav>
+      <UserChip />
       <SystemFooter system={system} />
     </aside>
+  )
+}
+
+function UserChip() {
+  const me = useMe()
+  const logout = useLogout()
+  const google = me.auth.mode === 'google'
+  return (
+    <div className="flex items-center gap-2.5 border-t border-border px-4 py-3">
+      <Avatar name={me.user.name} picture={me.user.picture} />
+      <div className="min-w-0 flex-1 leading-tight">
+        <div className="truncate text-[13px] font-medium">{me.user.name}</div>
+        <div className="text-[11px] text-faint">
+          {me.user.role === 'admin' ? 'Administrator' : 'Analyst'}
+          {google ? '' : ' · sign-in off'}
+        </div>
+      </div>
+      {google ? (
+        <Tip content="Sign out">
+          <button
+            type="button"
+            onClick={() => logout.mutate()}
+            className="rounded-md p-1.5 text-faint hover:bg-surface-2 hover:text-text focus-ring"
+            aria-label="Sign out"
+          >
+            <LogOut className="size-4" />
+          </button>
+        </Tip>
+      ) : null}
+    </div>
+  )
+}
+
+function AdminNav() {
+  const me = useMe()
+  if (me.user.role !== 'admin') return null
+  return (
+    <NavItem to="/admin/users" icon={<Users className="size-4" />}>
+      Users
+    </NavItem>
   )
 }
 
@@ -251,8 +297,10 @@ function TopBar({
   system?: SystemInfo
 }) {
   const navigate = useNavigate()
+  const me = useMe()
   const rename = useRename(caseId ?? '')
   const remove = useDeleteCase()
+  const mayDelete = !data?.owner || data.owner.id === me.user.id || me.user.role === 'admin'
   const [editing, setEditing] = useState(false)
   const [draft, setDraft] = useState('')
 
@@ -309,6 +357,9 @@ function TopBar({
               </button>
             )}
             <StageBadge stage={stage} short />
+            {data?.owner ? (
+              <span className="hidden text-[11px] text-faint lg:inline">by {data.owner.name}</span>
+            ) : null}
             {data?.decision?.leading_group_name ? (
               <span className="hidden truncate text-xs text-muted lg:inline">
                 {data.decision.named ? 'Named:' : 'Closest:'}{' '}
@@ -328,6 +379,7 @@ function TopBar({
               </Link>
             ) : null}
             <ExportMenu caseId={caseId} />
+            {mayDelete ? (
             <Tip content="Delete this case permanently">
               <Button
                 variant="ghost"
@@ -342,6 +394,7 @@ function TopBar({
                 <Trash2 className="size-4" />
               </Button>
             </Tip>
+            ) : null}
           </div>
         </>
       ) : (

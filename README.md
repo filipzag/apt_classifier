@@ -237,6 +237,27 @@ goes through `apt_classifier/service.py`, the same headless service any other fr
 use. Cases are saved automatically under `data/cases/` after every change, including the verifier's verdicts, so reopening a case replays them instead of calling the model again. Docker builds the
 web bundle in a Node stage and serves it from the Python image (`docker compose up`, port 8100).
 
+### Users and Google sign-in
+
+The web app can run as a shared team workspace with Google sign-in (OpenID Connect):
+
+1. In the Google Cloud console create an OAuth client ID of type *Web application* and add the
+   authorised redirect URI(s): `http://127.0.0.1:5173/auth/callback` for the Vite dev server,
+   `http://127.0.0.1:8100/auth/callback` when the API serves the built app, and your production
+   URL (`https://<host>/auth/callback`, with `AUTH_PUBLIC_URL=https://<host>`).
+2. Set `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`, `AUTH_SECRET_KEY` and an allowlist
+   (`AUTH_ALLOWED_DOMAINS` and/or `AUTH_ALLOWED_EMAILS`) in `.env`; without an allowlist the
+   server refuses to start in google mode. `AUTH_ADMIN_EMAILS` names administrators; the first
+   user to sign in is an administrator as well.
+3. Restart the API. Every `/api` route now needs a session; the app shows a sign-in page.
+
+Users live in `data/users.db` (SQLite): address, name, picture, role (`admin` or `analyst`),
+active flag, sign-in times. Administrators manage users on the *Users* page and can delete any
+case; analysts see every case in the workspace, create cases attributed to them, and can delete
+only their own. Without Google credentials (`AUTH_MODE=auto` or `off`) the app runs as one
+local analyst with administrator rights, which is also how the tests run. The legacy Streamlit
+UI has no sign-in and should only be run locally.
+
 ### Optional Elastic Agent Builder MCP
 
 The supported connector targets Elastic Agent Builder MCP on Elasticsearch 9.2+/9.3+ or Elastic Serverless, not the deprecated standalone Elasticsearch MCP server. Create an API key restricted to intended security indices with `read` and `view_index_metadata`, plus Kibana `feature_agentBuilder.read` access, then configure:

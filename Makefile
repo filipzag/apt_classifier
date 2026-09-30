@@ -7,7 +7,7 @@ EVIDENCEFORGE_CLINIC_DIR ?= ../evidenceforge_clinic
 PUBLIC_BASELINE ?= data/audits/public_heldout_baseline.json
 PUBLIC_CURRENT ?= data/audits/public_heldout_current.json
 
-.PHONY: api api-dev api-local web-install web-dev web-build web-check run-next setup up down ingest run run-local test lint evidenceforge-eval evidenceforge-eval-all benchmark-public benchmark-curated verify-results check-regression fit-acceptance benchmark-attribution train-reranker generate-synthetic benchmark-cti-hal benchmark-cti-hal-production benchmark-attribution-production
+.PHONY: api api-dev api-local api-auth-demo web-install web-dev web-build web-check run-next setup up down ingest run run-local test lint evidenceforge-eval evidenceforge-eval-all benchmark-public benchmark-curated verify-results check-regression fit-acceptance benchmark-attribution train-reranker generate-synthetic benchmark-cti-hal benchmark-cti-hal-production benchmark-attribution-production
 
 setup:
 	python3 -m venv --system-site-packages .venv
@@ -108,6 +108,10 @@ api:
 
 api-dev:
 	PYTHONPATH=. $(PYTHON) -m uvicorn api.main:app --host 127.0.0.1 --port 8100 --reload --reload-dir api --reload-dir apt_classifier
+
+# Shows the sign-in page without real Google credentials (the Google redirect itself fails).
+api-auth-demo:
+	AUTH_MODE=google GOOGLE_CLIENT_ID=demo GOOGLE_CLIENT_SECRET=demo AUTH_SECRET_KEY=demo-only AUTH_ALLOWED_DOMAINS=example.com PYTHONPATH=. $(PYTHON) -m uvicorn api.main:app --host 127.0.0.1 --port 8100
 
 api-local:
 	OPENROUTER_API_KEY= PYTHONPATH=. $(PYTHON) -m uvicorn api.main:app --host 127.0.0.1 --port 8100
