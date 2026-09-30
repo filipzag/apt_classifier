@@ -3087,8 +3087,9 @@ comparison is between rank fusions:
 | 0 / 1.0 | 0.621 | 0.915 | 0.739 | 28 | 26 / 2 |
 | 0.5 / 0.5 | 0.693 | 0.980 | 0.810 | 28 | 45 / 2 |
 
-The real-report check (55 CTI-HAL reports, combiner off on both sides; every look is listed) decided
-the adoption:
+The real-report check (55 CTI-HAL reports with the statements as reported, the protocol before the
+anonymized headline of 21.3.4b; combiner off on both sides; every look is listed) decided the
+adoption:
 
 | group forest / country forest weight | top-1 | top-5 | MRR | named | wrong names | reports better / worse |
 |---|---|---|---|---|---|---|
@@ -3113,7 +3114,7 @@ removed actor. Final comparison with the shipped pipeline (combiner on in both):
 | benchmark | top-1 | top-5 | MRR | named (all correct) | unknown named | better / worse |
 |---|---|---|---|---|---|---|
 | ATT&CK folds, seed 7 | 0.837 -> 0.830 | 0.967 -> 0.961 | 0.883 -> 0.880 | 33 -> 32 | 0 / 25 | 5 / 9 |
-| CTI-HAL, 55 reports | 0.545 -> 0.564 | 0.745 -> 0.727 | 0.632 -> 0.636 | 13 -> 15 | | 14 / 3 |
+| CTI-HAL, 55 reports (as reported) | 0.545 -> 0.564 | 0.745 -> 0.727 | 0.632 -> 0.636 | 13 -> 15 | | 14 / 3 |
 
 Real reports improve (cluster-aware top-1 0.673 -> 0.709, reports without software 0.222 -> 0.278)
 and no wrong name appears anywhere, but the folds lose one top-1 case and 0.003 MRR. Seven of the nine
