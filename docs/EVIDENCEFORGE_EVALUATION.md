@@ -121,6 +121,13 @@ are kept under `data/audits/superseded/`.
    in response, because any change motivated by a clinic failure would end its held-out
    status; the public held-out benchmark carries no zero-label cases, so this is the one
    place where over-acceptance is visible and it must be watched.
+   Since the labelled-sentence exemplars (2026-09-30, technical documentation 8.2 and 21.3.10)
+   all three red herrings are accepted in narrative mode: `cln-rh-002#1` is also accepted as
+   T1070.003, in narrative and eCAR mode, while narrative micro-F1 rose from 0.23 to 0.36 and
+   hit@1 from 0.22 to 0.33. The development bundles show the same trade (manufacturing
+   `mfg-rh-001#0` accepted as T1074 in narrative and eCAR mode). The exemplar change was
+   adopted for its real-report gains; nothing was tuned on the clinic bundle, and
+   `TECHNIQUE_EXEMPLARS_ENABLED=false` restores the previous acceptance behaviour.
 2. **Ranking is ahead of acceptance everywhere.** hit@10 is 0.59 to 0.80 in narrative mode
    while accepted-set F1 is 0.21 to 0.32: the correct technique is usually surfaced for
    review, but the local gate accepts at most one similarity-only candidate per observation.

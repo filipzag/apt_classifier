@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from apt_classifier.evidence.models import EvidenceLedger, Observation, Provenance
+from apt_classifier.memo import ObjectMemo
 
 _HASH_RE = re.compile(
     r"(?i)(?<![0-9a-f])(?:[0-9a-f]{128}|[0-9a-f]{64}|[0-9a-f]{40}|[0-9a-f]{32})(?![0-9a-f])"
@@ -277,15 +278,118 @@ def _aliases(record: Any) -> list[str]:
     return list(dict.fromkeys(alias.strip() for alias in values if alias.strip()))
 
 
-def _alias_pattern(alias: str) -> re.Pattern[str]:
+def _alias_pattern(alias: str, *, exact_case: bool = False) -> re.Pattern[str]:
     prefix = r"(?<!\w)" if alias[0].isalnum() or alias[0] == "_" else ""
     suffix = r"(?!\w)" if alias[-1].isalnum() or alias[-1] == "_" else ""
-    return re.compile(f"{prefix}{re.escape(alias)}{suffix}", re.I)
+    return re.compile(f"{prefix}{re.escape(alias)}{suffix}", 0 if exact_case else re.I)
+
+
+# Ordinary-word aliases. ATT&CK lists some software under names that are also plain English
+# words ("Page" for Elise, "Wiper", "Expand", "CALENDAR"). Matched case-insensitively they fire
+# on running text ("the payment page") and, for malware documented for a single group, hand that
+# group decisive software evidence. Which aliases are ambiguous is read from the knowledge base
+# itself rather than from a hand-written list: an alias is ambiguous when ATT&CK's own prose
+# (technique, group and software descriptions and procedure sentences; code spans, citations,
+# link targets and URLs removed; the software's own description excluded) uses its lowercase
+# form as an ordinary word at least as often as it writes the exact name. Such an alias only
+# matches in its exact spelling; a title-case one ("Page") also never at the start of a
+# sentence, where a leading capital carries no information (CALENDAR and ZLib still do).
+# Aliases whose canonical spelling is lowercase (netsh, certutil) are command names and keep
+# the case-insensitive match.
+_PROSE_TOKEN_RE = re.compile(r"(?<![\w\-./\\])[A-Za-z][A-Za-z0-9\-]*(?![\w\-]|\.\w)")
+_SINGLE_TOKEN_RE = re.compile(r"[A-Za-z][A-Za-z0-9\-]*")
+_PROSE_NOISE_RE = re.compile(
+    r"<code>.*?</code>|`[^`]*`|\(Citation:[^)]*\)|\]\([^)]*\)|https?://\S+", re.S
+)
+_SENTENCE_LEAD_CHARS = " \t\"'\u201c\u2018([{*-\u2022"
+_AMBIGUOUS_ALIAS_CACHE: ObjectMemo[frozenset[str]] = ObjectMemo()
+
+
+def _sentence_initial(text: str, start: int) -> bool:
+    prefix = text[:start].rstrip(_SENTENCE_LEAD_CHARS)
+    return not prefix or prefix[-1] in ".!?:;\n\r"
+
+
+def _title_case(token: str) -> bool:
+    """Only the first letter is a capital: at a sentence start that capital says nothing."""
+    return token[:1].isupper() and token[1:] == token[1:].lower()
+
+
+def _prose_counts(text: str, wanted: set[str]) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    cleaned = _PROSE_NOISE_RE.sub(" ", text)
+    for match in _PROSE_TOKEN_RE.finditer(cleaned):
+        token = match.group()
+        if token not in wanted:
+            continue
+        if _title_case(token) and _sentence_initial(cleaned, match.start()):
+            continue  # a leading capital at the start of a sentence is not evidence of a name
+        counts[token] = counts.get(token, 0) + 1
+    return counts
+
+
+def _kb_prose(kb: Any) -> list[str]:
+    texts: list[str] = []
+    for container_name in ("techniques", "groups"):
+        container = _value(kb, container_name)
+        values = container.values() if isinstance(container, Mapping) else ()
+        for record in values:
+            texts.append(str(_value(record, "description") or ""))
+            behaviours = _value(record, "technique_behaviors")
+            if isinstance(behaviours, Mapping):
+                for sentences in behaviours.values():
+                    texts.extend(str(sentence) for sentence in _iter_container(sentences))
+    return texts
+
+
+def ambiguous_software_aliases(kb: Any) -> frozenset[str]:
+    """Aliases (exact spelling) that only match case-sensitively; see the note above."""
+    if kb is None:
+        return frozenset()
+    records = _software_records(kb)
+    stamp = (
+        str(_value(kb, "version") or ""),
+        len(records),
+        len(_value(kb, "techniques") or ()),
+        len(_value(kb, "groups") or ()),
+    )
+    cached = _AMBIGUOUS_ALIAS_CACHE.get(kb, stamp)
+    if cached is not None:
+        return cached
+    candidates: dict[str, list[str]] = {}
+    for record in records:
+        for alias in _aliases(record):
+            if (
+                len(alias) >= 3
+                and alias != alias.lower()
+                and alias.casefold() not in _GENERIC_ALIASES
+                and _SINGLE_TOKEN_RE.fullmatch(alias)
+            ):
+                candidates.setdefault(alias, []).append(str(_value(record, "description") or ""))
+    if not candidates:
+        return _AMBIGUOUS_ALIAS_CACHE.put(kb, stamp, frozenset())
+    wanted = set(candidates) | {alias.lower() for alias in candidates}
+    totals: dict[str, int] = {}
+    for text in [*_kb_prose(kb), *(str(_value(r, "description") or "") for r in records)]:
+        for token, count in _prose_counts(text, wanted).items():
+            totals[token] = totals.get(token, 0) + count
+    ambiguous: set[str] = set()
+    for alias, own_descriptions in candidates.items():
+        word_uses = totals.get(alias.lower(), 0)
+        name_uses = totals.get(alias, 0)
+        for description in own_descriptions:  # the software's own description is not evidence
+            own = _prose_counts(description, {alias, alias.lower()})
+            word_uses -= own.get(alias.lower(), 0)
+            name_uses -= own.get(alias, 0)
+        if word_uses > 0 and word_uses >= name_uses:
+            ambiguous.add(alias)
+    return _AMBIGUOUS_ALIAS_CACHE.put(kb, stamp, frozenset(ambiguous))
 
 
 def match_software_aliases(text: str, kb: Any) -> list[SoftwareAliasMatch]:
     source = str(text or "")
     matches: list[SoftwareAliasMatch] = []
+    ambiguous = ambiguous_software_aliases(kb)
     for record in _software_records(kb):
         name = str(_value(record, "name")).strip()
         software_id = _external_id(record)
@@ -298,8 +402,11 @@ def match_software_aliases(text: str, kb: Any) -> list[SoftwareAliasMatch]:
         for alias in aliases:
             if len(alias) < 3 or alias.casefold() in _GENERIC_ALIASES or alias.isdecimal():
                 continue
-            for match in _alias_pattern(alias).finditer(source):
+            exact_case = alias in ambiguous
+            for match in _alias_pattern(alias, exact_case=exact_case).finditer(source):
                 start, end = match.span()
+                if exact_case and _title_case(alias) and _sentence_initial(source, start):
+                    continue
                 if any(
                     start < seen_end and seen_start < end for seen_start, seen_end in seen_spans
                 ):

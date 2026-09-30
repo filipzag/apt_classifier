@@ -1,7 +1,12 @@
 from types import SimpleNamespace
 
+from apt_classifier.attack.kb import AttackKnowledgeBase, Group, Software, Technique
 from apt_classifier.evidence.extract import extract_attack_actions
-from apt_classifier.evidence.iocs import extract_iocs
+from apt_classifier.evidence.iocs import (
+    ambiguous_software_aliases,
+    extract_iocs,
+    match_software_aliases,
+)
 from apt_classifier.evidence.models import (
     EvidenceLedger,
     Observation,
@@ -141,6 +146,68 @@ def test_iocs_and_software_aliases_are_extracted(synthetic_kb):
     assert {"ioc", "software"} <= kinds
     software = next(observation for observation in observations if observation.kind == "software")
     assert software.metadata["software_id"] == "S1"
+
+
+def _alias_kb():
+    return AttackKnowledgeBase(
+        version="t",
+        techniques={
+            "T1": Technique(
+                id="T1",
+                name="Phishing",
+                description=(
+                    "Adversaries may clone a login page. The page captures credentials. "
+                    "Operators ran mimikatz. A calendar event can start a timer."
+                ),
+            ),
+        },
+        groups={
+            "G1": Group(
+                id="G1",
+                name="Lotus",
+                description="The group used Mimikatz and [Elise](https://x) (Citation: page).",
+                technique_behaviors={"T1": ["The group ran Mimikatz, then netsh."]},
+            )
+        },
+        software={
+            "S1": Software(
+                id="S1",
+                name="Elise",
+                software_type="malware",
+                aliases=["Elise", "Page"],
+                description="Elise, also known as Page. Page is a backdoor.",
+            ),
+            "S2": Software(
+                id="S2", name="Mimikatz", software_type="tool", description="Mimikatz dumps."
+            ),
+            "S3": Software(id="S3", name="netsh", software_type="tool", description="netsh."),
+            "S4": Software(id="S4", name="CALENDAR", software_type="malware"),
+        },
+    )
+
+
+def test_ordinary_word_aliases_match_only_in_their_exact_spelling():
+    kb = _alias_kb()
+    # ATT&CK prose uses "page" and "calendar" as words; code spans, citations, link targets and
+    # the software's own description are not evidence; Mimikatz is mostly written as a name
+    assert ambiguous_software_aliases(kb) == frozenset({"Page", "CALENDAR"})
+
+    def ids(text):
+        return [(m.software_id, m.matched_alias) for m in match_software_aliases(text, kb)]
+
+    assert ids("The skimmer sat on the payment page.") == []
+    assert ids("They deployed the Page backdoor.") == [("S1", "Page")]
+    assert ids("Page was dropped to disk.") == []  # a leading capital at a sentence start
+    assert ids("CALENDAR beaconed out.") == [("S4", "CALENDAR")]  # all caps stays informative
+    assert ids("a calendar invite") == []
+    # names that are not ordinary words and lowercase command names keep matching any case
+    assert ids("they ran mimikatz and NETSH") == [("S2", "mimikatz"), ("S3", "NETSH")]
+    assert ids("Elise was loaded") == [("S1", "Elise")]
+    # knowledge bases without prose (or none) change nothing
+    assert ambiguous_software_aliases(None) == frozenset()
+    bare = AttackKnowledgeBase(software={"S1": Software(id="S1", name="Page")})
+    assert ambiguous_software_aliases(bare) == frozenset()
+    assert [m.software_id for m in match_software_aliases("the page", bare)] == ["S1"]
 
 
 def test_strategic_context_normalizes_lists_and_round_trips():

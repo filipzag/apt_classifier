@@ -31,6 +31,8 @@ function evidenceSummary(candidate: Candidate): string[] {
     else if (item.source === 'dense' && item.score !== null) parts.push(`dense ${fmt(item.score)} (${item.field ?? '?'})`)
     else if (item.source === 'lexical' && item.rank !== null) parts.push(`lexical #${item.rank}`)
     else if (item.source === 'explicit_cue' || item.source === 'structured_signal') parts.push('cue')
+    else if (item.source === 'exemplar' && item.rank !== null && item.score !== null)
+      parts.push(`exemplar ${fmt(item.score)} (#${item.rank})`)
     else if (item.source === 'corroboration') parts.push('corroborated')
     else if (item.source === 'analyst_review') parts.push('analyst')
   }
@@ -204,6 +206,26 @@ function TechniquesView({ caseId, data }: { caseId: string; data: CasePayload })
                             {c.technique_id}
                             {c.is_subtechnique && c.parent_technique_id ? ` · sub of ${c.parent_technique_id}` : ''}
                           </div>
+                          {(() => {
+                            const ex = c.evidence.find((e) => e.source === 'exemplar' && e.rank !== null && e.text)
+                            return ex ? (
+                              <Tip
+                                content={
+                                  <span>
+                                    Nearest labelled report sentence: “{ex.text}”
+                                    <br />
+                                    <span className="text-faint">
+                                      {ex.dataset ? `${ex.dataset} train split of ` : ''}tumeteor/mitre-ttp-mapping (CC-BY-4.0)
+                                    </span>
+                                  </span>
+                                }
+                              >
+                                <div className="mt-0.5 max-w-[260px] cursor-help truncate text-[11px] text-violet/80">
+                                  like: “{ex.text}”
+                                </div>
+                              </Tip>
+                            ) : null
+                          })()}
                         </td>
                         <td>
                           <div className="flex items-center gap-1.5">

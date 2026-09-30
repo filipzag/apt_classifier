@@ -33,6 +33,7 @@ from apt_classifier.evaluation import (
     source_fingerprint,
 )
 from apt_classifier.evidence.models import EvidenceLedger, Observation, Provenance
+from apt_classifier.exemplars import exemplar_kwargs, load_exemplar_index
 from apt_classifier.retrieve import (
     _BENIGN_INDICATORS,
     MIN_SIMILARITY_ONLY_WORDS,
@@ -56,6 +57,7 @@ def extract_rows(
     store: ChromaVectorStore,
     lexical_index: LexicalTechniqueIndex,
     priors: dict[str, list[float]] | None = None,
+    exemplar_index: Any = None,
 ) -> tuple[list[dict[str, float]], list[int], list[str], dict[str, int]]:
     rows: list[dict[str, float]] = []
     labels: list[int] = []
@@ -83,6 +85,7 @@ def extract_rows(
             acceptance_threshold=settings.technique_acceptance_threshold,
             relative_margin=settings.technique_relative_margin,
             acceptance_model=None,
+            **exemplar_kwargs(settings, exemplar_index),
         )
         expected = set(case.expected_technique_ids)
         expected_counts[case.case_id] = len(expected)
@@ -115,6 +118,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--seed", type=int, default=7)
     parser.add_argument("--l2", type=float, default=1.0)
     parser.add_argument("--min-precision", type=float, default=0.5)
+    parser.add_argument(
+        "--no-exemplars",
+        action="store_true",
+        help="fit without the exemplar index (schema-3 features stay at their empty values)",
+    )
     parser.add_argument("--output", type=Path, default=DEFAULT_OUTPUT)
     parser.add_argument(
         "--priors-split",
@@ -180,9 +188,25 @@ def main(argv: list[str] | None = None) -> int:
     embedder = SentenceTransformerEmbedder.from_settings(settings)
     store = ChromaVectorStore(settings, embedder)
     lexical_index = LexicalTechniqueIndex.from_kb(kb)
+    exemplar_index, exemplar_status = load_exemplar_index(settings)
+    if args.no_exemplars:
+        exemplar_index, exemplar_status = None, "disabled by --no-exemplars"
+    elif exemplar_index is None:
+        parser.error(
+            f"exemplar index unavailable ({exemplar_status}); run make exemplars or pass --no-exemplars"
+        )
+    if exemplar_index is not None and args.split != "dev":
+        parser.error("the exemplar index is built from the train split: fit on --split dev only")
+    print(f"exemplars: {exemplar_status}")
     started = time.time()
     rows, labels, case_ids, expected_counts = extract_rows(
-        cases, settings=settings, kb=kb, store=store, lexical_index=lexical_index, priors=priors
+        cases,
+        settings=settings,
+        kb=kb,
+        store=store,
+        lexical_index=lexical_index,
+        priors=priors,
+        exemplar_index=exemplar_index,
     )
     print(
         f"extracted {len(rows)} candidate rows from {len(cases)} cases in {time.time() - started:.0f}s"
@@ -196,6 +220,21 @@ def main(argv: list[str] | None = None) -> int:
     )
     model.threshold = float(operating_point["threshold"])
     model.metadata = {
+        # the runtime refuses this model unless the same exemplar index is loaded
+        "exemplar_fingerprint": exemplar_index.fingerprint if exemplar_index is not None else None,
+        "exemplars": (
+            {
+                "fingerprint": exemplar_index.fingerprint,
+                "count": len(exemplar_index),
+                **{
+                    k: v
+                    for k, v in exemplar_kwargs(settings, exemplar_index).items()
+                    if k != "exemplar_index"
+                },
+            }
+            if exemplar_index is not None
+            else None
+        ),
         "split": args.split,
         "datasets": sorted(set(args.datasets)),
         "case_count": len(cases),

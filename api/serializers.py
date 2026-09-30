@@ -47,6 +47,9 @@ def _evidence_items(candidate: Any) -> list[dict[str, Any]]:
                 "score": item.score,
                 "rank": item.rank,
                 "text": (item.text or "")[:240] or None,
+                # exemplar evidence names the labelled corpus its sentence comes from, so the
+                # UI can attribute it (tumeteor/mitre-ttp-mapping is CC-BY-4.0)
+                "dataset": (getattr(item, "metadata", None) or {}).get("source_dataset"),
             }
         )
     return rows

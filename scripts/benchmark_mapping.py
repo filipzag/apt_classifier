@@ -46,6 +46,7 @@ from apt_classifier.evaluation import (
     write_artifact,
 )
 from apt_classifier.evidence.models import EvidenceLedger, Observation, Provenance
+from apt_classifier.exemplars import exemplar_kwargs, load_exemplar_index
 from apt_classifier.reranker import LocalReranker, RerankerConfig
 from apt_classifier.retrieve import (
     LEXICAL_DEFAULT_FIELDS,
@@ -68,6 +69,7 @@ FINGERPRINTED_SOURCES = (
     REPO_ROOT / "apt_classifier" / "presets.py",
     REPO_ROOT / "apt_classifier" / "vectorstore.py",
     REPO_ROOT / "apt_classifier" / "acceptance.py",
+    REPO_ROOT / "apt_classifier" / "exemplars.py",
 )
 SUMMARY_METRICS = (
     "micro_precision",
@@ -204,6 +206,7 @@ def run(
     cues_enabled: bool = True,
     acceptance_model: Any = None,
     reranker: Any = None,
+    exemplar_index: Any = None,
     bootstrap_samples: int = 300,
     bootstrap_seed: int = 7,
     max_candidate_rows: int = 12,
@@ -245,6 +248,7 @@ def run(
             corroboration_accept_min_probability=float(
                 getattr(settings, "technique_corroboration_accept_min_probability", 0.2)
             ),
+            **exemplar_kwargs(settings, exemplar_index),
         )
         candidates = sorted(result.candidates, key=lambda item: item.fused_rank)
         ranked = tuple(dict.fromkeys(candidate.technique_id for candidate in candidates))
@@ -308,6 +312,20 @@ def run(
             else None
         ),
         "settings": retrieval_settings(settings),
+        "exemplar_index": (
+            {
+                "fingerprint": exemplar_index.fingerprint,
+                "count": len(exemplar_index),
+                "k": int(getattr(settings, "technique_exemplar_k", 64)),
+                "tau": float(getattr(settings, "technique_exemplar_tau", 0.05)),
+                "duplicate_similarity": float(
+                    getattr(settings, "technique_exemplar_duplicate_similarity", 0.95)
+                ),
+                "new_candidates": int(getattr(settings, "technique_exemplar_new_candidates", 0)),
+            }
+            if exemplar_index is not None
+            else None
+        ),
         "source_fingerprint": source_fingerprint(FINGERPRINTED_SOURCES),
     }
     return {
@@ -440,10 +458,11 @@ def main(argv: list[str] | None = None) -> int:
     cue_settings = (
         (True, False) if args.ablate_cues else ((False,) if args.disable_cues else (True,))
     )
+    exemplar_index, exemplar_status = load_exemplar_index(settings)
     model, model_status = (
         (None, "disabled by --no-acceptance-model")
         if args.no_acceptance_model
-        else load_acceptance_model(settings, kb)
+        else load_acceptance_model(settings, kb, exemplar_index)
     )
     model_settings = (model, None) if args.ablate_acceptance_model and model else (model,)
     reranker = build_reranker(settings, kb)
@@ -451,6 +470,7 @@ def main(argv: list[str] | None = None) -> int:
         parser.error("RERANKER_ENABLED is set but the reranker failed to load (see stderr)")
     reranker_settings = (reranker, None) if args.ablate_reranker and reranker else (reranker,)
     if not args.quiet:
+        print(f"exemplars: {exemplar_status}")
         print(f"acceptance model: {model_status}")
         print(f"reranker: {'active' if reranker is not None else 'off'}")
     results: dict[str, Any] = {}
@@ -473,6 +493,7 @@ def main(argv: list[str] | None = None) -> int:
                         cues_enabled=cues_enabled,
                         acceptance_model=acceptance_model,
                         reranker=active_reranker,
+                        exemplar_index=exemplar_index,
                         bootstrap_samples=args.bootstrap_samples,
                         bootstrap_seed=args.seed,
                         max_candidate_rows=args.max_candidate_rows,
@@ -493,6 +514,7 @@ def main(argv: list[str] | None = None) -> int:
         "case_diagnostics": case_diagnostics,
         "attack_version": kb.version,
         "acceptance_model_status": model_status,
+        "exemplar_status": exemplar_status,
         "results": results,
     }
     if args.output:

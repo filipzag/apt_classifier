@@ -7,7 +7,7 @@ EVIDENCEFORGE_CLINIC_DIR ?= ../evidenceforge_clinic
 PUBLIC_BASELINE ?= data/audits/public_heldout_baseline.json
 PUBLIC_CURRENT ?= data/audits/public_heldout_current.json
 
-.PHONY: fit-combiner api api-dev api-local api-auth-demo web-install web-dev web-build web-check run-next setup up down ingest run run-local test lint evidenceforge-eval evidenceforge-eval-all benchmark-public benchmark-curated verify-results check-regression fit-acceptance benchmark-attribution train-reranker generate-synthetic benchmark-cti-hal benchmark-cti-hal-production benchmark-attribution-production
+.PHONY: exemplars fit-combiner api api-dev api-local api-auth-demo web-install web-dev web-build web-check run-next setup up down ingest run run-local test lint evidenceforge-eval evidenceforge-eval-all benchmark-public benchmark-curated verify-results check-regression fit-acceptance benchmark-attribution train-reranker generate-synthetic benchmark-cti-hal benchmark-cti-hal-production benchmark-attribution-production
 
 setup:
 	python3 -m venv --system-site-packages .venv
@@ -73,8 +73,16 @@ check-regression:
 fit-combiner:
 	PYTHONPATH=. $(PYTHON) scripts/fit_attribution_combiner.py --seeds 11 23 37 --variants 5 --unknown-all
 
+# Labelled real-report sentences (public train splits) used as technique-mapping evidence;
+# needs scripts/prepare_public_benchmarks.py output. Run before fit-acceptance.
+exemplars:
+	PYTHONPATH=. $(PYTHON) scripts/build_exemplar_index.py
+
+# Shipped configuration: public dev split, no per-technique priors (priors were measured and
+# rejected, docs 21.3), exemplar features from `make exemplars`.
 fit-acceptance:
-	PYTHONPATH=. $(PYTHON) scripts/fit_acceptance_model.py
+	PYTHONPATH=. $(PYTHON) scripts/fit_acceptance_model.py --priors-split none
+	PYTHONPATH=. $(PYTHON) scripts/fit_acceptance_model.py --priors-split none --no-exemplars --output data/models/acceptance/acceptance_model_no_exemplars.json
 
 # Train the local cross-encoder reranker on the public train splits (dev splits calibrate the
 # promote/demote thresholds). Mined negatives are cached so a retry skips the mining pass.

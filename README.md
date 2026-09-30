@@ -124,11 +124,14 @@ typed by hand.
 | **pooled (current, acceptance model)** | 1391 | 0.32 [0.30, 0.34] | 0.50 | 0.24 | 0.35 | 0.53 | 0.73 |
 | **pooled (current, + ranking by acceptance probability)** | 1391 | 0.32 [0.30, 0.34] | 0.50 | 0.24 | **0.40** | **0.58** | **0.75** |
 | opt-in priors model (not shipped, see docs 21.3.6) | 1391 | 0.36 [0.34, 0.39] | 0.51 | 0.28 | 0.44 | 0.64 | 0.76 |
+| **pooled (current, + labelled-sentence exemplars, 2026-09-30)** | 1391 | **0.42 [0.39, 0.44]** | 0.52 | 0.35 | **0.50** | 0.67 | **0.80** |
 
 Baseline = before the acceptance-gate work; current = after (see docs section 21.3.6). The last row
-probability-ranking row is the shipped default since 2026-09-28: candidates are ordered by the calibrated
-probability that the mapping is correct. The per-technique priors model maps better still but named a wrong
-group on a real report, so it is kept as an opt-in artifact only (docs 8.2, 21.3.4b).
+probability-ranking row was the shipped default from 2026-09-28; since 2026-09-30 the acceptance model also
+reads what the nearest labelled public report sentences say about each candidate (exemplars, docs 8.2 and
+21.3.10). Part of that public gain is within-collection, because the exemplars are the same datasets' train
+splits; the CTI-HAL gain below is the cleaner estimate. The per-technique priors model named a wrong group on
+a real report, so it is kept as an opt-in artifact only (docs 8.2, 21.3.4b).
 
 **Curated retrieval (30 positive + 6 hard-negative cases):**
 
@@ -141,19 +144,23 @@ group on a real report, so it is kept as an opt-in artifact only (docs 8.2, 21.3
 
 **OTRF Sysmon (9 cases):** 9/9 top-1 with cues.
 
-**EvidenceForge held-out clinic bundle (narrative, 21 cases):** micro-F1 0.23 [0.00, 0.45],
-hit@1 0.22, hit@10 0.56; two of three benign red herrings are accepted (zero-label FPR 0.67).
-With the OpenRouter verifier enabled (production pipeline) narrative micro-F1 is 0.53, recall 0.56.
+**EvidenceForge held-out clinic bundle (narrative, 21 cases):** micro-F1 0.36 (was 0.23 before the
+exemplars), hit@1 0.33 (was 0.22); all three benign red herrings are now accepted (was two), and on the
+development bundles narrated telemetry loses some ranking, so structured-telemetry deployments can set
+`TECHNIQUE_EXEMPLARS_ENABLED=false` (docs 21.3.10). With the OpenRouter verifier enabled (production pipeline,
+measured before the exemplars) narrative micro-F1 was 0.53, recall 0.56.
 
-**Attribution (text in, group out; 153 held-out groups):** top-1 0.59 (was 0.38), top-5 0.80, MRR 0.71;
-cluster-aware top-1 0.60 (a documented related group at rank 1 counts). With the separation gate 35 known
-groups were named, all correct, and 0/25 removed actors were named (was 4): named risk 0.00 (was 0.56) at
-20% coverage (was 8%).
+**Attribution (text in, group out; 153 held-out groups):** top-1 0.84 (was 0.38 before the fusion work and
+0.60 before the learned combiner), top-5 0.97, MRR 0.88. With the separation gate 33 known groups are named,
+all correct, and 0/25 removed actors are named (was 4): named risk 0.00 (was 0.56) at 19% coverage.
 
-**CTI-HAL real reports (55 reports, 6 groups; local evaluation only):** statement mapping F1 0.32, hit@1 0.33 (was 0.27 before probability ranking);
-attribution top-1 0.45 (was 0.36 before the tool cap, decisive-malware boost and discriminative re-ranking), cluster-aware top-1 0.60, top-5 0.65, MRR 0.57, accepted-technique recall per report 0.31 (was 0.26 before corroboration acceptance); 12 reports reached a named
-hypothesis, all correct (was 3 under the maturity gate) (at the previous bar of 0.78 the gate named 7 and 3 were wrong, which is why the
-bar was raised). With the production pipeline (verifier + LLM vote; 10-report sample, $3.37) technique
+**CTI-HAL real reports (55 reports, 6 groups; local evaluation only):** statement mapping F1 0.38 (was 0.32 before the
+exemplars), recall 0.34 (was 0.25), hit@1 0.38 (was 0.33); median accepted-technique recall per report 0.42 (was 0.31);
+attribution top-1 0.55 (was 0.36 before the tool cap, decisive-malware boost, discriminative re-ranking, combiner and
+exemplars), cluster-aware top-1 0.67, top-5 0.75, MRR 0.63; 13 reports reached a named hypothesis, all correct (was 3
+under the maturity gate; at the previous bar of 0.78 the gate named 7 and 3 were wrong, which is why the bar was
+raised). Ordinary-word software aliases (ATT&CK lists "Page" for Elise) now match only in their exact spelling;
+before that fix the exemplar change named Lotus Blossom on a FIN6 report (docs 5.5). With the production pipeline (verifier + LLM vote; 10-report sample, $3.37) technique
 recall on the statements doubles (0.23 -> 0.48, precision 0.49 -> 0.40) while ranking and naming stay the
 same. This is the only attribution number measured on real report text. Refitting the
 acceptance model with the CTI-HAL statements did not help (public F1 0.320 -> 0.313) and was not adopted.
@@ -329,6 +336,9 @@ All settings are environment variables documented in `.env.example`. Important v
 - `TECHNIQUE_INCLUDE_SYNTHETIC=false` (LLM-generated observation sentences per technique in the index;
   `make generate-synthetic` then `make ingest`; off until the full set is generated and measured, see
   docs 7.3 and 21.3.6)
+- `TECHNIQUE_EXEMPLARS_ENABLED=true` (labelled public report sentences as acceptance evidence, `make exemplars`
+  then `make fit-acceptance`; CTI-HAL median accepted-technique recall per report 0.31 -> 0.42; `false` restores
+  the previous calibrated gate through `ACCEPTANCE_MODEL_FALLBACK_PATH`, see docs 8.2 and 21.3.10)
 - `TECHNIQUE_RANK_BY_ACCEPTANCE=true` (order each observation's candidates by the acceptance model's
   probability; held-out hit@1 0.35 -> 0.40 with the accepted set unchanged, see docs 8.2)
 - `TECHNIQUE_CORROBORATION_ACCEPT_OBSERVATIONS=2`, `TECHNIQUE_CORROBORATION_ACCEPT_MIN_PROBABILITY=0.1`

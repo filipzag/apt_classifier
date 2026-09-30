@@ -268,6 +268,7 @@ function SystemFooter({ system }: { system?: SystemInfo }) {
               {!local ? <div>Extraction {system.extract_model} · review {system.review_model}</div> : null}
               <div>Preset {system.preset} · gate {system.gate_mode}</div>
               <div>Learned combiner: {system.combiner}</div>
+              {system.exemplars ? <div>Exemplar index: {system.exemplars}</div> : null}
             </div>
           }
         >

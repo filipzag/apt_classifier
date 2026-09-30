@@ -13,6 +13,7 @@
 - Curated retrieval benchmark (development diagnostic): `make benchmark-curated` or `PYTHONPATH=. .venv/bin/python scripts/curated_retrieval_benchmark.py --modes legacy_dense hybrid lexical --ablate-cues`
 - OTRF benchmark: `PYTHONPATH=. .venv/bin/python scripts/otrf_benchmark.py`
 - Ensemble benchmark: `PYTHONPATH=. .venv/bin/python scripts/ensemble_benchmark.py --coverage 0.4 --seed 7`
+- Exemplar index and acceptance model: `make exemplars` (embeds the public train sentences, a few minutes) then `make fit-acceptance` (public dev only, about 25 minutes). The acceptance model stores the exemplar index fingerprint and is disabled (fail closed) when the index is missing or different, so rebuild both together.
 - Synthetic technique sentences: `make generate-synthetic` (OpenRouter, ~$2 for ~575 techniques; resumable), then `make ingest`; ablate with `TECHNIQUE_INCLUDE_SYNTHETIC=false`.
 - CTI-HAL benchmarks (local evaluation only, no licence published): `scripts/prepare_cti_hal.py --source <clone>` then `make benchmark-cti-hal` (statement-level mapping + real-report attribution over 55 reports / 6 groups); `make benchmark-cti-hal-production` runs the same reports through the verifier + LLM vote (spends OpenRouter credit, never the adoption gate).
 - Learned attribution combiner: `make fit-combiner` (ATT&CK folds only, ~1 h local, no credit; writes `data/models/combiner/attribution_combiner.json` + `data/audits/attribution_combiner_cv.json`), then both attribution benchmarks with `--set attribution_combiner_enabled=true` before any default flip
@@ -37,6 +38,7 @@ The project must use its `.venv`; system transformers v5 is incompatible with AT
 - `apt_classifier/activity_clusters.py` — Opt-in local longitudinal activity clustering (SQLite).
 - `apt_classifier/navigator.py` — ATT&CK Navigator layer export.
 - `apt_classifier/reranker.py` — Optional local cross-encoder technique reranker.
+- `apt_classifier/exemplars.py` — Exemplar index: labelled public report sentences (CC-BY-4.0, train splits only) whose nearest-neighbour votes are acceptance-model features.
 
 Always brief me on the changes you make.
 

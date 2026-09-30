@@ -30,7 +30,14 @@ from typing import Any
 
 import numpy as np
 
-FEATURE_SCHEMA_VERSION = 2
+from apt_classifier.exemplars import EVIDENCE_SOURCE as EXEMPLAR_EVIDENCE_SOURCE
+from apt_classifier.exemplars import FEATURE_NAMES as EXEMPLAR_FEATURE_NAMES
+from apt_classifier.exemplars import features_from_evidence as exemplar_features_from_evidence
+
+# Schema 3 (2026-09-30): exemplar features, i.e. what the nearest labelled real-report
+# sentences say about the candidate (``apt_classifier.exemplars``). A model fitted with them
+# records the exemplar index fingerprint and refuses to run without that index.
+FEATURE_SCHEMA_VERSION = 3
 
 # Per-technique priors (schema 2): how often the technique is labelled in the public *train*
 # splits, how many ATT&CK procedure sentences it has, and how many groups document it. They
@@ -67,6 +74,7 @@ FEATURE_NAMES: tuple[str, ...] = (
     "sparse_context",
     "candidate_count",
     *PRIOR_FEATURE_NAMES,
+    *EXEMPLAR_FEATURE_NAMES,
 )
 
 
@@ -159,6 +167,7 @@ def candidate_features(
         "benign_context": 1.0 if benign_context else 0.0,
         "sparse_context": 1.0 if sparse_context else 0.0,
         "candidate_count": float(len(ordered)),
+        **exemplar_features_from_evidence(candidate.evidence_for(EXEMPLAR_EVIDENCE_SOURCE)),
     }
 
 
@@ -214,13 +223,30 @@ class AcceptanceModel:
     def accepts(self, features: dict[str, float]) -> bool:
         return self.probability(features) >= self.threshold
 
-    def compatible_with(self, attack_version: str | None) -> tuple[bool, str]:
+    @property
+    def exemplar_fingerprint(self) -> str | None:
+        value = self.metadata.get("exemplar_fingerprint")
+        return str(value) if value else None
+
+    @property
+    def requires_exemplars(self) -> bool:
+        return self.exemplar_fingerprint is not None
+
+    def compatible_with(
+        self, attack_version: str | None, exemplar_fingerprint: str | None = None
+    ) -> tuple[bool, str]:
         if self.feature_schema_version != FEATURE_SCHEMA_VERSION:
             return False, (
                 f"feature schema {self.feature_schema_version} != {FEATURE_SCHEMA_VERSION}"
             )
         if attack_version and self.attack_version and attack_version != self.attack_version:
             return False, f"ATT&CK version {self.attack_version} != {attack_version}"
+        if self.requires_exemplars and exemplar_fingerprint != self.exemplar_fingerprint:
+            return False, (
+                "fitted with exemplar index "
+                f"{self.exemplar_fingerprint}, runtime has "
+                f"{exemplar_fingerprint or 'none'} (run make exemplars, or refit)"
+            )
         return True, "ok"
 
     def to_dict(self) -> dict[str, Any]:
@@ -354,24 +380,47 @@ def choose_threshold(
     return chosen
 
 
-def load_acceptance_model(settings: Any, kb: Any) -> tuple[AcceptanceModel | None, str]:
+def load_acceptance_model(
+    settings: Any, kb: Any, exemplar_index: Any = None
+) -> tuple[AcceptanceModel | None, str]:
     """Load the configured acceptance model fail-closed.
 
     Returns ``(model, status)``; ``model`` is ``None`` with a reason whenever the feature
-    is disabled, the artifact is missing, malformed, or built for another ATT&CK version.
+    is disabled, the artifact is missing, malformed, built for another ATT&CK version, or
+    fitted with an exemplar index that the runtime does not have (``exemplar_index``).
+
+    When the primary artifact cannot run, ``acceptance_model_fallback_path`` is tried: a model
+    fitted the same way without exemplar features (``make fit-acceptance`` writes both). It is
+    used only if it needs no exemplar index, so turning exemplars off, or losing the index,
+    restores the previous calibrated gate instead of the rule-based one.
     """
     if not bool(getattr(settings, "acceptance_model_enabled", False)):
         return None, "disabled"
     path = getattr(settings, "acceptance_model_path", None)
     if not path:
         return None, "no path configured"
+    model, status = _load_compatible(path, kb, exemplar_index)
+    if model is not None:
+        return model, status
+    fallback = getattr(settings, "acceptance_model_fallback_path", None)
+    if fallback and Path(fallback) != Path(path):
+        alternative, _ = _load_compatible(fallback, kb, None)
+        if alternative is not None and not alternative.requires_exemplars:
+            return alternative, f"fallback without exemplars ({status})"
+    return None, status
+
+
+def _load_compatible(path: Any, kb: Any, exemplar_index: Any) -> tuple[AcceptanceModel | None, str]:
     try:
         model = AcceptanceModel.load(path)
     except (ValueError, KeyError, TypeError, json.JSONDecodeError) as error:
         return None, f"invalid artifact: {error}"
     if model is None:
         return None, f"artifact not found: {path}"
-    ok, reason = model.compatible_with(str(getattr(kb, "version", "") or ""))
+    ok, reason = model.compatible_with(
+        str(getattr(kb, "version", "") or ""),
+        getattr(exemplar_index, "fingerprint", None) if exemplar_index is not None else None,
+    )
     if not ok:
         return None, f"incompatible artifact: {reason}"
     return model, "active"

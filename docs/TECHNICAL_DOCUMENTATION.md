@@ -402,6 +402,27 @@ The parser generates deterministic action descriptions and retains event ID, sou
 
 Software observations carry a `software_id` when an alias is resolved. IOC and software observations are not submitted as normal positive action text for technique retrieval, but software IDs are supplied to the software classifier and Canvas.
 
+Aliases are matched case-insensitively on word boundaries, except for **ordinary-word aliases**
+(2026-09-30). ATT&CK lists some software under plain English words: `Page` is an alias of
+Elise, a backdoor documented for Lotus Blossom alone, and `Wiper`, `Expand`, `CALENDAR` and
+`ZLib` are software names. Matched case-insensitively, the ordinary word "page" in a sentence about a
+card-skimming payment page became Elise and handed Lotus Blossom decisive single-group malware
+evidence in a FIN6 report.
+`ambiguous_software_aliases(kb)` decides which aliases need care from the knowledge base
+itself, not from a hand-written list. It reads ATT&CK's own prose: technique, group and
+software descriptions and procedure sentences, with code spans, citations, link targets and
+URLs removed and the software's own description excluded. An alias is ambiguous when that
+prose uses its lowercase form as an ordinary word at least as often as it writes the exact
+name. On ATT&CK 19.2 this flags `Page`, `Wiper`, `Expand`, `CALENDAR` and `ZLib`, while
+`Mimikatz` (74 name uses, 1 lowercase), `Bumblebee` and `Responder` keep the normal match.
+An ambiguous alias only matches in its exact spelling. A title-case one such as `Page` also
+never matches at the start of a sentence, where a leading capital says nothing; all-caps
+`CALENDAR` still does. Aliases whose canonical spelling is lowercase (`netsh`, `certutil`)
+are command names and keep the case-insensitive match. The table is memoised per knowledge
+base and costs about 0.15 s to build. Measured effect: 6 of the 55 CTI-HAL reports lose a
+false software match (Elise in five, Wiper in one) and nothing else changes; 12 of the 5,042
+ATT&CK procedure sentences change, all ordinary-word hits.
+
 ### 5.6 Strategic context
 
 The analyst can provide optional structured context through the Intake view:
@@ -672,7 +693,8 @@ been collected. Two gates exist:
 `apt_classifier/acceptance.py` scores every candidate with an L2-regularised logistic
 regression over its own evidence (fused score and rank, margins to the top and next
 candidate, dense similarity/field/rank, lexical rank, cue and signal flags, hierarchy and
-sub-technique flags, benign/sparse context, pool size). Feature schema 2 (2026-09-28) adds
+sub-technique flags, benign/sparse context, pool size, and since schema 3 the eight exemplar
+features described below). Feature schema 2 (2026-09-28) adds
 three **per-technique prior** slots: the log count of the technique as a label in the public
 **train** splits, the log number of its ATT&CK procedure sentences and the log number of
 groups documented using it. Priors are computed at fit time (`compute_technique_priors`),
@@ -735,6 +757,41 @@ verifier-decided candidates without a stored probability) follow in fused order.
 on the public dev split first (hit@1 0.355 -> 0.391, MRR 0.465 -> 0.505, F1 identical) and
 then through the held-out gate (21.3.6): hit@1 0.35 -> 0.40, hit@3 0.53 -> 0.58, hit@10
 0.73 -> 0.75, MRR 0.47 -> 0.52, every split up, accepted-set P/R/F1 unchanged.
+
+**Labelled-sentence exemplars (default on, 2026-09-30).** The dense and lexical indexes hold
+ATT&CK's own prose. Real report text is written differently: on the CTI-HAL statements 40% of
+the correct techniques were in the candidate pool but left in review, because similarity to
+ATT&CK prose could not separate them from wrong neighbours. `apt_classifier/exemplars.py` adds a
+second kind of evidence, *how other real report sentences that read like this one were
+labelled*. The exemplar index (`make exemplars`, `scripts/build_exemplar_index.py`,
+`data/models/exemplars/exemplar_index.npz`) holds the 6,360 distinct public **train** sentences of
+the `tram`, `expert` and `derived_procedures` splits of `tumeteor/mitre-ttp-mapping` (CC-BY-4.0;
+413 techniques), embedded with the technique embedder. It never holds the leaky `procedures`
+split, dev, test, CTI-HAL or EvidenceForge text. For each observation the 64 nearest exemplars
+vote with softmax weights (temperature 0.05). Any exemplar at cosine >= 0.95 is treated as a
+copy of the query and never votes. Every candidate gets eight features: its vote share, a
+hierarchy-relaxed share (own plus sub-technique votes), the similarity of its closest voting
+exemplar relative to the best one, inverse vote rank, vote count, the best exemplar similarity,
+vote x similarity, and an exemplar-only flag. Up to `TECHNIQUE_EXEMPLAR_NEW_CANDIDATES` (3)
+techniques that only the exemplars suggest are appended after the retrieved pool (fused score 0,
+never displacing a retrieved candidate). The acceptance model judges them on the exemplar
+evidence alone. The candidate's evidence carries the nearest labelled sentence, shown in the
+review table as "like: ..." with its corpus and licence. Structured telemetry is queried by its
+values only: a field/value record ("command_line: whoami /all. pid: 5512. process_name: ...")
+loses its lowercase schema keys and bare identifiers, because words such as "pid" and
+"process_name" pull report-prose neighbours towards Process Discovery. Prose is queried unchanged
+(0 of 1,391 public test texts, 0 of 968 CTI-HAL statements and 1 of 1,147 dev texts change).
+
+Feature schema 3 appends these eight features. The shipped model is fitted with them on the
+public dev split (`make fit-acceptance`; dev threshold 0.21, dev P 0.52 / R 0.42 / F1 0.47 versus
+0.50 / 0.28 / 0.36 without them) and stores the exemplar index fingerprint. It refuses to run
+against a different or missing index. In that case the loader uses
+`ACCEPTANCE_MODEL_FALLBACK_PATH` (`acceptance_model_no_exemplars.json`, the same fit without
+exemplar features, also written by `make fit-acceptance`), and diagnostics say "fallback without
+exemplars". `TECHNIQUE_EXEMPLARS_ENABLED=false` therefore restores the previous calibrated gate
+exactly. The index is pinned to the embedding model and revision and integrity-checked by a
+fingerprint. Results are in 21.3.10: real reports and the public held-out set gain markedly, while
+ATT&CK-phrased fold sentences and narrated telemetry pay a precision cost.
 
 **Per-sentence judgement for long observations (optional, off by default).** With
 `TECHNIQUE_SEGMENT_ACCEPTANCE=true` each sentence of a long observation also gets its *own*
@@ -2772,6 +2829,79 @@ out-of-fold mixed top-1 0.727 vs RRF 0.404 on its own lists, but on the seed-7 f
 better, 4 worse), 36 and 15 names all correct. Making the training regime harsher did not close the
 transfer gap; the gap sits in technique recall on real text, which is what the encoder follow-ups
 (plan) address.
+
+#### 21.3.10 Labelled-sentence exemplars: technique recall on real text (2026-09-30)
+
+Diagnosis. On the 55 CTI-HAL reports the median share of a report's annotated techniques that
+reached the accepted set was 0.31. Of the annotated statement labels, 25% were accepted, 40% were
+in the candidate pool but left in review (median rank 3) and 20% never entered the pool; the
+measurement itself (statements shown per report) cost almost nothing. The loss was therefore the acceptance
+decision on real prose, which 8.2's exemplar evidence targets. An offline prototype over saved
+candidate features (18 configurations of K, temperature and duplicate cut-off, including the
+strict 0.95 cut-off shipped) moved the report median from 0.26 to 0.39-0.41 with precision up in
+every configuration. The prototype printed CTI-HAL numbers next to the public ones, so the
+configuration was not chosen blind; the gain was stable across all 18, which limits the selection
+effect. Leak checks: 5 CTI-HAL statements are exact copies of an exemplar and 4.6% have one at
+cosine >= 0.95; both are excluded at query time by the duplicate rule.
+
+Same-code comparison. "Before" is a schema-3 model fitted without exemplars on the same code.
+It reproduces the committed CTI-HAL mapping and clinic artifacts exactly, so it equals the
+shipped behaviour and is what `TECHNIQUE_EXEMPLARS_ENABLED=false` restores (8.2).
+
+| benchmark | before | with exemplars |
+|---|---|---|
+| public held-out pooled F1 / P / R | 0.318 / 0.485 / 0.237 | **0.416 / 0.515 / 0.349** |
+| public held-out hit@1 / hit@10 / MRR | 0.400 / 0.748 / 0.517 | **0.500 / 0.804 / 0.605** |
+| public held-out F1 by split (tram / expert / derived) | 0.421 / 0.177 / 0.257 | 0.556 / 0.262 / 0.309 |
+| public held-out pooled F1 without cues | n/a | 0.410 |
+| CTI-HAL statements F1 [95% CI] | 0.317 [0.285, 0.352] | **0.379 [0.350, 0.411]** |
+| CTI-HAL statements P / R | 0.440 / 0.248 | 0.426 / 0.342 |
+| CTI-HAL statements hit@1 / hit@10 / MRR | 0.333 / 0.688 / 0.453 | 0.383 / 0.741 / 0.508 |
+| CTI-HAL reports: median accepted-technique recall | 0.308 | **0.417** (36 reports up, 3 down) |
+| CTI-HAL attribution top-1 / top-5 / MRR | 0.527 / 0.745 / 0.623 | 0.545 / 0.745 / 0.632 |
+| CTI-HAL named hypotheses | 14, all correct | 13, all correct |
+| ATT&CK folds top-1 / top-5 / MRR | 0.830 / 0.954 / 0.880 | 0.837 / 0.967 / 0.883 |
+| ATT&CK folds named / removed actors named | 36 correct / 0 of 25 | 33 correct / 0 of 25 |
+| ATT&CK folds accepted-technique recall / precision | 0.792 / 0.714 | 0.723 / 0.637 |
+
+The public held-out gain is partly within-collection: the exemplars are the train splits of the
+same three datasets, whose phrasing the test splits share. The CTI-HAL gain (a different source,
+never used for fitting) is the cleaner estimate of transfer to real reports. The accepted-set
+loss on the folds is real, not a labelling artefact: only 31 of the 144 lost correct techniques
+were replaced by a sibling in the same family. ATT&CK's procedure sentences are close to the
+index's own prose, where dense similarity is the most reliable signal, and the model now leans on
+report exemplars instead. Attribution ranking on the folds did not suffer.
+
+A wrong name surfaced and was fixed at its source. With exemplars the FIN6 report
+"AnotherVictim" gained two accepted techniques and cleared the insufficient-evidence boundary.
+Its only software match, however, was Elise via ATT&CK's alias "Page", matched on the word
+"page" in a sentence about a payment page, and Elise is documented for Lotus Blossom alone. The gate named Lotus Blossom.
+The alias matcher now treats ordinary-word aliases case-sensitively (5.5), which removes Elise
+from five reports and Wiper from one. The final run above includes that fix: no wrong name on
+either benchmark.
+
+EvidenceForge (narrated synthetic telemetry). The first version queried the exemplars with the
+raw record text and lost ranking on the development bundles. On manufacturing narrative hit@1
+fell from 0.235 to 0.059, and in four of five lost top-1s Process Discovery (T1057) took first
+place, with 82-94% of the exemplar vote. The record's field names ("pid", "process_name") were
+pulling the neighbours. Value-only record queries (8.2) were designed on the two development
+bundles; the clinic bundle was then run once:
+
+| bundle, mode (cases) | F1 before -> after | hit@1 before -> after | red herrings with an acceptance |
+|---|---|---|---|
+| clinic narrative (21) | 0.231 -> **0.357** | 0.222 -> **0.333** | 2 -> 3 of 3 |
+| clinic windows (7) | 0.600 -> 0.600 | 0.500 -> 0.500 | 1 -> 1 |
+| clinic eCAR (17) | 0.545 -> 0.545 | 0.571 -> 0.500 | 1 -> 2 |
+| branch-office narrative (11, dev) | 0.500 -> 0.444 | 0.400 -> 0.200 | 0 -> 0 |
+| manufacturing narrative (21, dev) | 0.320 -> 0.333 | 0.235 -> 0.176 | 0 -> 1 |
+| manufacturing eCAR (13, dev) | 0.526 -> 0.500 | 0.417 -> 0.333 | 0 -> 1 |
+
+Reading: on narrated telemetry the exemplars trade precision for recall, and in four of the nine
+bundle/mode combinations one more benign red herring is accepted (clinic `cln-rh-002#1` as
+T1070.003, manufacturing `mfg-rh-001#0` as T1074). Nothing was tuned on the clinic bundle. The
+change is adopted because the primary gate, the real-report target and both attribution gates
+pass. Deployments whose input is mostly structured telemetry can set
+`TECHNIQUE_EXEMPLARS_ENABLED=false` to get the previous gate back.
 
 ## 22. Failure modes and troubleshooting
 

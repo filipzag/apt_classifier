@@ -10,6 +10,8 @@ data/kb
 data/chroma
 data/cases
 data/audits/*.json
+# evaluation data never ships: CTI-HAL publishes no licence (local evaluation only)
+data/benchmarks
 data/models/technique-reranker*
 data/hf-cache
 scratchpad

@@ -20,6 +20,14 @@ from apt_classifier.evidence.models import (
     TechniqueReviewAction,
     TechniqueVerificationVerdict,
 )
+from apt_classifier.exemplars import (
+    DEFAULT_DUPLICATE_SIMILARITY as EXEMPLAR_DUPLICATE_SIMILARITY,
+)
+from apt_classifier.exemplars import DEFAULT_K as EXEMPLAR_K
+from apt_classifier.exemplars import DEFAULT_TAU as EXEMPLAR_TAU
+from apt_classifier.exemplars import EVIDENCE_SOURCE as EXEMPLAR_SOURCE
+from apt_classifier.exemplars import ExemplarVotes, exemplar_query_text
+from apt_classifier.exemplars import parent_map as exemplar_parent_map
 from apt_classifier.technique_signals import find_signals
 from apt_classifier.vectorstore import (
     ChromaVectorStore,
@@ -450,8 +458,19 @@ def retrieve_techniques(
     rank_by_acceptance: bool = False,
     corroboration_accept_observations: int = 0,
     corroboration_accept_min_probability: float = 0.2,
+    exemplar_index: Any = None,
+    exemplar_k: int = EXEMPLAR_K,
+    exemplar_tau: float = EXEMPLAR_TAU,
+    exemplar_duplicate_similarity: float = EXEMPLAR_DUPLICATE_SIMILARITY,
+    exemplar_new_candidates: int = 0,
 ) -> RetrievalResult:
     """Retrieve ATT&CK technique candidates for the positive observations in a ledger.
+
+    ``exemplar_index`` (:class:`apt_classifier.exemplars.ExemplarIndex`) adds what the nearest
+    labelled real-report sentences say about each candidate as ``exemplar`` evidence (the
+    acceptance model reads it) and appends up to ``exemplar_new_candidates`` techniques that
+    only the exemplars suggest. An acceptance model fitted with exemplars is not used when the
+    same index is unavailable (diagnostics say why).
 
     ``cues_enabled=False`` disables the regex cue tables (``_EXPLICIT_TECHNIQUE_CUES``
     and ``technique_signals.SIGNALS``) so benchmarks can report retrieval quality
@@ -517,13 +536,35 @@ def retrieve_techniques(
         else [[] for _ in flat_segments]
     )
     lexical_hits = _regroup(flat_lexical, segments)
+    exemplar_votes, exemplar_status = _exemplar_votes(
+        observations,
+        store,
+        kb,
+        exemplar_index,
+        k=exemplar_k,
+        tau=exemplar_tau,
+        duplicate_similarity=exemplar_duplicate_similarity,
+    )
+    acceptance_disabled: str | None = None
+    if acceptance_model is not None and getattr(acceptance_model, "requires_exemplars", False):
+        runtime = (
+            getattr(exemplar_index, "fingerprint", None) if exemplar_status == "active" else None
+        )
+        if runtime != getattr(acceptance_model, "exemplar_fingerprint", None):
+            acceptance_disabled = (
+                "acceptance model needs exemplar index "
+                f"{getattr(acceptance_model, 'exemplar_fingerprint', None)}, runtime has "
+                f"{runtime or exemplar_status}"
+            )
+            acceptance_model = None
+    exemplar_added = 0
     candidates: list[TechniqueCandidate] = []
     segmented_observations = 0
-    for observation, dense_groups, lexical_groups in zip(
-        observations, dense_hits, lexical_hits, strict=True
+    for observation_index, (observation, dense_groups, lexical_groups) in enumerate(
+        zip(observations, dense_hits, lexical_hits, strict=True)
     ):
         required_platform = _required_platform(observation)
-        segment_texts = segments[observations.index(observation)]
+        segment_texts = segments[observation_index]
         segment_count = len(dense_groups)
         segmented_observations += int(segment_count > 1)
         if segment_count <= 1 or not segment_acceptance:
@@ -584,6 +625,20 @@ def retrieve_techniques(
         observation_candidates = _expand_hierarchy_candidates(
             observation, kb, observation_candidates
         )
+        votes = exemplar_votes[observation_index]
+        if votes is not None:
+            before = len(observation_candidates)
+            if exemplar_new_candidates > 0 and (segment_count <= 1 or not segment_acceptance):
+                observation_candidates = _append_exemplar_candidates(
+                    observation,
+                    kb,
+                    observation_candidates,
+                    votes,
+                    limit=int(exemplar_new_candidates),
+                    required_platform=required_platform,
+                )
+            exemplar_added += len(observation_candidates) - before
+            observation_candidates = _attach_exemplar_evidence(observation_candidates, votes)
         candidates.extend(observation_candidates)
     behavior_query = getattr(store, "query_group_behaviors", None)
     behavior_hits = (
@@ -638,6 +693,9 @@ def retrieve_techniques(
             "reranker_enabled": reranker is not None,
             "reranker_available": bool(getattr(reranker, "available", False)),
             "reranker_load_error": getattr(reranker, "load_error", None),
+            "exemplars": exemplar_status,
+            "exemplar_candidates_added": exemplar_added,
+            **({"acceptance_model_disabled": acceptance_disabled} if acceptance_disabled else {}),
         },
     )
     if not finalize:
@@ -663,6 +721,124 @@ def retrieve_techniques(
 
 LONG_OBSERVATION_WORDS = 40
 MAX_SEGMENT_POOL = 30
+EXEMPLAR_TEXT_LIMIT = 300
+
+
+def _exemplar_votes(
+    observations: list[Any],
+    store: Any,
+    kb: Any,
+    exemplar_index: Any,
+    *,
+    k: int,
+    tau: float,
+    duplicate_similarity: float,
+) -> tuple[list[ExemplarVotes | None], str]:
+    """Exemplar votes per observation (``None`` entries when the index is unavailable)."""
+    empty: list[ExemplarVotes | None] = [None] * len(observations)
+    if exemplar_index is None:
+        return empty, "off"
+    if not observations:
+        return empty, "active"
+    embedder = getattr(store, "embedder", None)
+    if embedder is None or not callable(getattr(embedder, "embed", None)):
+        return empty, "no embedder on the store"
+    vectors = embedder.embed(
+        [exemplar_query_text(str(observation.text)) for observation in observations]
+    )
+    votes = exemplar_index.query_vectors(
+        vectors,
+        parent_of=exemplar_parent_map(kb),
+        k=k,
+        tau=tau,
+        duplicate_similarity=duplicate_similarity,
+    )
+    return list(votes), "active"
+
+
+def _exemplar_evidence(
+    votes: ExemplarVotes, technique_id: str, *, exemplar_only: bool
+) -> TechniqueRetrievalEvidence:
+    features = votes.features(technique_id, exemplar_only=exemplar_only)
+    rank = votes.ranks.get(technique_id)
+    count = votes.counts.get(technique_id, 0)
+    text = votes.best_text.get(technique_id)
+    return TechniqueRetrievalEvidence(
+        source=EXEMPLAR_SOURCE,
+        field="labelled_report_sentence",
+        text=text[:EXEMPLAR_TEXT_LIMIT] if text else None,
+        score=features["ex_vote"],
+        rank=rank,
+        rationale=(
+            f"{count} of the {votes.neighbours} most similar labelled report sentences carry "
+            "this technique"
+            if rank
+            else "no similar labelled report sentence carries this technique"
+        ),
+        metadata={
+            "features": features,
+            "source_dataset": votes.best_source.get(technique_id),
+            "top_similarity": round(votes.top_similarity, 4),
+            "excluded_duplicates": votes.excluded_duplicates,
+            "exemplar_only": exemplar_only,
+        },
+    )
+
+
+def _append_exemplar_candidates(
+    observation: Any,
+    kb: Any,
+    candidates: list[TechniqueCandidate],
+    votes: ExemplarVotes,
+    *,
+    limit: int,
+    required_platform: str | None,
+) -> list[TechniqueCandidate]:
+    """Techniques only the exemplars suggest, appended after the retrieved pool (fused score
+    0, so they never displace a retrieved candidate); the acceptance model judges them on the
+    exemplar evidence alone."""
+    techniques = getattr(kb, "techniques", {}) or {}
+    present = {candidate.technique_id for candidate in candidates}
+    output = list(candidates)
+    next_rank = len(candidates) + 1
+    for technique_id in votes.ranked:
+        if len(output) - len(candidates) >= limit:
+            break
+        if technique_id in present or technique_id not in techniques:
+            continue
+        technique = techniques[technique_id]
+        if not _platform_matches(_record_value(technique, "platforms", ()), required_platform):
+            continue
+        output.append(
+            TechniqueCandidate(
+                observation_id=observation.id,
+                technique_id=technique_id,
+                technique_name=_technique_name(kb, technique_id),
+                parent_technique_id=str(_record_value(technique, "parent_id", "") or "") or None,
+                is_subtechnique=bool(_record_value(technique, "is_subtechnique", False)),
+                fused_score=0.0,
+                fused_rank=next_rank,
+                evidence=[_exemplar_evidence(votes, technique_id, exemplar_only=True)],
+                state=TechniqueCandidateState.NEEDS_REVIEW,
+                state_reason="exemplar-only candidate; acceptance not yet evaluated",
+            )
+        )
+        present.add(technique_id)
+        next_rank += 1
+    return output
+
+
+def _attach_exemplar_evidence(
+    candidates: list[TechniqueCandidate], votes: ExemplarVotes
+) -> list[TechniqueCandidate]:
+    output = []
+    for candidate in candidates:
+        if candidate.evidence_for(EXEMPLAR_SOURCE) is not None:
+            output.append(candidate)
+            continue
+        evidence = _exemplar_evidence(votes, candidate.technique_id, exemplar_only=False)
+        output.append(candidate.model_copy(update={"evidence": [*candidate.evidence, evidence]}))
+    return output
 
 
 def _observation_segments(text: str) -> list[str]:

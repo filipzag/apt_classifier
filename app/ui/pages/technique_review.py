@@ -28,6 +28,8 @@ def _evidence_summary(candidate: Any) -> str:
             parts.append(f"lexical #{item.rank}")
         elif item.source in {"explicit_cue", "structured_signal"}:
             parts.append("cue")
+        elif item.source == "exemplar" and item.rank is not None and item.score is not None:
+            parts.append(f"exemplar {item.score:.2f} (#{item.rank})")
     return " · ".join(parts)
 
 

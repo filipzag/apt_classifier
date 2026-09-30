@@ -41,6 +41,7 @@ from apt_classifier.evidence.models import (
     TechniqueVerification,
     TechniqueVerificationVerdict,
 )
+from apt_classifier.exemplars import exemplar_kwargs, load_exemplar_index
 from apt_classifier.fusion import FusionResult, reciprocal_rank_fusion
 from apt_classifier.llm import OpenRouterClient
 from apt_classifier.origin import OriginAndThreatAssessment, assess_origin_and_threat_type
@@ -247,8 +248,9 @@ class AttributionEngine:
             software_idf=bool(getattr(self.settings, "software_idf_enabled", True)),
         )
         self.telemetry_profile: Any = None
+        self.exemplar_index, self.exemplar_status = load_exemplar_index(self.settings)
         self.acceptance_model, self.acceptance_model_status = load_acceptance_model(
-            self.settings, knowledge_base
+            self.settings, knowledge_base, self.exemplar_index
         )
         self.combiner_fingerprint = pipeline_fingerprint(
             rrf_k=int(self.settings.rrf_k),
@@ -342,6 +344,7 @@ class AttributionEngine:
                 getattr(self.settings, "technique_hierarchy_parent_mode", "off")
             ),
             include_synthetic=bool(getattr(self.settings, "technique_include_synthetic", False)),
+            **exemplar_kwargs(self.settings, self.exemplar_index),
         )
         verifications: dict[str, TechniqueCandidateVerificationResult] = {}
         # Local gating runs first so that the verifier's ``ambiguous`` scope means what it

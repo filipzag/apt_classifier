@@ -83,6 +83,11 @@ class Settings(BaseSettings):
     acceptance_model_path: Path = (
         PROJECT_ROOT / "data" / "models" / "acceptance" / "acceptance_model.json"
     )
+    # Same fit without exemplar features; used only when the primary model cannot run (exemplars
+    # disabled or the index missing), so the calibrated gate survives. `make fit-acceptance`.
+    acceptance_model_fallback_path: Path | None = (
+        PROJECT_ROOT / "data" / "models" / "acceptance" / "acceptance_model_no_exemplars.json"
+    )
     max_questions: int = 10
     threat_intel_days: int = 30
     threat_intel_timeout: float = 20.0
@@ -206,6 +211,19 @@ class Settings(BaseSettings):
     activity_clusters_min_similarity: float = 0.3
     data_dir: Path = PROJECT_ROOT / "data"
     model_cache_dir: Path = PROJECT_ROOT / ".huggingface"
+
+    # ----- exemplars: labelled real-report sentences as mapping evidence -----
+    # Built by `make exemplars` from the public *train* splits (tram, expert,
+    # derived_procedures; CC-BY-4.0); the acceptance model is fitted with them on dev.
+    technique_exemplars_enabled: bool = True
+    technique_exemplar_index_path: Path = (
+        PROJECT_ROOT / "data" / "models" / "exemplars" / "exemplar_index.npz"
+    )
+    technique_exemplar_k: int = 64
+    technique_exemplar_tau: float = 0.05
+    # an exemplar at or above this cosine to the query is treated as a copy and never votes
+    technique_exemplar_duplicate_similarity: float = 0.95
+    technique_exemplar_new_candidates: int = 3
 
     # ----- users and sign-in (web app) -----
     # "auto" = Google sign-in when GOOGLE_CLIENT_ID is set, otherwise a single local analyst.

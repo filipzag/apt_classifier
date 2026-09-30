@@ -20,6 +20,8 @@ export interface SystemInfo {
   gate_mode: string
   acceptance_model: unknown
   combiner: string
+  /** labelled-sentence exemplar index; when not active the acceptance model is off too */
+  exemplars?: string
   index: {
     ok: boolean
     technique_sentences?: number
@@ -69,6 +71,8 @@ export interface EvidenceItem {
   score: number | null
   rank: number | null
   text: string | null
+  /** labelled corpus of an exemplar sentence (tram, expert, derived_procedures) */
+  dataset?: string | null
 }
 
 export interface Candidate {
