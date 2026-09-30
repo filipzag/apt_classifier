@@ -325,11 +325,6 @@ def create_app(
         svc.run_review(case_id)
         return _case(svc, case_id)
 
-    @app.post("/api/cases/{case_id}/zero-shot")
-    def run_zero_shot(case_id: str, svc: CaseService = Depends(get_service)) -> dict[str, Any]:
-        svc.run_zero_shot(case_id)
-        return _case(svc, case_id)
-
     @app.post("/api/cases/{case_id}/cyberre")
     def run_cyberre(
         case_id: str, body: CyberREIn, svc: CaseService = Depends(get_service)

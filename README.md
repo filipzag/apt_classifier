@@ -16,7 +16,7 @@ See [`docs/TECHNICAL_DOCUMENTATION.md`](docs/TECHNICAL_DOCUMENTATION.md) for the
 2. Parse supported Windows/Sysmon events deterministically without sending bulk logs to an LLM.
 3. Embed observations with `basel/ATTACK-BERT` and retrieve sentence-level ATT&CK techniques plus actor-specific behavior sentences from local ChromaDB.
 4. Capture optional strategic context: target geography, industry, motivation, intended objective, and independently supported sponsor/origin.
-5. Rank groups with deterministic classifiers plus a bounded LLM zero-shot opinion:
+5. Rank groups with deterministic classifiers (the ensemble makes no LLM call unless the analyst runs CyberRE):
    - Bernoulli Naive Bayes
    - TF-IDF cosine
    - weighted Jaccard
@@ -27,9 +27,8 @@ See [`docs/TECHNICAL_DOCUMENTATION.md`](docs/TECHNICAL_DOCUMENTATION.md) for the
    - motivation alignment
    - campaign-profile overlap
    - software/tool links
-   - bounded LLM zero-shot ranking of the deterministic top candidates
    - opt-in CyberRE-LLM technique filtering and ranking
-6. Fuse applicable classifiers with family-aware Reciprocal Rank Fusion. Naive Bayes, TF-IDF, Jaccard, and the technique centroid share one technique-overlap budget instead of casting four full correlated votes. Actor-specific behavior, software, and campaign classifiers have their own family budgets. Context, motivation, and description signals may rerank only candidates with documented technical support; the LLM vote has its own low family budget and cannot introduce a candidate. Abstaining classifiers cast no vote. Groups with zero technical overlap are excluded from authoritative RRF.
+6. Fuse applicable classifiers with family-aware Reciprocal Rank Fusion. Naive Bayes, TF-IDF, Jaccard, and the technique centroid share one technique-overlap budget instead of casting four full correlated votes. Actor-specific behavior, software, and campaign classifiers have their own family budgets. Context, motivation, and description signals may rerank only candidates with documented technical support; the analyst-requested CyberRE vote has its own low family budget and cannot introduce a candidate. Abstaining classifiers cast no vote. Groups with zero technical overlap are excluded from authoritative RRF.
 7. Aggregate documented sponsor/origin evidence across the ranked candidates and classify the profile as APT-like state/espionage activity, financially motivated criminal intrusion, mixed, or indeterminate.
 8. Fetch a cached, non-voting live-intelligence layer from CISA KEV, CISA Alerts & Advisories, and explicitly labeled ransomware.live extortion claims; match only explicit case overlaps and add them to the Canvas.
 9. Run a hypothesis-driven chat interview that predicts unobserved behaviors from the current ensemble candidates, recommends ATT&CK-informed telemetry, Windows channels and Event IDs to inspect, and automatically asks the next prioritized question after each analyst response.
@@ -72,7 +71,7 @@ were correctly left unnamed. When the leader has documented overlap with another
 group (ATT&CK cross-references or rarely shared tooling, for example Carbanak and FIN7), the view says
 so, because the evidence usually cannot separate them.
 
-The bounded zero-shot LLM opinion is folded into RRF with a separate low-weight family budget after deterministic candidate generation. CyberRE-LLM output has its own bounded family and is also withheld from the independent reviewer, which preserves the fresh-session review boundary.
+The LLM zero-shot opinion was removed from the ensemble on 2026-09-30 to keep ranking deterministic and cheaper; it had changed the analyst-facing rank in one of ten measured reports. CyberRE-LLM output has its own bounded family, and its results table is withheld from the independent reviewer (docs 9.11, 16.2).
 
 ### Optional local reranker
 
@@ -98,7 +97,7 @@ typed by hand.
 - `scripts/evidenceforge_eval.py` (`make evidenceforge-eval-all`) — three synthetic
   EvidenceForge bundles; only `heldout-clinic` is untouched by tuning. See
   `docs/EVIDENCEFORGE_EVALUATION.md`.
-- `scripts/attribution_benchmark.py` (`make benchmark-attribution`; `--pipeline production` for the verifier + LLM vote, spends credit) — attribution gate: held-out,
+- `scripts/attribution_benchmark.py` (`make benchmark-attribution`; `--pipeline production` for the technique verifier, spends credit) — attribution gate: held-out,
   anonymized procedure sentences per group run through the real pipeline (text in, group out),
   with a per-fold leak filter and an unknown-actor arm for open-set metrics. Self-consistency over
   the ATT&CK answer key, NOT real-world attribution accuracy.
@@ -160,7 +159,7 @@ attribution top-1 0.55 (was 0.36 before the tool cap, decisive-malware boost, di
 exemplars), cluster-aware top-1 0.67, top-5 0.75, MRR 0.63; 13 reports reached a named hypothesis, all correct (was 3
 under the maturity gate; at the previous bar of 0.78 the gate named 7 and 3 were wrong, which is why the bar was
 raised). Ordinary-word software aliases (ATT&CK lists "Page" for Elise) now match only in their exact spelling;
-before that fix the exemplar change named Lotus Blossom on a FIN6 report (docs 5.5). With the production pipeline (verifier + LLM vote; 10-report sample, $3.37) technique
+before that fix the exemplar change named Lotus Blossom on a FIN6 report (docs 5.5). With the production pipeline as measured on 2026-09-28 (verifier plus the since-removed LLM vote; 10-report sample, $3.37) technique
 recall on the statements doubles (0.23 -> 0.48, precision 0.49 -> 0.40) while ranking and naming stay the
 same. This is the only attribution number measured on real report text. Refitting the
 acceptance model with the CTI-HAL statements did not help (public F1 0.320 -> 0.313) and was not adopted.
@@ -186,7 +185,7 @@ cp .env.example .env
 ```
 
 Set `OPENROUTER_API_KEY` in `.env` (optional: without it the app runs in **local mode**, with
-sentence-split extraction and no verifier, LLM vote, CyberRE or AI review), then start Chroma and
+sentence-split extraction and no verifier, CyberRE or AI review), then start Chroma and
 build the index:
 
 ```bash

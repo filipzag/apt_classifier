@@ -1,7 +1,7 @@
-import { BrainCircuit, ScanSearch, Scale, Vote } from 'lucide-react'
+import { BrainCircuit, ScanSearch, Scale } from 'lucide-react'
 import { useMemo, useState } from 'react'
 
-import { useCyberRE, useLlmStep, useSystem } from '../api/hooks'
+import { useCyberRE, useReview, useSystem } from '../api/hooks'
 import type { CasePayload } from '../api/types'
 import { CaseFrame, PageHeader, useCaseId } from '../components/CaseFrame'
 import { Badge, Button, Callout, Card, DataTable, Label, Metric, SectionTitle, Toggle } from '../components/ui'
@@ -15,8 +15,7 @@ export function ReviewPage() {
 function ReviewView({ caseId, data }: { caseId: string; data: CasePayload }) {
   const system = useSystem()
   const local = system.data?.mode === 'local'
-  const review = useLlmStep(caseId, 'review')
-  const zeroShot = useLlmStep(caseId, 'zero-shot')
+  const review = useReview(caseId)
   const cyberre = useCyberRE(caseId)
   const [usePrefilter, setUsePrefilter] = useState(true)
   const observations = useMemo(
@@ -32,12 +31,12 @@ function ReviewView({ caseId, data }: { caseId: string; data: CasePayload }) {
   return (
     <div className="space-y-6">
       <PageHeader
-        title="AI review and LLM votes"
-        lead="Advisory model passes that never change the deterministic ranking. The independent review is blinded from the zero-shot vote and from live intelligence; the zero-shot and CyberRE votes are bounded contributions to the ensemble."
+        title="AI review and CyberRE-LLM"
+        lead="Model passes that run only when you ask. The independent review is advisory and blinded from live intelligence; CyberRE-LLM adds a bounded vote to the ranking. The ensemble itself is deterministic."
       />
       {local ? (
         <Callout tone="warning" title="Unavailable in local mode">
-          Set OPENROUTER_API_KEY and restart the service to enable the independent review, the zero-shot vote and CyberRE-LLM.
+          Set OPENROUTER_API_KEY and restart the service to enable the independent review and CyberRE-LLM.
         </Callout>
       ) : null}
 
@@ -128,34 +127,6 @@ function ReviewView({ caseId, data }: { caseId: string; data: CasePayload }) {
           </div>
         ) : (
           <p className="text-sm text-muted">No review has been run for this case.</p>
-        )}
-      </Card>
-
-      <Card>
-        <SectionTitle
-          hint="A bounded vote from the model over the top candidates. Withheld from the reviewer."
-          action={
-            <Button disabled={local} loading={zeroShot.isPending} onClick={() => zeroShot.mutate()}>
-              <Vote className="size-4" /> {data.zero_shot ? 'Re-run zero-shot vote' : 'Run zero-shot vote'}
-            </Button>
-          }
-        >
-          LLM zero-shot vote
-        </SectionTitle>
-        {data.zero_shot ? (
-          <>
-            <p className="mb-2 text-xs text-muted">
-              {data.zero_shot.model} · ${fmt(data.zero_shot.cost_usd, 4)}
-            </p>
-            <DataTable
-              columns={Object.keys(data.zero_shot.ranking[0] ?? {})
-                .filter((k) => k !== 'group_id')
-                .map((k) => ({ key: k, label: k.replace(/_/g, ' ') }))}
-              rows={data.zero_shot.ranking}
-            />
-          </>
-        ) : (
-          <p className="text-sm text-muted">No vote recorded.</p>
         )}
       </Card>
 

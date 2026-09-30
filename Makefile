@@ -107,7 +107,7 @@ benchmark-cti-hal:
 	PYTHONPATH=. $(PYTHON) scripts/benchmark_mapping.py --root $(CTI_HAL_ROOT) --datasets cti_hal --output data/audits/cti_hal_mapping_current.json
 	PYTHONPATH=. $(PYTHON) scripts/attribution_benchmark.py --cti-hal $(CTI_HAL_ROOT)/reports.jsonl --output data/audits/attribution_cti_hal_current.json
 
-# Production pipeline (OpenRouter verifier on ambiguous candidates + bounded zero-shot vote);
+# Production pipeline (OpenRouter verifier on ambiguous candidates);
 # spends credit and records calls/errors/cost per report. Never used as the adoption gate.
 benchmark-cti-hal-production:
 	PYTHONPATH=. $(PYTHON) scripts/attribution_benchmark.py --pipeline production --cti-hal $(CTI_HAL_ROOT)/reports.jsonl --output data/audits/attribution_cti_hal_production.json

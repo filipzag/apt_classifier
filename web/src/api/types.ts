@@ -227,12 +227,6 @@ export interface ReviewInfo {
   audit_path: string | null
 }
 
-export interface ZeroShotInfo {
-  model: string
-  ranking: Record<string, unknown>[]
-  cost_usd: number
-}
-
 export interface CyberREResult {
   observation_id: string
   observation_text: string
@@ -309,8 +303,6 @@ export interface CasePayload {
   decisions: AppliedDecision[]
   techniques: AcceptedTechnique[]
   ranking: RankingEntry[]
-  ranking_includes_llm_vote: boolean
-  deterministic_leader: string | null
   decision: DecisionInfo | null
   origin: OriginInfo
   behaviour_matches: BehaviourMatch[]
@@ -322,7 +314,6 @@ export interface CasePayload {
   retrieval_diagnostics: Record<string, unknown>
   interview: { complete: boolean; stop_reason: string | null; answered: number; has_question: boolean }
   review: ReviewInfo | null
-  zero_shot: ZeroShotInfo | null
   cyberre: { results: Record<string, CyberREResult> }
   intel: { snapshot: IntelSnapshotSummary | null; matches: IntelMatch[] }
   group_label: string | null

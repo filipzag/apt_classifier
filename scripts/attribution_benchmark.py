@@ -3,13 +3,13 @@
 For every ATT&CK group with enough documented procedure sentences, a fraction of its
 (technique, sentence) behaviours is held out, anonymized (actor names -> "the adversary")
 and fed as free-text observations through ``AttributionEngine.analyze``. ``--pipeline local``
-(default) is deterministic: verifier off, LLM zero-shot vote off, no OpenRouter calls.
-``--pipeline production`` runs the shipped pipeline: the configured technique verifier on
-the ambiguous candidates and the bounded zero-shot vote folded into RRF, with call counts,
-errors and cost recorded per fold. The benchmark then asks whether the originating group is
-recovered by the fused ranking (``rank``: what the analyst sees; ``deterministic_rank``:
-before the LLM vote) and which attribution stage is reached (always from the deterministic
-fusion; LLM votes never raise the stage).
+(default) is deterministic: verifier off, no OpenRouter calls. ``--pipeline production``
+runs the shipped pipeline: the configured technique verifier on the ambiguous candidates,
+with call counts, errors and cost recorded per fold. The ensemble itself is deterministic in
+both (the LLM zero-shot vote was removed on 2026-09-30). The benchmark then asks whether the
+originating group is recovered by the fused ranking (``rank``: what the analyst sees;
+``deterministic_rank``: what the stage decision reads; equal since the vote was removed, both
+kept so older artifacts compare) and which attribution stage is reached.
 
 Leak control per fold (``FoldStore``):
 - technique-index hits whose text equals a held-out sentence are dropped (the dense index
@@ -288,15 +288,10 @@ def _ledger(fold: Fold) -> EvidenceLedger:
 
 def _llm_accounting(state: Any, client: OpenRouterClient | None, cost_before: float) -> dict:
     diagnostics = dict(getattr(state.retrieval, "diagnostics", None) or {})
-    zero_shot = getattr(state, "zero_shot", None)
     return {
         "verifier_calls": int(diagnostics.get("verifier_calls", 0) or 0),
         "verifier_errors": int(diagnostics.get("verifier_errors", 0) or 0),
         "verifier_cost_usd": round(float(diagnostics.get("verifier_cost_usd", 0.0) or 0.0), 6),
-        "zero_shot_applied": zero_shot is not None,
-        "zero_shot_cost_usd": round(
-            float(getattr(getattr(zero_shot, "usage", None), "cost_usd", 0.0) or 0.0), 6
-        ),
         "cost_usd": round(
             (client.total_usage.cost_usd - cost_before) if client is not None else 0.0, 6
         ),
@@ -310,7 +305,7 @@ class LLMUnavailableError(RuntimeError):
 def _all_llm_calls_failed(accounting: dict[str, Any]) -> bool:
     calls = int(accounting.get("verifier_calls", 0) or 0)
     errors = int(accounting.get("verifier_errors", 0) or 0)
-    return calls > 0 and errors == calls and not accounting.get("zero_shot_applied", False)
+    return calls > 0 and errors == calls
 
 
 def _separation_fields(state: Any, truth: str | None, decision: Any) -> dict[str, Any]:
@@ -408,8 +403,8 @@ def run_known(
                 if not rows:
                     raise LLMUnavailableError(
                         f"all {accounting['verifier_calls']} verifier calls failed on the first "
-                        f"fold ({label}) and the zero-shot vote was not applied; check the "
-                        "OpenRouter key/credit before running the production pipeline"
+                        f"fold ({label}); check the OpenRouter key/credit before running the "
+                        "production pipeline"
                     )
                 # Credit or the API went away mid-run: keep the folds that were measured with
                 # the LLM and stop, rather than silently appending local-only folds.
@@ -642,7 +637,6 @@ def summarize(
         metrics["llm"] = {
             "verifier_calls": sum(item["verifier_calls"] for item in llm_rows),
             "verifier_errors": sum(item["verifier_errors"] for item in llm_rows),
-            "zero_shot_applied": sum(1 for item in llm_rows if item["zero_shot_applied"]),
             "cost_usd": round(sum(item["cost_usd"] for item in llm_rows), 4),
         }
     stages: dict[str, dict[str, int]] = {"known": {}, "unknown": {}}
@@ -682,8 +676,8 @@ def _coerce(value: str) -> Any:
 def pipeline_overrides(pipeline: str, set_args: list[str]) -> dict[str, Any]:
     """Settings overrides for a pipeline; explicit ``--set KEY=VALUE`` items win.
 
-    ``local`` never touches OpenRouter (``local_only`` preset, zero-shot vote weight 0);
-    ``production`` keeps the configured preset, verifier and zero-shot weight. CyberRE is analyst-triggered in the
+    ``local`` never touches OpenRouter (``local_only`` preset, no verifier); ``production``
+    keeps the configured preset and verifier. CyberRE is analyst-triggered in the
     product and is excluded from both.
     """
     if pipeline == "local":
@@ -691,7 +685,6 @@ def pipeline_overrides(pipeline: str, set_args: list[str]) -> dict[str, Any]:
         # ``balanced`` preset forces the verifier to ``ambiguous``; ``local_only`` is the
         # same preset with the verifier off, so this is the only override that sticks.
         overrides: dict[str, Any] = {
-            "llm_zero_shot_weight": 0.0,
             "cyberre_weight": 0.0,
             "technique_mapping_preset": "local_only",
         }
@@ -727,8 +720,8 @@ def main(argv: list[str] | None = None) -> int:
         "--pipeline",
         choices=("local", "production"),
         default="local",
-        help="local: verifier and LLM vote off, no OpenRouter calls (default); "
-        "production: configured verifier + zero-shot vote, costs recorded",
+        help="local: verifier off, no OpenRouter calls (default); "
+        "production: configured technique verifier, costs recorded",
     )
     parser.add_argument("--quiet", action="store_true")
     parser.add_argument(
@@ -821,7 +814,6 @@ def main(argv: list[str] | None = None) -> int:
             if production
             else None
         ),
-        "zero_shot_model": settings.extract_model if production else None,
     }
     report = {
         "generated_at": datetime.now(UTC).isoformat(),

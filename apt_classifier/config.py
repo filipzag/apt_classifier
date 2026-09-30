@@ -119,8 +119,6 @@ class Settings(BaseSettings):
     actor_behavior_family_weight: float = 1.50
     software_family_weight: float = 1.20
     campaign_family_weight: float = 1.00
-    llm_zero_shot_weight: float = 0.50
-    llm_zero_shot_family_weight: float = 0.50
     cyberre_model: str = "openai/gpt-5.6-sol"
     cyberre_effort: str = "low"
     cyberre_weight: float = 0.35

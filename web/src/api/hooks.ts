@@ -130,18 +130,15 @@ export function useInterviewMutations(id: string) {
   return { answer, restart }
 }
 
-export function useLlmStep(id: string, kind: 'review' | 'zero-shot') {
+export function useReview(id: string) {
   const write = useCaseWriter(id)
   return useMutation({
-    mutationFn: () => (kind === 'review' ? api.review(id) : api.zeroShot(id)),
+    mutationFn: () => api.review(id),
     onSuccess: (payload) => {
       write(payload)
-      toast.success(kind === 'review' ? 'Independent review complete' : 'Zero-shot vote recorded')
+      toast.success('Independent review complete')
     },
-    onError: (error) =>
-      toast.error(kind === 'review' ? 'Review failed' : 'Zero-shot vote failed', {
-        description: describe(error),
-      }),
+    onError: (error) => toast.error('Review failed', { description: describe(error) }),
   })
 }
 

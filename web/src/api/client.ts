@@ -84,7 +84,6 @@ export const api = {
   restart: (id: string) =>
     request<InterviewState>(`/api/cases/${id}/interview/restart`, { method: 'POST' }),
   review: (id: string) => request<CasePayload>(`/api/cases/${id}/review`, { method: 'POST' }),
-  zeroShot: (id: string) => request<CasePayload>(`/api/cases/${id}/zero-shot`, { method: 'POST' }),
   cyberre: (id: string, observationId: string | null, usePrefilter: boolean) =>
     request<CasePayload>(
       `/api/cases/${id}/cyberre`,

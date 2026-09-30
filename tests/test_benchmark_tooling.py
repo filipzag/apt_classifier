@@ -546,14 +546,14 @@ def test_attribution_pipeline_overrides_keep_local_offline_and_let_set_win():
     local = pipeline_overrides("local", [])
     # the engine applies the mapping preset last, so the verifier is switched off via preset
     assert local["technique_mapping_preset"] == "local_only"
-    assert local["llm_zero_shot_weight"] == 0.0
     assert local["cyberre_weight"] == 0.0
+    # the LLM zero-shot vote left the ensemble: no pipeline sets its weight any more
+    assert not any("zero_shot" in key for key in local)
     production = pipeline_overrides("production", [])
     assert "technique_verifier_mode" not in production
-    assert "llm_zero_shot_weight" not in production  # settings default (the shipped vote)
     assert production["cyberre_weight"] == 0.0
-    forced = pipeline_overrides("production", ["llm_zero_shot_weight=0"])
-    assert forced["llm_zero_shot_weight"] == 0
+    forced = pipeline_overrides("production", ["cyberre_weight=0.2"])
+    assert forced["cyberre_weight"] == 0.2
     with pytest.raises(ValueError):
         pipeline_overrides("production", ["nonsense"])
     with pytest.raises(ValueError):
@@ -577,9 +577,7 @@ def test_attribution_summary_reports_deterministic_ranking_and_llm_cost():
                 "verifier_calls": 5,
                 "verifier_errors": errors,
                 "verifier_cost_usd": cost,
-                "zero_shot_applied": True,
-                "zero_shot_cost_usd": 0.001,
-                "cost_usd": cost + 0.001,
+                "cost_usd": cost,
             },
         }
 
@@ -591,8 +589,7 @@ def test_attribution_summary_reports_deterministic_ranking_and_llm_cost():
     assert metrics["llm"] == {
         "verifier_calls": 10,
         "verifier_errors": 1,
-        "zero_shot_applied": 2,
-        "cost_usd": pytest.approx(0.032),
+        "cost_usd": pytest.approx(0.03),
     }
     # rows without the production fields keep the old shape
     for item in known:
@@ -605,13 +602,11 @@ def test_attribution_summary_reports_deterministic_ranking_and_llm_cost():
 def test_attribution_production_detects_total_llm_failure():
     from scripts.attribution_benchmark import _all_llm_calls_failed
 
-    failed = {"verifier_calls": 27, "verifier_errors": 27, "zero_shot_applied": False}
-    partial = {"verifier_calls": 27, "verifier_errors": 3, "zero_shot_applied": True}
-    voted = {"verifier_calls": 27, "verifier_errors": 27, "zero_shot_applied": True}
-    none = {"verifier_calls": 0, "verifier_errors": 0, "zero_shot_applied": False}
+    failed = {"verifier_calls": 27, "verifier_errors": 27}
+    partial = {"verifier_calls": 27, "verifier_errors": 3}
+    none = {"verifier_calls": 0, "verifier_errors": 0}
     assert _all_llm_calls_failed(failed)
     assert not _all_llm_calls_failed(partial)
-    assert not _all_llm_calls_failed(voted)
     assert not _all_llm_calls_failed(none)  # local pipeline: nothing was attempted
 
 

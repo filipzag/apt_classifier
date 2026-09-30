@@ -377,18 +377,6 @@ def _render_review(engine: AttributionEngine, settings: Settings, state: Analysi
             if result.ok:
                 runtime.set_state(state)
                 st.rerun()
-        if columns[1].button("Re-run LLM zero-shot vote", use_container_width=True):
-            with st.spinner("Asking the model for its bounded vote…"):
-                result = run_step("Zero-shot vote", engine.run_zero_shot, state)
-            if result.ok:
-                st.rerun()
-    if state.zero_shot:
-        with st.expander(
-            "LLM zero-shot vote (bounded, withheld from the reviewer)", expanded=False
-        ):
-            st.dataframe(
-                pd.DataFrame(state.zero_shot.ranking), use_container_width=True, hide_index=True
-            )
     if state.review is None:
         return
     final = state.review.final.parsed

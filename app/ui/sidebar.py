@@ -9,7 +9,6 @@ import streamlit as st
 
 from app.ui import runtime
 from app.ui.guard import run_step
-from apt_classifier.classifiers.llm_zeroshot import ZeroShotResult
 from apt_classifier.config import Settings
 from apt_classifier.presets import PRESETS, apply_preset, preset_choices
 from apt_classifier.session import AttributionEngine, verifications_from_records
@@ -94,7 +93,6 @@ def _render_case_manager(
                         prior_verifications=verifications_from_records(
                             payload.get("verifications")
                         ),
-                        prior_zero_shot=ZeroShotResult.from_dict(payload.get("zero_shot")),
                     )
                 if loaded.ok:
                     st.session_state[runtime.CASE_NAME_KEY] = payload["name"]
@@ -167,9 +165,6 @@ def render_sidebar(
         motivation_family_weight = st.slider(
             "Motivation family", 0.0, 3.0, settings.motivation_family_weight, 0.05
         )
-        llm_zero_shot_family_weight = st.slider(
-            "LLM opinion family", 0.0, 2.0, settings.llm_zero_shot_family_weight, 0.05
-        )
         cyberre_family_weight = st.slider(
             "CyberRE-LLM family", 0.0, 2.0, getattr(settings, "cyberre_family_weight", 0.35), 0.05
         )
@@ -185,14 +180,6 @@ def render_sidebar(
             )
             for classifier in engine.classifiers
         }
-        weights["llm_zero_shot"] = st.slider(
-            "LLM zero-shot vote",
-            0.0,
-            2.0,
-            0.0 if runtime.local_only(settings) else default_weights.get("llm_zero_shot", 0.5),
-            0.05,
-            help="Bounded LLM opinion folded into the ranking after deterministic fusion. 0 disables it.",
-        )
     updated = settings.model_copy(
         update={
             "similarity_threshold": similarity,
@@ -202,10 +189,8 @@ def render_sidebar(
             "technique_family_weight": technique_family_weight,
             "context_family_weight": context_family_weight,
             "motivation_family_weight": motivation_family_weight,
-            "llm_zero_shot_family_weight": llm_zero_shot_family_weight,
             "cyberre_family_weight": cyberre_family_weight,
             "max_questions": max_questions,
-            "llm_zero_shot_weight": weights["llm_zero_shot"],
         }
     )
     state = runtime.current_state()

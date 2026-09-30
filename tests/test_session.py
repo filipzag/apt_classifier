@@ -1,7 +1,7 @@
 """End-to-end tests for ``AttributionEngine`` orchestration.
 
 These build a real engine over a fake vector store and a fake LLM client and exercise
-``analyze`` -> ``rescore`` eligibility, reviewer blinding from the zero-shot vote,
+``analyze`` -> ``rescore`` eligibility, an LLM-free ensemble,
 threshold wiring, and deterministic stage decisions.
 """
 
@@ -15,7 +15,6 @@ from apt_classifier.attribution import (
     _evidence_family_count,
     _generate_cluster_id,
 )
-from apt_classifier.classifiers.llm_zeroshot import ZeroShotResult
 from apt_classifier.config import Settings
 from apt_classifier.evidence.models import (
     EvidenceLedger,
@@ -151,7 +150,6 @@ def _kb() -> AttackKnowledgeBase:
 def _settings(**overrides) -> Settings:
     base = {
         "technique_mapping_preset": "local_only",
-        "llm_zero_shot_weight": 0.0,
         "cyberre_weight": 0.0,
         "reranker_enabled": False,
     }
@@ -207,18 +205,14 @@ def test_restart_interview_does_not_keep_a_shrunken_candidate_pool():
     assert "G2" in _groups(state.fusion)
 
 
-def test_reviewer_and_stage_use_deterministic_fusion_not_post_vote(monkeypatch):
-    engine = AttributionEngine(_settings(llm_zero_shot_weight=0.5), _kb(), FakeStore(), FakeLLM())
-
-    def fake_zero_shot(client, payload, *, model, effort):
-        # Rank the deterministic runner-up first to make the vote visible.
-        ranking = tuple(
-            {"candidate_id": candidate["candidate_id"], "rank": rank, "reason": "x"}
-            for rank, candidate in enumerate(reversed(payload.candidates), 1)
-        )
-        return ZeroShotResult(ranking, model, LLMUsage(), "", "")
-
-    monkeypatch.setattr(session_module, "run_zero_shot_guess", fake_zero_shot)
+def test_the_ensemble_makes_no_llm_call_even_with_a_client(monkeypatch):
+    """The LLM zero-shot vote left the ensemble (2026-09-30): with a client configured, analysis
+    and rescoring make no model call (FakeLLM raises on any), no LLM opinion family or weight
+    remains, and the reviewer receives the fusion the stage decision reads."""
+    engine = AttributionEngine(_settings(), _kb(), FakeStore(), FakeLLM())
+    assert "llm_zero_shot" not in engine.default_weights()
+    assert "llm_opinion" not in engine.family_weights()
+    assert not hasattr(engine, "run_zero_shot")
     captured: dict[str, FusionResult] = {}
 
     def fake_review(client, kb, ledger, classifier_results, fusion, **kwargs):
@@ -229,19 +223,16 @@ def test_reviewer_and_stage_use_deterministic_fusion_not_post_vote(monkeypatch):
     monkeypatch.setattr(session_module, "run_review_pipeline", fake_review)
 
     state = engine.analyze(_ledger("PowerShell executed an encoded command."))
-    assert state.zero_shot is not None
-    assert state.deterministic_fusion is not None
-    assert "llm_zero_shot" in state.fusion.active_classifiers
-    assert "llm_zero_shot" not in state.deterministic_fusion.active_classifiers
+    assert not hasattr(state, "zero_shot")
+    assert state.fusion is state.deterministic_fusion
     assert state.attribution_decision is not None
+    assert not any("zero_shot" in name for name in state.fusion.active_classifiers)
 
     engine.run_review(state)
     assert captured["fusion"] is state.deterministic_fusion
-    assert "llm_zero_shot" not in captured["classifiers"]
 
     engine.rescore(state)
-    assert state.deterministic_fusion is not None
-    assert "llm_zero_shot" not in state.deterministic_fusion.active_classifiers
+    assert state.fusion is state.deterministic_fusion
 
 
 def test_attribution_thresholds_come_from_settings():
@@ -432,29 +423,6 @@ def test_rerank_blend_zero_is_the_exact_rrf_fusion_and_blend_keeps_top_k(monkeyp
     assert b.entries[0].relative_score == pytest.approx(100.0)
 
 
-def test_zero_shot_refusion_carries_the_boosted_software_weight(monkeypatch):
-    engine = AttributionEngine(_settings(llm_zero_shot_weight=0.5), _kb(), FakeStore(), FakeLLM())
-
-    def fake_zero_shot(client, payload, *, model, effort):
-        ranking = tuple(
-            {"candidate_id": c["candidate_id"], "rank": rank, "reason": "x"}
-            for rank, c in enumerate(payload.candidates, 1)
-        )
-        return ZeroShotResult(ranking, model, LLMUsage(), "", "")
-
-    monkeypatch.setattr(session_module, "run_zero_shot_guess", fake_zero_shot)
-    # force a decisive-software factor so the boost is visible in both fusions
-    monkeypatch.setattr(
-        session_module, "decisive_software_factor", lambda kb, ids, *, boost, **_: (3.0, ("S1",))
-    )
-    state = engine.analyze(_ledger("PowerShell executed an encoded command."))
-    assert state.zero_shot is not None
-    deterministic = state.deterministic_fusion.effective_weights.get("software_tools")
-    post_vote = state.fusion.effective_weights.get("software_tools")
-    if deterministic is not None:
-        assert post_vote == pytest.approx(deterministic)
-
-
 def test_rerank_top_k_contrasts_a_longer_shortlist_but_the_gate_keeps_its_own(monkeypatch):
     """ATTRIBUTION_RERANK_TOP_K re-ranks over a longer shortlist than the naming gate scores:
     the recorded discrimination (gate) still has ATTRIBUTION_SEPARATION_TOP_K candidates, the
@@ -525,26 +493,6 @@ def test_prior_verifications_are_reused_without_calling_the_verifier():
     # records that are not final verdicts are ignored
     assert verifications_from_records([{**records[0], "verdict": "error"}, {"bad": 1}]) == {}
     assert collect_verifications(offline)  # the applied verdict is collected again
-
-
-def test_saved_zero_shot_vote_is_folded_in_without_calling_the_model():
-    """A vote saved with the case is reused on reopen: the model is not asked (FakeLLM raises
-    on any call) and the vote still enters the ensemble."""
-    prior = ZeroShotResult(
-        ranking=({"candidate_id": "G2", "rank": 1, "reason": "saved"},),
-        model="saved-model",
-        usage=LLMUsage(1, 1, 0.01),
-        prompt="",
-        response="",
-    )
-    engine = AttributionEngine(_settings(llm_zero_shot_weight=0.5), _kb(), FakeStore(), FakeLLM())
-    state = engine.analyze(
-        _ledger("PowerShell executed an encoded command."), prior_zero_shot=prior
-    )
-    assert state.zero_shot is prior
-    assert any(r.classifier == "llm_zero_shot" for r in state.classifier_results)
-    assert ZeroShotResult.from_dict(prior.to_dict()) == prior
-    assert ZeroShotResult.from_dict({"nope": 1}) is None and ZeroShotResult.from_dict(None) is None
 
 
 def test_combiner_orders_the_shortlist_and_the_gate_scores_the_new_leader(monkeypatch, tmp_path):

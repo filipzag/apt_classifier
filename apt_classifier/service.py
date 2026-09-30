@@ -22,7 +22,6 @@ from uuid import uuid4
 from apt_classifier.attack.kb import AttackKnowledgeBase
 from apt_classifier.canvas import build_analyst_canvas, build_candidate_dossier
 from apt_classifier.cases import CaseRecord, CaseStore
-from apt_classifier.classifiers.llm_zeroshot import ZeroShotResult
 from apt_classifier.config import Settings, get_settings
 from apt_classifier.diamond import build_diamond_model
 from apt_classifier.embeddings import SentenceTransformerEmbedder
@@ -256,7 +255,6 @@ class CaseService:
         previous: AnalysisState | None,
         *,
         prior_verifications: dict[tuple[str, str], Any] | None = None,
-        prior_zero_shot: ZeroShotResult | None = None,
     ) -> AnalysisState:
         if prior_verifications is None and previous is not None:
             prior_verifications = verifications_from_records(
@@ -267,7 +265,6 @@ class CaseService:
                 ledger,
                 weights=weights or None,
                 prior_verifications=prior_verifications or None,
-                prior_zero_shot=prior_zero_shot,
             )
             if previous is not None:
                 if previous.threat_intel_snapshot is not None:
@@ -306,7 +303,6 @@ class CaseService:
             weights=state.weights,
             summary=self.summary_for(state),
             verifications=collect_verifications(state.retrieval),
-            zero_shot=state.zero_shot.to_dict() if state.zero_shot is not None else None,
             owner=meta.owner,
         )
         record = next((r for r in self.store.list() if r.case_id == case_id), None)
@@ -348,13 +344,11 @@ class CaseService:
                 except (FileNotFoundError, ValueError) as exc:
                     raise CaseNotFound(case_id) from exc
                 saved_records = list(payload.get("verifications") or [])
-                saved_vote = ZeroShotResult.from_dict(payload.get("zero_shot"))
                 state = self._reanalyze(
                     payload["ledger"],
                     payload.get("weights") or None,
                     None,
                     prior_verifications=verifications_from_records(saved_records),
-                    prior_zero_shot=saved_vote,
                 )
                 self._states[case_id] = state
                 self._meta[case_id] = CaseMeta(
@@ -370,8 +364,7 @@ class CaseService:
                 new_verdicts = {(r["observation_id"], r["technique_id"]) for r in fresh} - {
                     (r.get("observation_id"), r.get("technique_id")) for r in saved_records
                 }
-                new_vote = saved_vote is None and state.zero_shot is not None
-                if new_verdicts or new_vote:
+                if new_verdicts:
                     self._save(case_id)
             return self._states[case_id], self._meta[case_id]
 
@@ -538,13 +531,6 @@ class CaseService:
         state, _ = self.get(case_id)
         with self._lock(case_id), self._engine_lock:
             self.engine.run_review(state)
-        return state
-
-    def run_zero_shot(self, case_id: str) -> AnalysisState:
-        self._require_llm("the LLM zero-shot vote")
-        state, _ = self.get(case_id)
-        with self._lock(case_id), self._engine_lock:
-            self.engine.run_zero_shot(state)
         return state
 
     def run_cyberre(

@@ -11,11 +11,6 @@ from apt_classifier.attribution import (
     assess_attribution,
 )
 from apt_classifier.classifiers.base import ClassifierContext, ClassifierResult
-from apt_classifier.classifiers.llm_zeroshot import (
-    ZERO_SHOT_CLASSIFIER_NAME,
-    ZeroShotResult,
-    run_zero_shot_guess,
-)
 from apt_classifier.classifiers.naive_bayes import posterior
 from apt_classifier.classifiers.registry import default_classifiers, run_classifiers
 from apt_classifier.classifiers.software import decisive_software_factor
@@ -66,7 +61,6 @@ from apt_classifier.retrieve import (
     refresh_context_answers,
     retrieve_techniques,
 )
-from apt_classifier.review.context import build_review_payload
 from apt_classifier.review.pipeline import ReviewOutcome, run_review_pipeline
 from apt_classifier.separation import (
     DiscriminationWeights,
@@ -100,7 +94,6 @@ _CLASSIFIER_FAMILIES = {
     "group_description": "context",
     "strategic_context": "context",
     "motivation_alignment": "motivation",
-    ZERO_SHOT_CLASSIFIER_NAME: "llm_opinion",
     CYBERRE_CLASSIFIER_NAME: "cyberre_llm",
 }
 
@@ -115,8 +108,8 @@ class AnalysisState:
     bayes_posterior: dict[str, float]
     origin_assessment: OriginAndThreatAssessment
     weights: dict[str, float] = field(default_factory=dict)
-    # Fusion of the deterministic classifiers only. ``fusion`` may additionally carry the
-    # bounded LLM zero-shot vote; the isolated reviewer and the attribution stage use this.
+    # Fusion the isolated reviewer and the attribution stage read. It equals ``fusion`` since the
+    # LLM zero-shot vote left the ensemble (2026-09-30); kept so callers and saved states are unchanged.
     deterministic_fusion: FusionResult | None = None
     current_question: SelectedQuestion | None = None
     interview_complete: bool = False
@@ -124,7 +117,6 @@ class AnalysisState:
     interview_revision: int = INTERVIEW_REVISION
     threat_intel_snapshot: ThreatIntelSnapshot | None = None
     threat_intel_matches: tuple[ThreatIntelMatch, ...] = ()
-    zero_shot: ZeroShotResult | None = None
     cyberre_results: dict[str, CyberREResult] = field(default_factory=dict)
     technique_verifications: dict[str, TechniqueCandidateVerificationResult] = field(
         default_factory=dict
@@ -400,7 +392,6 @@ class AttributionEngine:
         *,
         weights: dict[str, float] | None = None,
         prior_verifications: dict[tuple[str, str], TechniqueVerification] | None = None,
-        prior_zero_shot: ZeroShotResult | None = None,
     ) -> AnalysisState:
         retrieval, technique_verifications = self.map_techniques(
             ledger, prior_verifications=prior_verifications
@@ -436,7 +427,6 @@ class AttributionEngine:
             telemetry_profile=self.telemetry_profile,
             deterministic_fusion=fusion,
         )
-        self._apply_zero_shot_vote(state, merged_weights, prior=prior_zero_shot)
         state.attribution_decision = self._assess_stage(state)
         return state
 
@@ -542,68 +532,9 @@ class AttributionEngine:
             )
         state.current_question = None
         state.interview_stop_reason = None
-        state.zero_shot = None
         state.review = None
-        self._apply_zero_shot_vote(state, merged_weights)
         state.attribution_decision = self._assess_stage(state)
         return state
-
-    def _apply_zero_shot_vote(
-        self,
-        state: AnalysisState,
-        merged_weights: dict[str, float],
-        *,
-        prior: ZeroShotResult | None = None,
-    ) -> None:
-        """Run the LLM zero-shot against the deterministic fusion and re-fuse.
-
-        The LLM zero-shot is a bounded voting member of the ensemble. It runs
-        after the deterministic classifiers produce an initial ranking, ranks
-        only the top-N candidates from that ranking, and is then folded back
-        into RRF with its own family budget so it can rerank but not dominate.
-        The independent reviewer remains blinded to this vote. A ``prior`` vote
-        (saved with the case) is folded in instead of asking the model again.
-        """
-        if merged_weights.get(ZERO_SHOT_CLASSIFIER_NAME, 0.0) <= 0:
-            return
-        if not state.fusion.entries:
-            return
-        if prior is not None:
-            zero_shot = prior
-        else:
-            if self.llm is None:
-                return
-            top_n = min(10, len(state.fusion.entries))
-            payload = build_review_payload(
-                self.kb,
-                state.ledger,
-                state.classifier_results,
-                state.fusion,
-                top_n=top_n,
-            )
-            try:
-                zero_shot = run_zero_shot_guess(
-                    self.llm,
-                    payload,
-                    model=self.settings.extract_model,
-                    effort=self.settings.question_effort,
-                )
-            except Exception:
-                return
-        state.zero_shot = zero_shot
-        zero_shot_result = zero_shot.to_classifier_result()
-        if not zero_shot_result.applicable:
-            return
-        eligible_groups = state.context.eligible_group_ids or {
-            entry.group_id
-            for result in state.classifier_results
-            if result.applicable and result.classifier in _TECHNICAL_EVIDENCE_CLASSIFIERS
-            for entry in result.entries
-        }
-        combined = state.classifier_results + (zero_shot_result,)
-        state.classifier_results = combined
-        state.fusion = self._fuse(combined, merged_weights, eligible_groups, state.context)
-        state.origin_assessment = assess_origin_and_threat_type(self.kb, state.fusion)
 
     def attach_threat_intel(
         self, state: AnalysisState, snapshot: ThreatIntelSnapshot
@@ -729,22 +660,6 @@ class AttributionEngine:
         )
         return self.rescore(state)
 
-    def run_zero_shot(self, state: AnalysisState, top_n: int = 10) -> ZeroShotResult:
-        payload = build_review_payload(
-            self.kb,
-            state.ledger,
-            state.classifier_results,
-            state.fusion,
-            top_n=top_n,
-        )
-        state.zero_shot = run_zero_shot_guess(
-            self.llm,
-            payload,
-            model=self.settings.extract_model,
-            effort=self.settings.question_effort,
-        )
-        return state.zero_shot
-
     def run_cyberre(
         self,
         state: AnalysisState,
@@ -844,10 +759,10 @@ class AttributionEngine:
         review_results = tuple(
             result
             for result in state.classifier_results
-            if result.classifier not in {ZERO_SHOT_CLASSIFIER_NAME, CYBERRE_CLASSIFIER_NAME}
+            if result.classifier != CYBERRE_CLASSIFIER_NAME
         )
-        # The reviewer must not see the zero-shot vote: pass the deterministic fusion, not the
-        # post-vote ranking, alongside the LLM-free classifier results.
+        # The reviewer must not see an LLM vote: pass the deterministic fusion, not a ranking
+        # that includes CyberRE-LLM, alongside the LLM-free classifier results.
         state.review = run_review_pipeline(
             self.llm,
             self.kb,
@@ -868,7 +783,7 @@ class AttributionEngine:
         eligible_groups: set[str] | None,
         context: ClassifierContext,
     ) -> FusionResult:
-        """One fusion path for the deterministic pass and the zero-shot re-fusion.
+        """The single fusion path: every ranking the engine produces goes through it.
 
         Applies the decisive-evidence weights, family-aware RRF, then the candidate-relative
         discrimination (stored on the context for the stage decision and the UI) and, when
@@ -1035,7 +950,6 @@ class AttributionEngine:
             "actor_behavior": getattr(self.settings, "actor_behavior_family_weight", 1.50),
             "software": getattr(self.settings, "software_family_weight", 1.20),
             "campaign": getattr(self.settings, "campaign_family_weight", 1.00),
-            "llm_opinion": self.settings.llm_zero_shot_family_weight,
             "cyberre_llm": getattr(self.settings, "cyberre_family_weight", 0.35),
         }
 
@@ -1047,7 +961,6 @@ class AttributionEngine:
             "specific_behavior": self.settings.specific_behavior_weight,
             "strategic_context": self.settings.strategic_context_weight,
             "motivation_alignment": self.settings.motivation_weight,
-            ZERO_SHOT_CLASSIFIER_NAME: self.settings.llm_zero_shot_weight,
             CYBERRE_CLASSIFIER_NAME: self.settings.cyberre_weight,
             "software_tools": self.settings.software_weight,
             "bernoulli_naive_bayes": getattr(self.settings, "naive_bayes_weight", 1.0),

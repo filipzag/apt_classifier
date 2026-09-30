@@ -128,7 +128,6 @@ def autosave(settings: Settings, state: AnalysisState) -> None:
             weights=state.weights,
             summary=summary_for(state),
             verifications=collect_verifications(state.retrieval),
-            zero_shot=state.zero_shot.to_dict() if state.zero_shot is not None else None,
         )
     except Exception as exc:  # noqa: BLE001 - saving must never break the analysis
         st.toast(f"Case was not saved to disk: {exc}", icon="⚠️")
@@ -141,7 +140,6 @@ def reanalyze(
     *,
     previous: AnalysisState | None,
     prior_verifications: dict[tuple[str, str], Any] | None = None,
-    prior_zero_shot: Any = None,
 ) -> AnalysisState:
     """Full analysis of ``ledger`` that keeps what is still valid from ``previous``.
 
@@ -156,7 +154,6 @@ def reanalyze(
         ledger,
         weights=weights,
         prior_verifications=prior_verifications or None,
-        prior_zero_shot=prior_zero_shot,
     )
     if previous is not None:
         if previous.threat_intel_snapshot is not None:

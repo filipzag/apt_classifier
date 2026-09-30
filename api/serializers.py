@@ -345,22 +345,6 @@ def review(kb: Any, state: Any) -> dict[str, Any] | None:
     }
 
 
-def zero_shot(kb: Any, state: Any) -> dict[str, Any] | None:
-    result = getattr(state, "zero_shot", None)
-    if result is None:
-        return None
-    rows = []
-    for item in result.ranking:
-        gid = str(item.get("group_id") or item.get("candidate_id") or "")
-        rows.append({**item, "group_id": gid, "name": _name(kb, gid) if gid else ""})
-    usage = getattr(result, "usage", None)
-    return {
-        "model": result.model,
-        "ranking": rows,
-        "cost_usd": round(float(getattr(usage, "cost_usd", 0.0) or 0.0), 4),
-    }
-
-
 def cyberre(state: Any) -> dict[str, Any]:
     results = getattr(state, "cyberre_results", {}) or {}
     rows = {}
@@ -534,18 +518,6 @@ def case_payload(
         "decisions": decisions(state),
         "techniques": techniques(state),
         "ranking": ranking(kb, state),
-        "ranking_includes_llm_vote": bool(
-            getattr(state, "zero_shot", None) is not None
-            and getattr(state, "deterministic_fusion", None) is not None
-            and [e.group_id for e in state.deterministic_fusion.entries[:15]]
-            != [e.group_id for e in state.fusion.entries[:15]]
-        ),
-        "deterministic_leader": (
-            state.deterministic_fusion.entries[0].group_id
-            if getattr(state, "deterministic_fusion", None) is not None
-            and state.deterministic_fusion.entries
-            else None
-        ),
         "decision": decision(kb, state, thresholds),
         "origin": origin(kb, state),
         "behaviour_matches": behaviour_matches(kb, state),
@@ -569,7 +541,6 @@ def case_payload(
             "has_question": state.current_question is not None,
         },
         "review": review(kb, state),
-        "zero_shot": zero_shot(kb, state),
         "cyberre": cyberre(state),
         "intel": intel(state),
         "group_label": group_name(kb, state.fusion.entries[0].group_id)

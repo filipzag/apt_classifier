@@ -102,7 +102,6 @@ class CaseStore:
         settings_overrides: dict[str, Any] | None = None,
         summary: dict[str, Any] | None = None,
         verifications: list[dict[str, Any]] | None = None,
-        zero_shot: dict[str, Any] | None = None,
         owner: dict[str, Any] | None = None,
     ) -> Path:
         self.directory.mkdir(parents=True, exist_ok=True)
@@ -127,8 +126,6 @@ class CaseStore:
             # verifier verdicts (observation id, technique id, verdict, reason, span, model,
             # tokens, cost) so reopening the case never re-spends on the verifier
             "verifications": [dict(item) for item in (verifications or [])],
-            # the bounded LLM zero-shot vote, replayed on reopen instead of asked again
-            "zero_shot": dict(zero_shot) if zero_shot else None,
             # who created the case (web app users); absent for cases made before sign-in existed
             "owner": dict(owner) if owner else None,
         }
@@ -155,9 +152,6 @@ class CaseStore:
                 for item in (payload.get("verifications") or [])
                 if isinstance(item, dict)
             ],
-            "zero_shot": payload.get("zero_shot")
-            if isinstance(payload.get("zero_shot"), dict)
-            else None,
             "owner": payload.get("owner") if isinstance(payload.get("owner"), dict) else None,
             "created_at": payload.get("created_at"),
             "updated_at": payload.get("updated_at"),

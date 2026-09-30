@@ -149,7 +149,7 @@ A result should be read as: **“These candidates have varying degrees of docume
 | Windows parsing | `apt_classifier/evidence/winlogs.py` | Local Sysmon/Security/System event parsing |
 | IOC parsing | `apt_classifier/evidence/iocs.py` | Hash, IP, domain, and software-alias extraction |
 | Retrieval | `apt_classifier/retrieve.py` | Technique retrieval, platform filtering, aggregation, behavior retrieval, context construction |
-| Classifiers | `apt_classifier/classifiers/` | Deterministic group-ranking signals plus bounded LLM zero-shot opinion |
+| Classifiers | `apt_classifier/classifiers/` | Deterministic group-ranking signals plus the analyst-requested CyberRE-LLM vote |
 | Fusion | `apt_classifier/fusion.py` | RRF, family budgets, correlations, contested flags |
 | Diamond Model | `apt_classifier/diamond.py` | Four-vertex intrusion model with evidence-linked nodes, relationships, and caveats |
 | Origin/type | `apt_classifier/origin.py` | Country-origin hypotheses and APT-like/criminal/indeterminate assessment |
@@ -179,7 +179,7 @@ page under `app/ui/pages`). Startup:
    other on a shared engine. It is rebuilt only when the sidebar settings change; the
    OpenRouter client and its running cost carry over.
 5. Without `OPENROUTER_API_KEY` the app runs in **local mode** instead of stopping: prose is
-   split into sentences locally, the verifier, LLM vote, CyberRE and AI review are disabled
+   split into sentences locally, the verifier, CyberRE and AI review are disabled
    with a visible banner, and retrieval, gating, ranking and the interview (deterministic
    question selection) keep working.
 6. Renders the sidebar (case manager, mode banner, preset, advanced settings, system info;
@@ -263,7 +263,7 @@ runnable; the last Streamlit-only revision is preserved on the `streamlit-stable
   id (rebuilt from the saved ledger on first access), a per-case re-entrant lock plus one engine
   lock (the embedder and Chroma client are shared), and every analyst operation: intake
   (`IntakePayload` → LLM extraction or local sentence split → `analyze`), technique decisions,
-  interview (`interview()`, `answer()`, `restart_interview()`), LLM steps (review, zero-shot,
+  interview (`interview()`, `answer()`, `restart_interview()`), LLM steps (review,
   CyberRE) that raise `ServiceUnavailable` in local mode, live threat intelligence with a
   30-minute snapshot cache, Elasticsearch MCP staging, dossier/canvas/diamond views and exports.
   Re-analyses keep live-intel matches and CyberRE results for observations that still exist,
@@ -272,9 +272,9 @@ runnable; the last Streamlit-only revision is preserved on the `streamlit-stable
   by `map_techniques(prior_verifications=...)` in both production and local mode before any
   verifier call; candidates that carry a saved verdict are never sent to the verifier again, so
   reopening a case is deterministic and costs nothing (`retrieval_diagnostics.verifier_reused`).
-  `not_run` and `error` are not verdicts and are retried. The bounded zero-shot vote is saved the
-  same way (`zero_shot`) and folded back in on reopen instead of being asked again; decisions and
-  interview answers still re-cast it because the evidence changed.
+  `not_run` and `error` are not verdicts and are retried. Case files written before the LLM
+  zero-shot vote was removed (2026-09-30) may still carry a `zero_shot` entry; it is ignored on
+  load and dropped on the next save.
 - `apt_classifier/report.py` — headless `STAGE_INFO`, the Markdown assessment, the JSON audit
   payload, Navigator layers and Attack Flow export (`export_document(kb, state, kind)`); the
   Streamlit components delegate to it so the two front ends cannot drift.
@@ -287,11 +287,11 @@ runnable; the last Streamlit-only revision is preserved on the `streamlit-stable
 - `api/serializers.py` — pure reads of `AnalysisState` into JSON: observations, candidates (with
   the acceptance probability, evidence items and verifier verdict), accepted techniques, ranking
   entries with the per-channel discrimination, the decision with thresholds and gate mode,
-  origin, behaviour and strategic matches, the classifier rank matrix, review, zero-shot,
+  origin, behaviour and strategic matches, the classifier rank matrix, review,
   CyberRE, live-intel matches, and the "next step" hint. Group ids always carry the ATT&CK name.
 - Endpoints: `GET /api/system`, `/api/sample`, `/api/techniques?q=`; `GET|POST /api/cases`,
   `GET|PATCH|DELETE /api/cases/{id}`; `POST …/decisions`, `…/weights`; `GET …/interview`,
-  `POST …/interview/answer`, `…/interview/restart`; `POST …/review`, `…/zero-shot`, `…/cyberre`;
+  `POST …/interview/answer`, `…/interview/restart`; `POST …/review`, `…/cyberre`;
   `POST …/elastic/search`, `…/elastic/import`; `GET …/dossier/{group}`, `…/canvas`, `…/diamond`,
   `…/intel`, `…/export/{markdown|json|navigator|attack-flow}`.
 - Web app: routes `/` (cases), `/new` (intake), `/cases/:id` (assessment), `…/evidence`,
@@ -1021,7 +1021,7 @@ Presets are applied using Pydantic's `model_copy(update=...)` on the `Settings` 
 
 ## 9. Classifiers
 
-The registry currently creates ten deterministic classifiers plus the opt-in CyberRE-LLM classifier; the separate LLM zero-shot opinion is added after the deterministic ranking as a bounded voting member:
+The registry currently creates ten deterministic classifiers plus the opt-in CyberRE-LLM classifier (it votes only after an analyst runs CyberRE). The LLM zero-shot opinion was removed from the ensemble on 2026-09-30 (9.11):
 
 ```text
 bernoulli_naive_bayes
@@ -1035,7 +1035,6 @@ motivation_alignment
 campaign_profile
 software_tools
 cyberre_llm
-llm_zero_shot
 ```
 
 ### 9.1 Bernoulli Naive Bayes
@@ -1102,13 +1101,18 @@ llm_zero_shot
 
 **Decisive evidence boost.** Rank fusion cannot express evidence strength: with `RRF_K=20` a classifier's rank 1 is worth under five percent more than its rank 2, so a report that names a one-group implant got the same credit as one that names PsExec. `decisive_software_factor` therefore multiplies the software vote (classifier weight and family budget) by `1 + SOFTWARE_DECISIVE_BOOST` (default 2.0, i.e. ×3) when an observed *malware* entry is documented for at most two groups, and by half of that for up to four; tools never trigger it. The factor and the triggering ids are recorded on the classifier context (`decisive_software`), shown on the Assessment page and in the report. Measured (21.3.4b, 21.3.5): real-report top-1 0.36 -> 0.44, top-5 0.55 -> 0.69, MRR 0.47 -> 0.55; ATT&CK folds top-1 0.52 -> 0.53; no wrong name on either set.
 
-### 9.11 LLM zero-shot opinion
+### 9.11 LLM zero-shot opinion (removed 2026-09-30)
 
-**What it does:** After the deterministic classifiers produce an initial RRF ranking (kept as `state.deterministic_fusion`), the top-N candidates are sent to the LLM (`extract_model`) with the evidence and candidate profiles. The prompt states that the opinion is a bounded, low-weight vote withheld from the independent review; it cannot introduce candidates, and the attribution stage (section 10.6) is computed from the deterministic fusion so the vote can never raise it. The LLM independently ranks only the supplied candidates and returns a structured ranking with reasons. The ranking is converted to a `ClassifierResult` (name `llm_zero_shot`) and folded back into RRF with its own `llm_opinion` family budget. It emits signal IDs of the form `llm_zero_shot:rank:<n>`.
-
-**Why it is used:** The LLM can synthesize threat-intelligence knowledge that the deterministic classifiers cannot encode — it can recognize co-occurrence patterns, campaign signatures, and actor tradecraft from natural-language descriptions. Adding it as a bounded voting member lets it rerank technically supported candidates when its knowledge aligns with the evidence. It is deliberately bounded: its default weight (`0.50`) and family budget (`0.50`) are a fraction of the deterministic signals, so it can influence but not dominate the ensemble. It runs after deterministic fusion (not before) so it ranks only candidates that already have technical support, and it is gated to technically eligible groups — it cannot introduce an unsupported actor. The independent AI review remains blinded to this vote so the LLM's prior cannot bias the reviewer's assessment.
-
-**Limitations:** The LLM opinion is subject to fame/reporting bias (well-documented groups are more likely to be ranked highly), it adds cost and latency to every analysis, and it is only as current as the LLM's training data. Setting `LLM_ZERO_SHOT_WEIGHT=0` disables it entirely.
+The ensemble used to ask the extraction model (`openai/gpt-5.6-sol`) to rank the deterministic
+top ten, then folded that ranking into RRF as a bounded vote (`llm_zero_shot`, weight 0.50,
+family `llm_opinion` 0.50). It was removed at the product owner's request so that the
+ensemble is deterministic and analyses cost less. It ran on every analysis and again on every
+rescore, including each interview answer, at about $0.04 to $0.09 per call on report-sized
+cases. In the 10-report production measurement (21.3.4b) it changed the analyst-facing rank in
+one report and moved MRR from 0.666 to 0.670; the stage decision never read it. The module,
+settings, API endpoint and UI controls are gone. Saved cases that carry a vote still open, and
+the vote is ignored. CyberRE-LLM (9.12) remains as an analyst-requested vote, and the
+independent review remains an advisory LLM pass outside the ensemble.
 
 ### 9.12 CyberRE-LLM technique filtering and ranking
 
@@ -1116,7 +1120,7 @@ llm_zero_shot
 
 **Why it is used:** It follows the CyberRE-LLM paper's technique-space reduction strategy: reduce the large ATT&CK label space first, then rank the relevant labels. This supplements ATTACK-BERT retrieval when an analyst wants a second technique-labeling opinion for a specific sentence. It is not run automatically because a full scan can require one LLM call per ATT&CK technique plus a ranking call.
 
-**Voting behavior:** Inferred technique scores are kept separate from deterministic `observed_techniques` and are consumed by the `cyberre_llm` classifier only. The classifier has a default weight of `0.35` and a separate `cyberre_llm` family budget of `0.35`. RRF still gates group eligibility using deterministic technical classifiers, so CyberRE cannot introduce a group unsupported by the deterministic evidence. The independent AI review excludes `cyberre_llm` results along with the zero-shot vote.
+**Voting behavior:** Inferred technique scores are kept separate from deterministic `observed_techniques` and are consumed by the `cyberre_llm` classifier only. The classifier has a default weight of `0.35` and a separate `cyberre_llm` family budget of `0.35`. RRF still gates group eligibility using deterministic technical classifiers, so CyberRE cannot introduce a group unsupported by the deterministic evidence. The independent AI review excludes `cyberre_llm` results.
 
 **Audit and limitations:** Each scan stores the observation ID, filtered techniques, ranked techniques, model, call count, token usage, and cost. The original deterministic retrieval is preserved. Full mode is expensive, vulnerable to LLM labeling errors, and dependent on the supplied ATT&CK descriptions; the human analyst remains responsible for reviewing the resulting technique hypothesis before relying on it.
 
@@ -1154,9 +1158,6 @@ context:
 motivation:
   motivation_alignment
 
-llm_opinion:
-  llm_zero_shot
-
 cyberre_llm:
   cyberre_llm
 ```
@@ -1170,7 +1171,6 @@ Default family budgets are:
 | Technique overlap | 2.00 |
 | Context | 1.00 |
 | Motivation | 1.50 |
-| LLM opinion | 0.50 |
 | CyberRE-LLM | 0.35 |
 
 The individual classifier weights determine how a family cap is divided. A family is scaled down only when its active member weights exceed the cap. A weak singleton classifier is not scaled up.
@@ -1211,7 +1211,6 @@ Other default weights include:
 | Group description | 0.40 |
 | Strategic context | 0.70 |
 | Motivation alignment | 1.50 |
-| LLM zero-shot | 0.50 |
 | Semantic centroid | 0.70 |
 | Campaign profile | 0.00 |
 | CyberRE-LLM | 0.35 |
@@ -1323,8 +1322,7 @@ that the other top-K candidates do not explain:
 from scoring 1. Shared evidence contributes nothing to any side, so documented overlap needs
 no special case; the decision records the best-supported alternative and whether it is
 documented-related. The score is computed inside the single fusion helper
-`AttributionEngine._fuse` (used by the deterministic pass and the zero-shot re-fusion, which
-now also carries the decisive-malware weights) and stored on the classifier context.
+`AttributionEngine._fuse`, the single fusion path, and stored on the classifier context.
 
 **Gate modes** (`ATTRIBUTION_GATE_MODE`): `maturity` (10.6, unchanged), `separation`
 (named iff families >= 2, `separation >= ATTRIBUTION_HYPOTHESIS_SEPARATION`,
@@ -1947,7 +1945,7 @@ The blinded payload removes or replaces identity-bearing terms including:
 
 The reviewer receives structured candidate IDs, evidence, ranking records, and reference data rather than persuasive classifier prose.
 
-The reviewer is also blinded from the LLM votes: `AttributionEngine.run_review` passes `state.deterministic_fusion` (the RRF result of the deterministic classifiers only) together with classifier results that exclude `llm_zero_shot` and `cyberre_llm`. `state.fusion`, which the UI ranks by, may additionally contain the bounded zero-shot vote.
+The reviewer does not receive LLM classifier results: `AttributionEngine.run_review` passes `state.deterministic_fusion` together with classifier results that exclude `cyberre_llm`. Since the zero-shot vote was removed, `state.deterministic_fusion` and `state.fusion` are the same object. After an analyst runs CyberRE the rescored fusion does include its bounded vote, so the reviewer's candidate order can reflect it.
 
 ### 16.3 Review payload reduction
 
@@ -2011,7 +2009,6 @@ current_question: optional SelectedQuestion
 interview_complete: bool
 threat_intel_snapshot: optional ThreatIntelSnapshot
 threat_intel_matches: tuple[ThreatIntelMatch, ...]
-zero_shot: optional ZeroShotResult
 cyberre_results: map[observation_id, CyberREResult]
 review: optional ReviewOutcome
 ```
@@ -2103,8 +2100,6 @@ MOTIVATION_FAMILY_WEIGHT=1.50
 ACTOR_BEHAVIOR_FAMILY_WEIGHT=1.50
 SOFTWARE_FAMILY_WEIGHT=1.20
 CAMPAIGN_FAMILY_WEIGHT=1.00
-LLM_ZERO_SHOT_WEIGHT=0.50
-LLM_ZERO_SHOT_FAMILY_WEIGHT=0.50
 SPECIFIC_BEHAVIOR_WEIGHT=1.50
 CAMPAIGN_WEIGHT=0.00
 GROUP_DESCRIPTION_WEIGHT=0.40
@@ -2454,13 +2449,12 @@ out 40% of the group's (technique, sentence) behaviours, anonymizes actor names 
 adversary", and runs the sentences as free-text observations through
 `AttributionEngine.analyze`: retrieval, acceptance, eligibility, family weights and the
 stage decision run exactly as in the product. `--pipeline local` (default, the adoption
-gate) switches the verifier off and the zero-shot vote to weight 0, so no OpenRouter call
-is made; `--pipeline production` (`make benchmark-attribution-production`,
-`make benchmark-cti-hal-production`) runs the shipped pipeline with the configured
-technique verifier on the ambiguous candidates and the bounded zero-shot vote folded into
-RRF, and records verifier calls, errors and cost per fold. In production artifacts `rank`
-is the analyst-facing ranking (after the vote) and `deterministic_rank` the ranking before
-it; the stage is always decided on the deterministic fusion. `--sample N --seed S` runs a
+gate) switches the verifier off, so no OpenRouter call is made; `--pipeline production`
+(`make benchmark-attribution-production`, `make benchmark-cti-hal-production`) runs the
+shipped pipeline with the configured technique verifier on the ambiguous candidates and
+records verifier calls, errors and cost per fold. `rank` is the analyst-facing ranking and
+`deterministic_rank` the ranking the stage decision reads; they differed only while the LLM
+zero-shot vote existed (removed 2026-09-30) and are both kept so older artifacts compare. `--sample N --seed S` runs a
 group-balanced random subset of real reports (to fit a credit budget); the run aborts if every
 LLM call of the first fold fails and stops, keeping the measured folds and recording
 `truncated_at`, if the API goes away mid-run. A per-fold store proxy
@@ -2644,8 +2638,9 @@ reference for the naming gate rather than the held-out ATT&CK folds.
 **Production pipeline on real reports (`attribution_cti_hal_production.json`; 2026-09-28).**
 `make benchmark-cti-hal-production` with `--sample 10 --seed 7` ran a group-balanced sample
 of 10 of the 55 reports (two per group, except one each for OilRig and Wizard Spider)
-through the shipped pipeline: OpenRouter verifier (`openai/gpt-5.6-sol`, low effort) on the
-candidates still ambiguous after local gating and the bounded zero-shot vote. 165 verifier
+through the shipped pipeline as it was then: OpenRouter verifier (`openai/gpt-5.6-sol`, low
+effort) on the candidates still ambiguous after local gating and the bounded zero-shot vote,
+since removed. 165 verifier
 calls, 0 errors, 10 votes, $3.37 (about $0.34 per report; the full set would cost about $19).
 Paired comparison with the local run on the same 10 reports:
 

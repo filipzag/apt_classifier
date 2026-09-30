@@ -2,7 +2,6 @@ import inspect
 from types import SimpleNamespace
 
 from apt_classifier.classifiers.base import ClassifierEvidence, ClassifierResult
-from apt_classifier.classifiers.llm_zeroshot import ZERO_SHOT_CLASSIFIER_NAME
 from apt_classifier.cyberre import CYBERRE_CLASSIFIER_NAME
 from apt_classifier.llm import LLMResponse, LLMUsage
 from apt_classifier.review.context import ReviewPayload
@@ -43,7 +42,7 @@ class CapturingClient:
 
 def test_reviewer_receives_only_explicit_typed_payload():
     forbidden_prior = "SECRET PRIOR LLM REASONING"
-    forbidden_zero_shot = "ZERO SHOT SAID G9999"
+    forbidden_vote = "LLM VOTE SAID G9999"
     payload = ReviewPayload(
         evidence={"observations": [{"text": "Observed T1"}]},
         candidates=({"candidate_id": "Candidate A", "known_techniques": ["T1"]},),
@@ -61,7 +60,7 @@ def test_reviewer_receives_only_explicit_typed_payload():
     )
     prompt = client.messages[1]["content"]
     assert forbidden_prior not in prompt
-    assert forbidden_zero_shot not in prompt
+    assert forbidden_vote not in prompt
     assert "Candidate A" in prompt
     assert stage.parsed["ranking"][0]["candidate_id"] == "Candidate A"
     parameters = inspect.signature(run_review_pipeline).parameters
@@ -69,24 +68,10 @@ def test_reviewer_receives_only_explicit_typed_payload():
     assert "zero_shot" not in parameters
 
 
-def test_review_payload_excludes_llm_zero_shot_classifier():
-    """The review payload must not include the LLM zero-shot classifier result."""
+def test_review_payload_excludes_the_cyberre_llm_classifier():
+    """The review payload must not include the CyberRE-LLM classifier result."""
     from apt_classifier.fusion import FusionEntry, FusionResult
 
-    zero_shot_result = ClassifierResult(
-        classifier=ZERO_SHOT_CLASSIFIER_NAME,
-        applicable=True,
-        entries=(
-            ClassifierEvidence(
-                classifier=ZERO_SHOT_CLASSIFIER_NAME,
-                group_id="G1",
-                score=2.0,
-                rank=1,
-                signal_ids=("llm_zero_shot:rank:1",),
-            ),
-        ),
-        input_count=1,
-    )
     cyberre_result = ClassifierResult(
         classifier=CYBERRE_CLASSIFIER_NAME,
         applicable=True,
@@ -158,13 +143,13 @@ def test_review_payload_excludes_llm_zero_shot_classifier():
     )
     filtered = tuple(
         r
-        for r in (zero_shot_result, cyberre_result, other_result)
-        if r.classifier not in {ZERO_SHOT_CLASSIFIER_NAME, CYBERRE_CLASSIFIER_NAME}
+        for r in (cyberre_result, other_result)
+        if r.classifier
+        != CYBERRE_CLASSIFIER_NAME  # the filter AttributionEngine.run_review applies
     )
     from apt_classifier.review.context import build_review_payload
 
     payload = build_review_payload(kb, ledger, filtered, fusion)
     classifier_names = [r["classifier"] for r in payload.classifier_results]
-    assert ZERO_SHOT_CLASSIFIER_NAME not in classifier_names
     assert CYBERRE_CLASSIFIER_NAME not in classifier_names
     assert "idf_tfidf_cosine" in classifier_names

@@ -314,8 +314,9 @@ def compose(
         "cti_hal_attribution": summarize_attribution(cti_hal_attribution)
         if cti_hal_attribution
         else None,
-        # Production pipeline (verifier + zero-shot vote) on a credit-bounded sample of the
-        # CTI-HAL reports; never the adoption gate, reported for what analysts actually get.
+        # Production pipeline (technique verifier) on a credit-bounded sample of the CTI-HAL
+        # reports; never the adoption gate. The committed artifact predates the removal of the
+        # LLM zero-shot vote (2026-09-30), so it still includes that vote.
         "cti_hal_attribution_production": summarize_attribution(cti_hal_attribution_production)
         if cti_hal_attribution_production
         else None,

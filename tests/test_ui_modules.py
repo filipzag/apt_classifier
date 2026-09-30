@@ -146,18 +146,16 @@ def test_case_store_roundtrips_verifier_verdicts(tmp_path):
         "completion_tokens": 5,
         "cost_usd": 0.0,
     }
-    vote = {
-        "ranking": [{"candidate_id": "G1", "rank": 1}],
-        "model": "m",
-        "usage": {},
-        "prompt": "",
-        "response": "",
-    }
-    store.save(case_id="abc", name="n", ledger=ledger, verifications=[record], zero_shot=vote)
+    store.save(case_id="abc", name="n", ledger=ledger, verifications=[record])
     loaded = store.load("abc")
     assert loaded["verifications"] == [record]
-    assert loaded["zero_shot"] == vote
-    # older files without the field load with an empty list
+    # the LLM zero-shot vote left the ensemble: it is no longer written or returned
+    assert "zero_shot" not in json.loads((tmp_path / "cases" / "abc.json").read_text())
+    assert "zero_shot" not in loaded
+    # older files without verdicts load with an empty list; a saved vote is ignored
     store.save(case_id="old", name="n", ledger=ledger)
     assert store.load("old")["verifications"] == []
-    assert store.load("old")["zero_shot"] is None
+    old = json.loads((tmp_path / "cases" / "old.json").read_text())
+    old["zero_shot"] = {"ranking": [{"candidate_id": "G1", "rank": 1}], "model": "m"}
+    (tmp_path / "cases" / "old.json").write_text(json.dumps(old))
+    assert "zero_shot" not in store.load("old")
