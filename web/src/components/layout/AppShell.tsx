@@ -43,9 +43,11 @@ export function AppShell() {
   const system = useSystem()
   return (
     <TooltipPrimitive.Provider>
-      <div className="flex h-full min-h-screen">
+      {/* No fixed height here: the container must grow with the page so the sticky sidebar
+          and top bar have a taller containing block to stick within. */}
+      <div className="flex min-h-screen items-start">
         <Sidebar caseId={caseId} data={caseQuery.data} system={system.data} />
-        <div className="flex min-w-0 flex-1 flex-col">
+        <div className="flex min-h-screen min-w-0 flex-1 flex-col">
           <TopBar caseId={caseId} data={caseQuery.data} system={system.data} />
           <main className="min-w-0 flex-1 px-6 py-6 lg:px-8">
             <div className="mx-auto w-full max-w-[1400px]">
@@ -112,7 +114,7 @@ function Sidebar({
 }) {
   const counts = data?.candidate_counts
   return (
-    <aside className="sticky top-0 hidden h-screen w-[248px] shrink-0 flex-col border-r border-border bg-surface/80 backdrop-blur md:flex">
+    <aside className="sticky top-0 hidden h-screen w-[248px] shrink-0 self-start flex-col border-r border-border bg-surface/80 backdrop-blur md:flex">
       <Link to="/" className="flex items-center gap-2.5 px-4 pt-5 pb-4 focus-ring rounded-lg">
         <VestigeMark size={34} />
         <Wordmark />
