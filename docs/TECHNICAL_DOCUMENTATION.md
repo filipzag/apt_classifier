@@ -3132,9 +3132,11 @@ removed actor. Final comparison with the shipped pipeline (combiner on in both):
 |---|---|---|---|---|---|---|
 | ATT&CK folds, seed 7 | 0.837 -> 0.830 | 0.967 -> 0.961 | 0.883 -> 0.880 | 33 -> 32 | 0 / 25 | 5 / 9 |
 | CTI-HAL, 55 reports (as reported) | 0.545 -> 0.564 | 0.745 -> 0.727 | 0.632 -> 0.636 | 13 -> 15 | | 14 / 3 |
+| CTI-HAL, 55 reports (anonymized headline, 21.3.4b) | 0.436 -> 0.455 | 0.655 -> 0.636 | 0.527 -> 0.530 | 8 -> 10 | | 17 / 2 |
 
-Real reports improve (cluster-aware top-1 0.673 -> 0.709, reports without software 0.222 -> 0.278)
-and no wrong name appears anywhere, but the folds lose one top-1 case and 0.003 MRR. Seven of the nine
+Real reports improve (as reported: cluster-aware top-1 0.673 -> 0.709, reports without software
+0.222 -> 0.278; anonymized: cluster-aware top-1 0.545 -> 0.582, without software 0.125 -> 0.167), so the
+gain does not come from actor names, and no wrong name appears anywhere, but the folds lose one top-1 case and 0.003 MRR. Seven of the nine
 worse folds were already fine in the rank fusion and worsened only in the refitted combiner's order.
 Under the no-regression rule for both attribution benchmarks this is not a default: the country vote
 stays at 0 with the previous combiner (whose inputs are unchanged, re-stamped with a note), and the
