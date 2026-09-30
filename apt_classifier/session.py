@@ -108,8 +108,9 @@ class AnalysisState:
     bayes_posterior: dict[str, float]
     origin_assessment: OriginAndThreatAssessment
     weights: dict[str, float] = field(default_factory=dict)
-    # Fusion the isolated reviewer and the attribution stage read. It equals ``fusion`` since the
-    # LLM zero-shot vote left the ensemble (2026-09-30); kept so callers and saved states are unchanged.
+    # Fusion of the deterministic classifiers only; the isolated reviewer and the attribution
+    # stage read it. It is ``fusion`` itself until an analyst runs CyberRE-LLM, whose bounded
+    # vote then enters the analyst-facing ``fusion`` but never this one.
     deterministic_fusion: FusionResult | None = None
     current_question: SelectedQuestion | None = None
     interview_complete: bool = False
@@ -133,6 +134,13 @@ _FINAL_VERDICTS = frozenset(
         TechniqueVerificationVerdict.UNCERTAIN,
     }
 )
+
+
+def _deterministic_results(
+    results: tuple[ClassifierResult, ...],
+) -> tuple[ClassifierResult, ...]:
+    """Every classifier result except the analyst-requested CyberRE-LLM vote."""
+    return tuple(result for result in results if result.classifier != CYBERRE_CLASSIFIER_NAME)
 
 
 def collect_verifications(retrieval: Any) -> list[dict[str, Any]]:
@@ -413,7 +421,7 @@ class AttributionEngine:
         )
         merged_weights = self.default_weights()
         merged_weights.update(weights or {})
-        results, fusion, probabilities = self._score(context, merged_weights)
+        results, fusion, deterministic, probabilities = self._score(context, merged_weights)
         state = AnalysisState(
             ledger=ledger,
             retrieval=retrieval,
@@ -425,13 +433,14 @@ class AttributionEngine:
             weights=merged_weights,
             technique_verifications=technique_verifications,
             telemetry_profile=self.telemetry_profile,
-            deterministic_fusion=fusion,
+            deterministic_fusion=deterministic,
         )
         state.attribution_decision = self._assess_stage(state)
         return state
 
     def _assess_stage(self, state: AnalysisState) -> AttributionDecision:
-        """Stage decision from the deterministic fusion only (LLM votes never raise it)."""
+        """Stage decision from the deterministic fusion only (LLM votes never raise it). The
+        discrimination and combiner read here are the ones that fusion left on the context."""
         return assess_attribution(
             self.kb,
             state.deterministic_fusion or state.fusion,
@@ -520,10 +529,10 @@ class AttributionEngine:
         )
         merged_weights = self.default_weights()
         merged_weights.update(state.weights)
-        results, fusion, probabilities = self._score(state.context, merged_weights)
+        results, fusion, deterministic, probabilities = self._score(state.context, merged_weights)
         state.classifier_results = results
         state.fusion = fusion
-        state.deterministic_fusion = fusion
+        state.deterministic_fusion = deterministic
         state.bayes_posterior = probabilities
         state.origin_assessment = assess_origin_and_threat_type(self.kb, fusion)
         if state.threat_intel_snapshot is not None:
@@ -756,18 +765,13 @@ class AttributionEngine:
         }
 
     def run_review(self, state: AnalysisState, top_n: int = 10) -> ReviewOutcome:
-        review_results = tuple(
-            result
-            for result in state.classifier_results
-            if result.classifier != CYBERRE_CLASSIFIER_NAME
-        )
         # The reviewer must not see an LLM vote: pass the deterministic fusion, not a ranking
         # that includes CyberRE-LLM, alongside the LLM-free classifier results.
         state.review = run_review_pipeline(
             self.llm,
             self.kb,
             state.ledger,
-            review_results,
+            _deterministic_results(state.classifier_results),
             state.deterministic_fusion or state.fusion,
             model=self.settings.review_model,
             effort=self.settings.review_effort,
@@ -970,7 +974,9 @@ class AttributionEngine:
 
     def _score(
         self, context: ClassifierContext, weights: dict[str, float]
-    ) -> tuple[tuple[ClassifierResult, ...], FusionResult, dict[str, float]]:
+    ) -> tuple[tuple[ClassifierResult, ...], FusionResult, FusionResult, dict[str, float]]:
+        """Classifier results, the analyst-facing fusion, the deterministic fusion and the
+        Naive Bayes posterior. The two fusions are one object unless CyberRE-LLM voted."""
         # Eligibility is derived from this pass's technical-evidence results and applied
         # to fusion only. It must not constrain the classifiers themselves: a context is
         # reused across rescoring passes, and intersecting with the previous eligible set
@@ -990,6 +996,14 @@ class AttributionEngine:
         context.eligible_group_ids = eligible_groups
         context.group_eligibility_reasons = reasons
         fusion = self._fuse(results, weights, eligible_groups, context)
+        deterministic = fusion
+        if CYBERRE_CLASSIFIER_NAME in fusion.active_classifiers:
+            # The analyst ran CyberRE and its vote entered the ranking above. The reviewer and
+            # the stage decision read a fusion without it; it is fused last because ``_fuse``
+            # leaves its discrimination and combiner on the context, and the stage reads those.
+            deterministic = self._fuse(
+                _deterministic_results(results), weights, eligible_groups, context
+            )
         bayes = next(
             (result for result in results if result.classifier == "bernoulli_naive_bayes"),
             None,
@@ -997,4 +1011,4 @@ class AttributionEngine:
         probabilities = (
             posterior(bayes, self.settings.posterior_temperature) if bayes is not None else {}
         )
-        return results, fusion, probabilities
+        return results, fusion, deterministic, probabilities

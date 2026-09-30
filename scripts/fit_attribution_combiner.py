@@ -258,7 +258,7 @@ def generate_lists(
                     clean += 1
                 for variant in range(1, variants + 1):
                     ctx = perturb(context, kb, fold.group_id, pool, rng, regime)
-                    results, fusion, _ = engine._score(ctx, dict(state.weights))  # noqa: SLF001
+                    results, _, fusion, _ = engine._score(ctx, dict(state.weights))  # noqa: SLF001
                     lst = list_from_state(
                         engine, results, fusion, ctx, top_n=top_n, truth=fold.group_id
                     )

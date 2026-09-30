@@ -1120,7 +1120,17 @@ independent review remains an advisory LLM pass outside the ensemble.
 
 **Why it is used:** It follows the CyberRE-LLM paper's technique-space reduction strategy: reduce the large ATT&CK label space first, then rank the relevant labels. This supplements ATTACK-BERT retrieval when an analyst wants a second technique-labeling opinion for a specific sentence. It is not run automatically because a full scan can require one LLM call per ATT&CK technique plus a ranking call.
 
-**Voting behavior:** Inferred technique scores are kept separate from deterministic `observed_techniques` and are consumed by the `cyberre_llm` classifier only. The classifier has a default weight of `0.35` and a separate `cyberre_llm` family budget of `0.35`. RRF still gates group eligibility using deterministic technical classifiers, so CyberRE cannot introduce a group unsupported by the deterministic evidence. The independent AI review excludes `cyberre_llm` results.
+**Voting behavior:** Inferred technique scores are kept separate from deterministic `observed_techniques` and are consumed by the `cyberre_llm` classifier only. The classifier has a default weight of `0.35` and a separate `cyberre_llm` family budget of `0.35`. RRF still gates group eligibility using deterministic technical classifiers, so CyberRE cannot introduce a group unsupported by the deterministic evidence.
+
+The vote reaches only the analyst-facing ranking, `state.fusion`. When it is active, `AttributionEngine._score` fuses a second time without the `cyberre_llm` result, through the same `_fuse` path. This second call runs last, so the discrimination and combiner output it leaves on the context belong to the deterministic fusion. `state.deterministic_fusion`, that discrimination and that combiner output are therefore exactly what they would be if CyberRE had never run. Three consumers read this deterministic side:
+
+- the stage decision and naming gate (10.6, 10.7), including the separation and the combiner's calibrated leader probability;
+- the distinguish view (10.8);
+- the independent AI review (16.2), which also receives no `cyberre_llm` classifier results.
+
+A scan can re-order the ranking the analyst sees, but it cannot change the stage, the named group or its probability. The ranking table's discriminative-mass column shows the gate's shortlist, which can differ from the analyst order after a scan. Until CyberRE votes, the two fusions are the same object.
+
+Before 2026-09-30 all three read the rescored fusion, vote included, so a scan could move the reviewer's candidate order and raise the stage. The attribution benchmarks never run CyberRE and reproduce unchanged.
 
 **Audit and limitations:** Each scan stores the observation ID, filtered techniques, ranked techniques, model, call count, token usage, and cost. The original deterministic retrieval is preserved. Full mode is expensive, vulnerable to LLM labeling errors, and dependent on the supplied ATT&CK descriptions; the human analyst remains responsible for reviewing the resulting technique hypothesis before relying on it.
 
@@ -1945,7 +1955,9 @@ The blinded payload removes or replaces identity-bearing terms including:
 
 The reviewer receives structured candidate IDs, evidence, ranking records, and reference data rather than persuasive classifier prose.
 
-The reviewer does not receive LLM classifier results: `AttributionEngine.run_review` passes `state.deterministic_fusion` together with classifier results that exclude `cyberre_llm`. Since the zero-shot vote was removed, `state.deterministic_fusion` and `state.fusion` are the same object. After an analyst runs CyberRE the rescored fusion does include its bounded vote, so the reviewer's candidate order can reflect it.
+The reviewer receives no LLM output. `AttributionEngine.run_review` passes `state.deterministic_fusion`, which is fused from the deterministic classifiers only, together with classifier results that exclude `cyberre_llm`.
+
+Until an analyst runs CyberRE, `state.fusion` and `state.deterministic_fusion` are the same object. After a scan, `state.fusion` carries CyberRE's bounded vote for the analyst-facing ranking. The deterministic fusion is recomputed without the vote (9.12), so the reviewer's candidates and their order are the ones the stage decision reads.
 
 ### 16.3 Review payload reduction
 

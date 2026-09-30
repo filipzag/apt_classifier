@@ -16,6 +16,7 @@ from apt_classifier.attribution import (
     _generate_cluster_id,
 )
 from apt_classifier.config import Settings
+from apt_classifier.cyberre import CYBERRE_CLASSIFIER_NAME, CyberRERankedTechnique, CyberREResult
 from apt_classifier.evidence.models import (
     EvidenceLedger,
     EvidenceStatus,
@@ -157,9 +158,11 @@ def _settings(**overrides) -> Settings:
     return Settings(**base)
 
 
-def _ledger(text: str) -> EvidenceLedger:
+def _ledger(*texts: str) -> EvidenceLedger:
     return EvidenceLedger(
-        observations=[Observation(text=text, provenance=Provenance(source="free_text"))]
+        observations=[
+            Observation(text=text, provenance=Provenance(source="free_text")) for text in texts
+        ]
     )
 
 
@@ -233,6 +236,102 @@ def test_the_ensemble_makes_no_llm_call_even_with_a_client(monkeypatch):
 
     engine.rescore(state)
     assert state.fusion is state.deterministic_fusion
+
+
+def _rrf_rel_combiner(engine: AttributionEngine, weight: float):
+    """A hand-made combiner for ``engine``'s pipeline whose only feature is the fused score
+    (``rrf_rel``): a positive weight follows RRF, a negative one prefers its last candidate."""
+    import numpy as np
+
+    from apt_classifier.combiner import FEATURE_NAMES, NULL_FEATURE_NAMES, AttributionCombiner
+    from apt_classifier.combiner import pipeline_fingerprint as fingerprint_of
+
+    weights = np.zeros(len(FEATURE_NAMES))
+    weights[FEATURE_NAMES.index("rrf_rel")] = weight
+    return AttributionCombiner(
+        weights=weights,
+        means=np.zeros(len(FEATURE_NAMES)),
+        scales=np.ones(len(FEATURE_NAMES)),
+        attack_version="test",
+        pipeline_fingerprint=fingerprint_of(
+            rrf_k=int(engine.settings.rrf_k),
+            weights=engine.default_weights(),
+            family_weights=engine.family_weights(),
+        ),
+        null_weights=np.zeros(len(NULL_FEATURE_NAMES)),
+    )
+
+
+@pytest.mark.parametrize("with_combiner", [False, True], ids=["rrf", "combiner"])
+def test_cyberre_vote_reaches_the_analyst_ranking_but_not_the_reviewer_or_the_stage(
+    monkeypatch, tmp_path, with_combiner
+):
+    """After an analyst runs CyberRE its vote re-orders the analyst-facing ``fusion`` (here it
+    promotes Bravo), while the reviewer and the stage decision read the deterministic fusion:
+    exactly the pre-scan fusion, with that fusion's discrimination and combiner."""
+    overrides = {"cyberre_weight": 0.35, "attribution_combiner_enabled": with_combiner}
+    if with_combiner:
+        plain = AttributionEngine(
+            _settings(attribution_combiner_enabled=False), _kb(), FakeStore(), FakeLLM()
+        )
+        model = _rrf_rel_combiner(plain, 8.0)
+        overrides["attribution_combiner_path"] = model.save(tmp_path / "combiner.json")
+    engine = AttributionEngine(_settings(**overrides), _kb(), FakeStore(), FakeLLM())
+    assert (engine.combiner is not None) is with_combiner
+
+    def fake_scan(client, kb, observation, **kwargs):
+        # CyberRE "infers" SMB admin shares, which only Bravo documents
+        ranking = (CyberRERankedTechnique("T1021.002", "SMB/Windows Admin Shares", 1, "fake"),)
+        return CyberREResult(
+            observation.id, observation.text, (), ranking, "fake", 0, LLMUsage(0, 0, 0.0)
+        )
+
+    stage_inputs: list[dict] = []
+    real_assess = session_module.assess_attribution
+
+    def spy_assess(kb, fusion, context, **kwargs):
+        stage_inputs.append({"fusion": fusion, **kwargs})
+        return real_assess(kb, fusion, context, **kwargs)
+
+    reviewed: dict = {}
+
+    def fake_review(client, kb, ledger, classifier_results, fusion, **kwargs):
+        reviewed["fusion"] = fusion
+        reviewed["classifiers"] = {result.classifier for result in classifier_results}
+        return "review"
+
+    monkeypatch.setattr(session_module, "run_cyberre_scan", fake_scan)
+    monkeypatch.setattr(session_module, "assess_attribution", spy_assess)
+    monkeypatch.setattr(session_module, "run_review_pipeline", fake_review)
+
+    state = engine.analyze(
+        _ledger("PowerShell executed an encoded command.", "LSASS memory was read.")
+    )
+    assert state.fusion is state.deterministic_fusion
+    before = state.deterministic_fusion
+    decision = state.attribution_decision
+    discrimination = state.context.discrimination
+    combiner = state.context.combiner
+    assert _groups(before)[0] == "G3"
+    assert (combiner is not None) is with_combiner
+
+    engine.run_cyberre(state, state.ledger.observations[0].id)
+    assert CYBERRE_CLASSIFIER_NAME in state.fusion.active_classifiers
+    assert _groups(state.fusion)[0] == "G2"  # the vote promoted Bravo for the analyst
+    deterministic = state.deterministic_fusion
+    assert CYBERRE_CLASSIFIER_NAME not in deterministic.active_classifiers
+    assert not any(CYBERRE_CLASSIFIER_NAME in e.classifier_ranks for e in deterministic.entries)
+    assert deterministic == before
+    # the stage read that fusion, with its own discrimination and combiner, and did not move
+    assert stage_inputs[-1]["fusion"] is deterministic
+    assert stage_inputs[-1]["discrimination"] == discrimination
+    assert stage_inputs[-1]["combiner"] == combiner
+    assert state.attribution_decision == decision
+    assert state.attribution_decision.leading_group_id == "G3"
+
+    engine.run_review(state)
+    assert reviewed["fusion"] is deterministic
+    assert CYBERRE_CLASSIFIER_NAME not in reviewed["classifiers"]
 
 
 def test_attribution_thresholds_come_from_settings():
@@ -499,10 +598,7 @@ def test_combiner_orders_the_shortlist_and_the_gate_scores_the_new_leader(monkey
     """With a combiner loaded the shortlist follows its probabilities, the discrimination is
     recomputed on that order (leader-consistency guard never fires spuriously), the stage
     carries the calibrated leader probability, and disabling it restores the RRF path."""
-    import numpy as np
-
-    from apt_classifier.combiner import FEATURE_NAMES, NULL_FEATURE_NAMES, AttributionCombiner
-    from apt_classifier.combiner import pipeline_fingerprint as fingerprint_of
+    from apt_classifier.combiner import AttributionCombiner
 
     text = "PowerShell executed an encoded command."
     plain = AttributionEngine(
@@ -512,20 +608,7 @@ def test_combiner_orders_the_shortlist_and_the_gate_scores_the_new_leader(monkey
     assert plain.combiner is None and plain.combiner_status == "disabled"
     assert baseline.context.combiner is None
     # a hand-made combiner that prefers the *last* RRF candidate (negative weight on rrf_rel)
-    weights = np.zeros(len(FEATURE_NAMES))
-    weights[FEATURE_NAMES.index("rrf_rel")] = -8.0
-    model = AttributionCombiner(
-        weights=weights,
-        means=np.zeros(len(FEATURE_NAMES)),
-        scales=np.ones(len(FEATURE_NAMES)),
-        attack_version="test",
-        pipeline_fingerprint=fingerprint_of(
-            rrf_k=int(plain.settings.rrf_k),
-            weights=plain.default_weights(),
-            family_weights=plain.family_weights(),
-        ),
-        null_weights=np.zeros(len(NULL_FEATURE_NAMES)),
-    )
+    model = _rrf_rel_combiner(plain, -8.0)
     path = model.save(tmp_path / "combiner.json")
     engine = AttributionEngine(
         _settings(
