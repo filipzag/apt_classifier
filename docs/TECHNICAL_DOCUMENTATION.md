@@ -2534,7 +2534,78 @@ not redistributed. Two benchmarks use them:
 - real-report attribution through `attribution_benchmark.py --cti-hal`: each report's
   annotated statements are the observations, the expected answer is the report's group,
   nothing is hidden from the store (the group's documented behaviour is legitimate evidence
-  for a real report), and there is no unknown-actor arm.
+  for a real report), and there is no unknown-actor arm. Since 2026-09-30 the headline
+  replaces every ATT&CK group name and alias in the statements with "the adversary"
+  (`--anonymize-actors`, below).
+
+**Actor names in the statements (measured 2026-09-30).** Until then the real-report run read
+each report's statements as reported (the first 30 with at least three words). In 27 of the 55
+reports they name the report's own group or one of its ATT&CK aliases: 92 names in 87 of 846
+statements (FIN6 32, FIN7 24, Carbanak 23, APT34 4, OilRig 4, Anunak 2, ITG08 2, UNC1878 1).
+Name-sensitive signals can then score by reading the label instead of the tradecraft.
+`--anonymize-actors` applies the held-out folds' replacement (`_actor_name_pattern` and
+`_sanitize_procedure` over all 599 group names and aliases, each replaced by "the adversary")
+after the statements are selected; a statement without a name stays byte-identical, so both
+runs read the same statements. The artifact records `parameters.actor_names` (`as_reported` or
+`anonymized`), the totals under `leak_control.actor_name_replacement` and a per-report
+`actor_name_replacement` record on each row. Eighteen ATT&CK 19.2 group names or aliases are
+also software names (for example Carbanak and Anunak for S0030, Sofacy, Snake, Machete, Play).
+On CTI-HAL only Carbanak and Anunak occur, and all 25 of those mentions refer to the malware, so
+the replacement also removes 25 software matches and drops S0030 from the detected software of
+six reports.
+
+| CTI-HAL, 55 reports, local pipeline | Top-1 [95% CI] | Top-5 | MRR | Cluster top-1 | Named (wrong) |
+|---|---|---|---|---|---|
+| statements as reported (headline until 2026-09-30) | 0.55 [0.42, 0.69] | 0.75 | 0.63 | 0.67 | 13 (0) |
+| **`--anonymize-actors` (headline)** | **0.44** [0.31, 0.58] | 0.65 | 0.53 | 0.55 | 8 (0) |
+
+The 28 reports without a name give identical results in both runs. On the 27 that name their
+group, top-1 falls from 16 to 10, MRR from 0.71 to 0.50 and named hypotheses from 7 to 2; six
+reports lose the correct top answer and none gains one (two-sided sign test p = 0.03). Neither
+run names a wrong group. Per classifier (truth rank from `classifier_truth_ranks`: top-1 count out
+of 55 / MRR; a classifier that does not apply counts as a miss):
+
+| Classifier | As reported | Anonymized | MRR on the 27 name-bearing reports |
+|---|---|---|---|
+| `group_description` | 7 / 0.19 | 4 / 0.10 | 0.21 -> 0.03 |
+| `specific_behavior` (actor-behaviour retrieval) | 17 / 0.35 | 12 / 0.29 | 0.49 -> 0.36 |
+| `software_tools` | 31 / 0.60 | 25 / 0.49 | 0.70 -> 0.48 |
+| `campaign_profile` (weight 0) | 5 / 0.12 | 3 / 0.10 | 0.09 -> 0.05 |
+| `semantic_centroid` | 1 / 0.06 | 0 / 0.05 | 0.08 -> 0.06 |
+| `bernoulli_naive_bayes` | 6 / 0.23 | 6 / 0.24 | 0.23 -> 0.24 |
+| `idf_tfidf_cosine` | 0 / 0.07 | 1 / 0.07 | 0.08 -> 0.09 |
+| `weighted_jaccard` | 0 / 0.03 | 0 / 0.04 | 0.04 -> 0.05 |
+
+Two things cause the drop. The first is name matching: on the name-bearing reports
+group-description similarity was almost entirely the name and actor-behaviour retrieval partly,
+and the three named FIN6 hypotheses exist only while "FIN6" is in the text (the leader stays
+correct; the naming gate stops firing). The second is lost malware evidence: four of the six
+lost top-1 answers are FIN7 reports whose only software match was the Carbanak malware, removed
+with the name. A diagnostic run that keeps the 18 software-name aliases (not a script option)
+measured top-1 0.51, top-5 0.71, MRR 0.60 and 10 named, all correct, but it still leaks the
+group name where the malware carries it (group description ranks Carbanak first on one Carbanak
+report only while "CARBANAK" is in the text). The technique-set classifiers and accepted-technique
+recall (0.40 -> 0.41) do not move. The anonymized figure is therefore a lower bound for
+attribution from tradecraft alone and the as-reported figure an upper bound that includes
+reading the label.
+
+Decision (2026-09-30, product owner): the anonymized number is the headline real-report
+metric and the as-reported number is quoted beside it. It is measured the way the ATT&CK folds
+are, incident evidence rarely carries the actor's name, and the naming promise holds under it
+(8 of 8 named groups correct). `make benchmark-cti-hal` writes the headline to
+`data/audits/attribution_cti_hal_current.json` and the as-reported run to
+`attribution_cti_hal_as_reported.json`; `make benchmark-cti-hal-production` anonymizes as well.
+Without `--output` the script uses the same names (an as-reported production run writes
+`attribution_cti_hal_as_reported_production.json`), so no run replaces another mode's artifact;
+before this change a real-report run without `--output` overwrote the ATT&CK folds'
+`attribution_heldout_current.json`.
+`collect_verification.py` reports both (`cti_hal_attribution`, `cti_hal_attribution_as_reported`)
+and warns when the headline artifact was not anonymized (artifacts written before this change
+carry no `parameters.actor_names` and read the statements as reported). Naming-gate sweeps
+(`attribution_gate_sweep.py`) over `attribution_cti_hal_current.json` now read the anonymized
+rows. Every earlier CTI-HAL attribution number in this document, including the production
+measurement of 2026-09-28, was measured as reported; its before/after comparison stays valid
+because both sides read the same text.
 
 #### 21.3.5 Attribution benchmark (text in, group out)
 
@@ -3016,8 +3087,9 @@ comparison is between rank fusions:
 | 0 / 1.0 | 0.621 | 0.915 | 0.739 | 28 | 26 / 2 |
 | 0.5 / 0.5 | 0.693 | 0.980 | 0.810 | 28 | 45 / 2 |
 
-The real-report check (55 CTI-HAL reports, combiner off on both sides; every look is listed) decided
-the adoption:
+The real-report check (55 CTI-HAL reports with the statements as reported, the protocol before the
+anonymized headline of 21.3.4b; combiner off on both sides; every look is listed) decided the
+adoption:
 
 | group forest / country forest weight | top-1 | top-5 | MRR | named | wrong names | reports better / worse |
 |---|---|---|---|---|---|---|
@@ -3042,7 +3114,7 @@ removed actor. Final comparison with the shipped pipeline (combiner on in both):
 | benchmark | top-1 | top-5 | MRR | named (all correct) | unknown named | better / worse |
 |---|---|---|---|---|---|---|
 | ATT&CK folds, seed 7 | 0.837 -> 0.830 | 0.967 -> 0.961 | 0.883 -> 0.880 | 33 -> 32 | 0 / 25 | 5 / 9 |
-| CTI-HAL, 55 reports | 0.545 -> 0.564 | 0.745 -> 0.727 | 0.632 -> 0.636 | 13 -> 15 | | 14 / 3 |
+| CTI-HAL, 55 reports (as reported) | 0.545 -> 0.564 | 0.745 -> 0.727 | 0.632 -> 0.636 | 13 -> 15 | | 14 / 3 |
 
 Real reports improve (cluster-aware top-1 0.673 -> 0.709, reports without software 0.222 -> 0.278)
 and no wrong name appears anywhere, but the folds lose one top-1 case and 0.003 MRR. Seven of the nine

@@ -253,6 +253,20 @@ def summarize_attribution(payload: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def cti_hal_headline_warning(payload: dict[str, Any] | None) -> str | None:
+    """The CTI-HAL attribution headline reads anonymized statements since 2026-09-30 (docs
+    21.3.4b); an artifact without ``parameters.actor_names`` predates that and read them as
+    reported."""
+    if payload is None:
+        return None
+    if (payload.get("parameters") or {}).get("actor_names", "as_reported") == "anonymized":
+        return None
+    return (
+        "cti_hal_attribution reads the statements as reported, but the headline replaces actor "
+        "names (docs 21.3.4b); regenerate it with `make benchmark-cti-hal`"
+    )
+
+
 def compose(
     *,
     public: dict[str, Any] | None,
@@ -269,6 +283,8 @@ def compose(
     cti_hal_attribution_path: Path | None = None,
     cti_hal_attribution_production: dict[str, Any] | None = None,
     cti_hal_attribution_production_path: Path | None = None,
+    cti_hal_attribution_as_reported: dict[str, Any] | None = None,
+    cti_hal_attribution_as_reported_path: Path | None = None,
 ) -> dict[str, Any]:
     report: dict[str, Any] = {
         "generated_at": datetime.now(UTC).isoformat(),
@@ -300,6 +316,12 @@ def compose(
             "cti_hal_attribution": _source_record(cti_hal_attribution_path, cti_hal_attribution)
             if cti_hal_attribution_path is not None
             else None,
+            "cti_hal_attribution_as_reported": _source_record(
+                cti_hal_attribution_as_reported_path, cti_hal_attribution_as_reported
+            )
+            if cti_hal_attribution_as_reported_path is not None
+            and cti_hal_attribution_as_reported is not None
+            else None,
         },
         "gates": gates,
         "public_heldout": summarize_public(public) if public else None,
@@ -311,17 +333,26 @@ def compose(
         ],
         "attribution_text_heldout": summarize_attribution(attribution) if attribution else None,
         "cti_hal_mapping": summarize_public(cti_hal_mapping) if cti_hal_mapping else None,
+        # Headline: every ATT&CK group name and alias in the statements replaced by "the
+        # adversary"; the as-reported run sits beside it (docs 21.3.4b).
         "cti_hal_attribution": summarize_attribution(cti_hal_attribution)
         if cti_hal_attribution
         else None,
+        "cti_hal_attribution_as_reported": summarize_attribution(cti_hal_attribution_as_reported)
+        if cti_hal_attribution_as_reported
+        else None,
         # Production pipeline (technique verifier) on a credit-bounded sample of the CTI-HAL
         # reports; never the adoption gate. The committed artifact predates the removal of the
-        # LLM zero-shot vote (2026-09-30), so it still includes that vote.
+        # LLM zero-shot vote and the anonymized headline (both 2026-09-30), so it still includes
+        # that vote and reads the statements as reported.
         "cti_hal_attribution_production": summarize_attribution(cti_hal_attribution_production)
         if cti_hal_attribution_production
         else None,
         "superseded": "data/audits/superseded/README.md",
     }
+    warning = cti_hal_headline_warning(cti_hal_attribution)
+    if warning:
+        report["warnings"] = [warning]
     return report
 
 
@@ -353,6 +384,11 @@ def main(argv: list[str] | None = None) -> int:
         "--cti-hal-attribution-production",
         type=Path,
         default=AUDITS / "attribution_cti_hal_production.json",
+    )
+    parser.add_argument(
+        "--cti-hal-attribution-as-reported",
+        type=Path,
+        default=AUDITS / "attribution_cti_hal_as_reported.json",
     )
     parser.add_argument("--output", type=Path, default=AUDITS / "verification_results_current.json")
     parser.add_argument("--run", action="store_true", help="regenerate public + curated first")
@@ -428,11 +464,15 @@ def main(argv: list[str] | None = None) -> int:
         cti_hal_attribution_path=args.cti_hal_attribution,
         cti_hal_attribution_production=_load(args.cti_hal_attribution_production),
         cti_hal_attribution_production_path=args.cti_hal_attribution_production,
+        cti_hal_attribution_as_reported=_load(args.cti_hal_attribution_as_reported),
+        cti_hal_attribution_as_reported_path=args.cti_hal_attribution_as_reported,
     )
     if runs:
         report["benchmark_runs"] = runs
     destination = write_artifact(args.output, report)
     print(f"wrote {destination}")
+    for warning in report.get("warnings", []):
+        print(f"warning: {warning}", file=sys.stderr)
     failed = [name for name, item in runs.items() if item["returncode"] != 0]
     if gates:
         failed.extend(
