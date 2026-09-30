@@ -769,6 +769,24 @@ def _coerce(value: str) -> Any:
         return value
 
 
+def default_output(pipeline: str, *, real_reports: bool, anonymize_actors: bool) -> Path:
+    """Artifact path when ``--output`` is not given, named as the Makefile targets name it.
+
+    Every mode has its own file, so a run never replaces another benchmark's artifact: a
+    real-report run used to overwrite ``attribution_heldout_*`` (the ATT&CK folds, which the
+    verification collector reads as the attribution gate), and a run on the statements as
+    reported must not replace the anonymized CTI-HAL headline.
+    """
+    production = pipeline == "production"
+    if not real_reports:
+        name = "attribution_heldout_" + ("production" if production else "current")
+    elif anonymize_actors:
+        name = "attribution_cti_hal_" + ("production" if production else "current")
+    else:
+        name = "attribution_cti_hal_as_reported" + ("_production" if production else "")
+    return REPO_ROOT / "data" / "audits" / f"{name}.json"
+
+
 def pipeline_overrides(pipeline: str, set_args: list[str]) -> dict[str, Any]:
     """Settings overrides for a pipeline; explicit ``--set KEY=VALUE`` items win.
 
@@ -811,7 +829,13 @@ def main(argv: list[str] | None = None) -> int:
         help="real-report mode: run a seeded random sample of this many reports "
         "(spread across groups) instead of the first --limit",
     )
-    parser.add_argument("--output", type=Path, help="artifact path (default depends on --pipeline)")
+    parser.add_argument(
+        "--output",
+        type=Path,
+        help="artifact path (default: data/audits/attribution_heldout_{current,production}.json; "
+        "with --cti-hal, attribution_cti_hal_{current,production}.json when anonymized, else "
+        "attribution_cti_hal_as_reported[_production].json)",
+    )
     parser.add_argument(
         "--pipeline",
         choices=("local", "production"),
@@ -843,8 +867,11 @@ def main(argv: list[str] | None = None) -> int:
     if args.anonymize_actors and args.cti_hal is None:
         parser.error("--anonymize-actors needs --cti-hal; the ATT&CK folds are always anonymized")
     if args.output is None:
-        suffix = "production" if args.pipeline == "production" else "current"
-        args.output = REPO_ROOT / "data" / "audits" / f"attribution_heldout_{suffix}.json"
+        args.output = default_output(
+            args.pipeline,
+            real_reports=args.cti_hal is not None,
+            anonymize_actors=args.anonymize_actors,
+        )
 
     try:
         overrides = pipeline_overrides(args.pipeline, args.set)

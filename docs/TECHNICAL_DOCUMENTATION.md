@@ -2500,6 +2500,10 @@ are, incident evidence rarely carries the actor's name, and the naming promise h
 (8 of 8 named groups correct). `make benchmark-cti-hal` writes the headline to
 `data/audits/attribution_cti_hal_current.json` and the as-reported run to
 `attribution_cti_hal_as_reported.json`; `make benchmark-cti-hal-production` anonymizes as well.
+Without `--output` the script uses the same names (an as-reported production run writes
+`attribution_cti_hal_as_reported_production.json`), so no run replaces another mode's artifact;
+before this change a real-report run without `--output` overwrote the ATT&CK folds'
+`attribution_heldout_current.json`.
 `collect_verification.py` reports both (`cti_hal_attribution`, `cti_hal_attribution_as_reported`)
 and warns when the headline artifact was not anonymized (artifacts written before this change
 carry no `parameters.actor_names` and read the statements as reported). Naming-gate sweeps

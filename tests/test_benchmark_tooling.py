@@ -643,6 +643,41 @@ def test_attribution_pipeline_overrides_keep_local_offline_and_let_set_win():
         pipeline_overrides("staging", [])
 
 
+def test_attribution_default_output_matches_the_makefile_and_never_collides():
+    import shlex
+
+    from scripts.attribution_benchmark import REPO_ROOT, default_output
+
+    modes = [
+        (pipeline, real_reports, anonymize)
+        for pipeline in ("local", "production")
+        for real_reports, anonymize in ((False, False), (True, True), (True, False))
+    ]
+    paths = [default_output(p, real_reports=r, anonymize_actors=a) for p, r, a in modes]
+    assert len(set(paths)) == len(modes)  # no mode overwrites another mode's artifact
+    assert default_output("local", real_reports=True, anonymize_actors=False).name == (
+        "attribution_cti_hal_as_reported.json"
+    )
+    # every Makefile call writes where the same flags write without --output
+    calls = 0
+    for line in (REPO_ROOT / "Makefile").read_text(encoding="utf-8").splitlines():
+        if "scripts/attribution_benchmark.py" not in line:
+            continue
+        words = shlex.split(line)
+        flags = words[words.index("scripts/attribution_benchmark.py") + 1 :]
+        expected = default_output(
+            flags[flags.index("--pipeline") + 1] if "--pipeline" in flags else "local",
+            real_reports="--cti-hal" in flags,
+            anonymize_actors="--anonymize-actors" in flags,
+        )
+        written = (
+            REPO_ROOT / flags[flags.index("--output") + 1] if "--output" in flags else expected
+        )
+        assert written == expected, line
+        calls += 1
+    assert calls >= 5  # benchmark-attribution, benchmark-cti-hal (2), both production targets
+
+
 def test_attribution_summary_reports_deterministic_ranking_and_llm_cost():
     from scripts.attribution_benchmark import summarize
 
