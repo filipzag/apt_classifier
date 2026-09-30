@@ -2765,8 +2765,13 @@ keeps the naming promise (the wrong name had leader probability 0.87, so a proba
 not have caught it). Real reports with software: top-1 0.667 (was 0.641); without: 0.188
 (unchanged). Leader-probability AUC on the folds 0.952, on real reports 0.82; it is shown on the
 assessment page as the calibrated probability and is informational (the gate is unchanged). A
-harsher randomisation (recall 15-60%, precision 25-60%, generic false positives) was fitted as a
-second artifact for comparison; its numbers are recorded below when available.
+harsher randomisation (recall 15-60%, precision 25-60%, generic false positives, software dropped
+40%) was fitted as a second artifact (`attribution_combiner_v2.json`, kept on disk, not shipped):
+out-of-fold mixed top-1 0.727 vs RRF 0.404 on its own lists, but on the seed-7 folds 0.771 top-1 /
+0.837 MRR and on CTI-HAL 0.509 / 0.612 with the same half blend and union gate (paired: 3 reports
+better, 4 worse), 36 and 15 names all correct. Making the training regime harsher did not close the
+transfer gap; the gap sits in technique recall on real text, which is what the encoder follow-ups
+(plan) address.
 
 ## 22. Failure modes and troubleshooting
 
