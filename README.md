@@ -71,7 +71,7 @@ were correctly left unnamed. When the leader has documented overlap with another
 group (ATT&CK cross-references or rarely shared tooling, for example Carbanak and FIN7), the view says
 so, because the evidence usually cannot separate them.
 
-The LLM zero-shot opinion was removed from the ensemble on 2026-09-30 to keep ranking deterministic and cheaper; it had changed the analyst-facing rank in one of ten measured reports. CyberRE-LLM output has its own bounded family, and its results table is withheld from the independent reviewer (docs 9.11, 16.2).
+The LLM zero-shot opinion was removed from the ensemble on 2026-09-30 to keep ranking deterministic and cheaper; it had changed the analyst-facing rank in one of ten measured reports. CyberRE-LLM output has its own bounded family and re-orders only the ranking the analyst sees: the stage decision (and so the naming gate) and the independent reviewer read a fusion computed without it (docs 9.11, 9.12, 16.2).
 
 ### Optional local reranker
 
