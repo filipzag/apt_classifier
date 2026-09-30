@@ -170,12 +170,6 @@ export interface DecisionInfo {
 
 export interface OriginInfo {
   top_country: string | null
-  /** random-forest source-country estimate from the case evidence (null when it abstained) */
-  model_estimate?: {
-    top: string | null
-    top_label: string | null
-    classes: { class: string; country: string; probability: number }[]
-  } | null
   confidence: string
   coverage: number
   caveats: string[]

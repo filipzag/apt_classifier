@@ -1172,8 +1172,9 @@ every group with the probability of that group's own class, so the 83 unattribut
 scored like the rest, and groups of one class tie on rank. Both abstain without a loaded model or
 accepted techniques. Neither can make a group eligible, because eligibility still comes from the
 deterministic technical classifiers. They share one forest prediction per scoring pass, and each
-has its own family budget (`learned_profile`, `origin`). The country estimate is shown on the
-assessment page's origin tab as "Model estimate from this evidence". Both vote at weight 0 by
+has its own family budget (`learned_profile`, `origin`). The country forest's estimate is not shown
+to analysts: on its own it is weaker than the origin aggregated from the ranked groups (11.1; macro-F1
+0.36 against 0.80 on the ATT&CK folds, 0.18 against 0.52 on the real reports, 21.3.11). Both vote at weight 0 by
 default (21.3.11). The measured source-country configuration is one switch away:
 `SOURCE_COUNTRY_WEIGHT=1.0` with
 `ATTRIBUTION_COMBINER_PATH=data/models/combiner/attribution_combiner_source_country.json`, the combiner
@@ -3074,6 +3075,22 @@ different held-out sentences) using the mapped techniques the pipeline accepted:
 | group forest (scikit-learn, best of 16 settings) | top-1 0.451, MRR 0.575 | Naive Bayes 0.588 / 0.724 |
 | group forest (PyTorch GPU, shipped settings) | top-1 0.418-0.444, MRR 0.555-0.571 | |
 | country forest (balanced, leaf 3) | accuracy 0.62-0.66 | country-level Naive Bayes 0.47 (always "unattributed") |
+
+On the test sets (seed-7 folds, 153 cases; CTI-HAL, 55 reports), standalone and against simple
+references (one correct answer per case, so micro-F1 equals accuracy):
+
+| measure | ATT&CK folds | real reports |
+|---|---|---|
+| group forest accuracy / macro-F1 | 0.36 / 0.27 | 0.00 / 0.00 |
+| Naive Bayes top-1 | 0.46 | 0.11 |
+| country forest accuracy / macro-F1 | 0.52 / 0.36 | 0.47 / 0.18 |
+| country of the ensemble's top-ranked group, accuracy / macro-F1 | 0.87 / 0.80 | 0.85 / 0.52 |
+| always "unattributed", accuracy | 0.45 | 0.71 |
+
+Country-forest F1 per class on the folds: China 0.46, Iran 0.27, North Korea 0.22, Russia 0.15,
+another state 0.40, unattributed 0.64 (real reports: Iran 0.40, Russia 0.00, unattributed 0.65). As
+predictors the forests are weak, which is why the country estimate is not shown in the UI; the
+country forest's value, where it has any, is as a vote that shifts close calls.
 
 Weights were chosen on the validation folds with the learned combiner off on both sides, so the
 comparison is between rank fusions:

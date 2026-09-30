@@ -28,9 +28,8 @@ See [`docs/TECHNICAL_DOCUMENTATION.md`](docs/TECHNICAL_DOCUMENTATION.md) for the
    - campaign-profile overlap
    - software/tool links
    - source-country random forest: predicts the source-country class (China, Russia, Iran, North Korea,
-     another state, no documented state origin) from the mapped techniques, motivation and target; its estimate
-     is shown on the assessment page, and its vote for each group through the group's documented country is an
-     opt-in (real reports improve, the ATT&CK folds lose one case; docs 9.13, 21.3.11). Trained on the GPU from
+     another state, no documented state origin) from the mapped techniques, motivation and target; its vote for
+     each group through the group's documented country is an opt-in (real reports improve, the ATT&CK folds lose one case; docs 9.13, 21.3.11). Trained on the GPU from
      ATT&CK profiles.
    - group random forest over the same features (wired at weight 0: it helped the ATT&CK folds but hurt real reports)
    - opt-in CyberRE-LLM technique filtering and ranking

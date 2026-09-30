@@ -313,25 +313,6 @@ def _render_evidence_detail(engine: AttributionEngine, state: AnalysisState) -> 
                 use_container_width=True,
                 hide_index=True,
             )
-        estimate = getattr(state.context, "source_country", None)
-        if estimate:
-            labels = {"other_state": "Another state", "unattributed": "No documented state origin"}
-            st.caption(
-                "Model estimate from this evidence (random forest over mapped techniques, "
-                "motivation and target, trained on ATT&CK profiles)"
-            )
-            st.dataframe(
-                pd.DataFrame(
-                    [
-                        {"Source country": labels.get(name, name), "Probability": round(value, 3)}
-                        for name, value in sorted(
-                            estimate["probabilities"].items(), key=lambda item: -item[1]
-                        )
-                    ]
-                ),
-                use_container_width=True,
-                hide_index=True,
-            )
 
 
 def _render_diagnostics(engine: AttributionEngine, state: AnalysisState) -> None:
