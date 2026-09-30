@@ -244,3 +244,29 @@ def test_combiner_order_keeps_the_top_n_set_and_the_tail():
         full.entries[0].classifier_ranks
         == next(e for e in fusion.entries if e.group_id == "G3").classifier_ranks
     )
+
+
+def test_an_artifact_can_use_a_subset_of_the_current_features():
+    """A schema-1 artifact (no source_country features) keeps scoring on its own columns."""
+    rng = np.random.default_rng(6)
+    lists = _synthetic_lists(rng, 60)
+    model = AttributionCombiner.fit(lists, attack_version="t", pipeline_fingerprint="fp")
+    keep = [i for i, name in enumerate(FEATURE_NAMES) if not name.startswith("source_country_")]
+    payload = model.to_dict()
+    payload["feature_schema_version"] = 1
+    payload["feature_names"] = [FEATURE_NAMES[i] for i in keep]
+    for key in ("weights", "means", "scales"):
+        payload[key] = [payload[key][i] for i in keep]
+    older = AttributionCombiner.from_dict(payload)
+    assert older.feature_names == tuple(FEATURE_NAMES[i] for i in keep)
+    lst = lists[0]
+    expected = (lst.features[:, keep] - older.means) / older.scales @ older.weights
+    utilities, _ = older.utilities(lst)
+    assert np.allclose(utilities, expected)
+    assert older.to_dict()["feature_names"] == payload["feature_names"]
+    with pytest.raises(ValueError):
+        AttributionCombiner.from_dict(
+            {**payload, "feature_names": [*payload["feature_names"][:-1], "nope"]}
+        )
+    with pytest.raises(ValueError):
+        AttributionCombiner.from_dict({**payload, "feature_schema_version": 0})

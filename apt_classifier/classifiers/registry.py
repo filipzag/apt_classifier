@@ -1,3 +1,5 @@
+from typing import Any
+
 from apt_classifier.classifiers.base import Classifier, ClassifierContext, ClassifierResult
 from apt_classifier.classifiers.campaign import CampaignClassifier
 from apt_classifier.classifiers.cyberre import CyberREClassifier
@@ -5,6 +7,10 @@ from apt_classifier.classifiers.group_text import GroupTextClassifier
 from apt_classifier.classifiers.idf_overlap import IDFOverlapClassifier
 from apt_classifier.classifiers.jaccard import WeightedJaccardClassifier
 from apt_classifier.classifiers.naive_bayes import BernoulliNaiveBayesClassifier
+from apt_classifier.classifiers.profile_forest import (
+    ProfileForestClassifier,
+    SourceCountryClassifier,
+)
 from apt_classifier.classifiers.semantic_centroid import SemanticCentroidClassifier
 from apt_classifier.classifiers.software import COMMODITY_TOOL_WEIGHT_CAP, SoftwareClassifier
 from apt_classifier.classifiers.specific_behavior import SpecificBehaviorClassifier
@@ -22,6 +28,7 @@ def default_classifiers(
     software_idf: bool = True,
     software_tool_weight_cap: float = COMMODITY_TOOL_WEIGHT_CAP,
     idf_length_norm: float = 1.0,
+    profile_forest: Any = None,
 ) -> tuple[Classifier, ...]:
     return (
         BernoulliNaiveBayesClassifier(alpha, beta, negative_weight),
@@ -35,6 +42,8 @@ def default_classifiers(
         CampaignClassifier(),
         SoftwareClassifier(use_idf=software_idf, tool_weight_cap=software_tool_weight_cap),
         CyberREClassifier(),
+        ProfileForestClassifier(profile_forest),
+        SourceCountryClassifier(profile_forest),
     )
 
 

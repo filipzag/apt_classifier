@@ -7,7 +7,7 @@ EVIDENCEFORGE_CLINIC_DIR ?= ../evidenceforge_clinic
 PUBLIC_BASELINE ?= data/audits/public_heldout_baseline.json
 PUBLIC_CURRENT ?= data/audits/public_heldout_current.json
 
-.PHONY: exemplars fit-combiner api api-dev api-local api-auth-demo web-install web-dev web-build web-check run-next setup up down ingest run run-local test lint evidenceforge-eval evidenceforge-eval-all benchmark-public benchmark-curated verify-results check-regression fit-acceptance benchmark-attribution train-reranker generate-synthetic benchmark-cti-hal benchmark-cti-hal-production benchmark-attribution-production
+.PHONY: exemplars fit-forest fit-combiner api api-dev api-local api-auth-demo web-install web-dev web-build web-check run-next setup up down ingest run run-local test lint evidenceforge-eval evidenceforge-eval-all benchmark-public benchmark-curated verify-results check-regression fit-acceptance benchmark-attribution train-reranker generate-synthetic benchmark-cti-hal benchmark-cti-hal-production benchmark-attribution-production
 
 setup:
 	python3 -m venv --system-site-packages .venv
@@ -80,6 +80,10 @@ exemplars:
 
 # Shipped configuration: public dev split, no per-technique priors (priors were measured and
 # rejected, docs 21.3), exemplar features from `make exemplars`.
+# Random-forest group and source-country models from the ATT&CK knowledge base (GPU when available).
+fit-forest:
+	PYTHONPATH=. $(PYTHON) scripts/fit_profile_forest.py
+
 fit-acceptance:
 	PYTHONPATH=. $(PYTHON) scripts/fit_acceptance_model.py --priors-split none
 	PYTHONPATH=. $(PYTHON) scripts/fit_acceptance_model.py --priors-split none --no-exemplars --output data/models/acceptance/acceptance_model_no_exemplars.json

@@ -12,6 +12,7 @@ from apt_classifier.attribution import (
 )
 from apt_classifier.classifiers.base import ClassifierContext, ClassifierResult
 from apt_classifier.classifiers.naive_bayes import posterior
+from apt_classifier.classifiers.profile_forest import PROFILE_FOREST_NAME, SOURCE_COUNTRY_NAME
 from apt_classifier.classifiers.registry import default_classifiers, run_classifiers
 from apt_classifier.classifiers.software import decisive_software_factor
 from apt_classifier.combiner import (
@@ -41,6 +42,7 @@ from apt_classifier.fusion import FusionResult, reciprocal_rank_fusion
 from apt_classifier.llm import OpenRouterClient
 from apt_classifier.origin import OriginAndThreatAssessment, assess_origin_and_threat_type
 from apt_classifier.presets import apply_preset
+from apt_classifier.profile_forest import load_profile_forest
 from apt_classifier.questions import (
     INTERVIEW_REVISION,
     QuestionCandidate,
@@ -95,6 +97,8 @@ _CLASSIFIER_FAMILIES = {
     "strategic_context": "context",
     "motivation_alignment": "motivation",
     CYBERRE_CLASSIFIER_NAME: "cyberre_llm",
+    PROFILE_FOREST_NAME: "learned_profile",
+    SOURCE_COUNTRY_NAME: "origin",
 }
 
 
@@ -239,6 +243,9 @@ class AttributionEngine:
                 ),
             )
         )
+        self.profile_forest, self.profile_forest_status = load_profile_forest(
+            self.settings, knowledge_base
+        )
         self.classifiers = default_classifiers(
             self.settings.nb_alpha,
             self.settings.nb_beta,
@@ -246,6 +253,7 @@ class AttributionEngine:
             software_tool_weight_cap=float(getattr(self.settings, "software_tool_weight_cap", 1.5)),
             idf_length_norm=float(getattr(self.settings, "idf_overlap_length_norm", 1.0)),
             software_idf=bool(getattr(self.settings, "software_idf_enabled", True)),
+            profile_forest=self.profile_forest,
         )
         self.telemetry_profile: Any = None
         self.exemplar_index, self.exemplar_status = load_exemplar_index(self.settings)
@@ -945,6 +953,18 @@ class AttributionEngine:
         family_weights["software"] = float(family_weights.get("software", 1.0)) * factor
         return boosted, family_weights
 
+    def set_profile_forest(self, model: Any) -> None:
+        """Swap the random-forest models; the benchmarks refit them on a reduced knowledge base."""
+        self.profile_forest = model
+        self.profile_forest_status = (
+            f"active ({getattr(model, 'device', '?')}, injected)"
+            if model is not None
+            else "disabled"
+        )
+        for classifier in self.classifiers:
+            if getattr(classifier, "name", None) in {PROFILE_FOREST_NAME, SOURCE_COUNTRY_NAME}:
+                classifier.model = model
+
     def family_weights(self) -> dict[str, float]:
         """Per-family RRF budgets from settings (single definition for every fusion call)."""
         return {
@@ -955,6 +975,8 @@ class AttributionEngine:
             "software": getattr(self.settings, "software_family_weight", 1.20),
             "campaign": getattr(self.settings, "campaign_family_weight", 1.00),
             "cyberre_llm": getattr(self.settings, "cyberre_family_weight", 0.35),
+            "learned_profile": getattr(self.settings, "profile_forest_family_weight", 1.0),
+            "origin": getattr(self.settings, "source_country_family_weight", 1.0),
         }
 
     def default_weights(self) -> dict[str, float]:
@@ -970,6 +992,8 @@ class AttributionEngine:
             "bernoulli_naive_bayes": getattr(self.settings, "naive_bayes_weight", 1.0),
             "idf_tfidf_cosine": getattr(self.settings, "idf_overlap_weight", 1.0),
             "weighted_jaccard": getattr(self.settings, "jaccard_weight", 1.0),
+            PROFILE_FOREST_NAME: getattr(self.settings, "profile_forest_weight", 0.0),
+            SOURCE_COUNTRY_NAME: getattr(self.settings, "source_country_weight", 0.0),
         }
 
     def _score(

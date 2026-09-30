@@ -727,3 +727,34 @@ def test_gate_sweep_selects_a_clean_rule_on_synthetic_artifacts(tmp_path, capsys
     assert "clean rules" in out
     # the best clean rule names both correct leaders and none of the wrong one
     assert "attr=2(2)" in out
+
+
+def test_unknown_arm_refits_only_the_voting_forest(monkeypatch):
+    from types import SimpleNamespace
+
+    from scripts import attribution_benchmark as bench
+
+    calls = {}
+
+    def fake_fit(kb, *, params, device, reuse_group_forest=None):
+        calls.update(kb=kb, params=params, device=device, reuse=reuse_group_forest)
+        return "refit"
+
+    monkeypatch.setattr(bench, "fit_profile_forest", fake_fit)
+    model = SimpleNamespace(metadata={"params": {"seed": 7}}, device="cpu")
+    engine = SimpleNamespace(
+        profile_forest=model,
+        default_weights=lambda: {"profile_forest": 0.0, "source_country": 1.0},
+    )
+    assert bench._forest_votes(engine)
+    assert bench._refit_forest_without_actor(engine, "reduced") == "refit"
+    # the silent group forest is reused, the voting country forest is refitted
+    assert calls["reuse"] is model and calls["params"] == {"seed": 7} and calls["kb"] == "reduced"
+    engine.default_weights = lambda: {"profile_forest": 0.5, "source_country": 0.0}
+    bench._refit_forest_without_actor(engine, "reduced")
+    assert calls["reuse"] is None
+    engine.default_weights = lambda: {"profile_forest": 0.0, "source_country": 0.0}
+    assert not bench._forest_votes(engine)
+    assert not bench._forest_votes(
+        SimpleNamespace(profile_forest=None, default_weights=lambda: {"source_country": 1.0})
+    )

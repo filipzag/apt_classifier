@@ -43,6 +43,7 @@ from typing import Any
 from apt_classifier.attack.kb import AttackKnowledgeBase
 from apt_classifier.attack.related import related_groups
 from apt_classifier.attribution import AttributionStage
+from apt_classifier.classifiers.profile_forest import PROFILE_FOREST_NAME, SOURCE_COUNTRY_NAME
 from apt_classifier.config import Settings
 from apt_classifier.embeddings import SentenceTransformerEmbedder
 from apt_classifier.evaluation import (
@@ -56,6 +57,7 @@ from apt_classifier.evaluation import (
 )
 from apt_classifier.evidence.models import EvidenceLedger, Observation, Provenance
 from apt_classifier.llm import OpenRouterClient
+from apt_classifier.profile_forest import fit_profile_forest
 from apt_classifier.session import AttributionEngine
 from apt_classifier.vectorstore import (
     ChromaVectorStore,
@@ -77,6 +79,10 @@ FINGERPRINTED_SOURCES = (
     REPO_ROOT / "apt_classifier" / "classifiers" / "strategic_context.py",
     REPO_ROOT / "apt_classifier" / "combiner.py",
     REPO_ROOT / "apt_classifier" / "separation.py",
+    REPO_ROOT / "apt_classifier" / "origin.py",
+    REPO_ROOT / "apt_classifier" / "profile_forest.py",
+    REPO_ROOT / "apt_classifier" / "torch_forest.py",
+    REPO_ROOT / "apt_classifier" / "classifiers" / "profile_forest.py",
 )
 
 
@@ -470,6 +476,28 @@ def run_known(
     return rows, dropped_total
 
 
+def _forest_votes(engine: Any) -> bool:
+    weights = engine.default_weights()
+    return getattr(engine, "profile_forest", None) is not None and (
+        weights.get(PROFILE_FOREST_NAME, 0.0) > 0 or weights.get(SOURCE_COUNTRY_NAME, 0.0) > 0
+    )
+
+
+def _refit_forest_without_actor(engine: Any, reduced_kb: Any) -> Any:
+    """The shipped forest was fitted on the full knowledge base, so it knows the removed actor's
+    profile; masking its output would still leak that knowledge into the other votes. Refit both
+    forests on the reduced knowledge base with the same parameters and seed (GPU when present)."""
+    model = engine.profile_forest
+    # a group forest without a vote cannot move the ranking: keep it and refit the country forest
+    silent = engine.default_weights().get(PROFILE_FOREST_NAME, 0.0) <= 0
+    return fit_profile_forest(
+        reduced_kb,
+        params=dict(model.metadata.get("params") or {}),
+        device=model.device,
+        reuse_group_forest=model if silent else None,
+    )
+
+
 def run_unknown(
     settings: Settings,
     kb: AttackKnowledgeBase,
@@ -497,6 +525,10 @@ def run_unknown(
             hide_group_entirely=True,
         )
         engine = AttributionEngine(settings, reduced, proxy, client)  # type: ignore[arg-type]
+        forest = "off"
+        if _forest_votes(engine):
+            engine.set_profile_forest(_refit_forest_without_actor(engine, reduced))
+            forest = "refit without the actor"
         cost_before = client.total_usage.cost_usd if client is not None else 0.0
         state = engine.analyze(_ledger(fold))
         fusion = state.fusion
@@ -505,6 +537,7 @@ def run_unknown(
             {
                 "group_id": fold.group_id,
                 "observations": len(fold.observations),
+                "profile_forest": forest,
                 "llm": _llm_accounting(state, client, cost_before),
                 **_separation_fields(state, None, decision),
                 **_combiner_fields(state, None),
@@ -806,6 +839,11 @@ def main(argv: list[str] | None = None) -> int:
         "thresholds": engine.attribution_thresholds.__dict__,
         "acceptance_model": engine.acceptance_model_status,
         "combiner": engine.combiner_status,
+        "profile_forest": {
+            "status": engine.profile_forest_status,
+            "fingerprint": getattr(engine.profile_forest, "fingerprint", None),
+            "votes": _forest_votes(engine),
+        },
         "source_fingerprint": source_fingerprint(FINGERPRINTED_SOURCES),
         "pipeline": args.pipeline,
         "verifier_mode": str(getattr(settings, "technique_verifier_mode", "ambiguous")),

@@ -1021,7 +1021,7 @@ Presets are applied using Pydantic's `model_copy(update=...)` on the `Settings` 
 
 ## 9. Classifiers
 
-The registry currently creates ten deterministic classifiers plus the opt-in CyberRE-LLM classifier (it votes only after an analyst runs CyberRE). The LLM zero-shot opinion was removed from the ensemble on 2026-09-30 (9.11):
+The registry currently creates ten deterministic classifiers, the opt-in CyberRE-LLM classifier (it votes only after an analyst runs CyberRE) and the two random-forest members of 9.13. The LLM zero-shot opinion was removed from the ensemble on 2026-09-30 (9.11):
 
 ```text
 bernoulli_naive_bayes
@@ -1035,6 +1035,8 @@ motivation_alignment
 campaign_profile
 software_tools
 cyberre_llm
+profile_forest
+source_country
 ```
 
 ### 9.1 Bernoulli Naive Bayes
@@ -1134,6 +1136,52 @@ Before 2026-09-30 all three read the rescored fusion, vote included, so a scan c
 
 **Audit and limitations:** Each scan stores the observation ID, filtered techniques, ranked techniques, model, call count, token usage, and cost. The original deterministic retrieval is preserved. Full mode is expensive, vulnerable to LLM labeling errors, and dependent on the supplied ATT&CK descriptions; the human analyst remains responsible for reviewing the resulting technique hypothesis before relying on it.
 
+### 9.13 Random-forest group and source-country models (2026-09-30)
+
+**What it does:** `apt_classifier/profile_forest.py` fits two random forests from the ATT&CK
+knowledge base alone. The **group forest** predicts which documented group an evidence set belongs
+to. The **country forest** predicts the source-country class: China, Russia, Iran, North Korea,
+another state, or `unattributed`. A group's class comes from its documented origin (11.1): 44 China,
+18 Iran, 13 Russia, 8 North Korea, 10 other states and 83 groups with no documented state origin.
+Features are 0/1: one per ATT&CK technique, where a sub-technique also sets its parent. One more per
+canonical motivation and target geography (the strategic-context vocabulary), and an "unknown"
+flag for each. At inference the techniques are the accepted ones and motivation and target come
+from the analyst's strategic context.
+
+**Training data:** synthetic partial observations of every group's documented profile, 300 per
+group (51,300 cases). Each keeps a random 15-70% of the group's techniques, adds false positives
+drawn by how many groups document a technique (precision 45-95%), and gives the group's
+motivation or one of its target geographies 40% of the time each (5% of those replaced by a random
+value). No benchmark, case or CTI-HAL data is used.
+
+**GPU training and inference:** scikit-learn's forest runs on the CPU and stores a dense class row
+at every node, which exhausted memory for the 171-class model. `apt_classifier/torch_forest.py`
+grows the trees in PyTorch on the GPU (CPU fallback). Every split is "feature present" versus
+"absent", and a batch of trees grows level by level with integer scatter-adds, so training is
+deterministic for a seed. Like scikit-learn, a node's `max_features` candidates are drawn among the
+features that vary inside it. Leaves keep sparse class fractions, and inference sums them in fixed
+point, so CPU and GPU predictions are identical. On the RTX 4060 the group forest (200 trees) fits
+in 17 s and the country forest (300 trees, balanced classes, leaf size 3) in 15 s, with at most 2.7
+GB of GPU memory. A prediction takes about 12 ms. `make fit-forest` writes the artifact
+(`data/models/forest/profile_forest.npz`, 56 MB, no pickle, fingerprinted, pinned to the ATT&CK
+version, loaded fail-closed) and `data/audits/profile_forest_fit.json`. `PROFILE_FOREST_DEVICE`
+selects `auto` (GPU when present), `cuda` or `cpu`.
+
+**Ensemble members:** `profile_forest` votes with the group probability. `source_country` votes for
+every group with the probability of that group's own class, so the 83 unattributed groups are
+scored like the rest, and groups of one class tie on rank. Both abstain without a loaded model or
+accepted techniques. Neither can make a group eligible, because eligibility still comes from the
+deterministic technical classifiers. They share one forest prediction per scoring pass, and each
+has its own family budget (`learned_profile`, `origin`). The country estimate is shown on the
+assessment page's origin tab as "Model estimate from this evidence". Both vote at weight 0 by
+default (21.3.11). The measured source-country configuration is one switch away:
+`SOURCE_COUNTRY_WEIGHT=1.0` with
+`ATTRIBUTION_COMBINER_PATH=data/models/combiner/attribution_combiner_source_country.json`, the combiner
+refitted with the vote as a feature (feature schema 2). In the attribution benchmark's
+unknown-actor arm, the voting forest is refitted on the knowledge base without the removed actor,
+because masking the actor's output would still leak its profile into the other votes. The combiner
+fit's unknown lists do the same.
+
 ---
 
 ## 10. Family-aware Reciprocal Rank Fusion
@@ -1170,6 +1218,12 @@ motivation:
 
 cyberre_llm:
   cyberre_llm
+
+learned_profile:
+  profile_forest
+
+origin:
+  source_country
 ```
 
 ### 10.3 Family budgets
@@ -1182,6 +1236,8 @@ Default family budgets are:
 | Context | 1.00 |
 | Motivation | 1.50 |
 | CyberRE-LLM | 0.35 |
+| Learned profile (group forest) | 1.00 |
+| Origin (source-country forest) | 1.00 |
 
 The individual classifier weights determine how a family cap is divided. A family is scaled down only when its active member weights exceed the cap. A weak singleton classifier is not scaled up.
 
@@ -1224,6 +1280,8 @@ Other default weights include:
 | Semantic centroid | 0.70 |
 | Campaign profile | 0.00 |
 | CyberRE-LLM | 0.35 |
+| Group forest (`profile_forest`) | 0.00 (not adopted, 21.3.11) |
+| Source-country forest (`source_country`) | 0.00 (1.00 opt-in, 21.3.11) |
 
 The effective weights are displayed in Assessment and stored in the fusion result.
 
@@ -1405,6 +1463,13 @@ software (0.86 when it applies) and actor behaviour (0.61 when it applies) decid
 least one classifier already ranks the true group first in 93% of the ATT&CK folds and 73% of
 the real reports against 60% and 51% for the fused ranking, so the combiner is the largest lever.
 
+Feature schema 2 (2026-09-30) adds the random-forest `source_country` vote (9.13) to the
+per-classifier features, and the fit's unknown-actor lists refit the country forest without the
+removed actor. An artifact lists the features it was fitted on and is scored on those columns, so
+the schema-1 default artifact and the schema-2 opt-in artifact
+(`attribution_combiner_source_country.json`, fitted with the country vote at 1.0) both load; a
+newer schema, unknown feature names or mismatched vectors are still refused.
+
 - **Model.** A conditional logit (listwise softmax) over the top-N fused candidates (N = 20):
   every candidate gets a utility from *features only*, never from its identity, so a removed or
   never-seen group needs no special case. Fitted by damped Newton's method in numpy, the same
@@ -1464,6 +1529,24 @@ Country hypotheses are extracted only from documented group or linked-campaign d
 - `support of Iranian interests`.
 
 A sentence such as “targeted Chinese government organizations” does not qualify as origin evidence by itself.
+
+Since 2026-09-30 more of ATT&CK's own origin phrasings count, which raises the groups with exactly
+one documented source country from 53 to 91 of 176 without losing any:
+
+- a country adjective in the group's own self-description, anchored to the sentence form "<name
+  or alias> is a …" (for example "APT1 is a Chinese threat group", "Magic Hound is an
+  Iranian-sponsored threat group", "MirrorFace is a People's Republic of China (PRC)-aligned
+  cyberespionage actor");
+- "operating out of China", "operate from the Guandong Province of China", "likely Chinese
+  origins", "a suspected nexus to the Iranian government", "associated with the Chinese
+  government".
+
+The anchoring is what keeps victims and other groups out: "SideCopy's name comes from …
+Sidewinder, a suspected Indian threat group" does not make SideCopy Indian. Language never counts
+("Russian-speaking"), and "South American" is not the United States. Citations are stripped
+before matching, and the table is built once per knowledge base in about 0.3 s. The 38 groups this
+adds were each checked against their ATT&CK description. Group5 and POLONIUM still state two
+countries and stay ambiguous for the origin assessment.
 
 ### 11.2 Candidate weighting
 
@@ -2909,6 +2992,64 @@ T1070.003, manufacturing `mfg-rh-001#0` as T1074). Nothing was tuned on the clin
 change is adopted because the primary gate, the real-report target and both attribution gates
 pass. Deployments whose input is mostly structured telemetry can set
 `TECHNIQUE_EXEMPLARS_ENABLED=false` to get the previous gate back.
+
+#### 21.3.11 Random-forest group and source-country models (2026-09-30)
+
+Standalone, on 153 validation folds (seed 11: the same groups as the seed-7 evaluation folds,
+different held-out sentences) using the mapped techniques the pipeline accepted:
+
+| model | result | reference |
+|---|---|---|
+| group forest (scikit-learn, best of 16 settings) | top-1 0.451, MRR 0.575 | Naive Bayes 0.588 / 0.724 |
+| group forest (PyTorch GPU, shipped settings) | top-1 0.418-0.444, MRR 0.555-0.571 | |
+| country forest (balanced, leaf 3) | accuracy 0.62-0.66 | country-level Naive Bayes 0.47 (always "unattributed") |
+
+Weights were chosen on the validation folds with the learned combiner off on both sides, so the
+comparison is between rank fusions:
+
+| group forest / country forest weight | top-1 | top-5 | MRR | named (all correct) | folds better / worse |
+|---|---|---|---|---|---|
+| 0 / 0 | 0.601 | 0.869 | 0.716 | 27 | |
+| 0.5 / 0 | 0.667 | 0.980 | 0.788 | 29 | 40 / 3 |
+| 1.0 / 0 | 0.725 | 0.980 | 0.840 | 30 | 48 / 4 |
+| 0 / 0.5 | 0.608 | 0.882 | 0.723 | 27 | 13 / 2 |
+| 0 / 1.0 | 0.621 | 0.915 | 0.739 | 28 | 26 / 2 |
+| 0.5 / 0.5 | 0.693 | 0.980 | 0.810 | 28 | 45 / 2 |
+
+The real-report check (55 CTI-HAL reports, combiner off on both sides; every look is listed) decided
+the adoption:
+
+| group forest / country forest weight | top-1 | top-5 | MRR | named | wrong names | reports better / worse |
+|---|---|---|---|---|---|---|
+| 0 / 0 | 0.491 | 0.764 | 0.611 | 11 | 1 (FIN7 as Kimsuky) | |
+| 0.5 / 0 | 0.491 | 0.764 | 0.608 | 11 | 1 | 2 / 10 |
+| 1.0 / 0 | 0.455 | 0.727 | 0.575 | 9 | 0 | 2 / 14 |
+| **0 / 1.0** | **0.545** | **0.764** | **0.646** | **12** | **0** | **14 / 2** |
+| 0.5 / 0.5 | 0.491 | 0.764 | 0.614 | 12 | 0 | 6 / 8 |
+
+Reading: the group forest's fold gains do not transfer. On the folds a median 92% of the accepted
+techniques lie in the true group's ATT&CK profile, on the real reports 65%, and the extra techniques
+of real reports are genuine tradecraft that resembles other groups' documented profiles, which the
+forest amplifies. It stays wired at weight 0 (its votes are visible in the classifier matrix). The
+country forest transfers: on the real reports all 14 improvements are criminal groups whose evidence
+it recognises as having no documented state origin (Carbanak, FIN6, FIN7), OilRig loses two reports
+and the Russian groups are unchanged; on the validation folds every class improves slightly. The
+source-country vote at weight 1.0 was carried to the full pipeline: the combiner was refitted
+with it as a feature (seeds 11/23/37, 2,718 lists; out of fold clean top-1 0.860 against RRF 0.540,
+mixed MRR 0.812 against 0.570), and the unknown-actor lists refitted the country forest without the
+removed actor. Final comparison with the shipped pipeline (combiner on in both):
+
+| benchmark | top-1 | top-5 | MRR | named (all correct) | unknown named | better / worse |
+|---|---|---|---|---|---|---|
+| ATT&CK folds, seed 7 | 0.837 -> 0.830 | 0.967 -> 0.961 | 0.883 -> 0.880 | 33 -> 32 | 0 / 25 | 5 / 9 |
+| CTI-HAL, 55 reports | 0.545 -> 0.564 | 0.745 -> 0.727 | 0.632 -> 0.636 | 13 -> 15 | | 14 / 3 |
+
+Real reports improve (cluster-aware top-1 0.673 -> 0.709, reports without software 0.222 -> 0.278)
+and no wrong name appears anywhere, but the folds lose one top-1 case and 0.003 MRR. Seven of the nine
+worse folds were already fine in the rank fusion and worsened only in the refitted combiner's order.
+Under the no-regression rule for both attribution benchmarks this is not a default: the country vote
+stays at 0 with the previous combiner (whose inputs are unchanged, re-stamped with a note), and the
+measured configuration is kept as an opt-in (9.13).
 
 ## 22. Failure modes and troubleshooting
 

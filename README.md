@@ -27,6 +27,12 @@ See [`docs/TECHNICAL_DOCUMENTATION.md`](docs/TECHNICAL_DOCUMENTATION.md) for the
    - motivation alignment
    - campaign-profile overlap
    - software/tool links
+   - source-country random forest: predicts the source-country class (China, Russia, Iran, North Korea,
+     another state, no documented state origin) from the mapped techniques, motivation and target; its estimate
+     is shown on the assessment page, and its vote for each group through the group's documented country is an
+     opt-in (real reports improve, the ATT&CK folds lose one case; docs 9.13, 21.3.11). Trained on the GPU from
+     ATT&CK profiles.
+   - group random forest over the same features (wired at weight 0: it helped the ATT&CK folds but hurt real reports)
    - opt-in CyberRE-LLM technique filtering and ranking
 6. Fuse applicable classifiers with family-aware Reciprocal Rank Fusion. Naive Bayes, TF-IDF, Jaccard, and the technique centroid share one technique-overlap budget instead of casting four full correlated votes. Actor-specific behavior, software, and campaign classifiers have their own family budgets. Context, motivation, and description signals may rerank only candidates with documented technical support; the analyst-requested CyberRE vote has its own low family budget and cannot introduce a candidate. Abstaining classifiers cast no vote. Groups with zero technical overlap are excluded from authoritative RRF.
 7. Aggregate documented sponsor/origin evidence across the ranked candidates and classify the profile as APT-like state/espionage activity, financially motivated criminal intrusion, mixed, or indeterminate.
@@ -335,6 +341,10 @@ All settings are environment variables documented in `.env.example`. Important v
 - `TECHNIQUE_INCLUDE_SYNTHETIC=false` (LLM-generated observation sentences per technique in the index;
   `make generate-synthetic` then `make ingest`; off until the full set is generated and measured, see
   docs 7.3 and 21.3.6)
+- `SOURCE_COUNTRY_WEIGHT=0.0`, `PROFILE_FOREST_WEIGHT=0.0` (random-forest votes off by default; `make fit-forest` trains
+  both on the GPU when available, `PROFILE_FOREST_DEVICE=cpu` otherwise). To enable the measured source-country vote set
+  `SOURCE_COUNTRY_WEIGHT=1.0` and `ATTRIBUTION_COMBINER_PATH=data/models/combiner/attribution_combiner_source_country.json`
+  (docs 9.13 and 21.3.11)
 - `TECHNIQUE_EXEMPLARS_ENABLED=true` (labelled public report sentences as acceptance evidence, `make exemplars`
   then `make fit-acceptance`; CTI-HAL median accepted-technique recall per report 0.31 -> 0.42; `false` restores
   the previous calibrated gate through `ACCEPTANCE_MODEL_FALLBACK_PATH`, see docs 8.2 and 21.3.10)

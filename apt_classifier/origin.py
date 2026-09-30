@@ -4,10 +4,17 @@ from typing import Any
 
 from apt_classifier.attack.parse import split_sentences
 from apt_classifier.fusion import FusionResult
+from apt_classifier.memo import ObjectMemo
 
 _COUNTRY_ALIASES = {
     "Belarus": ("belarus", "belarusian"),
-    "China": ("china", "chinese", "prc"),
+    "China": (
+        "people s republic of china prc",
+        "people s republic of china",
+        "china",
+        "chinese",
+        "prc",
+    ),
     "India": ("india", "indian"),
     "Iran": ("iran", "iranian"),
     "Israel": ("israel", "israeli"),
@@ -144,7 +151,7 @@ def _assess_origin(
         group = groups.get(entry.group_id)
         if group is None:
             continue
-        origins = _documented_origins(_profile_texts(kb, entry.group_id))
+        origins = documented_origins(kb, entry.group_id)
         if not origins:
             continue
         candidate_weight = candidate_weights[entry.group_id]
@@ -278,17 +285,112 @@ def _ranking_is_weak(entries: tuple[Any, ...]) -> bool:
     return float(entries[0].relative_score) - float(entries[1].relative_score) < 10.0
 
 
-def _documented_origins(texts: list[str]) -> dict[str, str]:
+# More origin phrasings ATT&CK uses (2026-09-30), which lift the groups with one documented source
+# country from 53 to 91 of 176 without losing any. A country adjective counts only in the
+# group's own self-description ("APT1 is a Chinese threat group", "Magic Hound is an
+# Iranian-sponsored threat group"): elsewhere "Chinese" is as likely to describe victims or
+# another group. Language never counts ("Russian-speaking"), and "South American" is a region,
+# not the United States, because the adjective must directly follow the article or qualifier.
+_NOT_LANGUAGE = r"(?!\s+(?:speaking|speakers|language|languages)\b)"
+_QUALIFIER = r"(?:(?:suspected|likely|probable|possible|alleged|reportedly)\s+)?"
+_LINK = (
+    r"(?:\s+(?:state|government|military))?"
+    r"(?:\s+(?:sponsored|backed|linked|aligned|related|affiliated|nexus|based))?"
+)
+_ACTOR_WORDS = (
+    r"(?:\s+(?:cyber\s*espionage|cyberespionage|cyber|espionage|advanced\s+persistent|state"
+    r"|threat|apt|hacking|activity|intrusion))*"
+)
+_ACTOR_NOUN = r"\s+(?:group|actor|entity|apt|team|unit|adversary|operator|operators)\b"
+_CITATION_RE = re.compile(r"\(Citation:[^)]*\)")
+_ORIGIN_TABLE_CACHE: ObjectMemo[dict[str, dict[str, str]]] = ObjectMemo()
+
+
+def _extra_origin_patterns(alias: str) -> tuple[str, ...]:
+    escaped = re.escape(alias)
+    return (
+        rf"\b(?:operat(?:e|es|ing)|based)\s+(?:out\s+of|from)\s+(?:the\s+)?"
+        rf"(?:[a-z]+\s+province\s+of\s+)?{escaped}\b{_NOT_LANGUAGE}",
+        rf"\b{escaped}{_NOT_LANGUAGE}\s+origins?\b",
+        rf"\b(?:nexus|ties|link|links|connection|connections)\s+to\s+(?:the\s+)?{escaped}"
+        rf"{_NOT_LANGUAGE}(?:\s+(?:government|state|intelligence|military))?\b",
+        rf"\bassociated\s+with\s+(?:the\s+)?{escaped}{_NOT_LANGUAGE}"
+        rf"\s+(?:government|state|military|intelligence)\b",
+    )
+
+
+def _self_description_pattern(names: tuple[str, ...], alias: str) -> str:
+    who = "|".join(re.escape(name) for name in names)
+    return (
+        rf"^(?:{who})\s+(?:is|are|was|were)\s+(?:(?:a|an|the)\s+)?{_QUALIFIER}"
+        rf"{re.escape(alias)}{_NOT_LANGUAGE}{_LINK}{_ACTOR_WORDS}{_ACTOR_NOUN}"
+    )
+
+
+def _documented_origins(texts: list[str], names: tuple[str, ...] = ()) -> dict[str, str]:
+    """Countries a group's profile states as its origin, with the stating sentence.
+
+    ``names`` (the group's name and aliases) enable the self-description pattern.
+    """
+    normalized_names = tuple(
+        sorted(
+            {_normalize(name) for name in names if len(_normalize(name)) >= 2},
+            key=len,
+            reverse=True,
+        )
+    )
     found: dict[str, str] = {}
     for text in texts:
-        for sentence in split_sentences(text):
+        for sentence in split_sentences(_CITATION_RE.sub("", text)):
             normalized = _normalize(sentence)
             for country, aliases in _COUNTRY_ALIASES.items():
                 if country in found:
                     continue
-                if any(_origin_pattern(normalized, _normalize(alias)) for alias in aliases):
-                    found[country] = sentence
+                for alias in aliases:
+                    candidate = _normalize(alias)
+                    if f" {candidate} " not in f" {normalized} ":
+                        continue  # every pattern needs the alias itself; skip the regex work
+                    if (
+                        _origin_pattern(normalized, candidate)
+                        or any(
+                            re.search(pattern, normalized)
+                            for pattern in _extra_origin_patterns(candidate)
+                        )
+                        or (
+                            normalized_names
+                            and re.search(
+                                _self_description_pattern(normalized_names, candidate), normalized
+                            )
+                        )
+                    ):
+                        found[country] = sentence.strip()
+                        break
     return found
+
+
+def documented_origin_table(kb: Any) -> dict[str, dict[str, str]]:
+    """``{group_id: {country: stating sentence}}`` for every group (memoised per KB)."""
+    groups = getattr(kb, "groups", {}) or {}
+    stamp = (
+        str(getattr(kb, "version", "") or ""),
+        len(groups),
+        len(getattr(kb, "campaigns", {}) or {}),
+    )
+    cached = _ORIGIN_TABLE_CACHE.get(kb, stamp)
+    if cached is not None:
+        return cached
+    table = {}
+    for group_id, group in groups.items():
+        names = (
+            str(_record_value(group, "name", "")),
+            *(_record_value(group, "aliases", ()) or ()),
+        )
+        table[group_id] = _documented_origins(_profile_texts(kb, group_id), tuple(names))
+    return _ORIGIN_TABLE_CACHE.put(kb, stamp, table)
+
+
+def documented_origins(kb: Any, group_id: str) -> dict[str, str]:
+    return dict(documented_origin_table(kb).get(group_id, {}))
 
 
 def _origin_pattern(sentence: str, alias: str) -> bool:

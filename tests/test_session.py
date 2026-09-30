@@ -153,6 +153,7 @@ def _settings(**overrides) -> Settings:
         "technique_mapping_preset": "local_only",
         "cyberre_weight": 0.0,
         "reranker_enabled": False,
+        "profile_forest_enabled": False,
     }
     base.update(overrides)
     return Settings(**base)
@@ -643,3 +644,23 @@ def test_combiner_orders_the_shortlist_and_the_gate_scores_the_new_leader(monkey
         FakeLLM(),
     )
     assert disabled.combiner is None and "fingerprint" in disabled.combiner_status
+
+
+def test_profile_forest_members_are_wired_and_swappable():
+    engine = AttributionEngine(_settings(), _kb(), FakeStore(), FakeLLM())
+    weights = engine.default_weights()
+    # both members are wired; the votes stay at 0 by default (docs 21.3.11)
+    assert weights["profile_forest"] == 0.0 and weights["source_country"] == 0.0
+    assert {"learned_profile", "origin"} <= set(engine.family_weights())
+    members = [c for c in engine.classifiers if c.name in {"profile_forest", "source_country"}]
+    assert len(members) == 2 and all(c.model is None for c in members)
+    assert engine.profile_forest_status == "disabled"
+    sentinel = object()
+    engine.set_profile_forest(sentinel)
+    assert all(c.model is sentinel for c in members)
+    assert engine.profile_forest_status.startswith("active")
+    # without a model both members abstain and the analysis is unchanged
+    engine.set_profile_forest(None)
+    state = engine.analyze(_ledger("PowerShell executed an encoded command."))
+    by_name = {r.classifier: r for r in state.classifier_results}
+    assert not by_name["profile_forest"].applicable and not by_name["source_country"].applicable
