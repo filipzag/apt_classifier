@@ -258,7 +258,7 @@ def generate_lists(
                     clean += 1
                 for variant in range(1, variants + 1):
                     ctx = perturb(context, kb, fold.group_id, pool, rng, regime)
-                    results, fusion, _ = engine._score(ctx, dict(state.weights))  # noqa: SLF001
+                    results, _, fusion, _ = engine._score(ctx, dict(state.weights))  # noqa: SLF001
                     lst = list_from_state(
                         engine, results, fusion, ctx, top_n=top_n, truth=fold.group_id
                     )
@@ -320,6 +320,10 @@ def generate_unknown_lists(
             hide_group_entirely=True,
         )
         engine = AttributionEngine(settings, reduced, proxy, None)  # type: ignore[arg-type]
+        if bench._forest_votes(engine):  # noqa: SLF001
+            # the shipped forest knows the removed actor; the null option must be learned from
+            # a model that never saw it (same parameters and seed, GPU when available)
+            engine.set_profile_forest(bench._refit_forest_without_actor(engine, reduced))  # noqa: SLF001
         state = engine.analyze(bench._ledger(fold))  # noqa: SLF001
         fusion = state.deterministic_fusion or state.fusion
         if not fusion.entries:

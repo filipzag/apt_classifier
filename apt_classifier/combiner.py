@@ -35,7 +35,7 @@ from apt_classifier.classifiers.software import COMMODITY_TOOL_WEIGHT_CAP, softw
 from apt_classifier.fusion import FusionEntry, FusionResult, filter_eligible_results
 from apt_classifier.separation import DiscriminationResult, technique_document_counts
 
-FEATURE_SCHEMA_VERSION = 1
+FEATURE_SCHEMA_VERSION = 2  # 2: the random-forest source-country vote joins the features
 KIND = "attribution_combiner_conditional_logit"
 DISTINCTIVE_MAX_GROUPS = 10
 EXCLUSIVE_SOFTWARE_MAX_GROUPS = 4
@@ -52,6 +52,7 @@ CLASSIFIERS: tuple[str, ...] = (
     "group_description",
     "strategic_context",
     "motivation_alignment",
+    "source_country",
 )
 RRF_FEATURES = ("rrf_rel", "rrf_inv_rank", "rrf_support", "rrf_rank_std", "rrf_contested")
 DISC_FEATURES = (
@@ -304,10 +305,23 @@ class AttributionCombiner:
     top_n: int = 20
     feature_schema_version: int = FEATURE_SCHEMA_VERSION
     metadata: dict[str, Any] = field(default_factory=dict)
+    # the features this artifact was fitted on, a subset of FEATURE_NAMES in any order: a newer
+    # schema only adds features, so an older artifact keeps working on its own columns
+    feature_names: tuple[str, ...] = FEATURE_NAMES
+
+    @property
+    def _columns(self) -> list[int]:
+        index = {name: position for position, name in enumerate(FEATURE_NAMES)}
+        return [index[name] for name in self.feature_names]
 
     # ----- inference -----
     def _design(self, lst: CombinerList) -> tuple[np.ndarray, np.ndarray | None]:
-        candidate = (lst.features - self.means) / self.scales
+        features = lst.features
+        if tuple(self.feature_names) != FEATURE_NAMES and features.size:
+            features = features[:, self._columns]
+        elif not features.size:
+            features = np.zeros((features.shape[0], len(self.feature_names)))
+        candidate = (features - self.means) / self.scales
         null = _null_row(lst.regime) if self.null_weights is not None else None
         return candidate, null
 
@@ -336,7 +350,7 @@ class AttributionCombiner:
         return {
             "kind": KIND,
             "feature_schema_version": self.feature_schema_version,
-            "feature_names": list(FEATURE_NAMES),
+            "feature_names": list(self.feature_names),
             "null_feature_names": list(NULL_FEATURE_NAMES) if self.null_weights is not None else [],
             "weights": [float(v) for v in self.weights],
             "null_weights": [float(v) for v in self.null_weights]
@@ -360,9 +374,12 @@ class AttributionCombiner:
     def from_dict(cls, payload: Mapping[str, Any]) -> AttributionCombiner:
         if payload.get("kind") != KIND:
             raise ValueError("not an attribution combiner artifact")
-        if int(payload.get("feature_schema_version", 0)) != FEATURE_SCHEMA_VERSION:
-            raise ValueError("feature schema version does not match")
-        if tuple(payload.get("feature_names", ())) != FEATURE_NAMES:
+        version = int(payload.get("feature_schema_version", 0))
+        if not 1 <= version <= FEATURE_SCHEMA_VERSION:
+            raise ValueError("feature schema version is not supported")
+        names = tuple(payload.get("feature_names", ()))
+        known = set(FEATURE_NAMES)
+        if not names or len(set(names)) != len(names) or any(name not in known for name in names):
             raise ValueError("feature names do not match the current schema")
         null_names = tuple(payload.get("null_feature_names") or ())
         null_weights = payload.get("null_weights")
@@ -372,7 +389,7 @@ class AttributionCombiner:
         means = np.asarray(payload["means"], dtype=float)
         scales = np.asarray(payload["scales"], dtype=float)
         if (
-            weights.shape != (len(FEATURE_NAMES),)
+            weights.shape != (len(names),)
             or means.shape != weights.shape
             or scales.shape != weights.shape
         ):
@@ -390,8 +407,9 @@ class AttributionCombiner:
             pipeline_fingerprint=str(payload.get("pipeline_fingerprint", "")),
             null_weights=null,
             top_n=int(payload.get("top_n", 20)),
-            feature_schema_version=int(payload.get("feature_schema_version", 0)),
+            feature_schema_version=version,
             metadata=dict(payload.get("metadata") or {}),
+            feature_names=names,
         )
 
     @classmethod

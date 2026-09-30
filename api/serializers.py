@@ -217,6 +217,32 @@ def decision(kb: Any, state: Any, thresholds: Any) -> dict[str, Any] | None:
     }
 
 
+_COUNTRY_CLASS_LABELS = {
+    "other_state": "Another state",
+    "unattributed": "No documented state origin",
+}
+
+
+def _model_estimate(state: Any) -> dict[str, Any] | None:
+    """The source-country forest's estimate from this case's evidence (None when it abstained)."""
+    estimate = getattr(getattr(state, "context", None), "source_country", None)
+    if not estimate:
+        return None
+    probabilities = estimate.get("probabilities") or {}
+    return {
+        "top": estimate.get("top"),
+        "top_label": _COUNTRY_CLASS_LABELS.get(str(estimate.get("top")), estimate.get("top")),
+        "classes": [
+            {
+                "class": name,
+                "country": _COUNTRY_CLASS_LABELS.get(name, name),
+                "probability": round(float(value), 4),
+            }
+            for name, value in sorted(probabilities.items(), key=lambda item: (-item[1], item[0]))
+        ],
+    }
+
+
 def origin(kb: Any, state: Any) -> dict[str, Any]:
     assessment = state.origin_assessment
     origin_item = assessment.origin
@@ -227,6 +253,7 @@ def origin(kb: Any, state: Any) -> dict[str, Any]:
     )
     return {
         "top_country": top,
+        "model_estimate": _model_estimate(state),
         "confidence": origin_item.confidence,
         "coverage": float(origin_item.candidate_coverage),
         "caveats": list(origin_item.caveats),

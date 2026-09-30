@@ -119,6 +119,20 @@ class Settings(BaseSettings):
     actor_behavior_family_weight: float = 1.50
     software_family_weight: float = 1.20
     campaign_family_weight: float = 1.00
+    # Random-forest group and source-country models (apt_classifier/profile_forest.py, fitted
+    # from the ATT&CK knowledge base on the GPU when available: make fit-forest). They vote with
+    # the weights below; 0 keeps them visible in the classifier matrix without moving the ranking.
+    profile_forest_enabled: bool = True
+    profile_forest_path: Path = PROJECT_ROOT / "data" / "models" / "forest" / "profile_forest.npz"
+    profile_forest_device: str = "auto"
+    profile_forest_weight: float = 0.0
+    profile_forest_family_weight: float = 1.0
+    # Measured 2026-09-30 (docs 21.3.11): at 1.0 with its own refitted combiner
+    # (ATTRIBUTION_COMBINER_PATH=data/models/combiner/attribution_combiner_source_country.json) real
+    # reports improve but the ATT&CK folds lose one top-1 case, so the default stays 0 under the
+    # no-regression rule. The group forest hurts real reports at every weight tried.
+    source_country_weight: float = 0.0
+    source_country_family_weight: float = 1.0
     cyberre_model: str = "openai/gpt-5.6-sol"
     cyberre_effort: str = "low"
     cyberre_weight: float = 0.35

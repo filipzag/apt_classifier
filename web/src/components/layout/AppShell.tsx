@@ -269,6 +269,7 @@ function SystemFooter({ system }: { system?: SystemInfo }) {
               <div>Preset {system.preset} · gate {system.gate_mode}</div>
               <div>Learned combiner: {system.combiner}</div>
               {system.exemplars ? <div>Exemplar index: {system.exemplars}</div> : null}
+              {system.profile_forest ? <div>Random forests: {system.profile_forest}</div> : null}
             </div>
           }
         >

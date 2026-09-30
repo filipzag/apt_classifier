@@ -22,6 +22,8 @@ export interface SystemInfo {
   combiner: string
   /** labelled-sentence exemplar index; when not active the acceptance model is off too */
   exemplars?: string
+  /** random-forest group and source-country models, e.g. "active (cuda)" */
+  profile_forest?: string
   index: {
     ok: boolean
     technique_sentences?: number
@@ -168,6 +170,12 @@ export interface DecisionInfo {
 
 export interface OriginInfo {
   top_country: string | null
+  /** random-forest source-country estimate from the case evidence (null when it abstained) */
+  model_estimate?: {
+    top: string | null
+    top_label: string | null
+    classes: { class: string; country: string; probability: number }[]
+  } | null
   confidence: string
   coverage: number
   caveats: string[]

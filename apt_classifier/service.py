@@ -194,6 +194,7 @@ class CaseService:
             else str(status),
             "combiner": str(getattr(self.engine, "combiner_status", "unavailable")),
             "exemplars": str(getattr(self.engine, "exemplar_status", "unavailable")),
+            "profile_forest": str(getattr(self.engine, "profile_forest_status", "unavailable")),
             "index": index,
             "llm_spend_usd": round(float(getattr(usage, "cost_usd", 0.0) or 0.0), 4),
             "cases": len(self.store.list()),

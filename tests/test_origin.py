@@ -72,3 +72,38 @@ def test_empty_fusion_returns_indeterminate_assessment(synthetic_kb):
     assert assessment.origin.top_country is None
     assert assessment.threat_type.likely_apt is None
     assert assessment.threat_type.label == "Indeterminate"
+
+
+def test_self_description_and_operating_phrases_resolve_origin(synthetic_kb):
+    from apt_classifier.origin import _documented_origins, documented_origins
+
+    def origin(text):
+        return sorted(_documented_origins([text], ("Charlie", "Charlie Team")))
+
+    assert origin("Charlie is a suspected Iranian threat group active since 2013.") == ["Iran"]
+    assert origin("Charlie is an Iranian-sponsored threat group.") == ["Iran"]
+    assert origin("Charlie is a North Korea-aligned threat group.") == ["North Korea"]
+    assert origin(
+        "Charlie is a People's Republic of China (PRC)-aligned cyberespionage actor."
+    ) == ["China"]
+    assert origin("Charlie Team is a Türkiye-linked threat actor.") == ["Turkey"]
+    assert origin("Charlie is a group believed to be operating out of Iran.") == ["Iran"]
+    assert origin("Charlie is a cyber espionage group with likely Chinese origins.") == ["China"]
+    assert origin("Charlie has a suspected nexus to the Iranian government.") == ["Iran"]
+    # the per-KB table reads the group's own profile
+    synthetic_kb.groups["G3"].description = "Charlie is a Lebanese threat group."
+    assert list(documented_origins(synthetic_kb, "G3")) == ["Lebanon"]
+
+
+def test_language_regions_and_other_groups_are_not_origin():
+    from apt_classifier.origin import _documented_origins
+
+    def origin(text):
+        return sorted(_documented_origins([text], ("Charlie",)))
+
+    assert origin("Charlie is a Russian-speaking cybercriminal group.") == []
+    assert origin("Charlie is a suspected South American threat group.") == []  # not the US
+    # the adjective describes another group, not Charlie
+    assert origin("Charlie's name comes from Sidewinder, a suspected Indian threat group.") == []
+    assert origin("Charlie targeted Chinese government entities and Iranian dissidents.") == []
+    assert origin("Charlie is a group that targets Chinese threat actors.") == []

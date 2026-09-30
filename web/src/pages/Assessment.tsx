@@ -359,6 +359,22 @@ function OriginPanel({ data }: { data: CasePayload }) {
         <Metric label="Intrusion type" value={origin.threat_type.label} hint={origin.threat_type.confidence} />
         <Metric label="Origin-bearing coverage" value={pct(origin.coverage / 100, 0)} hint="of ranked candidates" />
       </div>
+      {origin.model_estimate ? (
+        <div className="rounded-xl border border-line px-4 py-3">
+          <div className="mb-2 flex items-baseline justify-between gap-3">
+            <span className="text-sm font-medium">Model estimate from this evidence</span>
+            <span className="text-[11px] text-faint">
+              random forest over mapped techniques, motivation and target, trained on ATT&CK profiles
+            </span>
+          </div>
+          <RankedBars
+            items={origin.model_estimate.classes.map((c) => ({ key: c.class, label: c.country, value: c.probability }))}
+            max={1}
+            valueFormatter={(v) => pct(v, 0)}
+            tone="violet"
+          />
+        </div>
+      ) : null}
       {origin.hypotheses.length ? (
         <DataTable
           columns={[

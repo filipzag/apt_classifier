@@ -72,6 +72,10 @@ class ClassifierContext:
     # near-miss candidates that only enter the candidate-relative separation (never a classifier)
     contrast_techniques: dict[str, float] = field(default_factory=dict)
     contrast_technique_observations: dict[str, tuple[str, ...]] = field(default_factory=dict)
+    # random-forest country estimate for the last scoring pass ({probabilities, top} or None) and
+    # the cached forest prediction it came from (see classifiers/profile_forest.py)
+    source_country: dict[str, Any] | None = None
+    profile_forest_prediction: Any = None
     # learned combiner output for the last fusion: probabilities, leader/null probability, status
     combiner: Any = None
 
