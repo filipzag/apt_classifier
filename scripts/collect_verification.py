@@ -245,6 +245,8 @@ def summarize_attribution(payload: dict[str, Any]) -> dict[str, Any]:
         "margin_auc",
         "rrf_top1",
         "leader_probability_auc",
+        "top3",
+        "cluster_top3",
         "top1_given_top3",
         "pairwise_12",
         "llm",

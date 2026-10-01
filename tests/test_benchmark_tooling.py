@@ -334,6 +334,47 @@ def test_build_folds_anonymizes_actor_names_and_is_deterministic():
     )
 
 
+def test_fold_anonymization_replaces_sentence_end_names_and_still_hides_the_index_form():
+    from apt_classifier.attack.kb import AttackKnowledgeBase, Group, Technique
+    from apt_classifier.vectorstore import normalize_procedure_text
+    from scripts.attribution_benchmark import build_folds
+
+    sentences = {
+        "T1": "The loader was attributed to Axiom.",
+        "T2": "Operators dropped Axiom.dll before Axiom's beacon ran.",
+        "T3": "Collection was done by the Group 72.",
+        "T4": "Axiom staged archives on the file server.",
+        "T5": "Axiom deleted logs with a custom wiper.",
+    }
+    kb = AttackKnowledgeBase(
+        version="t",
+        techniques={tid: Technique(id=tid, name=tid) for tid in sentences},
+        groups={
+            "G1": Group(
+                id="G1",
+                name="Axiom",
+                aliases=["Group 72"],
+                technique_ids=list(sentences),
+                technique_behaviors={tid: [text] for tid, text in sentences.items()},
+            )
+        },
+    )
+    fold = build_folds(
+        kb, coverage=1.0, seed=1, min_behaviors=5, min_techniques=5, max_observations=12
+    )[0]
+    texts = set(fold.observations)
+    assert "The loader was attributed to the adversary." in texts
+    assert "Collection was done by the adversary." in texts
+    # a dot followed by a word character protects file names; the possessive is replaced
+    assert "Operators dropped Axiom.dll before the adversary's beacon ran." in texts
+    # the technique index keeps the index pattern's form ("... attributed to Axiom."): both forms
+    # are hidden, so the held-out sentence cannot come back through the index
+    assert normalize_procedure_text("The loader was attributed to Axiom.") in fold.held_out_texts
+    assert normalize_procedure_text("The loader was attributed to the adversary.") in (
+        fold.held_out_texts
+    )
+
+
 def test_collector_summarizes_attribution_artifact():
     from scripts.collect_verification import compose, summarize_attribution
 
@@ -932,7 +973,12 @@ def test_attribution_summary_reports_top_one_given_top_three_and_the_guard():
         }
 
     known = [row("G1", 1), row("G2", 2), row("G3", 1, guard=True), row("G4", 3), row("G5", 7)]
+    known[4]["top3_related_to_truth"] = True  # a documented-overlap group made the top three
+    for item in known[:4]:
+        item["top3_related_to_truth"] = False
     metrics = summarize(known, [])
+    assert metrics["top3"] == pytest.approx(4 / 5)
+    assert metrics["cluster_top3"] == pytest.approx(5 / 5)
     assert metrics["top1_given_top3"] == pytest.approx(2 / 4)
     assert metrics["pairwise_12"] == pytest.approx(2 / 3)
     assert metrics["leader_guard_fired"] == 1

@@ -255,6 +255,9 @@ class AttributionEngine:
             idf_length_norm=float(getattr(self.settings, "idf_overlap_length_norm", 1.0)),
             software_idf=bool(getattr(self.settings, "software_idf_enabled", True)),
             profile_forest=self.profile_forest,
+            source_country_score_all=bool(
+                getattr(self.settings, "source_country_score_all", False)
+            ),
         )
         self.telemetry_profile: Any = None
         self.exemplar_index, self.exemplar_status = load_exemplar_index(self.settings)

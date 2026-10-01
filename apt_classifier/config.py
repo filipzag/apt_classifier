@@ -140,6 +140,9 @@ class Settings(BaseSettings):
     # real reports at every weight tried.
     source_country_weight: float = 1.0
     source_country_family_weight: float = 1.0
+    # rank groups of a zero-probability country class last instead of leaving them out
+    # (docs 21.3.14; under evaluation, off)
+    source_country_score_all: bool = False
     cyberre_model: str = "openai/gpt-5.6-sol"
     cyberre_effort: str = "low"
     cyberre_weight: float = 0.35

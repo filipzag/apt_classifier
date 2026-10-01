@@ -210,3 +210,31 @@ def test_analyst_context_is_mapped_to_the_vocabulary():
     )
     assert motivations == ("espionage",)
     assert targets == ("united states", "taiwan")
+
+
+def test_source_country_can_rank_zero_probability_classes_last():
+    kb = _kb()
+    model = fit_profile_forest(kb, params=SMALL, device="cpu")
+    context = _context(kb, ["T10", "T11"], StrategicContext(target_geographies=["Israel"]))
+    default = SourceCountryClassifier(model).classify(context)
+    scored = SourceCountryClassifier(model, score_all=True).classify(context)
+    voted = {entry.group_id for entry in default.entries}
+    everyone = {entry.group_id for entry in scored.entries}
+    classes = model.group_classes
+    assert voted <= everyone
+    missing = everyone - voted
+    # the extra groups are exactly the ones whose class got probability 0, and they rank last
+    zero = {
+        gid
+        for gid in everyone
+        if context.source_country["probabilities"].get(classes[gid], 0.0) == 0
+    }
+    assert missing == zero
+    if missing:
+        last = max(entry.rank for entry in scored.entries)
+        assert all(
+            entry.rank == last and entry.score == 0.0
+            for entry in scored.entries
+            if entry.group_id in missing
+        )
+        assert all(entry.rank < last for entry in scored.entries if entry.group_id in voted)

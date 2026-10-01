@@ -39,6 +39,7 @@ import argparse
 import copy
 import json
 import random
+import re
 import sys
 import time
 from collections import Counter
@@ -77,6 +78,28 @@ from apt_classifier.vectorstore import (
 )
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
+
+
+def _evidence_name_pattern(names: tuple[str, ...]) -> re.Pattern[str] | None:
+    """The actor-name pattern for *evidence* text (fold statements, real-report statements).
+
+    Like ``vectorstore._actor_name_pattern``, but a name that ends a sentence ("the backdoor known
+    as Carbanak.") is replaced too; a dot followed by a word character still protects file and
+    family names (Patchwork.dll, Silence.Downloader). The indexed procedure sentences keep the
+    index's pattern: changing it there would need a re-index and a combiner refit.
+    """
+    ordered = sorted(
+        (name for name in names if name), key=lambda item: (-len(item), item.casefold())
+    )
+    if not ordered:
+        return None
+    return re.compile(
+        r"(?<![\w.-])(?:" + "|".join(re.escape(name) for name in ordered) + r")"
+        r"(?P<possessive>['’]s)?(?![\w-]|\.\w)",
+        re.IGNORECASE,
+    )
+
+
 FINGERPRINTED_SOURCES = (
     REPO_ROOT / "apt_classifier" / "fusion.py",
     REPO_ROOT / "apt_classifier" / "attribution.py",
@@ -211,7 +234,8 @@ def build_folds(
     limit: int | None = None,
 ) -> list[Fold]:
     names = actor_names(kb)
-    pattern = _actor_name_pattern(names)
+    pattern = _evidence_name_pattern(names)
+    index_pattern = _actor_name_pattern(names)
     rng = random.Random(seed)
     folds: list[Fold] = []
     for group_id in sorted(kb.groups):
@@ -231,12 +255,18 @@ def build_folds(
         texts = tuple(text for text in texts if len(text.split()) >= 3)
         if not texts:
             continue
+        # the technique index holds the same sentences anonymized with the index's pattern; hide
+        # both forms so a sentence-end name the evidence pattern removes cannot leak back in
+        hidden = {normalize_procedure_text(text) for text in texts} | {
+            normalize_procedure_text(_sanitize_procedure(sentence, names, pattern=index_pattern))
+            for _, sentence in held
+        }
         folds.append(
             Fold(
                 group_id=group_id,
                 held_out_techniques=frozenset(technique_id for technique_id, _ in held),
                 observations=texts,
-                held_out_texts=frozenset(normalize_procedure_text(text) for text in texts),
+                held_out_texts=frozenset(hidden),
             )
         )
         if limit is not None and len(folds) >= limit:
@@ -293,7 +323,7 @@ def anonymize_report_folds(
     Returns the folds, one record per fold, and the totals.
     """
     names = actor_names(kb)
-    pattern = _actor_name_pattern(names)
+    pattern = _evidence_name_pattern(names)
     owners: dict[str, set[str]] = {}
     for group in kb.groups.values():
         for name in (group.name, *group.aliases):
@@ -610,6 +640,11 @@ def run_known(
                         and ranked[0] != fold.group_id
                         and ranked[0] in related.get(fold.group_id, {})
                     ),
+                    # a group ATT&CK documents as overlapping with the truth is in the top three
+                    "top3_related_to_truth": any(
+                        gid != fold.group_id and gid in related.get(fold.group_id, {})
+                        for gid in ranked[:3]
+                    ),
                     "candidates": len(ranked),
                     "top3": ranked[:3],
                     "stage": decision.stage.value if decision else None,
@@ -816,6 +851,17 @@ def summarize(
         metrics["deterministic_top5"] = fmean(1.0 if r and r <= 5 else 0.0 for r in det)
         metrics["deterministic_mrr"] = fmean(1.0 / r if r else 0.0 for r in det)
     if known_rows:
+        metrics["top3"] = fmean(
+            1.0 if row["rank"] and row["rank"] <= 3 else 0.0 for row in known_rows
+        )
+        if all("top3_related_to_truth" in row for row in known_rows):
+            # strict top-3 or a documented-overlap group in it (always reported beside top3)
+            metrics["cluster_top3"] = fmean(
+                1.0
+                if (row["rank"] and row["rank"] <= 3) or row.get("top3_related_to_truth")
+                else 0.0
+                for row in known_rows
+            )
         in_top3 = [row for row in known_rows if row["rank"] and row["rank"] <= 3]
         in_top2 = [row for row in known_rows if row["rank"] in (1, 2)]
         metrics["top1_given_top3"] = (

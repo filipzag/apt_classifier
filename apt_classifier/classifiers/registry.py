@@ -29,6 +29,7 @@ def default_classifiers(
     software_tool_weight_cap: float = COMMODITY_TOOL_WEIGHT_CAP,
     idf_length_norm: float = 1.0,
     profile_forest: Any = None,
+    source_country_score_all: bool = False,
 ) -> tuple[Classifier, ...]:
     return (
         BernoulliNaiveBayesClassifier(alpha, beta, negative_weight),
@@ -43,7 +44,7 @@ def default_classifiers(
         SoftwareClassifier(use_idf=software_idf, tool_weight_cap=software_tool_weight_cap),
         CyberREClassifier(),
         ProfileForestClassifier(profile_forest),
-        SourceCountryClassifier(profile_forest),
+        SourceCountryClassifier(profile_forest, score_all=source_country_score_all),
     )
 
 
