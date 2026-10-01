@@ -48,6 +48,8 @@ class VectorHit:
     similarity: float
 
 
+# result rows per ChromaDB query call; the server's limit is about 32k (measured 2026-10-01)
+_MAX_QUERY_RESULT_ROWS = 16_000
 _ARTICLE_BEFORE_ADVERSARY_RE = re.compile(r"\b(?:an?|the)\s+(the adversary)", re.IGNORECASE)
 
 
@@ -550,30 +552,36 @@ class ChromaVectorStore:
         count = collection.count()
         if count == 0:
             return [[] for _ in embeddings]
-        result = collection.query(
-            query_embeddings=embeddings,
-            n_results=min(max(n_results, 1), count),
-            where=where,
-            include=["documents", "metadatas", "distances"],
-        )
+        limit = min(max(n_results, 1), count)
+        # ChromaDB's SQLite backend refuses one query whose result rows (queries x n_results)
+        # pass about 32k ("too many SQL variables"): a long pasted report crashed retrieval.
+        # Each query is independent, so batches return exactly the single call's hits.
+        batch = max(1, _MAX_QUERY_RESULT_ROWS // limit)
         output: list[list[VectorHit]] = []
-        for query_index, ids in enumerate(result.get("ids") or []):
-            documents = (result.get("documents") or [[]])[query_index] or []
-            metadatas = (result.get("metadatas") or [[]])[query_index] or []
-            distances = (result.get("distances") or [[]])[query_index] or []
-            hits = []
-            for index, item_id in enumerate(ids):
-                distance = float(distances[index])
-                hits.append(
-                    VectorHit(
-                        id=str(item_id),
-                        document=str(documents[index]),
-                        metadata=dict(metadatas[index] or {}),
-                        distance=distance,
-                        similarity=1.0 - distance,
+        for start in range(0, len(embeddings), batch):
+            result = collection.query(
+                query_embeddings=embeddings[start : start + batch],
+                n_results=limit,
+                where=where,
+                include=["documents", "metadatas", "distances"],
+            )
+            for query_index, ids in enumerate(result.get("ids") or []):
+                documents = (result.get("documents") or [[]])[query_index] or []
+                metadatas = (result.get("metadatas") or [[]])[query_index] or []
+                distances = (result.get("distances") or [[]])[query_index] or []
+                hits = []
+                for index, item_id in enumerate(ids):
+                    distance = float(distances[index])
+                    hits.append(
+                        VectorHit(
+                            id=str(item_id),
+                            document=str(documents[index]),
+                            metadata=dict(metadatas[index] or {}),
+                            distance=distance,
+                            similarity=1.0 - distance,
+                        )
                     )
-                )
-            output.append(hits)
+                output.append(hits)
         return output
 
     ingest = upsert
