@@ -1516,6 +1516,56 @@ newer schema, unknown feature names or mismatched vectors are still refused.
   seed-7 folds and CTI-HAL (run once on the frozen artifact) with no wrong named group, at most
   1/25 removed actors named and no top-1/MRR regression. Results in 21.3.9.
 
+### 10.10 Distinguishing the top three (2026-10-01)
+
+`apt_classifier/top3.py`.
+
+**Why.** The right group is often in the top three but not first. On the seed-7 folds the truth is
+first in 127 of 153 rows and in the top three in 142. On the anonymized CTI-HAL reports it is first
+in 25 of 55 and in the top three in 31. In several of these misses the combiner's leader has clearly
+less discriminative mass (10.7) than another top-three member: less evidence that only it explains.
+
+**Rule (pre-registered 2026-10-01, before any fresh-seed run).** Within the final first three places,
+take the member with the largest gate-window D, with ties going to the better-placed group. Move it
+to first place (insert-shift: the groups it passes move down one place, and every place keeps its
+score) when both hold:
+
+- `D(best) >= D(leader) + margin`, with `ATTRIBUTION_TOP3_PROMOTION_MARGIN = 1.25`;
+- the leader's largest weighted single-channel advantage over it is at most
+  `ATTRIBUTION_TOP3_CONTRADICTION_TOLERANCE = 0.75`. The channels are technique, behaviour,
+  software and soft, with the engine's discrimination weights; negative evidence counts for the
+  leader when the rival carries more.
+
+The stage runs on the combiner path only and reorders only: the top-three and top-five sets never
+change. After a promotion the gate discrimination is recomputed on the same window with the promoted
+group first, so the recorded separation describes the displayed leader. **A promoted leader is never
+named in the same analysis.** The guard can only remove promotions.
+
+**How the margin and tolerance were found.** Offline replay over the recorded rows of the seed-7
+folds and both CTI-HAL variants (about 80 configurations were looked at during the research). These
+sets are therefore not clean for this rule.
+
+**Pre-registered checks:**
+
+1. **Design check on fresh fold seeds 41 and 53.** Neither seed was used anywhere before, and seeds
+   11/23/37 train the combiner. Each run has 153 known rows and 25 removed actors, stage off,
+   replayed with `scripts/top3_replay.py`. It passes when, pooled over both seeds:
+   - at most one correct leader is lost;
+   - the net gain is at least +2 per seed;
+   - the largest D gap a correct leader faces is at most 1.15;
+   - the top-three and top-five sets are unchanged.
+
+   If it fails, the margin may only be raised, to the smallest value with no loss and 0.1 slack.
+   If no allowed margin passes, the reorder is not adopted.
+2. **One A/B on the adoption benchmarks**, margin 0 against the frozen value, on the same combiner
+   artifact: seed-7 folds with 25 removed actors, CTI-HAL anonymized and as reported, and the
+   public mapping gate. It passes when:
+   - no wrong group is named and the named sets are identical;
+   - at most 1/25 removed actors are named;
+   - top-1 and MRR are not below the baseline on any set;
+   - non-promoted rows are identical;
+   - the combiner is active on every row.
+
 ## 11. Origin and intrusion-type assessment
 
 `apt_classifier/origin.py` performs a separate post-fusion assessment.
