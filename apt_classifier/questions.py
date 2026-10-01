@@ -503,10 +503,11 @@ def _investigation_steps(
     # back to hand-authored guidance. Analytics provide concrete log sources
     # and channels (e.g., Sysmon Event ID 10) tied to the current ATT&CK version.
     steps: list[str] = []
-    analytic_steps = _analytic_collection_steps(kb, technique_id)
+    analytic_steps = _analytic_collection_steps(kb, technique_id, scope)
     if analytic_steps:
         steps.extend(analytic_steps)
-    else:
+    elif scope is None or "Windows" in scope.platforms:
+        # the hand-written fallback names Windows telemetry (Sysmon, event IDs, registry)
         collection_steps = _TECHNIQUE_COLLECTION_GUIDANCE.get(
             technique_id, _TECHNIQUE_COLLECTION_GUIDANCE.get(parent_id, ())
         )
@@ -530,12 +531,16 @@ def _investigation_steps(
     return tuple(dict.fromkeys(steps))[:8]
 
 
-def _analytic_collection_steps(kb: Any, technique_id: str) -> list[str]:
+def _analytic_collection_steps(
+    kb: Any, technique_id: str, scope: PlatformScope | None = None
+) -> list[str]:
     """Build collection steps from ATT&CK Analytics when available.
 
     Returns an empty list if the KB has no parsed detection strategies or
     analytics for the technique, so the caller can fall back to hand-authored
-    guidance.
+    guidance. Each analytic covers one platform; with a Target OS only the
+    analytics for it (and for platforms an OS says nothing about) are kept, so a
+    Linux case is not sent to Windows event logs.
     """
     detection_strategies = getattr(kb, "detection_strategies", {})
     analytics = getattr(kb, "analytics", {})
@@ -546,6 +551,8 @@ def _analytic_collection_steps(kb: Any, technique_id: str) -> list[str]:
     except ImportError:
         return []
     steps = technique_collection_steps(kb, technique_id)
+    if scope is not None:
+        steps = [step for step in steps if scope.allows(step.platforms)]
     if not steps:
         return []
     result: list[str] = []

@@ -8,6 +8,7 @@ pins the error mapping and the request models. The second group drives the real 
 from __future__ import annotations
 
 import os
+import re
 from pathlib import Path
 from typing import Any
 
@@ -304,6 +305,13 @@ def test_local_flow_target_os(local_client: TestClient) -> None:
     asked = [interview["question"]["technique_id"]] if interview["question"] else []
     asked += [lead["technique_id"] for lead in interview["leads"]]
     assert asked and all(linux_compatible(t) for t in asked)
+    # and the investigation steps cite no Windows analytic ("[AN0983] Sources: WinEventLog...")
+    analytics = local_client.app.state.service.engine.kb.analytics
+    steps = list((interview["question"] or {}).get("investigation_steps", []))
+    steps += [lead["first_step"] for lead in interview["leads"]]
+    cited = {aid for step in steps for aid in re.findall(r"\[(AN\d+)\]", step)}
+    assert all(linux_scope.allows(analytics[aid].platforms) for aid in cited if aid in analytics)
+    assert not any("PRE systems" in step or "(None)" in step for step in steps)
     distinguish = local_client.get(f"/api/cases/{case_id}/distinguish?top_k=10").json()
     assert all(linux_compatible(lead["technique_id"]) for lead in distinguish["leads"])
     assert all(linux_compatible(row["technique_id"]) for row in distinguish["pending"])

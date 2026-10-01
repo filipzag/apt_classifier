@@ -39,7 +39,8 @@ class TelemetrySource:
 
     @property
     def label(self) -> str:
-        if self.channel:
+        # ATT&CK writes the channel "None" for a log source without a specific channel
+        if self.channel and self.channel.casefold() != "none":
             return f"{self.name} ({self.channel})"
         return self.name
 
