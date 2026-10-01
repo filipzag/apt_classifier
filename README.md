@@ -292,7 +292,8 @@ The web app can run as a shared team workspace with Google sign-in (OpenID Conne
 3. Restart the API. Every `/api` route now needs a session; the app shows a sign-in page.
 
 Users live in `data/users.db` (SQLite): address, name, picture, role (`admin` or `analyst`),
-active flag, sign-in times. Administrators manage users on the *Users* page and can delete any
+active flag, sign-in times. It is personal data: the API creates the file on first start, git
+ignores it and Docker builds leave it out, so back it up separately. Administrators manage users on the *Users* page and can delete any
 case; analysts see every case in the workspace, create cases attributed to them, and can delete
 only their own. Without Google credentials (`AUTH_MODE=auto` or `off`) the app runs as one
 local analyst with administrator rights, which is also how the tests run. The legacy Streamlit

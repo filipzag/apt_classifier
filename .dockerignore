@@ -9,6 +9,8 @@ data/raw
 data/kb
 data/chroma
 data/cases
+# user store: personal data never ships in an image (the container keeps its own on the /data volume)
+data/users.db*
 data/audits/*.json
 # evaluation data never ships: CTI-HAL publishes no licence (local evaluation only)
 data/benchmarks

@@ -316,7 +316,9 @@ rights, so single-user and test runs need no credentials; **google**: a signed s
 `email_verified`, applies the allowlist (`AUTH_ALLOWED_DOMAINS` / `AUTH_ALLOWED_EMAILS`, at
 least one required or the server refuses to start) and creates or refreshes the user in
 `data/users.db` (`apt_classifier/users.py`: id, address, name, picture, role, active, sign-in
-times, Google subject). The first user and every `AUTH_ADMIN_EMAILS` address are admins.
+times, Google subject). The store creates the file and table on first use; because it holds
+personal data it is not tracked by git (untracked 2026-10-01) and `.dockerignore` keeps it out
+of images. The first user and every `AUTH_ADMIN_EMAILS` address are admins.
 `current_user` is the dependency behind `get_service`, so every `/api` route is authenticated;
 state-changing requests must also carry `X-Requested-With: Vestige` (the SPA adds it; a
 cross-site form cannot), which closes the CSRF hole a cookie session opens. `/api/me` returns
