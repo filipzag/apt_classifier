@@ -8,7 +8,7 @@ The document is an implementation reference, not a claim of attribution accuracy
 
 ### 1.1 Intended audience
 
-- Security analysts and incident responders using the Streamlit interface.
+- Security analysts and incident responders using the web interface (React + FastAPI, 4.5; the Streamlit UI remains as a legacy front end).
 - Engineers maintaining the evidence, retrieval, ranking, and review pipeline.
 - Operators deploying the local ChromaDB service and application.
 - Reviewers evaluating whether a result is sufficiently supported for additional collection.
@@ -23,7 +23,7 @@ The current local knowledge base and vector index contain:
 | ATT&CK groups | 176 |
 | ATT&CK campaigns | 56 |
 | ATT&CK software objects | 825 |
-| Technique sentence vectors | 6,326 |
+| Technique sentence vectors | 11,614 |
 | Group documents | 5,394 |
 | Actor-specific behavior vectors | 5,042 |
 | Embedding dimension | 768 |
@@ -46,7 +46,7 @@ The application accepts mixed incident evidence and converts it into a structure
 5. Action observations are embedded with `basel/ATTACK-BERT` and queried against local ChromaDB.
 6. ATT&CK techniques are associated with evidence, including source and observation provenance.
 7. Multiple deterministic classifiers produce independent group rankings.
-8. Correlated classifier families are combined using family-aware Reciprocal Rank Fusion (RRF).
+8. Correlated classifier families are combined using family-aware Reciprocal Rank Fusion (RRF), and a learned combiner re-orders the top 20 (10.9).
 9. Strategic context—target geography, target industry, motivation, objective, and optionally supported sponsor/origin—is used as a conservative reranking signal.
 10. Actor-specific ATT&CK relationship descriptions provide a separate behavior signal.
 11. Public live intelligence can be fetched and matched to the case as non-voting enrichment.
@@ -78,9 +78,10 @@ A result should be read as: **“These candidates have varying degrees of docume
 
 ```text
                          +-------------------------+
-                         | Streamlit analyst UI    |
+                         | React web app + FastAPI |
                          | Intake / Canvas / Diamond / Intel |
-                         | Interview / Assessment  |
+                         | Distinguish / Interview |
+                         | Assessment              |
                          +------------+------------+
                                       |
                                       v
@@ -113,11 +114,13 @@ A result should be read as: **“These candidates have varying degrees of docume
                          | Classifier registry     |
                          | ten deterministic       |
                          | + CyberRE-LLM          |
+                         | + two forests           |
                          +------------+------------+
                                       |
                                       v
                          +-------------------------+
                          | Family-aware RRF        |
+                         | + learned combiner      |
                          | correlation diagnostics |
                          | candidate eligibility   |
                          +------------+------------+
@@ -136,7 +139,9 @@ A result should be read as: **“These candidates have varying degrees of docume
 
 | Area | Module | Responsibility |
 |---|---|---|
-| Application | `app/streamlit_app.py`, `app/ui/` | Streamlit entry point; per-session engine and case store (`runtime`, `cases`), guarded steps (`guard`), shared components, sidebar and one module per page (`pages/`) |
+| Web app | `web/` | React 19 + TypeScript + Vite single-page app, the primary interface since 2026-09-29 (4.5) |
+| HTTP API | `api/`, `apt_classifier/service.py` | FastAPI routes, serializers and Google sign-in (4.5, 4.6); `CaseService`, the headless engine, case store and every analyst operation |
+| Streamlit UI (legacy) | `app/streamlit_app.py`, `app/ui/` | Streamlit entry point; per-session engine and case store (`runtime`, `cases`), guarded steps (`guard`), shared components, sidebar and one module per page (`pages/`) |
 | Orchestration | `apt_classifier/session.py` | `AttributionEngine`, analysis state, rescoring, questions, review calls, live-intel attachment |
 | Configuration | `apt_classifier/config.py` | Pydantic settings and filesystem paths |
 | ATT&CK download | `apt_classifier/attack/download.py` | Bundle URL selection and local download |
@@ -151,6 +156,10 @@ A result should be read as: **“These candidates have varying degrees of docume
 | Retrieval | `apt_classifier/retrieve.py` | Technique retrieval, platform filtering, aggregation, behavior retrieval, context construction |
 | Classifiers | `apt_classifier/classifiers/` | Deterministic group-ranking signals plus the analyst-requested CyberRE-LLM vote |
 | Fusion | `apt_classifier/fusion.py` | RRF, family budgets, correlations, contested flags |
+| Attribution | `apt_classifier/separation.py`, `apt_classifier/combiner.py`, `apt_classifier/attribution.py` | Candidate-relative separation, learned combiner, stage and naming gate (10.6-10.9) |
+| Top three | `apt_classifier/top3_view.py` | Display-only Top-three view (10.10) |
+| Learned profiles | `apt_classifier/profile_forest.py`, `apt_classifier/torch_forest.py`, `apt_classifier/group_mlp.py` | Random-forest group and source-country models, optional group network (9.13) |
+| Target OS | `apt_classifier/platforms.py` | Observation platform scope and technique filtering (5.7) |
 | Diamond Model | `apt_classifier/diamond.py` | Four-vertex intrusion model with evidence-linked nodes, relationships, and caveats |
 | Origin/type | `apt_classifier/origin.py` | Country-origin hypotheses and APT-like/criminal/indeterminate assessment |
 | Live intel | `apt_classifier/threat_intel.py` | Public feed clients, parsers, caching data structures, case matching |
@@ -162,6 +171,8 @@ A result should be read as: **“These candidates have varying degrees of docume
 ---
 
 ## 4. Runtime lifecycle
+
+Sections 4.1 to 4.4 describe the Streamlit application, which remains runnable (`make run`) as the legacy UI. The primary interface, the React app with its FastAPI backend, is described in 4.5 and 4.6.
 
 ### 4.1 Application startup
 
@@ -241,10 +252,11 @@ flagged as *stale* on every page.
   dossier, evidence detail, diagnostics, the optional review and **exports that are always
   available** (Markdown report, JSON audit, Navigator layers, Attack Flow); the report says
   which steps were run.
-- **Operations**: `Dockerfile` and the `app` service in `docker-compose.yml` run the UI
-  next to Chroma (`docker compose up`), with `/data` as a volume, a health check on
-  `/_stcore/health`, a non-root user and the port bound to localhost. There is still no
-  authentication; put the app behind a reverse proxy with SSO before exposing it.
+- **Operations**: `Dockerfile` and the `app` service in `docker-compose.yml` run the FastAPI
+  backend with the built React app (4.5) next to Chroma (`docker compose up`), with `/data` as a
+  volume, a health check on `/api/health`, a non-root user and port 8100 bound to localhost.
+  Without `GOOGLE_CLIENT_ID` sign-in is off and every request runs as a local admin (4.6), so
+  configure Google sign-in before exposing it. The Streamlit UI has no authentication.
 - **Tests**: `tests/test_ui_modules.py` (case store, local extraction, error mapping,
   next-step guidance) and `tests/test_app_flow.py` (AppTest through the real local pipeline:
   Intake analyses the sample and saves the case; every page renders it; skipped when the
@@ -255,8 +267,9 @@ flagged as *stale* on every page.
 ### 4.5 HTTP API and React front end
 
 Since 2026-09-29 the primary interface is a React 19 + TypeScript + Vite + Tailwind v4 single-page
-app (`web/`) served by a FastAPI backend (`api/`). The Streamlit app is unchanged and remains
-runnable; the last Streamlit-only revision is preserved on the `streamlit-stable` branch.
+app (`web/`) served by a FastAPI backend (`api/`). The Streamlit app remains runnable (`make run`)
+as the legacy UI, without the later features (Target OS, Distinguish, the Top-three view); the last
+Streamlit-only revision is preserved on the `streamlit-stable` branch.
 
 - `apt_classifier/service.py` — `CaseService`: one engine (knowledge base, embedder, vector
   store, optional OpenRouter client), the on-disk `CaseStore`, in-memory `AnalysisState` per case
@@ -289,13 +302,14 @@ runnable; the last Streamlit-only revision is preserved on the `streamlit-stable
   entries with the per-channel discrimination, the decision with thresholds and gate mode,
   origin, behaviour and strategic matches, the classifier rank matrix, review,
   CyberRE, live-intel matches, and the "next step" hint. Group ids always carry the ATT&CK name.
-- Endpoints: `GET /api/system`, `/api/sample`, `/api/techniques?q=`; `GET|POST /api/cases`,
-  `GET|PATCH|DELETE /api/cases/{id}`; `POST …/decisions`, `…/weights`; `GET …/interview`,
+- Endpoints: `GET /api/health`, `/api/system`, `/api/sample`, `/api/techniques?q=`; `GET|POST /api/cases`,
+  `GET|PATCH|DELETE /api/cases/{id}`; `POST …/decisions`, `…/weights`, `…/platforms`; `GET …/interview`,
   `POST …/interview/answer`, `…/interview/restart`; `POST …/review`, `…/cyberre`;
-  `POST …/elastic/search`, `…/elastic/import`; `GET …/dossier/{group}`, `…/canvas`, `…/diamond`,
+  `POST …/elastic/search`, `…/elastic/import`; `GET …/dossier/{group}`, `…/distinguish`, `…/top3`, `…/canvas`, `…/diamond`,
   `…/intel`, `…/export/{markdown|json|navigator|attack-flow}`.
 - Web app: routes `/` (cases), `/new` (intake), `/cases/:id` (assessment), `…/evidence`,
-  `…/techniques`, `…/interview`, `…/canvas`, `…/diamond`, `…/intel`, `…/review`. TanStack Query
+  `…/techniques`, `…/distinguish`, `…/interview`, `…/canvas`, `…/diamond`, `…/intel`, `…/review`,
+  `/admin/users`. TanStack Query
   caches the case payload; mutations write the returned payload straight into the cache.
   Visual language: cyan for the deterministic ranking, violet for advisory AI output, amber for
   review, rose for rejection; every state carries a label, never colour alone. The canvas and
@@ -443,8 +457,8 @@ ATT&CK records the platforms each technique applies to (131 of the 697 technique
 Windows-only, 13 Linux-only, 18 macOS-only). The analyst can state which operating systems the
 affected hosts run, the case's **Target OS**: Windows, Linux, macOS and ESXi, every one the
 activity touched (a Linux DMZ server pivoting to Windows servers is Windows + Linux), empty when
-unknown. A missing operating system hides its techniques (21.3.12). It is chosen in Intake and can be changed on the Technique review
-page, which maps every observation again. Saved verifier verdicts are reused, so in production
+unknown. A missing operating system hides its techniques (21.3.12). It is chosen in the web app's Intake (the Streamlit UI has no Target OS) and can be changed on the
+Technique review page, which maps every observation again. Saved verifier verdicts are reused, so in production
 mode only candidates new to the case are sent to the verifier. It is stored in the ledger's
 `metadata["target_platforms"]` rather than a new ledger field, so case files stay readable by
 code that predates it, and it appears in the Markdown export and the JSON audit record.
@@ -797,8 +811,8 @@ statement benchmark) are unaffected by construction. Measured on the attribution
 (21.3.4b, 21.3.5): real-report accepted-technique recall 0.26 -> 0.31 at unchanged precision
 (0.49), 36 of 55 reports gain techniques, top-1 unchanged, top-5 0.69 -> 0.66, 3 of 3 names
 correct; ATT&CK folds technique recall 0.78 -> 0.79, precision 0.75 -> 0.71, top-1 0.53 ->
-0.52, 14 of 14 names correct. A 0.2 floor barely fires because the acceptance threshold is
-0.27.
+0.52, 14 of 14 names correct. A 0.2 floor barely fires because the acceptance threshold was
+then 0.27 (0.21 since the exemplar refit of 2026-09-30, below).
 
 **Ranking by acceptance probability (default on).** With `TECHNIQUE_RANK_BY_ACCEPTANCE=true`
 each observation's candidates are ordered by the calibrated model's probability that the
@@ -1068,9 +1082,9 @@ Five presets bundle retrieval, verification, hierarchy, and gating options:
 |---|---|---|---|---|---|
 | **Balanced** (default) | Hybrid | Ambiguous | Ancestor-compatible | 0.45 | Standard (0.75) |
 | **Conservative** | Hybrid | All | Exact-only | 0.55 | Strict (0.70, margin 0.10) |
-| **Exploratory** | Hybrid | Off | Ancestor-compatible | 0.35 | Lenient |
+| **Exploratory** | Hybrid (pool 20, top-k 50) | Ambiguous | Ancestor-compatible | 0.45 | Standard |
 | **Local only** | Hybrid | Off | Ancestor-compatible | 0.45 | Standard |
-| **Legacy** | Dense only | Off | Legacy expand | 0.45 | None |
+| **Legacy** | Dense only (`dense`, detection sentences included) | Off | Ancestor-compatible | 0.45 | Standard |
 
 Presets are applied using Pydantic's `model_copy(update=...)` on the `Settings` model.
 
@@ -1078,7 +1092,7 @@ Presets are applied using Pydantic's `model_copy(update=...)` on the `Settings` 
 
 ## 9. Classifiers
 
-The registry currently creates ten deterministic classifiers, the opt-in CyberRE-LLM classifier (it votes only after an analyst runs CyberRE) and the two random-forest members of 9.13. The LLM zero-shot opinion was removed from the ensemble on 2026-09-30 (9.11):
+The registry currently creates ten deterministic classifiers, the opt-in CyberRE-LLM classifier (it votes only after an analyst runs CyberRE) and the two random-forest members of 9.13. The PyTorch group network (`group_mlp`, 9.13) is added only when `GROUP_MLP_WEIGHT` > 0 (default 0). The LLM zero-shot opinion was removed from the ensemble on 2026-09-30 (9.11):
 
 ```text
 bernoulli_naive_bayes
@@ -1244,6 +1258,20 @@ schema-1 combiner. In the attribution benchmark's unknown-actor arm, the voting 
 because masking the actor's output would still leak its profile into the other votes. The combiner
 fit's unknown lists do the same.
 
+**Group network (2026-10-01).** `apt_classifier/group_mlp.py` is a PyTorch MLP from the same 0/1
+features, plus one entry per named ATT&CK software, to the documented group. It is trained from the
+knowledge base alone on synthetic report-like cases that include the group's own software, and it
+adds a prominence prior at prediction. `make fit-mlp` writes `data/models/mlp/group_mlp.npz` and
+`data/audits/group_mlp_eval.json`. The default fit is one network, which is as accurate on the ATT&CK
+campaigns as five averaged networks (MRR 0.71 against 0.69) and takes about 20 s. The `group_mlp`
+member joins the `learned_profile` family only when `GROUP_MLP_WEIGHT` > 0. At the default 0 it is
+not loaded, so the fusion and the combiner fingerprint are unchanged. In the unknown-actor arm the
+benchmark refits it without the removed actor. Measured on 2026-10-01 at weight 1.0 with its own
+combiner (`attribution_combiner_group_mlp.json`), before the anonymizer fix of 21.3.14: anonymized
+CTI-HAL top-1 went from 0.455 to 0.473 and as reported stayed at 0.564, but on the ATT&CK folds
+top-1 fell from 0.830 to 0.817 with one wrong name (Silence named as Kimsuky). It fails the naming
+gate and is not adopted.
+
 ---
 
 ## 10. Family-aware Reciprocal Rank Fusion
@@ -1281,8 +1309,18 @@ motivation:
 cyberre_llm:
   cyberre_llm
 
+actor_behavior:
+  specific_behavior
+
+software:
+  software_tools
+
+campaign:
+  campaign_profile
+
 learned_profile:
   profile_forest
+  group_mlp (only when GROUP_MLP_WEIGHT > 0)
 
 origin:
   source_country
@@ -1298,12 +1336,15 @@ Default family budgets are:
 | Context | 1.00 |
 | Motivation | 1.50 |
 | CyberRE-LLM | 0.35 |
-| Learned profile (group forest) | 1.00 |
+| Actor behavior | 1.50 |
+| Software | 1.20 |
+| Campaign | 1.00 |
+| Learned profile (group forest, group network) | 1.00 |
 | Origin (source-country forest) | 1.00 |
 
 The individual classifier weights determine how a family cap is divided. A family is scaled down only when its active member weights exceed the cap. A weak singleton classifier is not scaled up.
 
-Effective balance with the defaults: the four technique-overlap classifiers share a single budget of 1.00 (about 0.27 each), while `specific_behavior` (1.50), `motivation_alignment` (1.50) and `software_tools` (1.20) each carry more weight than all technique evidence combined, and five of the eight family caps equal their single member's weight (no-ops). Motivation is a substring match over descriptions ("espionage" hits 50 of 176 groups, all tied at rank 1) and software links had no rarity weighting (Mimikatz is documented for 51 groups). Measured with the attribution benchmark (section 21.3.5) and adjusted on 2026-09-22: the technique-overlap budget was raised to 2.00 (top-1 0.38 -> 0.48 alone), the group RRF constant lowered to 20 (with the budget: top-1 0.50, top-5 0.83, MRR 0.64), software links are rarity-weighted (`SOFTWARE_IDF_ENABLED`), and fused-score ties are broken towards the *less* prominent group instead of the alphabetically earlier id. Lowering the software weight (1.20 -> 0.60) hurt ranking (top-1 0.37) and was not adopted. Motivation and strategic-context weights could not be measured by this benchmark (its observations carry no strategic context) and are unchanged.
+Effective balance with the defaults before 2026-09-22: the four technique-overlap classifiers share a single budget of 1.00 (about 0.27 each), while `specific_behavior` (1.50), `motivation_alignment` (1.50) and `software_tools` (1.20) each carry more weight than all technique evidence combined, and five of the eight family caps equal their single member's weight (no-ops). Motivation is a substring match over descriptions ("espionage" hits 50 of 176 groups, all tied at rank 1) and software links had no rarity weighting (Mimikatz is documented for 51 groups). Measured with the attribution benchmark (section 21.3.5) and adjusted on 2026-09-22: the technique-overlap budget was raised to 2.00 (top-1 0.38 -> 0.48 alone), the group RRF constant lowered to 20 (with the budget: top-1 0.50, top-5 0.83, MRR 0.64), software links are rarity-weighted (`SOFTWARE_IDF_ENABLED`), and fused-score ties are broken towards the *less* prominent group instead of the alphabetically earlier id. Lowering the software weight (1.20 -> 0.60) hurt ranking (top-1 0.37) and was not adopted. Motivation and strategic-context weights could not be measured by this benchmark (its observations carry no strategic context) and are unchanged.
 
 **Per-classifier reliability (2026-09-28).** The attribution benchmark now records the rank each classifier gives the true group (`classifier_truth_ranks`). Hit@1 of the truth per classifier, where the classifier applies: on the 55 CTI-HAL real reports `software_tools` 0.76 (38 reports with named tooling), `specific_behavior` 0.31, Naive Bayes 0.15, group description 0.13, IDF cosine 0.04, Jaccard 0.02; on the 153 ATT&CK folds Naive Bayes 0.71, IDF 0.67, software 0.75, Jaccard 0.65, centroid 0.25, behaviour 0.13, group description 0.03. Some classifier has the truth at rank 1 in 40 of 55 reports and 143 of 153 folds, against fused top-1 of 20 and 79: fusion is the bottleneck. The two size-normalised overlaps (IDF cosine, Jaccard) penalise groups with long technique lists on real reports; per-classifier weights `NAIVE_BAYES_WEIGHT`, `IDF_OVERLAP_WEIGHT`, `JACCARD_WEIGHT` (default 1.0) allow that family to be rebalanced. A reliability-shifted configuration (technique family 1.0, IDF and Jaccard 0.3, group description 0.2, software and actor-behaviour budgets 2.0) reaches real-report top-1 0.47 / MRR 0.58 with the boost but drops the ATT&CK folds from top-1 0.53 to 0.44 (top-5 0.82 -> 0.73), so it is not the default: the folds are self-consistency over the technique table and a configuration that abandons technique overlap fails them. A milder variant (IDF and Jaccard 0.5, software and actor-behaviour budgets 2.0, technique family unchanged) gains nothing on real reports (top-1 0.44, MRR 0.56) and still costs the folds (top-1 0.53 -> 0.51). The defaults keep the family budgets and add only the tool cap and the decisive-malware boost, which improve both sets.
 
@@ -1344,6 +1385,7 @@ Other default weights include:
 | CyberRE-LLM | 0.35 |
 | Group forest (`profile_forest`) | 0.00 (not adopted, 21.3.11) |
 | Source-country forest (`source_country`) | 1.00 (default since 2026-10-01, 21.3.11) |
+| Group network (`group_mlp`) | 0.00 (not loaded; fails the naming gate at 1.0, 9.13) |
 
 The effective weights are displayed in Assessment and stored in the fusion result.
 
@@ -1411,8 +1453,9 @@ fusion only and is reproducible across processes.
   techniques, and the cluster id is a hash of the sorted observed technique IDs plus the
   top three candidate IDs, so two unrelated cases with the same leading group get
   different clusters.
-- No calibration artifact exists; `is_calibrated` is always false and the UI shows
-  qualitative maturity only.
+- No separate calibration artifact exists. With the learned combiner active (the default, 10.9)
+  `is_calibrated` is true and `calibrated_probability` is the combiner's leader probability;
+  without it `is_calibrated` is false and the UI shows qualitative maturity only.
 - The UI treats "no named group" as a first-class outcome: for every stage below
   `KNOWN_GROUP_HYPOTHESIS` the Assessment view states that no documented group meets the
   evidence bar, labels the leader as the *closest documented group (not an attribution)*,
@@ -1460,7 +1503,8 @@ documented-related. The score is computed inside the single fusion helper
 the RRF margin is reported but not required) and `both`. The lower boundaries
 (insufficient evidence, unresolved cluster) keep maturity and families. Optionally
 `ATTRIBUTION_RERANK_BLEND` > 0 re-orders the top-K by `rrf · (1 + β · D/max(D_max, floor))`
-(the top-K set never changes; 0 = pure RRF order).
+(the top-K set never changes; 0 = pure RRF order). The default 0.5 applies only when the learned
+combiner does not run; with the combiner active, the default, the blend is skipped (10.9).
 
 **Choosing bars offline.** The attribution benchmark now records per row the separation,
 the leader's evidence specificity, the best alternative, the maturity factors and the raw
@@ -1490,7 +1534,8 @@ A step after the ensemble has picked its shortlist, with three parts.
    The re-ranking now contrasts the top-K of the ensemble order for its own K while the gate keeps
    scoring its five, so the gate's tuned bars and their measured naming behaviour are unchanged
    (`_fuse` computes a second `discriminate` when the two sizes differ; 0 means "same as the gate").
-   Adoption numbers are in 21.3.8.
+   Adoption numbers are in 21.3.8. Like the blend, it is skipped while the learned combiner runs
+   (10.9).
 2. **Contrastive near misses** (`ATTRIBUTION_CONTRAST_MIN_PROBABILITY`, default 0 = off).
    NEEDS_REVIEW candidates whose calibrated acceptance probability clears the floor enter a
    separate `soft` channel of the discrimination (`DiscriminationWeights.soft`,
@@ -1539,7 +1584,7 @@ newer schema, unknown feature names or mismatched vectors are still refused.
   names, means/scales, ATT&CK version, pipeline fingerprint; `from_dict` rejects mismatches;
   `load_attribution_combiner` fails closed). An optional **null option** (utility from the
   evidence-regime features, trained on unknown-actor lists) gives P(no documented group).
-- **Features** (73 + 8 null): per deterministic classifier `present`, `inv_rank`, `score_rel`;
+- **Features** (76 + 8 null in feature schema 2, 73 + 8 in schema 1): per deterministic classifier `present`, `inv_rank`, `score_rel`;
   RRF `rel`, `inv_rank`, `support`, `rank_std`, `contested`; the discrimination channels of 10.7
   (technique, behaviour, software, soft, negative, total relative to the shortlist maximum);
   candidate facts (`matched_share`, `matched_distinctive_share`, `exclusive_software`,
@@ -1579,7 +1624,7 @@ newer schema, unknown feature names or mismatched vectors are still refused.
 
 **Why.** The right group is often in the top three but not first: on the seed-7 folds the truth is
 first in 127 of 153 rows and in the top three in 142; on the anonymized CTI-HAL reports first in
-25 of 55 and in the top three in 31. Two kinds of miss dominate. In the first, the combiner's
+25 of 55 and in the top three in 31 (29 after the anonymizer fix later that day, 21.3.14). Two kinds of miss dominate. In the first, the combiner's
 leader has clearly less discriminative mass (10.7) than another top-three member. In the second,
 the three include a documented-overlap pair (Carbanak/FIN7, FIN6/Cobalt Group) whose evidence
 cannot be separated.
@@ -1864,7 +1909,7 @@ Connections include:
 
 ### 13.3 Canvas layout
 
-The Vega-Lite chart positions layers in columns:
+Both front ends position layers in the same four columns (Streamlit: a Vega-Lite chart; web app: the layered SVG of `LayeredGraph.tsx`, 4.5):
 
 ```text
 Column 0: evidence and strategic context
@@ -1873,7 +1918,7 @@ Column 2: candidate groups
 Column 3: countries and threat type
 ```
 
-Edges are rendered as rules between nodes. Hovering over nodes and edges shows details, supporting text, publication time, verification, and match reasons.
+Edges are drawn between nodes (rules in Vega-Lite, curves in the SVG). Hovering over nodes and edges shows details, supporting text, publication time, verification, and match reasons.
 
 ### 13.4 Canvas controls
 
@@ -1940,7 +1985,7 @@ The model does not manufacture missing infrastructure, infer a victim from an IP
 
 The Interview view is an automatic chat workflow that predicts behaviors which may be present but have not yet been observed. These predictions are collection leads derived from current candidate profiles, not incident findings.
 
-### 14.1 Ensemble hypothesis weights
+### 15.1 Ensemble hypothesis weights
 
 Question generation uses the top ten fused candidates rather than the standalone Naive Bayes posterior. Each candidate receives a normalized investigation weight:
 
@@ -1951,7 +1996,7 @@ hypothesis weight(group) = raw weight(group) / Σ raw weights
 
 Squaring emphasizes better-ranked candidates while retaining alternatives. The UI labels these as hypothesis weights, not attribution probabilities.
 
-### 14.2 Predicting unobserved behavior
+### 15.2 Predicting unobserved behavior
 
 The engine considers ATT&CK techniques documented for the current weighted candidate set and excludes techniques that are already observed or have already been answered. For each remaining technique it computes:
 
@@ -1978,7 +2023,7 @@ This allows the interview to ask about both:
 
 The five highest-priority unobserved leads are shown before the current chat question with technique ID, profile support, number of supporting profiles, estimated yes rate, information gain, and the first collection step.
 
-### 14.3 Investigation guidance
+### 15.3 Investigation guidance
 
 Every lead contains deterministic collection guidance derived from the selected ATT&CK technique:
 
@@ -2016,7 +2061,7 @@ The Windows log upload parser automatically normalizes only the Event IDs listed
 
 The configured question model selects one lead from the deterministic shortlist and phrases a neutral yes/no question. The model cannot add a technique outside that shortlist or alter the deterministic collection instructions. Candidate group names are omitted from the question prompt and question text to reduce confirmation bias.
 
-### 14.4 Startup and progression
+### 15.4 Startup and progression
 
 When the analyst selects Interview after analysis:
 
@@ -2034,7 +2079,7 @@ When the analyst selects Interview after analysis:
 
 There is no normal per-question “Generate next question” click.
 
-### 14.5 Answer semantics
+### 15.5 Answer semantics
 
 The parser accepts variants such as:
 
@@ -2056,7 +2101,7 @@ Typed response text is retained in the question-answer record. Unrecognized repl
 
 Each answer also retains the information gain, estimated yes rate, profile support, investigation priority, uncertainty statement, and collection steps that existed when the question was asked.
 
-### 14.6 Stopping rule
+### 15.6 Stopping rule
 
 The interview stops when any of these conditions applies:
 
@@ -2069,9 +2114,9 @@ If at least one technique is supported by the current weighted candidates, actio
 
 A strong leader alone no longer stops the interview. If the candidate profiles still predict an actionable hidden behavior, the workflow continues so the analyst can seek confirming or disconfirming evidence. `interview_complete` prevents repeated calls after stopping. The state stores a specific stop reason (`question_limit`, `no_candidates`, `low_priority`, `concentrated_low_value`, or `selection_failed`) and the UI reports that reason rather than presenting every stop as a question-limit condition.
 
-The Interview view provides **Restart interview**, which clears interview-derived positive/negative answers and reconstructs the context from the original retrieval result. Interview state also carries a revision number; when question semantics change after an application update, an older in-memory Streamlit interview is reset once instead of remaining incorrectly completed across a hot reload.
+The Interview view provides **Restart interview**, which clears interview-derived positive/negative answers and reconstructs the context from the original retrieval result. Interview state also carries a revision number; when question semantics change after an application update, an older in-memory interview is reset once instead of remaining incorrectly completed across a hot reload.
 
-### 14.7 Analytical safeguards
+### 15.7 Analytical safeguards
 
 - Predictions are always displayed as unconfirmed leads, never as observed facts.
 - Candidate-profile support means ATT&CK documents the technique for weighted candidates; it does not mean the behavior occurred in this intrusion.
@@ -2081,7 +2126,7 @@ The Interview view provides **Restart interview**, which clears interview-derive
 - Collection guidance is derived from ATT&CK metadata and a fixed tactic-to-telemetry map, not invented by the question model.
 - The interview is capped and low-priority leads are suppressed to avoid open-ended hypothesis fishing.
 
-### 14.8 Optional Elasticsearch evidence gathering through MCP
+### 15.8 Optional Elasticsearch evidence gathering through MCP
 
 The Interview can gather candidate events for the current lead through Elastic Agent Builder's MCP endpoint:
 
@@ -2103,7 +2148,7 @@ The connector uses the official Python MCP SDK over Streamable HTTP. It discover
 5. Display the generated ES|QL query in the UI for analyst audit.
 6. Call `platform.core.execute_esql` with the generated query to retrieve tabular results.
 7. Normalize structured tabular results locally.
-8. Stage normalized candidates in Streamlit session state for analyst review.
+8. Stage normalized candidates for analyst review (Streamlit session state, or `CaseService` behind the API).
 9. Import only records explicitly selected by the analyst, then rerun vector retrieval, all classifiers, RRF, origin/type assessment, and live-intel matching.
 
 **Fallback search flow** (when ES|QL tools are not available but `platform.core.search` is):
@@ -2121,13 +2166,12 @@ Because no index is specified, the Elastic API key and Agent Builder space defin
 
 The generated search request requires exact available fields such as timestamp, index, document ID, event code, host, user, source/destination, process image, parent process, command line, file path, hash, and original message. It explicitly forbids inference of missing fields, attacker identity, or whether the ATT&CK technique occurred.
 
-#### Automatic versus manual collection
+#### Manual collection
 
-- **Search current lead** performs an explicit one-time request.
-- **Automatically search once for each new interview lead** performs one request per unique case/technique pair.
-- Both modes only gather and stage candidate records.
-- Neither mode imports evidence or changes attribution automatically.
-- The analyst must select candidates and click **Import selected and rescore**.
+- **Search this lead** (Streamlit) or `POST /api/cases/{id}/elastic/search` performs an explicit one-time request; the web app has no search button.
+- There is no automatic gathering: `ELASTIC_MCP_AUTO_GATHER` is defined in the settings but neither front end reads it.
+- A search only gathers and stages candidate records; it does not import evidence or change attribution.
+- The analyst must select candidates and click **Import selected and re-rank** (Streamlit) or call `POST …/elastic/import`.
 
 #### Local normalization and privacy
 
@@ -2159,7 +2203,7 @@ The Elastic API key is a Pydantic secret, used only in the MCP `Authorization: A
 
 ## 16. Isolated AI review
 
-The AI review is not part of the deterministic RRF decision. It is an independent critique stage launched from Assessment.
+The AI review is not part of the deterministic RRF decision. It is an independent critique stage launched from Assessment in Streamlit and from the Review page in the web app.
 
 ### 16.1 Four review calls
 
@@ -2243,15 +2287,21 @@ retrieval: RetrievalResult
 context: ClassifierContext
 classifier_results: tuple[ClassifierResult, ...]
 fusion: FusionResult
+deterministic_fusion: optional FusionResult
 bayes_posterior: dict[group_id, probability]
 origin_assessment: OriginAndThreatAssessment
 weights: dict[classifier, weight]
 current_question: optional SelectedQuestion
 interview_complete: bool
+interview_stop_reason: optional string
+interview_revision: int
 threat_intel_snapshot: optional ThreatIntelSnapshot
 threat_intel_matches: tuple[ThreatIntelMatch, ...]
 cyberre_results: map[observation_id, CyberREResult]
+technique_verifications: map[key, TechniqueCandidateVerificationResult]
 review: optional ReviewOutcome
+telemetry_profile: optional
+attribution_decision: optional AttributionDecision
 ```
 
 ### 17.3 `ClassifierResult`
@@ -2317,6 +2367,8 @@ TECHNIQUE_INCLUDE_SYNTHETIC=false
 TECHNIQUE_SEGMENT_ACCEPTANCE=false
 TECHNIQUE_HIERARCHY_PARENT_MODE=off
 TECHNIQUE_RANK_BY_ACCEPTANCE=true
+TECHNIQUE_EXEMPLARS_ENABLED=true
+TECHNIQUE_PLATFORM_FROM_TEXT=true
 TECHNIQUE_CORROBORATION_ACCEPT_OBSERVATIONS=2
 TECHNIQUE_CORROBORATION_ACCEPT_MIN_PROBABILITY=0.1
 TECHNIQUE_VERIFIER_MODE=ambiguous
@@ -2371,6 +2423,12 @@ ATTRIBUTION_HYPOTHESIS_SEPARATION=0.5
 ATTRIBUTION_HYPOTHESIS_MIN_DISCRIMINATIVE=3.0
 ATTRIBUTION_HYPOTHESIS_SPECIFICITY=0.0
 ATTRIBUTION_RERANK_BLEND=0.5
+ATTRIBUTION_RERANK_TOP_K=10
+ATTRIBUTION_COMBINER_ENABLED=true
+ATTRIBUTION_COMBINER_BLEND=0.5
+PROFILE_FOREST_WEIGHT=0.0
+SOURCE_COUNTRY_WEIGHT=1.0
+GROUP_MLP_WEIGHT=0.0
 NB_ALPHA=0.60
 NB_BETA=0.05
 NEGATIVE_EVIDENCE_WEIGHT=0.30
@@ -2397,7 +2455,7 @@ ELASTIC_MCP_MAX_RESULTS=20
 ELASTIC_MCP_AUTO_GATHER=false
 ```
 
-`ELASTIC_MCP_URL` must end with `/api/agent_builder/mcp`, including `/s/{SPACE_NAME}` before that suffix for a custom Kibana space. Remote endpoints must use HTTPS. `ELASTIC_MCP_API_KEY` is stored as `SecretStr`. Automatic gathering means one staged search per new lead; it does not bypass analyst approval.
+`ELASTIC_MCP_URL` must end with `/api/agent_builder/mcp`, including `/s/{SPACE_NAME}` before that suffix for a custom Kibana space. Remote endpoints must use HTTPS. `ELASTIC_MCP_API_KEY` is stored as `SecretStr`. `ELASTIC_MCP_AUTO_GATHER` is not read by either front end; every search is started by the analyst (15.8).
 
 `CAMPAIGN_WEIGHT=0.00` means campaign results remain inspectable but do not vote in default RRF. The Live Intel layer is non-voting regardless of feed matches.
 
@@ -2444,12 +2502,14 @@ techniques=697
  groups=176
 campaigns=56
 software=825
-sentences=6326
+sentences=11614
 group_documents=5394
 actor_behaviors=5042
 ```
 
-### 19.4 Start Streamlit
+### 19.4 Start the web app (or Streamlit)
+
+The primary interface is the React app (4.5). After `make web-install`, `make run-next` builds `web/` and serves it with the API at `http://127.0.0.1:8100`; for development run `make api` plus `make web-dev` (Vite on 5173), and `make api-local` runs without OpenRouter. The Streamlit app remains runnable:
 
 ```bash
 make run
@@ -2494,7 +2554,7 @@ ok
 
 ### 20.1 Secret handling
 
-- `OPENROUTER_API_KEY` and `ELASTIC_MCP_API_KEY` are loaded as Pydantic `SecretStr` values.
+- `OPENROUTER_API_KEY`, `ELASTIC_MCP_API_KEY`, `GOOGLE_CLIENT_SECRET` and `AUTH_SECRET_KEY` are loaded as Pydantic `SecretStr` values.
 - `.env` is ignored by Git.
 - `.env` should be mode `600`.
 - The key must not be printed, placed in an audit, or uploaded to a remote secrets service without explicit authorization.
@@ -2547,11 +2607,12 @@ Incident text and live-feed summaries are untrusted data. Structured schemas, bo
 ```bash
 make test
 make lint
-.venv/bin/python -m compileall -q apt_classifier app scripts tests
+make web-check
+.venv/bin/python -m compileall -q apt_classifier api app scripts tests
 docker compose config --quiet
 ```
 
-`make test` runs the suite (about 310 tests at the time of writing; the exact count is recorded under `gates.pytest` in `data/audits/verification_results_current.json`). Coverage includes:
+`make test` runs the suite (about 460 test functions on 2026-10-01; `gates.pytest` in `data/audits/verification_results_current.json` records the return code and run time). Coverage includes:
 
 - ATT&CK parsing and relationship resolution.
 - Revoked/deprecated object filtering.
@@ -2593,7 +2654,8 @@ Feed records are capped for the smoke test and should not be interpreted as a co
 
 The repository includes benchmark scripts under `scripts/` for the held-out public
 technique-mapping gate, curated retrieval, OTRF-style retrieval, EvidenceForge synthetic
-bundles, and held-out ATT&CK group self-consistency. All local results are composed into
+bundles, held-out ATT&CK group self-consistency, attribution (text in, group out) on the ATT&CK
+folds, and CTI-HAL real-report mapping and attribution. All local results are composed into
 `data/audits/verification_results_current.json` by `scripts/collect_verification.py`
 (`make verify-results`); that file is never edited by hand and records the path, mtime and
 hash of every source artifact.
@@ -2610,8 +2672,8 @@ Important interpretation:
   not a real-world actor-attribution benchmark, and high self-consistency can coexist with
   poor field attribution because ATT&CK group technique data is presence-only and
   reporting-biased.
-- Every benchmark below measures technique mapping. There is no labelled
-  attribution-accuracy benchmark yet.
+- The attribution benchmarks (real reports in 21.3.4b, ATT&CK folds in 21.3.5) measure group
+  ranking and the naming gate; the other benchmarks below measure technique mapping.
 
 #### 21.3.1 Public held-out benchmark
 
@@ -2703,7 +2765,7 @@ six reports.
 | CTI-HAL, 55 reports, local pipeline | Top-1 [95% CI] | Top-5 | MRR | Cluster top-1 | Named (wrong) |
 |---|---|---|---|---|---|
 | statements as reported (headline until 2026-09-30) | 0.55 [0.42, 0.69] | 0.75 | 0.63 | 0.67 | 13 (0) |
-| **`--anonymize-actors` (headline)** | **0.44** [0.31, 0.58] | 0.65 | 0.53 | 0.55 | 8 (0) |
+| **`--anonymize-actors` (headline; 2026-09-30 figures, current in 21.3.14)** | **0.44** [0.31, 0.58] | 0.65 | 0.53 | 0.55 | 8 (0) |
 
 The 28 reports without a name give identical results in both runs. On the 27 that name their
 group, top-1 falls from 16 to 10, MRR from 0.71 to 0.50 and named hypotheses from 7 to 2; six
@@ -2782,8 +2844,8 @@ stages, accepted techniques and the technique recall of the mapping step.
 
 Interpretation: group technique lists, technique-profile centroids and descriptions still
 contain the held-out techniques, so this is self-consistency over the ATT&CK answer key
-with the text leak removed, not field attribution accuracy. It is still the only
-benchmark that measures the stage machinery.
+with the text leak removed, not field attribution accuracy. It and the CTI-HAL
+real-report run (21.3.4b) measure the stage machinery; only this one has an unknown-actor arm.
 
 `scripts/ensemble_benchmark.py` is the older technique-ID version (perfect mapping
 assumed, three voting classifiers, no eligibility gate, no stage). It remains as a
@@ -2791,8 +2853,10 @@ diagnostic; about 19% of a group's held-out techniques re-enter it through campa
 
 #### 21.3.6 Benchmark results
 
-All numbers below are copied from artifacts regenerated on 2026-09-22 with ATT&CK 19.2,
-`basel/ATTACK-BERT`, the balanced preset and no LLM verifier.
+Numbers below were recorded between 2026-09-22 and 2026-09-29 with ATT&CK 19.2,
+`basel/ATTACK-BERT`, the balanced preset and no LLM verifier unless stated. "Current" and
+"shipped" here mean at that date; later subsections (21.3.8 onward) supersede several of them,
+and the current figures are in `data/audits/verification_results_current.json`.
 
 **Curated retrieval (30 positive cases, 6 hard negatives;
 `data/audits/curated_hybrid_current.json`)**
@@ -2838,7 +2902,7 @@ the P2 gating changes and the acceptance model; top-1 moved 26 -> 25.
 | **pooled (current, rule gate only)** | 1391 | 0.30 [0.27, 0.32] | 0.41 | 0.23 | 0.35 | 0.53 | 0.73 |
 | **pooled (current, acceptance model)** | 1391 | 0.32 [0.30, 0.34] | 0.50 | 0.24 | 0.35 | 0.53 | 0.73 |
 | **pooled (current, + ranking by acceptance probability)** | 1391 | 0.32 [0.30, 0.34] | 0.50 | 0.24 | **0.40** | **0.58** | **0.75** |
-| **shipped (schema 2, no priors, threshold 0.27)** | 1391 | 0.32 [0.30, 0.34] | 0.49 | 0.24 | 0.40 | 0.58 | 0.75 |
+| **shipped 2026-09-28 (schema 2, no priors, threshold 0.27; superseded by exemplars, 21.3.10)** | 1391 | 0.32 [0.30, 0.34] | 0.49 | 0.24 | 0.40 | 0.58 | 0.75 |
 | opt-in `acceptance_model_priors.json` (schema 2, train priors) | 1391 | 0.36 [0.34, 0.39] | 0.51 | 0.28 | 0.44 | 0.64 | 0.76 |
 
 The priors model (2026-09-28) passes the mapping gate on every split (tram F1 0.43 -> 0.48,
@@ -3016,7 +3080,7 @@ artifacts and pair cache are kept so a retrain with more or synthetic data costs
 **Attribution benchmark results (text in, group out; 153 known folds, 25 unknown-actor
 folds; `attribution_heldout_baseline.json` vs `attribution_heldout_current.json`)**
 
-| Metric | Before rebalancing | After (current defaults) |
+| Metric | Before rebalancing | After (2026-09-29 defaults; superseded, 21.3.8 onward) |
 |---|---|---|
 | Top-1 (true group ranked first) | 0.38 [0.30, 0.46] | 0.59 [0.52, 0.67] |
 | Cluster-aware top-1 (a documented related group at rank 1 counts) | n/a | 0.60 |
@@ -3031,13 +3095,13 @@ folds; `attribution_heldout_baseline.json` vs `attribution_heldout_current.json`
 | Named risk, cluster-aware | n/a | 0.00 |
 
 "Before" is the ensemble as shipped (technique family budget 1.00, `RRF_K=60`, plain
-software ratio, alphabetical tie-break, hypothesis maturity 0.70). "After" is the current
+software ratio, alphabetical tie-break, hypothesis maturity 0.70). "After" is the 2026-09-29
 default (budget 2.00, `RRF_K=20`, rarity-weighted software links with the tool cap and the decisive-malware boost of 2026-09-28, the separation gate and 0.5 discriminative re-ranking of 2026-09-29 (10.7), prominence tie-break,
 hypothesis maturity 0.82). Stage distribution after: known {'known_group_hypothesis': 35, 'known_group_shortlist': 104, 'unresolved_activity_cluster': 14};
 unknown {'insufficient_evidence': 2, 'known_group_shortlist': 19, 'unresolved_activity_cluster': 4}. The rarity weighting alone is neutral here
 (top-5 0.82 with vs 0.82 without); it is kept because commodity tools should not count as
 much as bespoke implants. The named hypotheses are 35 known groups (all correct) and no removed actor (the separation gate of 10.7 also stopped the Play -> BlackByte false name).
-named-risk figure as a lower bound for field data.
+Treat the named-risk figure as a lower bound for field data.
 
 **Ensemble self-consistency (legacy technique-ID diagnostic; 153 groups, 40% coverage, seed 7; measured before the 2026-09-22 fusion rebalancing)**
 
@@ -3136,8 +3200,8 @@ harsher randomisation (recall 15-60%, precision 25-60%, generic false positives,
 out-of-fold mixed top-1 0.727 vs RRF 0.404 on its own lists, but on the seed-7 folds 0.771 top-1 /
 0.837 MRR and on CTI-HAL 0.509 / 0.612 with the same half blend and union gate (paired: 3 reports
 better, 4 worse), 36 and 15 names all correct. Making the training regime harsher did not close the
-transfer gap; the gap sits in technique recall on real text, which is what the encoder follow-ups
-(plan) address.
+transfer gap; the gap sits in technique recall on real text, which the labelled-sentence
+exemplars (21.3.10) then targeted.
 
 #### 21.3.10 Labelled-sentence exemplars: technique recall on real text (2026-09-30)
 
@@ -3289,6 +3353,8 @@ Under the no-regression rule for both attribution benchmarks this was first kept
 2026-10-01 the product owner made it the default, accepting the one-fold loss on the ATT&CK folds for
 the real-report gains, which hold on the anonymized headline. The previous configuration remains as
 an opt-out (9.13); the published attribution artifacts were regenerated with the new default.
+The anonymized top-5, MRR and cluster-aware top-1 were superseded on 2026-10-01 by the anonymizer
+fix (0.600, 0.512 and 0.564, 21.3.14).
 
 #### 21.3.12 Target OS and operating systems named in the text (2026-10-01)
 
@@ -3371,13 +3437,13 @@ there, and promoting the favourite does not fix it. The analyst view reports thi
 pulls both ways" (10.10), and naming is unaffected (such leaders have negative separation).
 
 **Same-code baseline and parity.** The main checkout's `*_current.json` artifacts were regenerated
-on 2026-10-01 by another branch (`platform_from_text`, target-OS mapping). They differ from this
-branch's code in one technique on one row per set, so the before artifacts here are a same-code
+on 2026-10-01 by the target-OS change (`platform_from_text`, 21.3.12, since merged). They differ
+from the code measured here in one technique on one row per set, so the before artifacts here are a same-code
 run at a5de814. Seed 7: top-1 0.830, MRR 0.880, 32 named. CTI-HAL anonymized: 0.455 and 10 named.
 As reported: 0.564 and 15 named. With the instrumentation added, every previously recorded field
 is identical row for row on seed 7 (153 rows) and on anonymized CTI-HAL (55). The new summary
 fields read: seed 7 top-1 given top-3 0.894, pairwise #1-vs-#2 0.948; CTI-HAL anonymized 0.806 and
-0.862.
+0.862 (0.862 and 0.926 after the anonymizer fix, 21.3.14).
 
 #### 21.3.14 Shortlist recall on real reports (2026-10-01)
 
@@ -3465,7 +3531,8 @@ in the top three; always reported beside the strict figure):
 The Top-three view now lists, for each of the three, the groups ATT&CK documents as overlapping
 with it and their rank in the case. FIN7 ranked first shows "Carbanak #8".
 
-**What remains.** About 8 to 10 of the 24 reports outside the top three cannot be reached by a
+**What remains.** About 8 to 10 of the 24 reports outside the top three before the anonymizer fix (26 after it)
+cannot be reached by a
 leak-safe pipeline change. In five Carbanak reports ATT&CK documents almost none of the report's
 techniques for Carbanak. Three come back only through the Carbanak malware, whose name is the
 group's. Two or three carry only generic evidence. The rest need evidence ATT&CK does not link to
@@ -3483,7 +3550,8 @@ make up
 make ingest
 ```
 
-Then reload Streamlit.
+Then restart the API (`make api` or `make run-next`; it loads the knowledge base at startup) or
+reload Streamlit.
 
 ### 22.2 Actor behavior index shows zero
 
@@ -3493,7 +3561,8 @@ The existing group collection predates actor-specific behavior vectors. Run:
 make ingest
 ```
 
-The sidebar should report a nonzero actor behavior count.
+`GET /api/system` (`index.actor_behavior_documents`) or the Streamlit sidebar should report a
+nonzero actor behavior count.
 
 ### 22.3 Chroma unavailable
 
@@ -3610,13 +3679,18 @@ Do not allow arbitrary analyst-provided URLs to become server-side fetch targets
 6. Add a default weight and, if appropriate, a family mapping.
 7. Add contribution, unmatched evidence, and correlation tests.
 8. Verify it does not duplicate an existing evidence family.
+9. Refit the learned combiner (`make fit-combiner`; add the classifier to `CLASSIFIERS` in
+   `apt_classifier/combiner.py` to give it features) and rerun both attribution benchmarks. Any
+   change under `apt_classifier/classifiers/` changes the pipeline fingerprint, and the combiner
+   fails closed until it is refitted.
 
 ### 24.3 Add a new Canvas layer
 
 1. Add a `CanvasNode.kind` and relationship types in `apt_classifier/canvas.py`.
 2. Add deterministic IDs and deduplication.
 3. Include supporting details and provenance.
-4. Add layer labels, colors, and column placement in `_canvas_spec()`.
+4. Add layer labels, colors, and column placement in `web/src/pages/Canvas.tsx` (`KIND_LABELS`,
+   `COLUMN_BY_KIND`, `COLOR_BY_KIND`) and in `_canvas_spec()` (`app/ui/pages/canvas.py`, Streamlit).
 5. Add an inspector section if the layer is candidate-specific.
 6. Add graph-model tests.
 
@@ -3652,7 +3726,10 @@ The current ATT&CK self-consistency benchmarks are not sufficient for this purpo
 
 | Implementation reference | Key symbols |
 |---|---|
-| `app/streamlit_app.py` | `load_engine`, `render_intake`, `render_canvas`, `render_threat_intel`, `render_interview`, `render_assessment` |
+| `api/app.py`, `api/serializers.py` | `create_app`, routes and error mapping, `AnalysisState` → JSON |
+| `apt_classifier/service.py` | `CaseService`: engine, case store and every analyst operation behind the API |
+| `web/src/` | React pages (`pages/`), API client and types (`api/`) |
+| `app/streamlit_app.py`, `app/ui/` | Streamlit UI: `runtime.get_engine`, one `render()` per page in `pages/` |
 | `apt_classifier/session.py` | `AnalysisState`, `AttributionEngine.analyze`, `rescore`, `attach_threat_intel`, `next_question` |
 | `apt_classifier/evidence/models.py` | `EvidenceStatus`, `Provenance`, `Observation`, `TechniqueMatch`, `QuestionAnswer`, `StrategicContext`, `EvidenceLedger` |
 | `apt_classifier/evidence/extract.py` | `extract_attack_actions`, `extract_evidence` |
@@ -3674,8 +3751,8 @@ The current ATT&CK self-consistency benchmarks are not sufficient for this purpo
 | `apt_classifier/review/context.py` | compact review payload and raw-data reduction |
 | `apt_classifier/review/pipeline.py` | four-stage isolated review and audit persistence |
 | `apt_classifier/llm.py` | OpenRouter client, structured response parsing and retry |
-| `scripts/curated_retrieval_benchmark.py` | 21-case curated retrieval benchmark with mode comparison |
-| `scripts/otrf_benchmark.py` | 5-case OTRF Sysmon retrieval benchmark |
+| `scripts/curated_retrieval_benchmark.py` | 36-case curated retrieval benchmark with mode comparison |
+| `scripts/otrf_benchmark.py` | 9-case OTRF Sysmon retrieval benchmark |
 | `scripts/ensemble_benchmark.py` | held-out group self-consistency benchmark |
 | `tests/test_retrieve.py` | retrieval, hierarchy, abstention, explicit cue, and candidate decision tests |
 | `tests/test_presets.py` | mapping preset tests |
@@ -3700,8 +3777,10 @@ make up
 # 4. Build/update ATT&CK and actor-behavior vectors
 make ingest
 
-# 5. Start the local application
-make run
+# 5. Start the local application (React + FastAPI on http://127.0.0.1:8100)
+make web-install   # once
+make run-next
+# legacy Streamlit UI: make run
 
 # 6. Verify the project
 make test

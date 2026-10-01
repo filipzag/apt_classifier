@@ -73,9 +73,10 @@ Here's the cool part. The robot doesn't just use one way to guess. It uses **man
 3. **The Tool Judge** — checks if the tools you found match known group tools
 4. **The Behavior Judge** — checks if the specific behaviors match how a group operates
 5. **The Context Judge** — checks if the target, motive, and industry make sense for that group
-6. **The AI Judge** — an AI reads everything and makes a guess (but this judge's vote is small)
+6. **The Country Judge** — guesses which country the attackers probably work for (or none), then votes for the groups ATT&CK documents from there
+7. **The AI Judge** — only when you ask for it, an AI (CyberRE-LLM) ranks the tricks behind one clue; its vote is small, it can't add a new suspect, and it never decides whether a group gets named
 
-Each judge ranks the suspects independently. Then the robot combines all their rankings into one final list.
+Each judge ranks the suspects independently. Then the robot combines all their rankings into one final list: half from adding up the judges' rankings, half from a learned combiner trained only on practice cases built from the library.
 
 **Why so many judges?** Because no single judge is perfect. The Pattern Judge might be wrong if a technique is super common. The AI Judge might be biased. By using many judges and combining their votes, we get a more fair answer.
 
@@ -114,7 +115,7 @@ After all the analysis, the robot gives you one of four answers:
 There's enough evidence to say "Group X is our leading hypothesis." But it's still a **hypothesis**, not a confirmation. Like saying "I think Bob did it" — not "Bob definitely did it."
 
 ### 🔵 "We have a shortlist"
-There are some candidates, but none of them is strong enough to be a hypothesis yet. Like saying "It could be Bob, Alice, or Charlie, but I'm not sure which one."
+There are some candidates, but none of them is strong enough to be a hypothesis yet. Like saying "It could be Bob, Alice, or Charlie, but I'm not sure which one." The **Top three** view puts the first three side by side and shows which clues only one of them is known for.
 
 ### 🟠 "Unresolved activity cluster"
 There's clearly bad stuff happening, but we can't match it to any known group. The robot gives it a label like "CL-UNK-1234" — like calling an unknown suspect "John Doe." This might be a new group we've never seen before.
@@ -122,11 +123,9 @@ There's clearly bad stuff happening, but we can't match it to any known group. T
 ### ⚪ "Insufficient evidence"
 There's not enough evidence to say anything useful. Like trying to solve a case with just one blurry photo.
 
-### Why no percentages?
+### What about percentages?
 
-The robot **does not give you a percentage** like "78% likely it's Group X." Why? Because that would be making up a number. Without real historical data to calibrate against, any percentage would be a guess dressed up as math.
-
-If you provide a **calibration file** (historical data showing how often the robot was right in the past), then it can give a calibrated probability. But without that, it only says "strong," "moderate," or "weak."
+The robot gives **one** probability: the learned combiner's "leader probability", its estimate that the top suspect is the right group (shown when the combiner is on, which is the default). It was fitted on practice cases built from the ATT&CK library, not on real casework, so a "78%" there is a rough guide, not a real-world chance that Group X did it. The stage itself stays qualitative.
 
 ---
 
@@ -192,8 +191,11 @@ Here's what makes this robot different from a regular AI:
 2. **No single judge decides.** Multiple independent classifiers vote, and no one of them is the boss.
 3. **The AI review is separate.** The AI can give advice but cannot override the deterministic analysis.
 4. **Live intelligence can't vote.** It adds context but doesn't get a say in the ranking.
-5. **No made-up percentages.** Without calibration data, the robot only gives qualitative maturity levels.
-6. **Raw logs never go to the cloud.** Your sensitive data stays local. Only normalized, redacted metadata is used.
+5. **No made-up percentages.** The one probability shown comes from the learned combiner, which says what it was fitted on; the stages themselves are qualitative.
+6. **What goes to the cloud, and what does not.** Windows and Sysmon logs are parsed on your own computer.
+   With an OpenRouter key, the online AI service receives the written clues, alert text, interview context, the
+   observations the technique checker double-checks (these can include text taken from logs, such as command
+   lines) and the AI review. Without a key (local mode) nothing is sent.
 7. **"No" only counts if you were looking.** A negative answer is only evidence if you had the right tools to see it.
 8. **Uncertainty is preserved.** The robot would rather say "I don't know" than guess wrong.
 

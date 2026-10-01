@@ -68,8 +68,11 @@ fingerprint.
 
 ## Results (local pipeline, ATT&CK 19.2, artifacts regenerated 2026-09-22 after the acceptance-gate changes)
 
-Source artifacts: `data/audits/evidenceforge_local_leakfree.json`,
+Source artifacts as of 2026-09-22: `data/audits/evidenceforge_local_leakfree.json`,
 `data/audits/evidenceforge_heldout_local.json`, `data/audits/evidenceforge_clinic_local.json`.
+The files have since been regenerated (labelled-sentence exemplars, technical documentation
+21.3.10; operating systems named in the text, 21.3.12), so the local-pipeline table below is
+superseded; current figures are in `data/audits/verification_results_current.json`.
 `n` is the number of scorable cases, with the fraction of ground-truth events that could be
 aligned in parentheses.
 
@@ -128,15 +131,18 @@ are kept under `data/audits/superseded/`.
    `mfg-rh-001#0` accepted as T1074 in narrative and eCAR mode). The exemplar change was
    adopted for its real-report gains; nothing was tuned on the clinic bundle, and
    `TECHNIQUE_EXEMPLARS_ENABLED=false` restores the previous acceptance behaviour.
-2. **Ranking is ahead of acceptance everywhere.** hit@10 is 0.59 to 0.80 in narrative mode
-   while accepted-set F1 is 0.21 to 0.32: the correct technique is usually surfaced for
-   review, but the local gate accepts at most one similarity-only candidate per observation.
+2. **Ranking is ahead of acceptance everywhere.** In the 2026-10-01 artifacts narrative hit@10 is
+   0.47 to 0.61 while accepted-set F1 is 0.33 to 0.44: the correct technique is often surfaced
+   for review, but the acceptance model's threshold is set for precision (without the model the
+   rule-based gate accepts at most one similarity-only candidate per observation).
 3. **Native-record modes look better partly because of coverage selection.** Windows mode
    scores 2 of 11 branch-office events and 7 of 21 clinic events; the events that survive
    exact alignment are the ones with a distinctive command line or image, which are also the
    easiest to map.
-4. **Development and held-out numbers diverge as expected.** Narrative hit@1 falls from 0.40
-   (branch-office) to 0.24 (manufacturing) to 0.17 (clinic), in step with cue-table coverage.
+4. **Development and held-out numbers diverged as expected on 2026-09-22.** Narrative hit@1 fell
+   from 0.40 (branch-office) to 0.29 (manufacturing) to 0.22 (clinic), in step with cue-table
+   coverage. Since the exemplars (technical documentation 21.3.10) it is 0.20, 0.18 and 0.33, so
+   the order no longer follows cue coverage.
 
 ## Recommendations
 

@@ -4,7 +4,7 @@
 ATT&CK, ranks documented threat groups, and names one only when the evidence separates it from
 every alternative. (Python package: `apt_classifier`.)
 
-A local, evidence-driven Streamlit application for ranking threat-group hypotheses from mixed incident evidence. It accepts analyst observations, EDR/SIEM alerts, Windows/Sysmon JSON, IOCs, and named tools.
+A local, evidence-driven web application (React front end on a FastAPI backend; the legacy Streamlit UI remains available) for ranking threat-group hypotheses from mixed incident evidence. It accepts analyst observations, EDR/SIEM alerts, Windows/Sysmon JSON, IOCs, and named tools.
 
 The application does **not** prove attribution. It ranks groups whose documented MITRE ATT&CK tradecraft overlaps the supplied evidence. Shared tools, incomplete reporting, and false-flag activity can invalidate the result.
 
@@ -32,6 +32,8 @@ See [`docs/TECHNICAL_DOCUMENTATION.md`](docs/TECHNICAL_DOCUMENTATION.md) for the
      for each group through the group's documented country (default since 2026-10-01: real reports improve, the
      ATT&CK folds lose one case; docs 9.13, 21.3.11). Trained on the GPU from ATT&CK profiles.
    - group random forest over the same features (wired at weight 0: it helped the ATT&CK folds but hurt real reports)
+   - PyTorch group network over the accepted techniques and named software (`GROUP_MLP_WEIGHT=0`, not loaded:
+     at weight 1.0 it named one wrong group on the ATT&CK folds on 2026-10-01)
    - opt-in CyberRE-LLM technique filtering and ranking
 6. Fuse applicable classifiers with family-aware Reciprocal Rank Fusion. Naive Bayes, TF-IDF, Jaccard, and the technique centroid share one technique-overlap budget instead of casting four full correlated votes. Actor-specific behavior, software, and campaign classifiers have their own family budgets. Context, motivation, and description signals may rerank only candidates with documented technical support; the analyst-requested CyberRE vote has its own low family budget and cannot introduce a candidate. Abstaining classifiers cast no vote. Groups with zero technical overlap are excluded from authoritative RRF.
 7. Aggregate documented sponsor/origin evidence across the ranked candidates and classify the profile as APT-like state/espionage activity, financially motivated criminal intrusion, mixed, or indeterminate.
@@ -70,8 +72,8 @@ CISA KEV and CISA Alerts & Advisories are labeled authoritative for what CISA re
 
 When no named group meets the evidence bar (stages below *known group hypothesis*), the Assessment
 view says so explicitly and labels the leader as the closest documented group, not an attribution;
-on the attribution benchmarks every named known group was correct (33 of 33 on the ATT&CK folds; 8 of 8
-on the CTI-HAL real reports with the group names removed from the text, 13 of 13 with them left in) and
+on the attribution benchmarks every named known group was correct (32 of 32 on the ATT&CK folds; 10 of 10
+on the CTI-HAL real reports with the group names removed from the text, 15 of 15 with them left in) and
 all 25 actors removed from ATT&CK were correctly left unnamed. When the leader has documented overlap with another
 group (ATT&CK cross-references or rarely shared tooling, for example Carbanak and FIN7), the view says
 so, because the evidence usually cannot separate them.
@@ -84,8 +86,8 @@ A local reranker adapter (`apt_classifier/reranker.py`) can re-score the hybrid 
 
 ### Benchmarks
 
-Benchmark scripts under `scripts/` measure technique mapping; there is no labelled
-attribution-accuracy benchmark yet. Results are composed into
+Benchmark scripts under `scripts/` measure technique mapping and attribution (ATT&CK
+self-consistency folds and the CTI-HAL real reports; there is no labelled field-data benchmark). Results are composed into
 `data/audits/verification_results_current.json` by `make verify-results` and are never
 typed by hand.
 
@@ -114,7 +116,7 @@ typed by hand.
   "the adversary", as the ATT&CK folds do (`--anonymize-actors`); the run on the statements as reported
   is kept beside it (docs 21.3.4b).
 
-#### Current results (artifacts regenerated 2026-09-22, local pipeline, no LLM verifier)
+#### Current results (artifacts as of 2026-10-01, local pipeline, no LLM verifier)
 
 **Public held-out (hybrid):**
 
@@ -133,8 +135,9 @@ typed by hand.
 | opt-in priors model (not shipped, see docs 21.3.6) | 1391 | 0.36 [0.34, 0.39] | 0.51 | 0.28 | 0.44 | 0.64 | 0.76 |
 | **pooled (current, + labelled-sentence exemplars, 2026-09-30)** | 1391 | **0.42 [0.39, 0.44]** | 0.52 | 0.35 | **0.50** | 0.67 | **0.80** |
 
-Baseline = before the acceptance-gate work; current = after (see docs section 21.3.6). The last row
-probability-ranking row was the shipped default from 2026-09-28; since 2026-09-30 the acceptance model also
+Baseline = before the acceptance-gate work; current = after (see docs section 21.3.6). The per-split rows
+predate the acceptance model; with the shipped default (last row) the splits give micro-F1 0.55 (tram), 0.26
+(expert) and 0.31 (derived_procedures). The probability-ranking row was the shipped default from 2026-09-28; since 2026-09-30 the acceptance model also
 reads what the nearest labelled public report sentences say about each candidate (exemplars, docs 8.2 and
 21.3.10). Part of that public gain is within-collection, because the exemplars are the same datasets' train
 splits; the CTI-HAL gain below is the cleaner estimate. The per-technique priors model named a wrong group on
@@ -144,10 +147,10 @@ a real report, so it is kept as an opt-in artifact only (docs 8.2, 21.3.4b).
 
 | Mode | Cues | Top-1 | Top-3 | Top-10 | Accepted-set P / R / F1 | Hard-negative accepted-FP cases |
 |---|---|---|---|---|---|---|
-| **hybrid (default)** | on | 25/30 | 29/30 | 30/30 | 0.79 / 0.77 / 0.78 | 0/6 |
+| **hybrid (default)** | on | 25/30 | 29/30 | 30/30 | 0.79 / 0.74 / 0.76 | 0/6 |
 | hybrid | off | 15/30 | 24/30 | 29/30 | 0.52 / 0.43 / 0.47 | 0/6 |
 | legacy_dense | on | 26/30 | 29/30 | 30/30 | 0.85 / 0.83 / 0.84 | 0/6 |
-| lexical | on | 26/30 | 26/30 | 26/30 | 1.00 / 0.63 / 0.77 | 0/6 |
+| lexical | on | 26/30 | 26/30 | 26/30 | 1.00 / 0.60 / 0.75 | 0/6 |
 
 **OTRF Sysmon (9 cases):** 9/9 top-1 with cues.
 
@@ -159,14 +162,16 @@ measured before the exemplars) narrative micro-F1 was 0.53, recall 0.56.
 
 **Attribution (text in, group out; 153 held-out groups):** top-1 0.83 (was 0.38 before the fusion work and
 0.60 before the learned combiner; 0.84 before the source-country vote, which costs one fold here and gains on real
-reports), top-5 0.96, MRR 0.88. With the separation gate 32 known groups are named, all correct, and 0/25 removed
+reports), top-3 0.93, top-5 0.96, MRR 0.88. With the separation gate 32 known groups are named, all correct, and 0/25 removed
 actors are named (was 4): named risk 0.00 (was 0.56) at 18% coverage.
 
 **CTI-HAL real reports (55 reports, 6 groups; local evaluation only):** statement mapping F1 0.38 (was 0.32 before the
 exemplars), recall 0.34 (was 0.25), hit@1 0.38 (was 0.33); median accepted-technique recall per report 0.42 (was 0.31).
 Attribution, with every ATT&CK group name and alias in the statements replaced by "the adversary" as in the ATT&CK
-folds: **top-1 0.46** (0.44 before the source-country vote), cluster-aware top-1 0.58, top-5 0.64, MRR 0.53; 10 reports
-reached a named hypothesis, all correct (8 before). With the statements as reported (27 of the 55 reports name their own
+folds: **top-1 0.46** (0.44 before the source-country vote), cluster-aware top-1 0.56, top-3 0.53
+(cluster-aware 0.65), top-5 0.60, MRR 0.51 (cluster-aware top-1 0.58, top-5 0.64, MRR 0.53 before the 2026-10-01 anonymizer
+fix, docs 21.3.14); 10 reports
+reached a named hypothesis, all correct (8 before the source-country vote). With the statements as reported (27 of the 55 reports name their own
 group in them) the same pipeline gives top-1 0.56 (was 0.36 before the tool cap, decisive-malware boost, discriminative
 re-ranking, combiner, exemplars and country vote), cluster-aware top-1 0.71, top-5 0.73, MRR 0.64, and 15 named, all
 correct (was 3 under the maturity gate; at the
@@ -191,6 +196,7 @@ These are engineering diagnostics, not production accuracy claims. See
 - Python 3.11–3.13
 - Docker with permission to access the Docker daemon
 - NVIDIA GPU optional; CPU works but ingestion is slower
+- Node.js 22 with npm for the web front end outside Docker (`make web-install`)
 - OpenRouter API key with access to the configured extraction and review models
 
 ## Setup
@@ -207,10 +213,11 @@ build the index:
 ```bash
 make up
 make ingest
-make run
+make web-install
+make run-next
 ```
 
-Open the URL printed by Streamlit. Initial ingestion downloads approximately 54 MB of ATT&CK data and the ATTACK-BERT model.
+Open http://127.0.0.1:8100 (`make run` starts the legacy Streamlit UI instead). Initial ingestion downloads approximately 54 MB of ATT&CK data and the ATTACK-BERT model.
 
 To run the UI in a container next to Chroma instead of from the `.venv`:
 
@@ -219,8 +226,9 @@ docker compose up --build
 ```
 
 The `app` service reads `.env`, keeps its data in the `app_data` volume and listens on
-`127.0.0.1:8501`. Ingest once from the host (`make ingest` with `CHROMA_HOST=localhost`) or inside
-the container. There is no authentication; put it behind a reverse proxy with SSO before exposing it.
+`127.0.0.1:8100`. Ingest once from the host (`make ingest` with `CHROMA_HOST=localhost`) or inside
+the container. Without Google sign-in (below) there is no authentication; configure it, or put the app behind a
+reverse proxy with SSO, before exposing it.
 
 ### Using the app
 
@@ -231,11 +239,15 @@ the container. There is no authentication; put it behind a reverse proxy with SS
 2. **Technique review**: one table of every candidate mapping with its gate reason and evidence.
    Confirm, reject or replace, then apply; the ranking is recomputed. Changing the Target OS here
    maps the observations again.
-3. **Interview**: answer predicted-behaviour questions (yes / no / unknown / not visible) to
+3. **Distinguish** (web app only): the "Top three" tab puts the first three candidates side by side
+   (evidence only one of them has, documented overlaps, ATT&CK's stated origin and motivation); the
+   "Whole shortlist" tab shows which techniques separate the shortlist and which pending mappings or
+   interview leads would sharpen or challenge the leader.
+4. **Interview**: answer predicted-behaviour questions (yes / no / unknown / not visible) to
    separate the shortlisted groups; optional Elasticsearch gathering per lead. With a Target OS,
    techniques documented only for other operating systems are never asked about (here and in the
    Distinguish leads).
-4. **Assessment**: the stage decision with its bars and glossary, the ranking chart, a dossier
+5. **Assessment**: the stage decision with its bars and glossary, the ranking chart, a dossier
    per candidate, the optional independent AI review, and exports (Markdown, JSON audit,
    Navigator layers, Attack Flow) that are always available.
 
@@ -361,6 +373,9 @@ All settings are environment variables documented in `.env.example`. Important v
   trains both on the GPU when available, `PROFILE_FOREST_DEVICE=cpu` otherwise). To turn the country vote off set
   `SOURCE_COUNTRY_WEIGHT=0.0` and `ATTRIBUTION_COMBINER_PATH=data/models/combiner/attribution_combiner_no_country.json`
   (docs 9.13 and 21.3.11)
+- `GROUP_MLP_WEIGHT=0.0` (PyTorch group network, `make fit-mlp`; not loaded at 0. At 1.0 it needs
+  `ATTRIBUTION_COMBINER_PATH=data/models/combiner/attribution_combiner_group_mlp.json` and named one wrong group
+  on the ATT&CK folds on 2026-10-01)
 - `TECHNIQUE_EXEMPLARS_ENABLED=true` (labelled public report sentences as acceptance evidence, `make exemplars`
   then `make fit-acceptance`; CTI-HAL median accepted-technique recall per report 0.31 -> 0.42; `false` restores
   the previous calibrated gate through `ACCEPTANCE_MODEL_FALLBACK_PATH`, see docs 8.2 and 21.3.10)
