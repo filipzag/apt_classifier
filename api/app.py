@@ -165,7 +165,12 @@ def create_app(
     def _case(svc: CaseService, case_id: str) -> dict[str, Any]:
         state, meta = svc.get(case_id)
         return serializers.case_payload(
-            svc.engine.kb, state, meta, svc.engine.attribution_thresholds, svc.summary_for(state)
+            svc.engine.kb,
+            state,
+            meta,
+            svc.engine.attribution_thresholds,
+            svc.summary_for(state),
+            top3=svc.top3_summary(state),
         )
 
     @app.get("/api/cases")
@@ -358,9 +363,13 @@ def create_app(
 
     @app.get("/api/cases/{case_id}/distinguish")
     def distinguish(
-        case_id: str, top_k: int = 10, svc: CaseService = Depends(get_service)
+        case_id: str, top_k: int | None = None, svc: CaseService = Depends(get_service)
     ) -> dict[str, Any]:
         return svc.distinguish(case_id, top_k=top_k)
+
+    @app.get("/api/cases/{case_id}/top3")
+    def top3(case_id: str, svc: CaseService = Depends(get_service)) -> dict[str, Any]:
+        return svc.top3(case_id)
 
     @app.get("/api/cases/{case_id}/canvas")
     def canvas(

@@ -914,3 +914,40 @@ def test_unknown_arm_refits_only_the_voting_forest(monkeypatch):
     assert not bench._forest_votes(
         SimpleNamespace(profile_forest=None, default_weights=lambda: {"source_country": 1.0})
     )
+
+
+def test_attribution_summary_reports_top_one_given_top_three_and_the_guard():
+    from scripts.attribution_benchmark import summarize
+
+    def row(group, rank, guard=False):
+        return {
+            "group_id": group,
+            "report_id": f"r-{group}-{rank}",
+            "rank": rank,
+            "top3": [group] if rank == 1 else ["G0999", group],
+            "stage": "known_group_shortlist",
+            "technique_recall": 0.5,
+            "observations": 5,
+            "leader_guard_fired": guard,
+        }
+
+    known = [row("G1", 1), row("G2", 2), row("G3", 1, guard=True), row("G4", 3), row("G5", 7)]
+    metrics = summarize(known, [])
+    assert metrics["top1_given_top3"] == pytest.approx(2 / 4)
+    assert metrics["pairwise_12"] == pytest.approx(2 / 3)
+    assert metrics["leader_guard_fired"] == 1
+    # rows recorded before the instrumentation keep the old shape
+    for item in known:
+        item.pop("leader_guard_fired")
+    assert "leader_guard_fired" not in summarize(known, [])
+
+
+def test_attribution_benchmark_lists_rows_scored_without_an_enabled_combiner():
+    from scripts.attribution_benchmark import _inactive_combiner_rows
+
+    rows = [
+        {"group_id": "G1", "combiner_status": "active"},
+        {"group_id": "G2", "report_id": "r2", "combiner_status": "incompatible artifact: x"},
+        {"group_id": "G3", "combiner_status": None},  # no fusion, no status
+    ]
+    assert _inactive_combiner_rows(rows) == ["G2:r2"]

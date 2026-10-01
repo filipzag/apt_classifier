@@ -1572,6 +1572,90 @@ newer schema, unknown feature names or mismatched vectors are still refused.
   seed-7 folds and CTI-HAL (run once on the frozen artifact) with no wrong named group, at most
   1/25 removed actors named and no top-1/MRR regression. Results in 21.3.9.
 
+### 10.10 Distinguishing the top three (2026-10-01)
+
+**Why.** The right group is often in the top three but not first: on the seed-7 folds the truth is
+first in 127 of 153 rows and in the top three in 142; on the anonymized CTI-HAL reports first in
+25 of 55 and in the top three in 31. Two kinds of miss dominate. In the first, the combiner's
+leader has clearly less discriminative mass (10.7) than another top-three member. In the second,
+the three include a documented-overlap pair (Carbanak/FIN7, FIN6/Cobalt Group) whose evidence
+cannot be separated.
+
+**A reorder rule, pre-registered and not adopted** (`apt_classifier/top3.py`, results in 21.3.13).
+The rule was written down and committed before it was run on any fresh data:
+
+- Within the first three places, take the member with the largest gate-window D.
+- Move it to first place when its D exceeds the leader's by at least 1.25 and the leader's largest
+  weighted single-channel advantage over it is at most 0.75.
+- A promoted leader would never be named in the same analysis.
+
+On the data it was found on it looked clean: seed-7 folds +5/-0, anonymized CTI-HAL +2/-0. On the
+fresh fold seeds 41 and 53 it gave +1/-1 and +1/-0. It fails the pre-registered bar (net +2 per
+seed, a slack of 0.1 to the largest gap a correct leader faced), and raising the margin, the only
+change the protocol allowed, removes the wins with the losses. Nothing in the engine reorders the
+top three. `decide_promotion` stays as a pure function for the replay
+(`scripts/top3_replay.py`) and for the view below.
+
+**What did generalise: a warning, not an answer.** When another top-three member holds clearly
+more exclusive evidence than the leader, the leader is rarely right: 1 of 8 such rows on the fresh
+seeds, against about 87% leader accuracy overall. The exclusive-evidence favourite is right only
+2 of 8 times, and in the other 5 the truth is elsewhere. Such a leader always has a negative
+separation, so it is never named already. The analyst view reports the state, not a winner.
+
+**Top-three view** (`apt_classifier/top3_view.py`, `CaseService.top3`,
+`GET /api/cases/{id}/top3`, the light `top3` summary in every case payload). It is display only:
+it reads the decision's recorded gate discrimination, the combiner's raw probabilities and RRF
+ranks, and the stage, and the engine never imports it. For each of the first three groups it shows:
+
+- the exclusive evidence by channel (stacked with the gate's weights), the raw combiner
+  probability (labelled as fitted on ATT&CK folds, never renormalised over three) and the RRF
+  place before the combiner;
+- the documented profile size, with a caution for the largest tenth;
+- the named software;
+- **ATT&CK's own documentation**: the stated origin (with the sentence that states it), the
+  threat type from the state-sponsorship and criminal markers (`origin.documented_threat_type`)
+  and the motivations the motivation classifier's vocabulary finds. These are labelled "ATT&CK
+  documents (not inferred from this case)".
+
+For each pair it shows the separation computed as the gate computes it, the documented-overlap
+reason and profile containment, and the accepted techniques, named software and actor-behaviour
+wins that only one side documents. A state banner leads, first match wins:
+
+| state | condition |
+|---|---|
+| named | the decision named the leader |
+| overlap | the leader and another top-three group are documented-related and their profiles nest (containment >= 0.8) or their pair separation is below 0.5 |
+| split | another top-three member leads the leader's D by at least 1.25 (the summary adds when one channel favours the leader) |
+| thin | the largest D among the three is at most 1.5 |
+| not separated | the leader is ahead but below the naming bar |
+
+The thresholds are display labels found on the development data, not gates. The React app shows
+the view as the default "Top three" tab of Distinguish, and the Assessment page shows a badge that
+links to it. Streamlit is unchanged.
+
+**Distinguish replays the gate's own window.** `CaseService.distinguish` used to default to the
+top 10 in the combined order, while the decision scores the gate window: the combiner's top five
+plus the RRF top five, 5 to 8 groups. The two separations therefore differed (one test case:
+0.891 in Distinguish, 0.875 in the decision). The default is now the recorded window in its
+recorded order, returned as `gate_top_k`, so both pages show the same number. An explicit `top_k`
+still works.
+
+**Benchmark instrumentation.** Each attribution benchmark row now records:
+
+- for the first three places, the combiner probability, RRF rank and classifier ranks;
+- the accepted techniques with their confidences;
+- the gate window's actor-behaviour matches (ids and scores, never text);
+- decisive software and negative answers;
+- whether the leader-consistency guard fired.
+
+From these inputs `discriminate` replays every recorded channel to within 0.0003 (rounding of
+the recorded inputs). Before, the technique channel replayed at 0.77-0.86x and behaviour could
+not be replayed at all. The summary adds `top1_given_top3`, `pairwise_12` (the truth first when
+it is first or second) and `leader_guard_fired`, and `fingerprint_inputs` records the
+discrimination weights. A run refuses to start or to write when the learned combiner is enabled
+but did not load. A fingerprint mismatch would otherwise fall back to the RRF order silently
+(fold top-1 0.83 -> about 0.60); `--allow-inactive-combiner` measures that fallback on purpose.
+
 ## 11. Origin and intrusion-type assessment
 
 `apt_classifier/origin.py` performs a separate post-fusion assessment.
@@ -3241,6 +3325,54 @@ A correct Target OS helps or is neutral. A wrong one hurts: the clinic intrusion
 portal (cron persistence, `/etc/shadow`, `chmod`), and "Windows" removed exactly those techniques. The
 analyst guidance is therefore to pick every operating system the activity touched and to leave the
 field empty when unknown; the setting is never inferred from the evidence.
+
+#### 21.3.13 Distinguishing the top three: a pre-registered reorder that did not replicate (2026-10-01)
+
+**Design data, every look.** About 80 configurations of the rule (margins, the guard, separation
+triggers, K=3 recomputed discrimination, a learned pairwise model, the group network as a judge,
+victimology, Condorcet, size-normalised mass) were replayed offline over the seed-7 folds and both
+CTI-HAL variants (`top3`/`topk` rows). The best was the rule of 10.10 at margin 1.25 with
+tolerance 0.75: folds 127 -> 132 (+5/-0), anonymized CTI-HAL 25 -> 27 (+2/-0), as reported
+31 -> 31. Any margin from 1.0 to 1.5 gave the same result. Because these sets chose the rule, the
+rule and its acceptance bar were committed before any fresh run (10.10).
+
+**Fresh fold seeds 41 and 53** (153 known rows and 25 removed actors each, combiner active on every
+row, stage off, replayed with `scripts/top3_replay.py`):
+
+| seed | top-1 | top-5 | MRR | named (all known correct) | removed actors named | top-1 given top-3 | rule at 1.25 |
+|---|---|---|---|---|---|---|---|
+| 41 | 0.863 | 0.948 | 0.899 | 37 | 1 of 25 (G1053 as G0027) | 0.936 | +1/-1 |
+| 53 | 0.876 | 0.935 | 0.909 | 35 | 0 of 25 | 0.944 | +1/-0 |
+
+Pre-registered bar: at most one loss pooled (met), net +2 per seed (not met: 0 and +1) and a
+largest correct-leader gap of at most 1.15 (not met: 1.54 on seed 41). The allowed fallback,
+raising the margin to the smallest value with no loss and 0.1 slack (1.75), leaves seed 41 at
++0/-0 and seed 53 at +1/-0, so the rule is **not adopted**. The exploratory sweep on the same
+seeds fails everywhere (wins/losses on seeds 7 | 41 | 53):
+
+| variant | seed 7 | seed 41 | seed 53 |
+|---|---|---|---|
+| margin 0.75 | +6/-2 | +3/-2 | +1/-3 |
+| margin 1.0 | +5/-0 | +2/-2 | +1/-0 |
+| margin 1.25 (pre-registered) | +5/-0 | +1/-1 | +1/-0 |
+| margin 2.0 | +3/-0 | +0/-0 | +1/-0 |
+| leader separation < -0.5, promote max D | +5/-2 | +2/-3 | +1/-3 |
+| leader separation < -0.3, promote max D | +7/-8 | +3/-8 | +2/-8 |
+
+Reading: the seed-7 gain was mostly a selection effect, and the fresh seeds show what
+pre-registration is for. Where the condition holds (another top-three member leads D by at least
+1.25), the leader was right in 1 of 8 fresh rows and the favourite in 2. The leader is unreliable
+there, and promoting the favourite does not fix it. The analyst view reports this as "evidence
+pulls both ways" (10.10), and naming is unaffected (such leaders have negative separation).
+
+**Same-code baseline and parity.** The main checkout's `*_current.json` artifacts were regenerated
+on 2026-10-01 by another branch (`platform_from_text`, target-OS mapping). They differ from this
+branch's code in one technique on one row per set, so the before artifacts here are a same-code
+run at a5de814. Seed 7: top-1 0.830, MRR 0.880, 32 named. CTI-HAL anonymized: 0.455 and 10 named.
+As reported: 0.564 and 15 named. With the instrumentation added, every previously recorded field
+is identical row for row on seed 7 (153 rows) and on anonymized CTI-HAL (55). The new summary
+fields read: seed 7 top-1 given top-3 0.894, pairwise #1-vs-#2 0.948; CTI-HAL anonymized 0.806 and
+0.862.
 
 ## 22. Failure modes and troubleshooting
 

@@ -393,6 +393,24 @@ def documented_origins(kb: Any, group_id: str) -> dict[str, str]:
     return dict(documented_origin_table(kb).get(group_id, {}))
 
 
+def documented_threat_type(kb: Any, group_id: str) -> dict[str, Any]:
+    """ATT&CK's own wording about a group's nature: the state-sponsorship and criminal markers
+    its description and linked campaigns contain (the markers the threat-type assessment
+    weighs). ``type`` is state-sponsored, criminal, mixed or None."""
+    profile = _normalize(" ".join(_profile_texts(kb, group_id)))
+    state = sorted(marker for marker in _STATE_MARKERS if marker in profile)
+    criminal = sorted(marker for marker in _CRIMINAL_MARKERS if marker in profile)
+    if state and criminal:
+        kind = "mixed"
+    elif state:
+        kind = "state-sponsored"
+    elif criminal:
+        kind = "criminal"
+    else:
+        kind = None
+    return {"type": kind, "state_markers": state, "criminal_markers": criminal}
+
+
 def _origin_pattern(sentence: str, alias: str) -> bool:
     escaped = re.escape(alias)
     patterns = (

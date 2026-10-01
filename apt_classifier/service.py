@@ -46,6 +46,7 @@ from apt_classifier.session import (
     verifications_from_records,
 )
 from apt_classifier.threat_intel import PublicThreatIntelClient, ThreatIntelSnapshot
+from apt_classifier.top3_view import build_top3_view, top3_summary
 from apt_classifier.vectorstore import ChromaVectorStore
 
 SAMPLE_PATH = Path(__file__).resolve().parents[1] / "data" / "samples" / "case_observation.txt"
@@ -655,14 +656,24 @@ class CaseService:
         return updated
 
     # ----- distinguishing the shortlist -----
-    def distinguish(self, case_id: str, *, top_k: int = 10, limit: int = 12) -> dict[str, Any]:
+    def distinguish(
+        self, case_id: str, *, top_k: int | None = None, limit: int = 12
+    ) -> dict[str, Any]:
         """What separates the top-K, and which pending candidates or interview leads would
-        change the separation the most (counterfactual replays of the discrimination)."""
+        change the separation the most (counterfactual replays of the discrimination).
+
+        By default K is the naming gate's own window (the combiner's top five plus the RRF
+        top five, 5-8 groups), replayed in the recorded order, so the separation shown equals
+        the decision's."""
         state, _ = self.get(case_id)
         kb = self.engine.kb
         settings = self.engine.settings
         fusion = state.deterministic_fusion or state.fusion
-        k = max(2, min(int(top_k), 15))
+        context = state.context
+        recorded = getattr(context, "discrimination", None)
+        recorded_order = [item.group_id for item in recorded.scores] if recorded is not None else []
+        gate_k = len(recorded_order)
+        k = max(2, min(int(top_k if top_k is not None else (gate_k or 10)), 15))
         weights = self.engine.discrimination_weights
         options = {
             "top_k": k,
@@ -670,18 +681,20 @@ class CaseService:
             "tool_weight_cap": float(getattr(settings, "software_tool_weight_cap", 1.5)),
             "behavior_threshold": float(settings.behavior_similarity_threshold),
         }
-        context = state.context
         soft = dict(getattr(context, "contrast_techniques", {}) or {})
-        # The stage decision scores the shortlist in the fusion order *before* the discriminative
-        # re-ranking (the leader is the ensemble's rank 1). Replay on that same order so the
-        # separation shown here equals the decision's; the recorded discrimination keeps it.
-        recorded = getattr(context, "discrimination", None)
-        recorded_order = [item.group_id for item in recorded.scores] if recorded is not None else []
-        top_entries = list(fusion.entries[:k])
-        if recorded_order and {e.group_id for e in top_entries} >= set(recorded_order):
-            position = {gid: index for index, gid in enumerate(recorded_order)}
-            top_entries.sort(key=lambda e: (position.get(e.group_id, len(position)), e.rank))
-        basis = replace(fusion, entries=tuple(top_entries) + tuple(fusion.entries[k:]))
+        # The stage decision scored the gate window in its recorded order (leader first; with the
+        # combiner the window adds RRF top-five groups the combiner ranked lower). Whenever K
+        # covers that window, replay it first, then the next groups in fusion order, so the
+        # separation shown here equals the decision's at K = window size.
+        by_id = fusion.by_group()
+        if recorded_order and k >= gate_k and all(gid in by_id for gid in recorded_order):
+            window = set(recorded_order)
+            ordered = [by_id[gid] for gid in recorded_order] + [
+                entry for entry in fusion.entries if entry.group_id not in window
+            ]
+        else:
+            ordered = list(fusion.entries)
+        basis = replace(fusion, entries=tuple(ordered))
         names = {
             gid: (g.name if g else gid)
             for gid, g in ((e.group_id, kb.groups.get(e.group_id)) for e in basis.entries[:k])
@@ -811,6 +824,7 @@ class CaseService:
         by_group = base.by_group()
         return {
             "top_k": k,
+            "gate_top_k": gate_k,
             "separation": round(base.separation, 4),
             "leader_total": round(base.leader_total, 4),
             "leader": {
@@ -861,6 +875,30 @@ class CaseService:
             "pending": pending[: max(1, limit)],
             "leads": leads[:8],
         }
+
+    def top3_view(self, state: Any) -> dict[str, Any]:
+        """Head-to-head of the decision's first three candidates (display only, docs 10.10)."""
+        settings = self.engine.settings
+        thresholds = self.engine.attribution_thresholds
+        return build_top3_view(
+            self.engine.kb,
+            state,
+            floor=float(getattr(settings, "attribution_separation_floor", 1.0)),
+            separation_bar=float(getattr(thresholds, "hypothesis_separation", 0.5)),
+            min_discriminative=float(getattr(thresholds, "hypothesis_min_discriminative", 3.0)),
+            behavior_threshold=float(settings.behavior_similarity_threshold),
+        )
+
+    def top3(self, case_id: str) -> dict[str, Any]:
+        state, _ = self.get(case_id)
+        return self.top3_view(state)
+
+    def top3_summary(self, state: Any) -> dict[str, Any] | None:
+        """State and one-line summary for the case payload; never fails the payload."""
+        try:
+            return top3_summary(self.top3_view(state))
+        except Exception:  # noqa: BLE001 - an explanatory badge must not break a case view
+            return None
 
     # ----- views and exports -----
     def dossier(self, case_id: str, group_id: str) -> dict[str, Any]:

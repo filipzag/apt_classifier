@@ -10,7 +10,8 @@ export const keys = {
   case: (id: string) => ['case', id] as const,
   interview: (id: string) => ['interview', id] as const,
   dossier: (id: string, group: string) => ['dossier', id, group] as const,
-  distinguish: (id: string, k: number) => ['distinguish', id, k] as const,
+  distinguish: (id: string, k: number | null) => ['distinguish', id, k ?? 'gate'] as const,
+  top3: (id: string) => ['top3', id] as const,
   canvas: (id: string, g: number, e: number) => ['canvas', id, g, e] as const,
   diamond: (id: string, g: number, c: number, i: number) => ['diamond', id, g, c, i] as const,
   intel: (id: string, d: number, c: boolean) => ['intel', id, d, c] as const,
@@ -48,10 +49,19 @@ export function useInterview(id: string | undefined) {
   })
 }
 
-export function useDistinguish(id: string | undefined, topK: number) {
+export function useDistinguish(id: string | undefined, topK: number | null) {
   return useQuery({
     queryKey: keys.distinguish(id ?? '', topK),
     queryFn: () => api.distinguish(id!, topK),
+    enabled: Boolean(id),
+    staleTime: 30_000,
+  })
+}
+
+export function useTop3(id: string | undefined) {
+  return useQuery({
+    queryKey: keys.top3(id ?? ''),
+    queryFn: () => api.top3(id!),
     enabled: Boolean(id),
     staleTime: 30_000,
   })
@@ -74,6 +84,7 @@ export function useCaseWriter(id: string) {
     void client.invalidateQueries({ queryKey: ['interview', id] })
     void client.invalidateQueries({ queryKey: ['dossier', id] })
     void client.invalidateQueries({ queryKey: ['distinguish', id] })
+    void client.invalidateQueries({ queryKey: ['top3', id] })
     void client.invalidateQueries({ queryKey: ['canvas', id] })
     void client.invalidateQueries({ queryKey: ['diamond', id] })
     void client.invalidateQueries({ queryKey: keys.cases })
@@ -127,6 +138,7 @@ export function useInterviewMutations(id: string) {
     client.setQueryData(keys.interview(id), state)
     void client.invalidateQueries({ queryKey: keys.case(id) })
     void client.invalidateQueries({ queryKey: ['distinguish', id] })
+    void client.invalidateQueries({ queryKey: ['top3', id] })
     void client.invalidateQueries({ queryKey: keys.cases })
   }
   const answer = useMutation({

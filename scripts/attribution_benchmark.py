@@ -457,6 +457,58 @@ def _combiner_fields(state: Any, truth: str | None) -> dict[str, Any]:
     }
 
 
+def _top3_fields(state: Any, ranked: list[str]) -> dict[str, Any]:
+    """Top-three diagnostics and exact-replay inputs per row (docs 10.10): for the first three
+    places their combiner probability, RRF rank and classifier ranks; the accepted techniques
+    with their confidences, the actor-behaviour matches of the gate window (ids and scores only,
+    never text), decisive software and negative answers, so ``discriminate`` can be replayed
+    offline; and whether the leader-consistency guard fired."""
+    context = state.context
+    discrimination = getattr(context, "discrimination", None)
+    window = (
+        {item.group_id for item in discrimination.scores} if discrimination is not None else set()
+    )
+    info = context.combiner if isinstance(getattr(context, "combiner", None), dict) else {}
+    probabilities = info.get("probabilities") or {}
+    rrf_ranks = info.get("rrf_ranks") or {}
+    deterministic = state.deterministic_fusion or state.fusion
+    entries = deterministic.by_group()
+    return {
+        "top3_detail": [
+            {
+                "group_id": group_id,
+                "combiner_probability": probabilities.get(group_id),
+                "rrf_rank": rrf_ranks.get(group_id),
+                "classifier_ranks": dict(entries[group_id].classifier_ranks)
+                if group_id in entries
+                else {},
+            }
+            for group_id in ranked[:3]
+        ],
+        "accepted_confidences": {
+            technique_id: round(float(confidence), 4)
+            for technique_id, confidence in sorted(context.observed_techniques.items())
+        },
+        "window_behavior_matches": sorted(
+            [
+                str(match.group_id),
+                str(match.observation_id),
+                str(match.technique_id),
+                round(float(match.score), 4),
+            ]
+            for match in getattr(context, "specific_behavior_matches", ()) or ()
+            if str(getattr(match, "group_id", "")) in window
+        ),
+        "decisive_software": dict(getattr(context, "decisive_software", {}) or {}),
+        "negative_techniques": sorted(getattr(context, "negative_techniques", ()) or ()),
+        "leader_guard_fired": bool(
+            discrimination is not None
+            and deterministic.entries
+            and discrimination.leader_id != deterministic.entries[0].group_id
+        ),
+    }
+
+
 def _rank_of(fusion: Any, group_id: str) -> int | None:
     ranked = [entry.group_id for entry in fusion.entries]
     return ranked.index(group_id) + 1 if group_id in ranked else None
@@ -564,6 +616,7 @@ def run_known(
                     "margin": decision.margin if decision else None,
                     "maturity": decision.maturity_score if decision else None,
                     "leading": decision.leading_group_id if decision else None,
+                    **_top3_fields(state, ranked),
                 }
             )
             for key, value in proxy.dropped.items():
@@ -643,6 +696,7 @@ def run_unknown(
                 "margin": decision.margin if decision else None,
                 "maturity": decision.maturity_score if decision else None,
                 "top3": [entry.group_id for entry in fusion.entries[:3]],
+                **_top3_fields(state, [entry.group_id for entry in fusion.entries]),
             }
         )
     return rows
@@ -761,6 +815,19 @@ def summarize(
         metrics["deterministic_top1"] = fmean(1.0 if r == 1 else 0.0 for r in det)
         metrics["deterministic_top5"] = fmean(1.0 if r and r <= 5 else 0.0 for r in det)
         metrics["deterministic_mrr"] = fmean(1.0 / r if r else 0.0 for r in det)
+    if known_rows:
+        in_top3 = [row for row in known_rows if row["rank"] and row["rank"] <= 3]
+        in_top2 = [row for row in known_rows if row["rank"] in (1, 2)]
+        metrics["top1_given_top3"] = (
+            fmean(1.0 if row["rank"] == 1 else 0.0 for row in in_top3) if in_top3 else None
+        )
+        metrics["pairwise_12"] = (
+            fmean(1.0 if row["rank"] == 1 else 0.0 for row in in_top2) if in_top2 else None
+        )
+    if any("leader_guard_fired" in row for row in known_rows + unknown_rows):
+        metrics["leader_guard_fired"] = sum(
+            1 for row in known_rows + unknown_rows if row.get("leader_guard_fired")
+        )
     all_rows = known_rows + unknown_rows
     if all_rows and any("llm" in row for row in all_rows):
         llm_rows = [row["llm"] for row in all_rows if "llm" in row]
@@ -776,6 +843,17 @@ def summarize(
         stages["unknown"][row["stage"]] = stages["unknown"].get(row["stage"], 0) + 1
     metrics["stage_distribution"] = stages
     return metrics
+
+
+def _inactive_combiner_rows(rows: list[dict[str, Any]]) -> list[str]:
+    """Rows scored without the learned combiner although it is enabled: the engine falls back
+    to the RRF order silently when the artifact fails closed (e.g. a fingerprint mismatch).
+    Rows without a fusion (no candidates) carry no status and are not counted."""
+    return [
+        f"{row['group_id']}:{row.get('report_id') or ''}".rstrip(":")
+        for row in rows
+        if row.get("combiner_status") not in (None, "active")
+    ]
 
 
 def _auc(positives: list[float], negatives: list[float]) -> float | None:
@@ -891,6 +969,12 @@ def main(argv: list[str] | None = None) -> int:
         '"the adversary" before analysis, as the held-out folds do (default: statements as reported)',
     )
     parser.add_argument(
+        "--allow-inactive-combiner",
+        action="store_true",
+        help="write the artifact even when the learned combiner is enabled but did not load "
+        "(the engine then falls back to the RRF order); default: refuse",
+    )
+    parser.add_argument(
         "--set",
         action="append",
         default=[],
@@ -941,6 +1025,19 @@ def main(argv: list[str] | None = None) -> int:
     if not folds:
         parser.error("no eligible groups")
     engine = AttributionEngine(settings, kb, store, client)  # type: ignore[arg-type]
+    combiner_expected = bool(getattr(settings, "attribution_combiner_enabled", False))
+    if (
+        combiner_expected
+        and engine.combiner_status != "active"
+        and not args.allow_inactive_combiner
+    ):
+        print(
+            f"refusing to run: the learned combiner is enabled but {engine.combiner_status!r}; "
+            "a fingerprinted source or weight changed (refit with make fit-combiner), or pass "
+            "--allow-inactive-combiner to measure the RRF fallback deliberately",
+            file=sys.stderr,
+        )
+        return 3
     started = time.time()
     try:
         known_rows, dropped = run_known(
@@ -983,6 +1080,8 @@ def main(argv: list[str] | None = None) -> int:
             "fingerprint": getattr(engine.profile_forest, "fingerprint", None),
             "votes": _forest_votes(engine),
         },
+        # the channel weights the gate window was scored with (offline replays read them)
+        "discrimination_weights": dict(vars(engine.discrimination_weights)),
         "source_fingerprint": source_fingerprint(FINGERPRINTED_SOURCES),
         "platform_from_text": bool(getattr(settings, "technique_platform_from_text", False)),
         "pipeline": args.pipeline,
@@ -1029,6 +1128,15 @@ def main(argv: list[str] | None = None) -> int:
         "known": known_rows,
         "unknown": unknown_rows,
     }
+    inactive = _inactive_combiner_rows(known_rows + unknown_rows)
+    if combiner_expected and inactive and not args.allow_inactive_combiner:
+        print(
+            f"refusing to write {args.output}: the learned combiner is enabled but was inactive "
+            f"on {len(inactive)} rows (first {inactive[0]}); pass --allow-inactive-combiner to "
+            "record the RRF fallback deliberately",
+            file=sys.stderr,
+        )
+        return 3
     destination = write_artifact(args.output, report)
     if not args.quiet:
         print(
