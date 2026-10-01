@@ -76,7 +76,41 @@ def test_target_os_keeps_other_operating_systems_out_of_the_interview():
     assert {c.technique_id for c in linux} == {"TCRON", "TJOB", "TCLOUD"}
     job = next(c for c in linux if c.technique_id == "TJOB")
     scope_step = next(s for s in job.investigation_steps if s.startswith("Scope the search"))
-    assert scope_step == "Scope the search to relevant Containers, Linux systems and identities."
+    assert scope_step == "Scope the search to Linux hosts and containers."
+
+
+def test_scope_step_names_places_to_search_not_platform_labels():
+    kb = SimpleNamespace(
+        group_techniques={"G1": {"TPRE", "TALL", "TESX"}},
+        techniques={
+            "TPRE": SimpleNamespace(
+                name="Tool", platforms=("PRE",), tactics=("resource-development",)
+            ),
+            "TALL": SimpleNamespace(
+                name="Phishing",
+                platforms=(
+                    "Identity Provider",
+                    "Linux",
+                    "Office Suite",
+                    "SaaS",
+                    "Windows",
+                    "macOS",
+                ),
+            ),
+            "TESX": SimpleNamespace(name="Hypervisor CLI", platforms=("ESXi", "Linux")),
+        },
+    )
+    steps = {
+        c.technique_id: c.investigation_steps for c in shortlist_questions(kb, {"G1": 1.0}, set())
+    }
+    # pre-compromise techniques happen outside the environment: no "PRE systems"
+    assert steps["TPRE"][0].startswith("Pre-compromise activity outside the environment")
+    assert not any("PRE" in step for step in steps["TPRE"])
+    assert (
+        "Scope the search to Windows, Linux and macOS hosts, SaaS applications, office suites "
+        "(Microsoft 365, Google Workspace) and identity providers." in steps["TALL"]
+    )
+    assert "Scope the search to Linux hosts and ESXi hypervisors." in steps["TESX"]
 
 
 def test_shortlist_does_not_reask_intake_confirmed_archive_utility():

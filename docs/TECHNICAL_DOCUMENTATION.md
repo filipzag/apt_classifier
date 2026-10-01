@@ -475,7 +475,11 @@ The interview and the Distinguish step use the case's Target OS as well
 Distinguish leads). A technique documented only for other operating systems is never asked about:
 the hosts cannot show it, and a "no" would count against the groups that document it for a reason
 that has nothing to do with them. Each lead's "scope the search" step names only the platforms still
-relevant (a Linux case: Linux plus cloud, container or identity platforms), and in production the
+relevant (a Linux case: Linux plus cloud, container or identity platforms), worded as places to
+search ("Windows and Linux hosts, ESXi hypervisors and identity providers"). ATT&CK's `PRE` platform
+(the 96 reconnaissance and resource-development techniques) is not a place on the network, so those
+leads point to threat intelligence and external records (registrations, perimeter scans, tooling
+recovered from hosts) instead of naming "PRE systems". In production the
 question model is told which operating systems the hosts run. Per-observation text scopes do not
 narrow the interview, because a case can mix hosts; only the analyst's Target OS does. Without one,
 nothing changes: for "the attacker created a scheduled task that runs the payload every hour" the

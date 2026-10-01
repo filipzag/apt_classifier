@@ -448,6 +448,47 @@ def should_stop(
     )
 
 
+# How ATT&CK platform labels read in an investigation step; the host operating systems are
+# grouped into one phrase ("Windows and Linux hosts").
+_HOST_LABELS = ("Windows", "Linux", "macOS")
+_PLATFORM_PHRASES = {
+    "ESXi": "ESXi hypervisors",
+    "Containers": "containers",
+    "Network Devices": "network devices",
+    "IaaS": "cloud infrastructure (IaaS)",
+    "SaaS": "SaaS applications",
+    "Office Suite": "office suites (Microsoft 365, Google Workspace)",
+    "Identity Provider": "identity providers",
+}
+# "PRE" marks reconnaissance and resource development (always alone in ATT&CK 19): it happens
+# before access, outside the victim's systems, so there is nothing to scope on hosts.
+_PRE_COMPROMISE_STEP = (
+    "Pre-compromise activity outside the environment: look for it in threat intelligence and "
+    "external records (domain, certificate and hosting registrations, scans or probes seen at "
+    "the perimeter) and in the tooling recovered from hosts, not in host logs alone."
+)
+
+
+def _join(items: list[str]) -> str:
+    return items[0] if len(items) == 1 else f"{', '.join(items[:-1])} and {items[-1]}"
+
+
+def _scope_step(platforms: tuple[str, ...]) -> str | None:
+    """Where to look, in words: the technique's ATT&CK platforms as places to search."""
+    if not platforms:
+        return None
+    if set(platforms) == {"PRE"}:
+        return _PRE_COMPROMISE_STEP
+    parts = []
+    hosts = [label for label in _HOST_LABELS if label in platforms]
+    if hosts:
+        parts.append(f"{_join(hosts)} hosts")
+    parts += [phrase for label, phrase in _PLATFORM_PHRASES.items() if label in platforms]
+    known = {*_HOST_LABELS, *_PLATFORM_PHRASES, "PRE"}
+    parts += [label for label in platforms if label not in known]  # a newer ATT&CK label, as is
+    return f"Scope the search to {_join(parts)}." if parts else None
+
+
 def _investigation_steps(
     kb: Any, technique_id: str, scope: PlatformScope | None = None
 ) -> tuple[str, ...]:
@@ -470,8 +511,9 @@ def _investigation_steps(
             technique_id, _TECHNIQUE_COLLECTION_GUIDANCE.get(parent_id, ())
         )
         steps.extend(collection_steps)
-    if platforms:
-        steps.append(f"Scope the search to relevant {', '.join(platforms)} systems and identities.")
+    scope_step = _scope_step(platforms)
+    if scope_step:
+        steps.append(scope_step)
     steps.extend(
         _TACTIC_GUIDANCE[tactic.casefold()]
         for tactic in tactics
