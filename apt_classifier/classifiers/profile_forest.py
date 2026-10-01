@@ -68,12 +68,8 @@ class ProfileForestClassifier:
 class SourceCountryClassifier:
     name = SOURCE_COUNTRY_NAME
 
-    def __init__(self, model: Any = None, *, score_all: bool = False) -> None:
+    def __init__(self, model: Any = None) -> None:
         self.model = model
-        # with ``score_all`` a group whose country class got probability 0 is ranked last
-        # instead of receiving no vote (docs 21.3.14): absence costs a full RRF vote, which
-        # pushed groups of an unpredicted class below every group of the predicted one
-        self.score_all = score_all
 
     def classify(self, context: ClassifierContext) -> ClassifierResult:
         prediction = _predict(self.model, context)
@@ -91,6 +87,4 @@ class SourceCountryClassifier:
             if probability > 0:
                 scores[group_id] = probability
                 signals[group_id] = (f"source_country:{country_class}:{probability:.2f}",)
-            elif self.score_all and country_class:
-                scores[group_id] = 0.0
         return build_result(self.name, context, scores, applicable=bool(scores), signals=signals)

@@ -129,6 +129,7 @@ def build_top3_view(
         item = scored.get(group_id)
         return float(item.total) if item is not None else 0.0
 
+    fused_rank = {entry.group_id: int(entry.rank) for entry in fusion.entries}
     candidates = []
     for entry in entries:
         gid = entry.group_id
@@ -151,6 +152,19 @@ def build_top3_view(
                     {"id": sid, "name": getattr(software.get(sid), "name", sid)}
                     for sid in sorted(software_ids & set(group_software.get(gid, ()) or ()))
                 ],
+                # groups ATT&CK documents as overlapping with this one, wherever they rank
+                "related": sorted(
+                    (
+                        {
+                            "group_id": other,
+                            "name": _name(kb, other),
+                            "reason": reason,
+                            "rank": fused_rank.get(other),
+                        }
+                        for other, reason in related_to(kb, gid).items()
+                    ),
+                    key=lambda item: (item["rank"] is None, item["rank"] or 0, item["group_id"]),
+                ),
                 "documented": {
                     "origins": [
                         {"country": country, "sentence": sentence[:300]}

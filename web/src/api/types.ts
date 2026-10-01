@@ -541,6 +541,8 @@ export interface Top3Candidate {
   profile_size: number
   broad_profile: boolean
   named_software: { id: string; name: string }[]
+  /** groups ATT&CK documents as overlapping with this one, with their rank in this case */
+  related: { group_id: string; name: string; reason: string; rank: number | null }[]
   /** ATT&CK's own description and campaigns, not an inference from this case */
   documented: {
     origins: { country: string; sentence: string }[]

@@ -2751,7 +2751,9 @@ carry no `parameters.actor_names` and read the statements as reported). Naming-g
 (`attribution_gate_sweep.py`) over `attribution_cti_hal_current.json` now read the anonymized
 rows. Every earlier CTI-HAL attribution number in this document, including the production
 measurement of 2026-09-28, was measured as reported; its before/after comparison stays valid
-because both sides read the same text.
+because both sides read the same text. On 2026-10-01 a leak in the anonymization was closed: a
+name that ended a sentence survived. The headline on the same code moved from top-3 31 to 29,
+top-5 0.636 to 0.600 and MRR 0.530 to 0.512, with top-1 unchanged at 0.455 (21.3.14).
 
 #### 21.3.5 Attribution benchmark (text in, group out)
 
@@ -3377,7 +3379,7 @@ is identical row for row on seed 7 (153 rows) and on anonymized CTI-HAL (55). Th
 fields read: seed 7 top-1 given top-3 0.894, pairwise #1-vs-#2 0.948; CTI-HAL anonymized 0.806 and
 0.862.
 
-#### 21.3.14 Shortlist recall on real reports (2026-10-01, in progress)
+#### 21.3.14 Shortlist recall on real reports (2026-10-01)
 
 **Diagnosis** (anonymized CTI-HAL headline, 24 reports with the truth outside the top three). The
 software matcher misses no ATT&CK software in any of them. The malware these reports name is
@@ -3418,6 +3420,57 @@ Selection over the 306 pooled known rows:
   carried to a combiner refit and evaluated once on the seed-7 folds, the anonymized and
   as-reported CTI-HAL runs, the public mapping gate and the EvidenceForge development bundles.
 - **Below the bar:** nothing is refit, and the result is recorded here.
+
+**Result of the design sweep: nothing clears the bar, nothing is adopted.** Pooled over the 306
+known rows of seeds 41 and 53, rank fusion, combiner off:
+
+| variant | top-1 | top-3 | top-5 | MRR | named | wrong names | top-5 better / worse |
+|---|---|---|---|---|---|---|---|
+| baseline | 194 | 254 | 272 | 0.747 | 61 | 0 | |
+| Naive Bayes weight 2.0 | 190 | 250 | 273 | 0.735 | 60 | 1 | +5 / -4 |
+| Naive Bayes weight 3.0 | 188 | 245 | 269 | 0.724 | 61 | 1 | +3 / -6 |
+| IDF length norm 0.5 | 189 | 251 | 275 | 0.734 | 61 | 0 | +5 / -2 |
+| both | 186 | 245 | 271 | 0.723 | 59 | 0 | +4 / -5 |
+| source country scores every group | 193 | 254 | 271 | 0.745 | 61 | 0 | +0 / -1 |
+
+Reading: weighting coverage more, the change the real-report diagnosis pointed at, costs first
+places on the ATT&CK folds, and the Naive Bayes variants name a wrong group. The best shortlist
+gain (+3 top-5 rows with the length norm) is below the bar and costs five first places. The
+real-report benefit would come largely from CTI-HAL's large, prominent truths, which the
+diagnosis warned about. Variant 6 was not run, because no weight variant was eligible. As
+pre-registered, CTI-HAL was not consulted for these variants, and the source-country option was
+removed again so the combiner artifact stays valid.
+
+**The anonymizer fix, same code** (frontend-next engine; only the benchmark's evidence
+anonymization differs):
+
+| set | top-1 | top-3 | top-5 | MRR | named (all correct) |
+|---|---|---|---|---|---|
+| ATT&CK folds, seed 7 (153 + 25 removed actors) | 127 -> 127 | 142 -> 142 | 147 -> 147 | 0.880 -> 0.880 | 32 -> 32; removed actors named 0 of 25 |
+| CTI-HAL anonymized headline (55) | 25 -> 25 | 31 -> **29** | 35 -> **33** | 0.530 -> **0.512** | 10 -> 10 |
+| CTI-HAL as reported (55) | 31 -> 31 | 37 -> 37 | 40 -> 40 | 0.636 -> 0.636 | 15 -> 15 |
+
+The two Carbanak reports that read "... known as Carbanak." lose the S0030 match and fall from
+rank 2 to 71 and out of the list. The folds' three leaking statements changed no outcome.
+
+**Cluster-aware top-3** (`cluster_top3`, a group ATT&CK documents as overlapping with the truth is
+in the top three; always reported beside the strict figure):
+
+| set | strict top-3 | cluster-aware top-3 |
+|---|---|---|
+| CTI-HAL anonymized | 29 (0.527) | 36 (0.655) |
+| CTI-HAL as reported | 37 (0.673) | 41 (0.745) |
+| ATT&CK folds, seed 7 | 142 (0.928) | 142 (0.928) |
+
+The Top-three view now lists, for each of the three, the groups ATT&CK documents as overlapping
+with it and their rank in the case. FIN7 ranked first shows "Carbanak #8".
+
+**What remains.** About 8 to 10 of the 24 reports outside the top three cannot be reached by a
+leak-safe pipeline change. In five Carbanak reports ATT&CK documents almost none of the report's
+techniques for Carbanak. Three come back only through the Carbanak malware, whose name is the
+group's. Two or three carry only generic evidence. The rest need evidence ATT&CK does not link to
+the group: malware not in ATT&CK, such as Bateleur, TONEDEAF and TinyMet, or tools documented for
+other groups.
 
 ## 22. Failure modes and troubleshooting
 

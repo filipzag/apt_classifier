@@ -183,3 +183,13 @@ def test_empty_shortlist():
     state = _state(kb, ["G0046", "G0008", "G0016"])
     state.fusion = state.deterministic_fusion = _fusion()
     assert build_top3_view(kb, state)["state"] == "empty"
+
+
+def test_each_candidate_lists_its_documented_overlap_with_rank():
+    kb = _kb()
+    view = build_top3_view(kb, _state(kb, ["G0046", "G0016", "G0008"]))
+    fin7 = next(c for c in view["candidates"] if c["group_id"] == "G0046")
+    assert [(r["group_id"], r["rank"]) for r in fin7["related"]] == [("G0008", 3)]
+    assert fin7["related"][0]["reason"]
+    apt29 = next(c for c in view["candidates"] if c["group_id"] == "G0016")
+    assert apt29["related"] == []

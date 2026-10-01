@@ -154,6 +154,22 @@ function CandidateCard({ candidate, view, max }: { candidate: Top3Candidate; vie
         </div>
       ) : null}
 
+      {candidate.related.length ? (
+        <div className="mt-2 flex flex-wrap items-center gap-1.5 text-[11px] text-muted">
+          <Link2 className="size-3 text-amber" /> documented overlap
+          {candidate.related.slice(0, 4).map((r) => (
+            <Tip key={r.group_id} content={r.reason}>
+              <span>
+                <Badge tone="amber">
+                  {r.name}
+                  {r.rank ? ` #${r.rank}` : ' · not ranked'}
+                </Badge>
+              </span>
+            </Tip>
+          ))}
+        </div>
+      ) : null}
+
       <div className="mt-3 rounded-lg border border-border bg-surface-1/60 px-3 py-2">
         <div className="flex items-center gap-1.5 text-[10px] font-semibold uppercase tracking-[0.08em] text-faint">
           <BookOpen className="size-3" /> ATT&CK documents (not inferred from this case)
