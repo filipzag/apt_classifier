@@ -3377,6 +3377,48 @@ is identical row for row on seed 7 (153 rows) and on anonymized CTI-HAL (55). Th
 fields read: seed 7 top-1 given top-3 0.894, pairwise #1-vs-#2 0.948; CTI-HAL anonymized 0.806 and
 0.862.
 
+#### 21.3.14 Shortlist recall on real reports (2026-10-01, in progress)
+
+**Diagnosis** (anonymized CTI-HAL headline, 24 reports with the truth outside the top three). The
+software matcher misses no ATT&CK software in any of them. The malware these reports name is
+either not in ATT&CK (Bateleur, TONEDEAF, TinyMet, Ammyy) or not linked to the true group, so
+better software matching recovers nothing. The primary causes:
+
+- Carbanak's profile is 9 techniques, all inside FIN7's (5 reports, not fixable).
+- The anonymizer removes the Carbanak malware name, which is also the group name (3 reports,
+  measurement policy).
+- The technique scorers favour small profiles over groups that explain all of the evidence
+  (7 reports).
+- Thin, generic evidence (4 reports).
+- Shared software favours another group (2 reports).
+- The country vote gives no vote to groups whose class got probability 0 (1 report).
+
+**Measurement fix.** The anonymizer kept a name that ends a sentence: 3 CTI-HAL statements and 3
+seed-7 folds read their group's name. It is closed in the benchmark (commit 550cce9); results
+after the fix are in this section.
+
+**Pre-registered design protocol** (written before any run). The variants, all at the rank-fusion
+level with the learned combiner off:
+
+1. `NAIVE_BAYES_WEIGHT` 2.0;
+2. `NAIVE_BAYES_WEIGHT` 3.0;
+3. `IDF_OVERLAP_LENGTH_NORM` 0.5;
+4. variants 1 and 3 together;
+5. `SOURCE_COUNTRY_SCORE_ALL`;
+6. the best weight variant combined with variant 5.
+
+Each runs on fold seeds 41 and 53, known rows only, against the same-code baseline.
+
+Selection over the 306 pooled known rows:
+
+- **Eligible:** top-1 at most 2 rows below the baseline, MRR at most 0.005 below it, and no wrong
+  named group.
+- **Choice:** the most top-5 rows, with MRR breaking ties.
+- **Bar to continue:** at least +3 top-5 rows over the baseline. A variant that clears it is
+  carried to a combiner refit and evaluated once on the seed-7 folds, the anonymized and
+  as-reported CTI-HAL runs, the public mapping gate and the EvidenceForge development bundles.
+- **Below the bar:** nothing is refit, and the result is recorded here.
+
 ## 22. Failure modes and troubleshooting
 
 ### 22.1 “ATT&CK knowledge base has not been ingested”
