@@ -180,7 +180,10 @@ def test_residual_audit_lists_names_the_patterns_cannot_touch(kb):
     anonymizer = ReportAnonymizer(kb, "strict")
     found = anonymizer.residuals(["see the manage-apt32 write-up", "the adversary used PsExec"])
     assert [item["term"] for item in found] == ["APT32"]
-    assert anonymizer.residuals(["play the Chromium build", "a Cuba sample"]) == []
+    # lower-case ordinary words and software names are not residuals; a title-case
+    # ordinary-word alias is listed for review, since the strict guard keeps it
+    assert anonymizer.residuals(["play the game", "a Cuba sample"]) == []
+    assert [item["term"] for item in anonymizer.residuals(["the Chromium build"])] == ["CHROMIUM"]
 
 
 def _feed(items: list[tuple[str, str]]) -> str:
@@ -487,3 +490,90 @@ def test_collector_keeps_elastic_slots_and_warns_when_the_headline_is_not_strict
         elastic_attribution_path=tmp_path / "e.json",
     )
     assert any("elastic_attribution" in warning for warning in report["warnings"])
+    sampled = artifact("strict")
+    sampled["parameters"]["report_observations"] = 30  # the volume diagnostic is not the headline
+    report = compose(
+        **common, elastic_attribution=sampled, elastic_attribution_path=tmp_path / "e.json"
+    )
+    assert any("elastic_attribution" in warning for warning in report["warnings"])
+
+
+def test_strict_closes_the_gaps_found_in_review(kb):
+    from scripts.attribution_benchmark import anonymize_report_folds
+    from scripts.report_anonymizer import ReportAnonymizer
+
+    texts = [
+        "North Koreans posed as Americans to get hired.",
+        "TraderTraitor/Jade Sleet/UNC4899 used the loader.",
+        "Lazarus-linked infrastructure hosted the payload.",
+        "The CIS-region check and pro-DPRK hacktivists.",
+        "The DPRK continues attacks against exchanges.",
+        "An Iranian group attacked banks in the U.S. with a state sponsored kit.",
+        "The SVG was served to en-US browsers in US-ASCII.",
+    ]
+    (fold,), records, _ = anonymize_report_folds(_folds(texts), kb, level="strict")
+    assert fold.observations == (
+        "undisclosed nationals posed as undisclosed nationals to get hired.",
+        "the adversary/the adversary/the adversary used the loader.",
+        "the adversary-linked infrastructure hosted the payload.",
+        "The undisclosed-region check and pro-undisclosed hacktivists.",
+        "The undisclosed country continues attacks against exchanges.",
+        "A group attacked banks in the undisclosed country with a kit.",
+        "The SVG was served to en-US browsers in US-ASCII.",
+    )
+    assert records[0]["strict"]["residuals"] == []
+    anonymizer = ReportAnonymizer(kb)
+    # "known as" is a cue only before a name, not before a technique description
+    assert anonymizer.attribution_flags(
+        ["REF7001 takes advantage of a technique known as reflective binary loading."]
+    ) == [None]
+    assert anonymizer.attribution_flags(
+        ["The cluster tracked as REF7001 is known as Lazarus."]
+    ) == ["sentence"]
+    # the audit keeps its positions when case folding changes the length, and lists title-case
+    # ordinary-word aliases that the strict guard keeps
+    assert [item["term"] for item in anonymizer.residuals(["Straße: see manage-apt32"])] == [
+        "APT32"
+    ]
+    # the audit sees a group name in a dash compound, and strict replaces it
+    assert [item["term"] for item in anonymizer.residuals(["Leviathan-style lures"])] == [
+        "Leviathan"
+    ]
+    (fold,), _, _ = anonymize_report_folds(_folds(["Leviathan-style lures"]), kb, level="strict")
+    assert fold.observations == ("the adversary-style lures",)
+
+
+def test_prepare_drops_every_variant_of_the_non_narrative_headings():
+    from scripts.prepare_elastic_reports import _DROP_HEADING_RE, _normalize_heading
+
+    def dropped(heading: str) -> bool:
+        return bool(_DROP_HEADING_RE.match(_normalize_heading(heading).lower()))
+
+    for heading in (
+        "Techniques (sub-techniques)",
+        "Techniques / Sub techniques",
+        "Detecting and preventing REVSTEALER",
+        "Detection rules for REVSTEALER",
+        "Prevention rules for REVSTEALER",
+        "YARA rules for REVSTEALER",
+        "Observables and indicators of compromise",
+        "Existing Detection Rules",
+        "Malware and MITRE ATT\\&CK",
+        "[Malware] and MITRE ATT&CK",
+    ):
+        assert dropped(heading), heading
+    for heading in (
+        "Detection crafting",
+        "Observing WhisperGate in Elastic Security",
+        "The undetected version of RUSTBUCKET",
+        "Execution",
+        "Persistence",
+    ):
+        assert not dropped(heading), heading
+
+
+def test_diagnostic_arms_need_their_own_output():
+    from scripts.attribution_benchmark import main
+
+    with pytest.raises(SystemExit):
+        main(["--cti-hal", "reports.jsonl", "--report-observations", "30"])

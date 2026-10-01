@@ -78,11 +78,14 @@ _HEADING_TAGS = {f"h{level}": level for level in range(1, 7)}
 # whole headings (normalized, lower case) of non-narrative sections, dropped for every post
 _DROP_HEADING_RE = re.compile(
     r"^(?:.*mitre att&ck.*"
-    r"|tactics|techniques(?: ?/ ?sub[- ]?techniques)?|observed (?:adversary )?tactics and techniques"
-    r"|detections?(?: logic| rules?| opportunities| capabilities)?"
-    r"|(?:malware )?(?:prevention|detection) capabilities|preventions?(?: rules?)?"
-    r"|hunting quer(?:y|ies).*|eql quer(?:y|ies)|es\|?ql quer(?:y|ies)|yara(?: rules?| signatures?)?"
-    r"|how to detect and prevent.*|observations|observables|indicators(?: of compromise.*)?|iocs?"
+    r"|tactics|techniques(?: ?(?:/|\() ?sub[- ]?techniques\)?)?"
+    r"|observed (?:adversary )?tactics and techniques"
+    r"|detections?(?: logic| rules?(?: for .*)?| opportunities| capabilities)?"
+    r"|existing detection rules|detecting and preventing .*"
+    r"|(?:malware )?(?:prevention|detection) capabilities|preventions?(?: rules?(?: for .*)?)?"
+    r"|hunting quer(?:y|ies).*|eql quer(?:y|ies)|es\|?ql quer(?:y|ies)"
+    r"|yara(?: rules?(?: for .*)?| signatures?)?"
+    r"|how to detect and prevent.*|observations|observables.*|indicators(?: of compromise.*)?|iocs?"
     r"|artifacts|references|appendix.*|(?:the )?diamond model|about elastic security labs"
     r"|defensive recommendations|recommendations)$"
 )
@@ -92,7 +95,8 @@ _FIGURE_LINE_RE = re.compile(r"^Figure \d+\b")
 
 
 def _normalize_heading(text: str) -> str:
-    return " ".join(text.replace("®", "").split())
+    # some feed headings carry markdown escapes ("MITRE ATT\\&CK")
+    return " ".join(text.replace("®", "").replace("\\", "").split())
 
 
 class _PostParser(HTMLParser):
@@ -286,7 +290,9 @@ def attack_citations(raw_bundle: Path | None, slugs: list[str]) -> dict[str, lis
 
 
 def group_citations_in_year(raw_bundle: Path | None, kb: Any, group_id: str, year: int) -> int:
-    """How many of the group's ATT&CK relationship citations name the activity year."""
+    """How many of the group's ATT&CK relationship citations were published in the activity year
+    (the year in the citation's source name or its "(YEAR, Month day)" date, not the
+    "Retrieved" access date)."""
     if raw_bundle is None or not raw_bundle.is_file() or group_id not in kb.groups:
         return 0
     stix_id = kb.groups[group_id].stix_id
@@ -296,8 +302,10 @@ def group_citations_in_year(raw_bundle: Path | None, kb: Any, group_id: str, yea
         if item.get("type") != "relationship" or item.get("source_ref") != stix_id:
             continue
         for reference in item.get("external_references") or []:
-            text = f"{reference.get('source_name', '')} {reference.get('description', '')}"
-            if str(year) in text:
+            published = re.search(r"\((\d{4})\b", str(reference.get("description") or ""))
+            if str(year) in str(reference.get("source_name") or "") or (
+                published is not None and published.group(1) == str(year)
+            ):
                 count += 1
                 break
     return count
@@ -552,6 +560,10 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument("--no-exemplar-audit", action="store_true")
     args = parser.parse_args(argv)
+    if args.feed is not None and not args.feed.is_file():
+        parser.error(
+            f"--feed {args.feed} does not exist (the cached feed is never replaced silently)"
+        )
     feed = args.feed or args.output / "feed.xml"
     if args.download or not feed.is_file():
         download_feed(FEED_URL, args.output / "feed.xml")

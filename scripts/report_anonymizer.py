@@ -150,20 +150,22 @@ VENDOR_ACTOR_NAMES = (
     "DragonBreath", "RudePanda", "Sordeal Group", "Gwisin Gang", "Famous Chollima",
 )  # fmt: skip
 _DASH = "-‐‑–"
-_CLUSTER_RE = re.compile(
-    r"(?<![\w./\\-])(?P<name>"
+_CLUSTER_ALTERNATION = (
     r"REF[ -]?\d{4}|UNC\d{3,5}|(?:Storm|DEV)-\d{4}|TA(?!0)\d{3,4}|UAT-?\d{3,5}|UAC-\d{4}"
     r"|TAG-\d{2,3}|APT-[A-Z]{1,2}-\d{1,3}|APT[ -]?\d{1,3}|CL-(?:STA|CRI|UNK)-\d{4}|Hive\d{4}"
     r"|TEMP\.[A-Z][a-z]+|DEV#[A-Z]+"
     r"|[A-Z][a-z]+ (?:Typhoon|Sleet|Blizzard|Sandstorm|Cyclone|Tempest|Hail|Panda|Bear|Kitten"
     r"|Chollima|Spider|Pisces|Taurus|Ursa|Serpens|Libra|Scorpius)"
     r"|(?:Earth|Water|Void) [A-Z][a-z]+"
-    r"|"
-    + "|".join(re.escape(name) for name in sorted(VENDOR_ACTOR_NAMES, key=len, reverse=True))
-    + r")(?P<possessive>['’]s)?(?!\w|\.\w)"
+    r"|" + "|".join(re.escape(name) for name in sorted(VENDOR_ACTOR_NAMES, key=len, reverse=True))
 )
+# "/" may precede a name: vendors list aliases as "TraderTraitor/Jade Sleet/UNC4899"
+_CLUSTER_RE = re.compile(
+    r"(?<![\w.\\-])(?P<name>" + _CLUSTER_ALTERNATION + r")(?P<possessive>['’]s)?(?!\w|\.\w)"
+)
+_CLUSTER_AUDIT_RE = re.compile(r"(?<![A-Za-z0-9])(?P<name>" + _CLUSTER_ALTERNATION + r")")
 _SHORT_FORM_RE = re.compile(
-    r"(?<![\w.-])(?:" + "|".join(SHORT_FORMS) + r")(?P<possessive>['’]s)?(?![\w-]|\.\w)",
+    r"(?<![\w.-])(?:" + "|".join(SHORT_FORMS) + r")(?P<possessive>['’]s)?(?!\w|\.\w)",
     re.IGNORECASE,
 )
 _ATTACK_ID_RE = re.compile(r"(?<![\w/.-])(?:[GSC]\d{4}|TA00\d\d)(?![\w-])")
@@ -250,7 +252,7 @@ _ACRONYMS = {
     "USA": "country", "UK": "country", "UAE": "country", "EU": "region", "CIS": "region",
     "ASEAN": "region", "APAC": "region", "EMEA": "region", "LATAM": "region", "NATO": "agency",
     "IRGC": "agency", "MOIS": "agency", "GRU": "agency", "FSB": "agency", "SVR": "agency",
-    "MSS": "agency", "KGB": "agency", "GCHQ": "agency",
+    "MSS": "agency", "KGB": "agency", "GCHQ": "agency", "U.S.": "country", "U.K.": "country",
 }  # fmt: skip
 _AGENCIES = (
     "Reconnaissance General Bureau", "Ministry of State Security", "Federal Security Service",
@@ -286,6 +288,9 @@ _ORIGIN_SUFFIXES = frozenset(
         "run",
         "controlled",
         "directed",
+        "tied",
+        "connected",
+        "associated",
     ]
 )
 _ORIGIN_ROLE_SUFFIXES = frozenset(
@@ -302,6 +307,9 @@ _ORIGIN_ROLE_SUFFIXES = frozenset(
         "directed",
         "origin",
         "speaking",
+        "tied",
+        "connected",
+        "associated",
     ]
 )
 _ORIGIN_CONTEXT_RE = re.compile(
@@ -341,13 +349,13 @@ _TERM_ALTERNATION = "|".join(
 _STEMS = r"Ukr[a-z]+|Belarus[a-z]*|Unit \d{5}"
 _GAZETTEER_RE = re.compile(
     r"(?:(?<![\w.\[\]/\\@#$])|(?<=\bpro-)|(?<=\banti-)|(?<=\bnon-))"
-    r"(?P<term>" + _TERM_ALTERNATION + "|" + _STEMS + r")"
+    r"(?P<term>" + _TERM_ALTERNATION + "|" + _STEMS + r")(?P<plural>s)?"
     r"(?:(?P<origin>[" + _DASH + r"](?P<suffix>[A-Za-z]+))(?![\w-]))?"
     r"(?P<possessive>['’]s)?(?!\w|\.\w)"
 )
 _SPONSOR_RE = re.compile(
-    r"(?<![\w-])(?:(?:state|government|nation|regime)[" + _DASH + r"](?:sponsored|backed|"
-    r"affiliated|aligned|linked|nexus|controlled|directed|level)|nation[" + _DASH + r" ]states?)"
+    r"(?<![\w-])(?:(?:state|government|nation|regime)[" + _DASH + r" ](?:sponsored|backed|"
+    r"affiliated|aligned|linked|nexus|controlled|directed)|nation[" + _DASH + r" ]states?)"
     r"(?![\w-])",
     re.IGNORECASE,
 )
@@ -357,7 +365,8 @@ _CUE_RE = re.compile(
     r"|behind (?:this|the)\b|\blink(?:ed|ing|s)? (?:to|this|it|with)\b|\boverlap"
     # "align" as a verb, not inside an origin compound ("DPRK-aligned" is the gazetteer's)
     r"|(?<![" + _DASH + r"])\balign"
-    r"|tied to|known (?:publicly )?as|\baka\b|tracked as|consistent with|correlat"
+    r"|tied to|known (?:publicly )?as (?:the )?(?-i:[A-Z])|\baka\b|tracked as|consistent with"
+    r"|correlat"
     r"|previous(?:ly)? report|prior reporting|\breporting\b|operat(?:ed|ing) by|behest|sub-unit"
     r"|umbrella|exclusively|only group|\bbelong|notorious|infamous|well-known|in origin"
     r"|suspected|\bassess|confidence|connect(?:ed|ing|ion)|active since|since at least"
@@ -397,7 +406,18 @@ _FUNCTION_WORDS = frozenset(
         "which",
     ]
 )
-_ARTICLE_AT_DELETION_RE = re.compile(r"\b(an?)\s*" + _DELETED + r"[\s" + _DELETED + r"]*(?=(\w))")
+_ARTICLE_AT_DELETION_RE = re.compile(
+    r"\b(an?)\s*" + _DELETED + r"[\s" + _DELETED + r"]*(?=(\w))", re.IGNORECASE
+)
+
+
+def _is_locale(text: str, start: int) -> bool:
+    """An acronym after a standalone two-letter language tag: en-US, zh-CN (not pro-DPRK)."""
+    return bool(
+        start >= 3
+        and text[start - 1] in _DASH
+        and re.search(r"(?<![A-Za-z])[a-z]{2}$", text[: start - 1])
+    )
 
 
 def _article_for(word: str) -> str:
@@ -480,6 +500,18 @@ class ReportAnonymizer:
         self.level = level
         self.names = actor_names(kb)
         self.name_pattern = evidence_name_pattern(self.names)
+        # names pattern skips dash compounds on purpose (index parity); strict replaces the
+        # group name inside one too ("Leviathan-style lures" -> "the adversary-style lures")
+        ordered = sorted(self.names, key=lambda item: (-len(item), item.casefold()))
+        self.compound_pattern = (
+            re.compile(
+                r"(?<![\w.-])(?:" + "|".join(re.escape(name) for name in ordered) + r")"
+                r"(?=[" + _DASH + r"]\w)",
+                re.IGNORECASE,
+            )
+            if ordered
+            else None
+        )
         self._spellings: dict[str, set[str]] = {}
         for name in self.names:
             self._spellings.setdefault(name.casefold(), set()).add(name)
@@ -596,6 +628,23 @@ class ReportAnonymizer:
                 return REPLACEMENT + (match.group("possessive") or "")
 
             text = _SHORT_FORM_RE.sub(short_form, text)
+
+            def compound(match: re.Match[str], inside=inside_software) -> str:
+                word = match.group(0)
+                key = word.casefold()
+                spellings = self._spellings.get(key, set())
+                if key in self._guarded and not (
+                    word in spellings or any(word == item.upper() for item in spellings)
+                ):
+                    return word
+                if inside(match.start(), match.end()):
+                    protected[word] += 1
+                    return word
+                counts["name_compounds"] += 1
+                return REPLACEMENT
+
+            if self.compound_pattern is not None:
+                text = self.compound_pattern.sub(compound, text)
             stage.append(text)
         texts = stage
         stage = []
@@ -638,8 +687,11 @@ class ReportAnonymizer:
                     else:
                         kind = "demonym"
                 acronym = kind.startswith("acronym_")
-                if acronym and start > 0 and text[start - 1] in _DASH:
+                if acronym and _is_locale(text, start):
                     return match.group(0)  # en-US, zh-CN style locale codes
+                plural = bool(match.group("plural"))
+                if plural and kind not in ("demonym", "region_adjective"):
+                    return match.group(0)  # "USs" is no word; only demonyms take a plural
                 suffix = (match.group("suffix") or "").lower()
                 window = text[max(0, start - 60) : end + 60]
                 origin_role = suffix in _ORIGIN_ROLE_SUFFIXES or bool(
@@ -651,9 +703,9 @@ class ReportAnonymizer:
                     if suffix in _ORIGIN_SUFFIXES:
                         counts["origin_compounds"] += 1
                         return _DELETED
-                    if acronym:
+                    if acronym and not match.group("suffix").islower():
                         return match.group(0)  # US-ASCII
-                    counts[kind] += 1  # "Malaysian-focused" -> "undisclosed-focused"
+                    counts[kind] += 1  # "Malaysian-focused", "CIS-region" -> "undisclosed-..."
                     suffix_term = match.group("suffix")
                     if suffix_term in GAZETTEER_KINDS:  # "Iraqi-Kurdistan", "Russia-Ukraine"
                         counts[GAZETTEER_KINDS[suffix_term]] += 1
@@ -667,10 +719,15 @@ class ReportAnonymizer:
                 )
                 base = kind.removeprefix("acronym_")
                 counts[kind] += 1
+                if plural:  # "North Koreans posed as Americans"
+                    return "undisclosed nationals" + possessive
+                if start > 0 and text[start - 1] in _DASH:  # pro-DPRK, anti-Russian
+                    return "undisclosed" + possessive
                 if base in ("demonym", "region_adjective", "language") and adjectival:
                     return _DELETED
-                if acronym and adjectival and next_word.group(1)[0].islower():
-                    return _DELETED  # "DPRK operatives", "US companies"
+                after_the = re.search(r"\bthe\s+$", text[max(0, start - 5) : start], re.I)
+                if acronym and adjectival and next_word.group(1)[0].islower() and not after_the:
+                    return _DELETED  # "DPRK operatives", "US companies"; "the DPRK continues" stays a noun
                 if base == "country":
                     return "an undisclosed country" + possessive
                 if base == "region":
@@ -741,37 +798,57 @@ class ReportAnonymizer:
     def residuals(self, texts: Sequence[str]) -> list[dict[str, str]]:
         """Boundary-free search for names and places that survived masking (for review).
 
-        Lists every group name/alias of five or more characters, gazetteer term and cluster id
-        found anywhere in the statements, except ordinary-word aliases used as words and
-        ALL-CAPS codenames (both kept on purpose) and software names that contain a term.
+        Lists every group name/alias of five or more characters, short form, gazetteer term
+        (acronyms case-sensitively) and cluster id found anywhere in the statements, except
+        ordinary-word aliases used in lower case, ALL-CAPS codenames (both kept on purpose),
+        software names that contain a term and locale codes such as en-US. Title-case
+        ordinary-word aliases ("Hafnium") are listed: the strict guard keeps them as words.
         """
         found: list[dict[str, str]] = []
-        terms = [name for name in self.names if len(name) >= 5] + [
-            term for term in GAZETTEER_KINDS if len(term) >= 5
-        ]
+        insensitive = (
+            [name for name in self.names if len(name) >= 5]
+            + list(SHORT_FORMS)
+            + [term for term in GAZETTEER_KINDS if len(term) >= 5 and not term.isupper()]
+        )
+        sensitive = [term for term in GAZETTEER_KINDS if term not in insensitive]
         joined, _ = _joined(texts)
         software = [(match.start, match.end) for match in match_software_aliases(joined, self.kb)]
-        lowered = joined.casefold()
-        for term in sorted(set(terms), key=lambda item: (-len(item), item)):
-            key = term.casefold()
-            start = lowered.find(key)
-            while start >= 0:
-                end = start + len(term)
-                word = joined[start:end]
-                ordinary = key in self._guarded and word not in self._spellings.get(key, {word})
+        seen: set[tuple[int, int]] = set()
+
+        def check(term: str, flags: int) -> None:
+            for match in re.finditer(re.escape(term), joined, flags):
+                start, end = match.span()
+                word = match.group(0)
+                key = term.casefold()
+                ordinary = key in self._guarded and word.islower()
                 codename = word.isupper() and word != term and term in GAZETTEER_KINDS
                 in_software = any(start < s_end and s_start < end for s_start, s_end in software)
+                following = joined[end : end + 2]
+                plural = following[:1] == "s" and not following[1:2].isalnum()
                 inside_word = (start > 0 and joined[start - 1].isalnum()) or (
-                    end < len(joined) and joined[end].isalnum()
+                    end < len(joined) and joined[end].isalnum() and not plural
                 )
-                if not (ordinary or codename or in_software or inside_word):
+                locale = word.isupper() and len(word) <= 3 and _is_locale(joined, start)
+                # an acronym before an upper-case compound is a name such as US-ASCII (kept)
+                locale = locale or bool(
+                    word.isupper() and re.match("[" + _DASH + "][A-Z]", joined[end : end + 2])
+                )
+                overlapping = any(start < e and s < end for s, e in seen)
+                if not (
+                    ordinary or codename or in_software or inside_word or locale or overlapping
+                ):
+                    seen.add((start, end))
                     found.append({"term": term, "context": joined[max(0, start - 40) : end + 40]})
-                start = lowered.find(key, end)
-        for match in _CLUSTER_RE.finditer(joined):
+
+        for term in sorted(set(insensitive), key=lambda item: (-len(item), item)):
+            check(term, re.IGNORECASE)
+        for term in sorted(set(sensitive), key=lambda item: (-len(item), item)):
+            check(term, 0)
+        for match in _CLUSTER_AUDIT_RE.finditer(joined):
             found.append(
                 {
                     "term": match.group("name"),
-                    "context": joined[match.start() - 40 : match.end() + 40],
+                    "context": joined[max(0, match.start() - 40) : match.end() + 40],
                 }
             )
         return found

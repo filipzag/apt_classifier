@@ -45,6 +45,7 @@ from __future__ import annotations
 
 import argparse
 import copy
+import hashlib
 import json
 import random
 import sys
@@ -1049,6 +1050,10 @@ def _inactive_combiner_rows(rows: list[dict[str, Any]]) -> list[str]:
     ]
 
 
+def _file_sha256(path: Path) -> str:
+    return hashlib.sha256(Path(path).read_bytes()).hexdigest()
+
+
 def _wilson(hits: int, total: int, z: float = 1.96) -> tuple[float, float]:
     """Wilson score interval for a proportion; sound at n = 8 and at 0/n or n/n, where the
     percentile bootstrap collapses to a point."""
@@ -1280,6 +1285,11 @@ def main(argv: list[str] | None = None) -> int:
         or args.report_sample_seed is not None
     ):
         parser.error("--open-set and --report-observations need --cti-hal")
+    if args.output is None and (
+        args.report_observations is not None or args.report_sample_seed is not None
+    ):
+        # a diagnostic arm must never take the headline's file name
+        parser.error("--report-observations and --report-sample-seed need an explicit --output")
     if args.output is None:
         args.output = default_output(
             args.pipeline,
@@ -1384,13 +1394,13 @@ def main(argv: list[str] | None = None) -> int:
             open_rows, open_dropped = run_known(
                 engine, open_folds, hide_evidence=False, client=client
             )
-        except LLMUnavailableError as error:
-            print(f"aborted: {error}", file=sys.stderr)
-            if client is not None:
-                client.close()
-            return 2
+        except LLMUnavailableError:
+            # credit ran out after the labelled reports: keep them, record the open set as cut
+            open_rows, open_dropped = [], {"llm_unavailable_at": "open set, first report"}
         for key in ("technique", "behavior", "profile"):
             dropped[key] += open_dropped.get(key, 0)
+        if open_dropped.get("llm_unavailable_at"):
+            dropped["open_set_llm_unavailable_at"] = open_dropped["llm_unavailable_at"]
         for row, record in zip(open_rows, open_records, strict=False):
             row["actor_name_replacement"] = record
         known_seconds += time.time() - started
@@ -1409,6 +1419,9 @@ def main(argv: list[str] | None = None) -> int:
     metrics = summarize(known_rows, unknown_rows)
     if open_folds:
         metrics["open_set"] = open_set_metrics(open_rows, known_rows)
+        if any("llm" in row for row in open_rows):
+            # the run's spend includes the open-set reports
+            metrics["llm"] = summarize(known_rows, unknown_rows + open_rows)["llm"]
     fingerprint_inputs = {
         "attack_version": kb.version,
         "embedding_model": settings.embedding_model,
@@ -1438,6 +1451,21 @@ def main(argv: list[str] | None = None) -> int:
             else {}
         ),
         "source_fingerprint": source_fingerprint(FINGERPRINTED_SOURCES),
+        # real reports: the anonymizer rules and the exact input files read
+        **(
+            {
+                "report_rules": source_fingerprint(
+                    (REPO_ROOT / "scripts" / "report_anonymizer.py",)
+                ),
+                "report_inputs": {
+                    str(path): _file_sha256(path)
+                    for path in (args.cti_hal, args.open_set)
+                    if path is not None
+                },
+            }
+            if real_reports
+            else {}
+        ),
         "platform_from_text": bool(getattr(settings, "technique_platform_from_text", False)),
         "pipeline": args.pipeline,
         "verifier_mode": str(getattr(settings, "technique_verifier_mode", "ambiguous")),

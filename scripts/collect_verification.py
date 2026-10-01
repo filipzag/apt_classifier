@@ -283,11 +283,18 @@ def elastic_headline_warning(payload: dict[str, Any] | None) -> str | None:
     """The Elastic Security Labs headline is the strict anonymization level (docs 21.3.4c)."""
     if payload is None:
         return None
-    if (payload.get("parameters") or {}).get("anonymization") == "strict":
+    parameters = payload.get("parameters") or {}
+    if (
+        parameters.get("anonymization") == "strict"
+        and parameters.get("report_observations") is None
+        and parameters.get("report_sample_seed") is None
+        and parameters.get("sample") is None
+        and parameters.get("limit") is None
+    ):
         return None
     return (
-        "elastic_attribution is not the strict level its headline is defined on (docs 21.3.4c); "
-        "regenerate it with `make benchmark-elastic`"
+        "elastic_attribution is not the headline run (strict level, every report, every "
+        "sentence; docs 21.3.4c); regenerate it with `make benchmark-elastic`"
     )
 
 

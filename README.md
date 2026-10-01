@@ -87,7 +87,7 @@ A local reranker adapter (`apt_classifier/reranker.py`) can re-score the hybrid 
 ### Benchmarks
 
 Benchmark scripts under `scripts/` measure technique mapping and attribution (ATT&CK
-self-consistency folds and the CTI-HAL real reports; there is no labelled field-data benchmark). Results are composed into
+self-consistency folds, the CTI-HAL real reports and the Elastic Security Labs real reports; there is no labelled field-data benchmark). Results are composed into
 `data/audits/verification_results_current.json` by `make verify-results` and are never
 typed by hand.
 
@@ -115,6 +115,13 @@ typed by hand.
   The attribution headline first replaces every ATT&CK group name and alias in the statements with
   "the adversary", as the ATT&CK folds do (`--anonymize-actors`); the run on the statements as reported
   is kept beside it (docs 21.3.4b).
+- `scripts/prepare_elastic_reports.py` + `make prepare-elastic` / `make benchmark-elastic` — Elastic Security Labs
+  posts that Elastic attributes to one ATT&CK group (8 reports, 6 groups) plus 22 posts on actors outside ATT&CK
+  (open set), labels pre-registered in `data/elastic_security_labs/labels.json`. Each post is read as the product's
+  no-LLM mode reads a pasted report (every prose sentence); the headline anonymization is strict (the report's own
+  attribution prose, group and cluster names, places and sponsors removed; `scripts/report_anonymizer.py`), with
+  names, tradecraft (ATT&CK malware masked too) and as-reported runs beside it (docs 21.3.4c). Post text is (c)
+  Elastic, local evaluation only.
 
 #### Current results (artifacts as of 2026-10-01, local pipeline, no LLM verifier)
 
@@ -182,8 +189,15 @@ aliases gives top-1 0.51), so attribution from tradecraft alone lies between 0.4
 Ordinary-word software aliases (ATT&CK lists "Page" for Elise) now match only in their exact spelling;
 before that fix the exemplar change named Lotus Blossom on a FIN6 report (docs 5.5). With the production pipeline as measured on 2026-09-28 (verifier plus the since-removed LLM vote; 10-report sample, $3.37) technique
 recall on the statements doubles (0.23 -> 0.48, precision 0.49 -> 0.40) while ranking and naming stay the
-same. This is the only attribution number measured on real report text. Refitting the
+same. Refitting the
 acceptance model with the CTI-HAL statements did not help (public F1 0.320 -> 0.313) and was not adopted.
+
+**Elastic Security Labs real reports (8 reports, 6 groups, whole posts read as the no-LLM mode reads them; local
+evaluation only):** strict anonymization **top-1 4/8 = 0.50** [Wilson 0.22, 0.78], top-5 0.63, MRR 0.54; one group named,
+correct, and none of the 22 open-set posts (actors outside ATT&CK) named. Three of the four hits rest on malware only
+the truth group uses in ATT&CK: with ATT&CK malware names masked top-1 is 1/8 (Gamaredon, from behaviour). Group names
+left in give 5/8; the extra hit (LOBSHOT) comes from software mentioned only in Elastic's attribution paragraph. Reading
+30 random sentences instead of all gives 0.40. n = 8, so these are indications, not estimates (docs 21.3.4c).
 
 **Ensemble self-consistency (153 groups, 40% coverage):** 147/153 (96%) top-1 without
 campaign voting, MRR 0.977.

@@ -2817,6 +2817,149 @@ because both sides read the same text. On 2026-10-01 a leak in the anonymization
 name that ended a sentence survived. The headline on the same code moved from top-3 31 to 29,
 top-5 0.636 to 0.600 and MRR 0.530 to 0.512, with top-1 unchanged at 0.455 (21.3.14).
 
+#### 21.3.4c Elastic Security Labs real-report benchmark
+
+A second real-report source, independent of CTI-HAL and untouched by any tuning: Elastic
+Security Labs posts in which Elastic attributes observed activity to one ATT&CK 19.2 group.
+Unlike CTI-HAL's annotated snippets, each post is read **the way the product's no-LLM mode reads
+a pasted report**: every prose sentence through `local_observations`, no curation. This set is the
+only clean real-report holdout; nothing may be tuned on it.
+
+**Provenance and licence.** The Security Labs RSS feed carries all 302 posts (May 2022 to
+September 2026) with their full HTML, so no scraping is needed (a sitemap check found one missing
+post, on log4j). `scripts/prepare_elastic_reports.py` (`make prepare-elastic`) downloads it once to
+`data/benchmarks/elastic/feed.xml`. The post text is (c) Elastic: the derived files stay under the
+gitignored `data/benchmarks/elastic/` for local evaluation and are not redistributed. Only slugs,
+ATT&CK ids and our own paraphrases are committed (`data/elastic_security_labs/labels.json`).
+
+**Selection (pre-registered 2026-10-01, commit 520ca28).** All 302 posts were screened for
+attribution to an ATT&CK group, 25 candidates were adversarially verified and a completeness pass
+looked for misses. Eight posts remain (six groups): Elastic's own attribution of real observed
+activity with enough behaviour prose. Contagious Interview (G1052); KANDYKORN and RUSTBUCKET
+(Lazarus Group G0032, APT38 G0082 also accepted, since other vendors file both under BlueNoroff);
+SPECTRALVIPER and PHOREAL (APT32 G0050); LOBSHOT (TA505 G0092); Gamaredon Group (G0047); and the
+Malaysian lure (Leviathan G0065). Fourteen posts are excluded with reasons in the labels file, for
+example operation-bleeding-bear (the label follows from WhisperGate being Ember Bear-only, the
+same mapping the software classifier reads), dynowiper (contested attribution), emulations and
+product demos. An **open set** of 22 posts on actors that are in no ATT&CK group (Elastic REF
+clusters and vendor names outside ATT&CK; 7 APT-like, 15 commodity) was checked by two
+independent refuters each; the correct answer there is "no named group", and any name is
+unsupported rather than proven wrong. Labels, accept sets, rules, metrics and arms were committed
+with the sha256 of the prepared files before the first run.
+
+**Reading rule (label-blind, the same for every post).** `<pre>` code and code pasted between
+paragraphs, markdown pipe tables and fences, image and "Figure N" lines and headings themselves
+are dropped, as are whole non-narrative sections matched by exact heading (MITRE ATT&CK lists,
+detection and hunting rules, YARA, observations and indicators, references, appendix, diamond
+model). The 8 posts give 848 statements (44 to 191 each), the open set 3,619 (67 to 407).
+Report-level technique labels come from every `attack.mitre.org/techniques/...` link in a post,
+with revoked ids followed to their successors (six of the eight posts carry links). Leak audit: no
+statement equals an ATT&CK procedure sentence or an exemplar sentence, and no ATT&CK object cites
+any of the eight posts.
+
+**Anonymization levels** (`scripts/report_anonymizer.py`, `--anonymize LEVEL`):
+
+- `names`: every ATT&CK group name and alias -> "the adversary" (the CTI-HAL headline level,
+  byte-identical to before).
+- `strict` (**headline**): additionally the report's own attribution prose (a sentence that
+  refers to an actor *and* argues attribution, a paragraph with two such sentences, a section
+  about attribution: heading rule plus curated headings fixed in the labels), vendor cluster
+  names (REF/UNC/Storm numbers, family-suffix names, a short list such as DangerousPassword),
+  ATT&CK object ids, and a case-sensitive country / nationality / sponsor / region / language
+  gazetteer (origin compounds such as "DPRK-aligned" are deleted, nouns become "an undisclosed
+  country"). ALL-CAPS codenames (CUBA, KREMLIN) and software names (Cuba, S0625) are protected,
+  ordinary-word aliases ("Play", "Chromium") are replaced only in their ATT&CK spelling. Victim
+  geography goes too: strict is a no-victimology regime. On the eight posts it removed 88
+  attribution statements (51 in attribution sections, 34 sentences, 3 paragraph neighbours),
+  9 group names, 23 cluster names and 30 place or sponsor words (12 origin, 18 victim or other),
+  leaving 760 statements; the residual audit (boundary-free search for every alias, short form,
+  place and cluster id left) finds nothing on them, and on the open set lists only the Chromium
+  browser, defanged domains and a malware marker string.
+- `tradecraft`: strict plus every ATT&CK *malware* name -> "the malware" (tools stay).
+
+**Results (2026-10-01, local pipeline, no credit; `make benchmark-elastic`).**
+
+| Elastic, 8 reports, 6 groups | Top-1 (k/8) [Wilson 95%] | Top-3 | Top-5 | MRR | Group-macro top-1 | Named (wrong) |
+|---|---|---|---|---|---|---|
+| **strict (headline)** | **4/8 = 0.50** [0.22, 0.78] | 0.50 | 0.63 | 0.54 | 0.50 | 1 (0) |
+| names | 5/8 = 0.63 [0.31, 0.86] | 0.63 | 0.75 | 0.66 | 0.67 | 1 (0) |
+| tradecraft | 1/8 = 0.13 [0.02, 0.47] | 0.25 | 0.25 | 0.21 | 0.17 | 0 (0) |
+| as reported | 5/8 = 0.63 [0.31, 0.86] | 0.63 | 0.75 | 0.66 | 0.67 | 0 (0) |
+| strict, 30 random sentences (seeds 1-5, mean) | 0.40 | 0.48 | 0.53 | 0.46 | | 0-2 per seed (0) |
+
+Lenient scoring (APT38 accepted on the two Lazarus reports) changes nothing: both miss either
+way. Cluster-aware top-1 equals top-1. On the 22 open-set posts **no group was named** (all
+reached a shortlist), so the combined named risk over labelled and open-set reports is 0; no
+group leads the open-set rankings often (Kimsuky three times, five groups twice, Lazarus once,
+the other labelled groups never), so the hits below are not a default leader showing up
+everywhere.
+
+| Report | Truth | Rank strict / names / tradecraft / as reported | Strict stage, leader | Group-only ATT&CK malware left at strict |
+|---|---|---|---|---|
+| contagious-interview | G1052 | 1 / 1 / 7 / 1 | shortlist, G1052 | BeaverTail S1246 |
+| kandykorn | G0032 | 4 / 4 / 3 / 4 | shortlist, APT3 | none (APT3's OSInfo matched the field name "osinfo") |
+| rustbucket | G0032 | 52 / 36 / 52 / 36 | shortlist, Mustang Panda | none |
+| spectralviper | G0050 | 1 / 1 / 11 / 1 | shortlist, G0050 | PHOREAL S0158 |
+| phoreal | G0050 | 1 / 1 / 18 / 1 | named, G0050 | PHOREAL S0158 |
+| lobshot | G0092 | 52 / 1 / 52 / 1 | shortlist, Gamaredon | none (Get2 sat in the dropped attribution paragraph) |
+| gamaredon | G0047 | 1 / 1 / 1 / 1 | shortlist, G0047 | Pteranodon S0147 |
+| malaysian (APT40) | G0065 | 108 / 107 / 108 / 108 | shortlist, Patchwork | none |
+
+What the numbers say. (1) **The hits are mostly malware lookups.** Three of the four strict hits
+rest on malware only the truth group uses in ATT&CK, and masking it (tradecraft) leaves one hit:
+Gamaredon, the only report recognised from behaviour (actor-behaviour channel 0.83 against 0.39
+for the next group). Top-1 is 0.80 on the five reports where any ATT&CK software is detected and
+0.00 on the three without. (2) **Elastic's
+attribution prose carries evidence, not only claims:** removing it costs LOBSHOT, whose only
+mention of the TA505-only Get2 loader is in the attribution paragraph (rank 1 -> 52). Group names
+alone moved almost nothing: names and as-reported rank the truth the same on seven of the eight
+reports (the Malaysian lure 107 against 108). (3) **The
+naming promise holds**: one name in eight labelled reports, correct, and none in 22 open-set
+reports, at every arm and seed. (4) **Reading the whole report helps**: 30 random sentences give
+top-1 0.40 on average against 0.50 for all of them. (5) Two failure causes are visible: a false
+software match ("osinfo" as a record field matched ATT&CK's OSInfo, an APT3-only malware, and the
+decisive-malware boost put APT3 first on KANDYKORN; the same class as the "Page" alias in 5.5),
+and reports whose behaviour is generic for their group (RUSTBUCKET and the Malaysian lure have no
+group-specific malware or procedures in ATT&CK that the text matches).
+
+**Registered run, review and corrected run.** The first run used the rules as committed with the
+labels. A read-only code review afterwards (three lenses, each finding reproduced by an
+independent skeptic) confirmed 18 defects; six changed what the model read: acronym compounds and
+prefixes kept ("CIS-region", "pro-DPRK"), "The DPRK continues" lost its subject, the cue "known as"
+dropped technique sentences ("a technique known as reflective binary loading"), "U.S." and spaced
+"state sponsored" were missed, and three heading families (`Techniques (sub-techniques)`,
+`Detection rules for X`, an escaped `ATT\&CK`) kept ATT&CK names and rule names in three
+open-set posts. Latent gaps were closed too (plural demonyms, cluster names after "/", group
+names in dash compounds), and the artifact now records the rule and input hashes. The fixes
+implement the registered rules as written; no label, threshold or metric changed. The corrected
+run (the artifacts above) gives the same strict, names and as-reported ranks on every report and
+the same open-set result as the registered run; tradecraft MRR moves 0.23 -> 0.21 (KANDYKORN rank
+2 -> 3) and the volume diagnostic 0.33 -> 0.40 (two more statements change the samples). Still
+open: the newest post renders its tables as runs of `<p>` cells, which are read as prose (one
+open-set post, about 56 statements), and cities other than capitals are not masked.
+
+Caveats: n = 8 (one report moves top-1 by 0.125; no significance claim is made, and none against
+CTI-HAL, whose groups and reading regime differ); several labels are moderate-confidence or rest
+on overlap with other vendors' reporting; spectralviper and phoreal share a victim environment and
+the two Lazarus posts cross-reference each other; the Elastic technique lists are short author
+lists (mean accepted-technique recall 0.76 over the six labelled posts, precision 0.06 to 0.39).
+
+Running the open set exposed a product bug: retrieval sent every sentence of a report to ChromaDB
+in one query, and the server refuses about 32k result rows (queries x results) in one call, so a
+pasted report of several hundred sentences crashed analysis in local mode. `vectorstore._query`
+now batches the queries under 16k rows per call; each query is independent, so the hits are
+identical and shorter reports still make a single call.
+
+Artifacts (`make benchmark-elastic`): `attribution_elastic_current.json` (strict headline with the
+open set under `open_set` and `metrics.open_set`), `_names.json`, `_tradecraft.json`,
+`_as_reported.json`; the volume diagnostic is `attribution_benchmark.py --report-set elastic
+--cti-hal data/benchmarks/elastic/reports.jsonl --anonymize strict --report-observations 30
+--report-sample-seed S`. `default_output` names the headline level of each report set
+`*_current` (CTI-HAL: names; Elastic: strict). `collect_verification.py` reports
+`elastic_attribution` and `elastic_attribution_as_reported` and warns when the Elastic headline
+is not strict. `make benchmark-elastic-production` (technique verifier) is built but not run: at
+about $0.02 and 11 s per sentence it would cost roughly $15-20 and 2.5 h for the eight posts.
+
 #### 21.3.5 Attribution benchmark (text in, group out)
 
 `scripts/attribution_benchmark.py` (`make benchmark-attribution`) is the attribution gate.
