@@ -3539,6 +3539,122 @@ group's. Two or three carry only generic evidence. The rest need evidence ATT&CK
 the group: malware not in ATT&CK, such as Bateleur, TONEDEAF and TinyMet, or tools documented for
 other groups.
 
+#### 21.3.15 Clusters, confidence labels, software questions and window recall: pre-registration (2026-10-02)
+
+Product-owner decisions of 2026-10-02:
+
+- name a documented-overlap pair as a cluster, counted as correct when the truth is in it and as
+  wrong otherwise;
+- show calibrated confidence labels;
+- build interview questions about malware that only one top-three group uses, recording found /
+  not found / not checked;
+- work on real-report recall.
+
+This entry fixes every parameter and acceptance bar **before** the fresh fold seeds 43 and 47 are
+opened. Their stage-off baselines were run on 2026-10-01 on frontend-next and have not been read
+beyond row counts and combiner status.
+
+**What was already seen.** The designs used seeds 41 and 53. The cluster and window designs also
+replayed seed 7 and CTI-HAL, so those sets are disclosed as already seen for those two tracks and
+are run once at the end as reports, not as tests. The Elastic set (8 anonymized reports,
+data/benchmarks/elastic, local evaluation only) is a report-only check. Nothing is ever fitted or
+tuned on seeds 7, 41, 43, 47, 53, 59 or 61, or on CTI-HAL. The combiner trains only on seeds
+11/23/37.
+
+**Order.** Instrumentation, then cluster naming (A), then confidence labels (B), software questions
+(C) and window recall (D). Each is measured on its own.
+
+**A. Documented-cluster naming**
+
+- **Settings.** `ATTRIBUTION_CLUSTER_NAMING`, default off.
+- **Members.** Pairs only: the gate-window leader plus one twin.
+- **Twin.** A gate-window member that ATT&CK relates to the leader (`attack/related.py`: a
+  description reference, or non-tool software used by at most three groups) and that also either
+  nests (profile containment >= 0.8) or does not separate from the leader (|pair separation| <
+  0.5). If several qualify, the twin with the largest gate-window mass is chosen.
+- **Cluster evidence.** Discrimination is recomputed over the gate window with the pair merged
+  into one unit.
+- **A cluster is named when all of these hold:**
+  - the leader passes the lower stage checks;
+  - the leader-consistency guard did not fire;
+  - cluster separation >= 0.5;
+  - cluster mass >= 3.5, or >= 3.0 for a nested pair;
+  - the members' combiner probabilities sum to >= 0.8.
+- **Nested twin.** A single name whose nested twin is in the window becomes the cluster, or is held
+  at shortlist when the cluster fails.
+- **Bars** on seeds 43+47 pooled:
+  - A1: zero wrong cluster names on known rows and zero removed actors named through a cluster. One
+    failure means it is not adopted, with no retuning.
+  - A2: single names identical to the off run, apart from correct nested upgrades.
+  - A3: at least 2 correct cluster names.
+  - A4: the on run equals the offline replay on every row.
+  - A5: if 2 or more removed actors clear two of the three cluster bars, only the nested scope may
+    ship.
+
+**B. Confidence labels (display only)**
+
+- **Settings.** `CONFIDENCE_LABELS_ENABLED`, default off.
+- **Model.** Logistic calibrators for "leader correct" and "truth in the top 2 / top 3". Inputs:
+  logit combiner P, gate separation, logit null P, log accepted count, leader software vote.
+- **Fit.** Seeds 41+53, removed actors counted as wrong leaders, GroupKFold(5) by group.
+- **Thresholds.** Strong at >= 0.88 (one-sided 95% Clopper-Pearson upper bound on the leader error
+  <= 5%). "One of these 2/3" at >= 0.865. Insufficient evidence is open; that rule was chosen after
+  seeing seed 7.
+- **When a cluster is named,** the label describes the cluster as a two-group set and never says
+  "strong single answer".
+- **Bars** on seeds 43+47 (known + removed):
+  - B1: strong leader error <= 5.0% pooled and <= 8% per seed.
+  - B2: ECE of the calibrated leader probability <= 0.06 pooled.
+  - B3: "one of these" covers the truth in >= 80% of its rows pooled.
+  - B4: decisions, rankings and exports are identical with the labels on and off.
+
+**C. Software questions (pilot-ready)**
+
+- **Settings.** `INTERVIEW_SOFTWARE_QUESTIONS`, default off.
+- **Questions.** For each top-three group, malware that only it documents in ATT&CK and whose only
+  user is inside the gate window. At most 3 questions per case, asked only while the case is not
+  named.
+- **Answers.** Found adds the software as evidence. Not found may only lower the leader's
+  separation. Not checked records nothing.
+- **Guard.** A name must not rest on interview answers alone: the leader's separation without them
+  must be >= 0.
+- **Order in the gate.** Single gate, then the cluster step on the evidence before any "not found"
+  answer, then the "not found" filter. The filter can only move hypothesis or cluster to
+  shortlist.
+- **Bars** per fresh seed, with the simulated answer model q in {0.1, 0.3, 1.0} and a wrong-"found"
+  rate in {0, 0.05}:
+  - C1: at a false rate of 0, no wrong name and no removed actor named.
+  - C2: at least 8 names gained at q = 0.3 and at least 30 at q = 1.0.
+  - C3: no correct name lost.
+  - C4: all answers "not found" leaves the named count unchanged.
+  - C5: at a 5% false rate, at most 1.0 wrong or removed-actor names per seed. This needs product
+    owner sign-off.
+  - C6: replay and pipeline agree within ±2 names.
+  - C7: monotone: a "not found" never adds or changes a name.
+  - C8: C1 and C5 still hold with A on.
+
+**D. Window recall (refit per experiment, defaults unchanged)**
+
+- **D2: combiner window 40.** Refit with `--top-n 40` on seeds 11/23/37.
+  - Fold bars per fresh seed: top-1 and top-3 >= baseline - 1, named correct >= baseline - 2, no
+    wrong name, removed actors named <= baseline.
+  - Cross-validation bar on the lists common to both windows: randomised top-1 >= 0.682, top-5 >=
+    0.905, AUC >= 0.85.
+  - Reported once: CTI-HAL anonymized strict top-3 >= 31/55, truth in the window >= 40/55, no wrong
+    name; as reported top-3 >= 37 and >= 15 names, all correct.
+- **D1: strict-twin admission.** Description reference or malware with exactly two users; combiner
+  schema 3; an admitted ineligible group is never named alone.
+  - Same fold bars, plus no removed actor's twin named.
+  - Reported once: CTI-HAL anonymized strict top-3 >= 29, truth in the window >= 42/55,
+    cluster-aware top-3 >= baseline + 3, no wrong name.
+
+**Expectation stated up front.** Strict top-3 on anonymized CTI-HAL is expected to move by about +0
+to +3 of 55. Five Carbanak reports cannot be ranked above FIN7 on technique evidence, and three more
+lose the Carbanak malware to anonymization. Most of the visible gain will come from counting
+documented clusters, a choice the product owner has made explicitly.
+
+**Results.** To be added below as each track completes.
+
 ## 22. Failure modes and troubleshooting
 
 ### 22.1 “ATT&CK knowledge base has not been ingested”

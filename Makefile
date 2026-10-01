@@ -71,7 +71,7 @@ check-regression:
 # Learned attribution combiner: ATT&CK folds only (training seeds), randomised evidence regimes,
 # unknown-actor lists, group-level CV; writes data/models/combiner/attribution_combiner.json.
 fit-combiner:
-	PYTHONPATH=. $(PYTHON) scripts/fit_attribution_combiner.py --seeds 11 23 37 --variants 5 --unknown-all
+	PYTHONPATH=. $(PYTHON) scripts/fit_attribution_combiner.py --seeds 11 23 37 --variants 5 --unknown-all --overwrite-production
 
 # Labelled real-report sentences (public train splits) used as technique-mapping evidence;
 # needs scripts/prepare_public_benchmarks.py output. Run before fit-acceptance.

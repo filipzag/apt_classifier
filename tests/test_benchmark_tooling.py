@@ -997,3 +997,37 @@ def test_attribution_benchmark_lists_rows_scored_without_an_enabled_combiner():
         {"group_id": "G3", "combiner_status": None},  # no fusion, no status
     ]
     assert _inactive_combiner_rows(rows) == ["G2:r2"]
+
+
+def test_combiner_fields_record_window_probabilities_and_the_rrf_order_to_60():
+    from types import SimpleNamespace
+
+    from scripts.attribution_benchmark import _combiner_fields
+
+    entries = [SimpleNamespace(group_id=f"G{i:02d}") for i in range(70)]
+    # combiner reordered the head (top 3 of the RRF top 4); the tail stays in RRF order
+    head_order = ["G02", "G00", "G03", "G01"]
+    fusion = SimpleNamespace(
+        entries=[SimpleNamespace(group_id=g) for g in head_order] + entries[4:]
+    )
+    window = SimpleNamespace(scores=[SimpleNamespace(group_id=g) for g in ("G02", "G00", "G05")])
+    context = SimpleNamespace(
+        discrimination=window,
+        combiner={
+            "status": "active",
+            "probabilities": {"G00": 0.2, "G01": 0.1, "G02": 0.6, "G03": 0.05},
+            "rrf_ranks": {"G00": 1, "G01": 2, "G02": 3, "G03": 4},
+            "leader_probability": 0.6,
+            "null_probability": 0.05,
+        },
+    )
+    state = SimpleNamespace(context=context, deterministic_fusion=fusion, fusion=fusion)
+    fields = _combiner_fields(state, "G05")
+    assert fields["rrf_top60"][:5] == ["G00", "G01", "G02", "G03", "G04"]
+    assert len(fields["rrf_top60"]) == 60
+    assert fields["window_probabilities"] == {"G02": 0.6, "G00": 0.2, "G05": 0.0}
+    assert fields["truth_in_window"] is True and fields["rrf_rank"] is None
+    off = _combiner_fields(
+        SimpleNamespace(context=SimpleNamespace(discrimination=None, combiner=None)), "G05"
+    )
+    assert off["combiner_status"] is None and off["truth_in_window"] is False

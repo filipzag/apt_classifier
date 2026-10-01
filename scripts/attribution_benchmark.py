@@ -37,6 +37,7 @@ from __future__ import annotations
 
 import argparse
 import copy
+import hashlib
 import json
 import random
 import re
@@ -476,16 +477,35 @@ def _separation_fields(state: Any, truth: str | None, decision: Any) -> dict[str
 
 def _combiner_fields(state: Any, truth: str | None) -> dict[str, Any]:
     """Learned-combiner diagnostics per row: the truth's rank in the RRF order the combiner
-    started from, the probability it assigned to its leader, and its status."""
+    started from, the probability it assigned to its leader, and its status. For offline
+    replays also every combiner probability (the RRF top N), the probabilities of the gate
+    window's members, the RRF order to place 60 (the head from ``rrf_ranks``; past the head the
+    deterministic order is the RRF order), and whether the truth reached the gate window."""
     info = getattr(state.context, "combiner", None)
+    discrimination = getattr(state.context, "discrimination", None)
+    window = [item.group_id for item in discrimination.scores] if discrimination is not None else []
+    window_fields = {"truth_in_window": (truth in window) if truth else None}
     if not isinstance(info, dict):
-        return {"rrf_rank": None, "combiner_leader_probability": None, "combiner_status": None}
+        return {
+            "rrf_rank": None,
+            "combiner_leader_probability": None,
+            "combiner_status": None,
+            **window_fields,
+        }
     ranks = info.get("rrf_ranks") or {}
+    probabilities = info.get("probabilities") or {}
+    deterministic = state.deterministic_fusion or state.fusion
+    head = [gid for gid, _ in sorted(ranks.items(), key=lambda item: item[1])]
+    tail = [entry.group_id for entry in deterministic.entries[len(head) : 60]]
     return {
         "rrf_rank": ranks.get(truth) if truth else None,
         "combiner_leader_probability": info.get("leader_probability"),
         "combiner_null_probability": info.get("null_probability"),
         "combiner_status": info.get("status"),
+        "combiner_probabilities": dict(probabilities),
+        "window_probabilities": {gid: probabilities.get(gid, 0.0) for gid in window},
+        "rrf_top60": (head + tail)[:60],
+        **window_fields,
     }
 
 
@@ -538,6 +558,25 @@ def _top3_fields(state: Any, ranked: list[str]) -> dict[str, Any]:
             and deterministic.entries
             and discrimination.leader_id != deterministic.entries[0].group_id
         ),
+    }
+
+
+def _combiner_artifact(settings: Any, engine: Any) -> dict[str, Any] | None:
+    """Which combiner artifact scored the run (path, content hash, top N, pipeline fingerprint),
+    so a later replay can tell artifacts fitted on different lists apart."""
+    model = getattr(engine, "combiner", None)
+    path = getattr(settings, "attribution_combiner_path", None)
+    if model is None or not path:
+        return None
+    try:
+        digest = hashlib.sha256(Path(path).read_bytes()).hexdigest()[:24]
+    except OSError:
+        digest = None
+    return {
+        "path": str(path),
+        "sha256": digest,
+        "top_n": int(getattr(model, "top_n", 0) or 0),
+        "pipeline_fingerprint": getattr(model, "pipeline_fingerprint", None),
     }
 
 
@@ -739,6 +778,7 @@ def run_unknown(
                 "margin": decision.margin if decision else None,
                 "maturity": decision.maturity_score if decision else None,
                 "top3": [entry.group_id for entry in fusion.entries[:3]],
+                "software_ids": sorted(state.context.software_ids),
                 **_top3_fields(state, [entry.group_id for entry in fusion.entries]),
             }
         )
@@ -1129,6 +1169,7 @@ def main(argv: list[str] | None = None) -> int:
         "thresholds": engine.attribution_thresholds.__dict__,
         "acceptance_model": engine.acceptance_model_status,
         "combiner": engine.combiner_status,
+        "combiner_artifact": _combiner_artifact(settings, engine),
         "profile_forest": {
             "status": engine.profile_forest_status,
             "fingerprint": getattr(engine.profile_forest, "fingerprint", None),

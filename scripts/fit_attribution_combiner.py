@@ -536,6 +536,10 @@ def _cv_metrics(
 # ----------------------------------------------------------------------------- main
 
 
+# fold seeds kept for evaluation and design (docs 21.3.13-21.3.15): never fitted on
+EVALUATION_SEEDS = frozenset({7, 41, 43, 47, 53, 59, 61})
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
@@ -592,7 +596,38 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument("--set", action="append", default=[], metavar="KEY=VALUE")
     parser.add_argument("--quiet", action="store_true")
+    parser.add_argument(
+        "--lists-only",
+        action="store_true",
+        help="generate and cache the lists, do not fit (allowed on evaluation seeds, for reports)",
+    )
+    parser.add_argument(
+        "--overwrite-production",
+        action="store_true",
+        help="allow writing the default (shipped) artifact, lists cache and report paths",
+    )
     args = parser.parse_args(argv)
+    evaluation = sorted(set(args.seeds) & EVALUATION_SEEDS)
+    if evaluation and not args.lists_only:
+        parser.error(
+            f"seeds {evaluation} are evaluation seeds; fit on 11/23/37 (or use --lists-only)"
+        )
+    defaults = {
+        "--output": (args.output, parser.get_default("output")),
+        "--lists-cache": (args.lists_cache, parser.get_default("lists_cache")),
+        "--report": (args.report, parser.get_default("report")),
+    }
+    shipped = [
+        flag
+        for flag, (value, default) in defaults.items()
+        if Path(value).resolve() == Path(default).resolve()
+        and not (args.lists_only and flag != "--lists-cache")
+    ]
+    if shipped and not args.overwrite_production:
+        parser.error(
+            f"{', '.join(shipped)} would overwrite the shipped files; pass other paths or "
+            "--overwrite-production"
+        )
 
     def log(message: str) -> None:
         if not args.quiet:
@@ -662,6 +697,9 @@ def main(argv: list[str] | None = None) -> int:
             for record in records:
                 handle.write(json.dumps(record) + "\n")
         log(f"wrote {len(records)} lists to {args.lists_cache}")
+    if args.lists_only:
+        log("lists only: no fit")
+        return 0
     if not records:
         print("no training lists", file=sys.stderr)
         return 1
