@@ -688,6 +688,7 @@ def test_attribution_default_output_matches_the_makefile_and_never_collides():
     import shlex
 
     from scripts.attribution_benchmark import REPO_ROOT, default_output
+    from scripts.report_anonymizer import LEVELS
 
     modes = [
         (pipeline, real_reports, anonymize)
@@ -695,7 +696,34 @@ def test_attribution_default_output_matches_the_makefile_and_never_collides():
         for real_reports, anonymize in ((False, False), (True, True), (True, False))
     ]
     paths = [default_output(p, real_reports=r, anonymize_actors=a) for p, r, a in modes]
-    assert len(set(paths)) == len(modes)  # no mode overwrites another mode's artifact
+    # the Elastic set and the other anonymization levels add their own files
+    paths += [
+        default_output(p, real_reports=True, anonymize_actors=False, report_set=s, anonymization=lv)
+        for p in ("local", "production")
+        for s, levels in (("cti_hal", ("strict", "tradecraft")), ("elastic", LEVELS + (None,)))
+        for lv in levels
+    ]
+    assert len(set(paths)) == len(paths)  # no mode overwrites another mode's artifact
+    assert (
+        default_output(
+            "local",
+            real_reports=True,
+            anonymize_actors=False,
+            report_set="elastic",
+            anonymization="strict",
+        ).name
+        == "attribution_elastic_current.json"
+    )  # strict is the Elastic headline
+    assert (
+        default_output(
+            "local",
+            real_reports=True,
+            anonymize_actors=True,
+            report_set="cti_hal",
+            anonymization="names",
+        ).name
+        == "attribution_cti_hal_current.json"
+    )  # names stays the CTI-HAL headline
     assert default_output("local", real_reports=True, anonymize_actors=False).name == (
         "attribution_cti_hal_as_reported.json"
     )
@@ -710,13 +738,19 @@ def test_attribution_default_output_matches_the_makefile_and_never_collides():
             flags[flags.index("--pipeline") + 1] if "--pipeline" in flags else "local",
             real_reports="--cti-hal" in flags,
             anonymize_actors="--anonymize-actors" in flags,
+            report_set=flags[flags.index("--report-set") + 1]
+            if "--report-set" in flags
+            else "cti_hal",
+            # exact token: "--anonymize" must not match "--anonymize-actors"
+            anonymization=flags[flags.index("--anonymize") + 1] if "--anonymize" in flags else None,
         )
         written = (
             REPO_ROOT / flags[flags.index("--output") + 1] if "--output" in flags else expected
         )
         assert written == expected, line
         calls += 1
-    assert calls >= 5  # benchmark-attribution, benchmark-cti-hal (2), both production targets
+    # benchmark-attribution, benchmark-cti-hal (2), benchmark-elastic (4), three production targets
+    assert calls >= 10
 
 
 def test_attribution_summary_reports_deterministic_ranking_and_llm_cost():

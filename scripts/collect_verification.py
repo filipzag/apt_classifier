@@ -249,6 +249,12 @@ def summarize_attribution(payload: dict[str, Any]) -> dict[str, Any]:
         "cluster_top3",
         "top1_given_top3",
         "pairwise_12",
+        "top1_count",
+        "top1_wilson95",
+        "lenient_top1",
+        "lenient_top3",
+        "group_macro_top1",
+        "open_set",
         "llm",
     )
     return {
@@ -273,6 +279,18 @@ def cti_hal_headline_warning(payload: dict[str, Any] | None) -> str | None:
     )
 
 
+def elastic_headline_warning(payload: dict[str, Any] | None) -> str | None:
+    """The Elastic Security Labs headline is the strict anonymization level (docs 21.3.4c)."""
+    if payload is None:
+        return None
+    if (payload.get("parameters") or {}).get("anonymization") == "strict":
+        return None
+    return (
+        "elastic_attribution is not the strict level its headline is defined on (docs 21.3.4c); "
+        "regenerate it with `make benchmark-elastic`"
+    )
+
+
 def compose(
     *,
     public: dict[str, Any] | None,
@@ -291,6 +309,10 @@ def compose(
     cti_hal_attribution_production_path: Path | None = None,
     cti_hal_attribution_as_reported: dict[str, Any] | None = None,
     cti_hal_attribution_as_reported_path: Path | None = None,
+    elastic_attribution: dict[str, Any] | None = None,
+    elastic_attribution_path: Path | None = None,
+    elastic_attribution_as_reported: dict[str, Any] | None = None,
+    elastic_attribution_as_reported_path: Path | None = None,
 ) -> dict[str, Any]:
     report: dict[str, Any] = {
         "generated_at": datetime.now(UTC).isoformat(),
@@ -328,6 +350,15 @@ def compose(
             if cti_hal_attribution_as_reported_path is not None
             and cti_hal_attribution_as_reported is not None
             else None,
+            "elastic_attribution": _source_record(elastic_attribution_path, elastic_attribution)
+            if elastic_attribution_path is not None
+            else None,
+            "elastic_attribution_as_reported": _source_record(
+                elastic_attribution_as_reported_path, elastic_attribution_as_reported
+            )
+            if elastic_attribution_as_reported_path is not None
+            and elastic_attribution_as_reported is not None
+            else None,
         },
         "gates": gates,
         "public_heldout": summarize_public(public) if public else None,
@@ -354,11 +385,27 @@ def compose(
         "cti_hal_attribution_production": summarize_attribution(cti_hal_attribution_production)
         if cti_hal_attribution_production
         else None,
+        # Elastic Security Labs posts, every prose sentence, strict anonymization (attribution
+        # prose, cluster names, places and sponsors removed) with the open set inside; the
+        # as-reported run sits beside it (docs 21.3.4c). Local evaluation only.
+        "elastic_attribution": summarize_attribution(elastic_attribution)
+        if elastic_attribution
+        else None,
+        "elastic_attribution_as_reported": summarize_attribution(elastic_attribution_as_reported)
+        if elastic_attribution_as_reported
+        else None,
         "superseded": "data/audits/superseded/README.md",
     }
-    warning = cti_hal_headline_warning(cti_hal_attribution)
-    if warning:
-        report["warnings"] = [warning]
+    warnings = [
+        warning
+        for warning in (
+            cti_hal_headline_warning(cti_hal_attribution),
+            elastic_headline_warning(elastic_attribution),
+        )
+        if warning
+    ]
+    if warnings:
+        report["warnings"] = warnings
     return report
 
 
@@ -395,6 +442,14 @@ def main(argv: list[str] | None = None) -> int:
         "--cti-hal-attribution-as-reported",
         type=Path,
         default=AUDITS / "attribution_cti_hal_as_reported.json",
+    )
+    parser.add_argument(
+        "--elastic-attribution", type=Path, default=AUDITS / "attribution_elastic_current.json"
+    )
+    parser.add_argument(
+        "--elastic-attribution-as-reported",
+        type=Path,
+        default=AUDITS / "attribution_elastic_as_reported.json",
     )
     parser.add_argument("--output", type=Path, default=AUDITS / "verification_results_current.json")
     parser.add_argument("--run", action="store_true", help="regenerate public + curated first")
@@ -472,6 +527,10 @@ def main(argv: list[str] | None = None) -> int:
         cti_hal_attribution_production_path=args.cti_hal_attribution_production,
         cti_hal_attribution_as_reported=_load(args.cti_hal_attribution_as_reported),
         cti_hal_attribution_as_reported_path=args.cti_hal_attribution_as_reported,
+        elastic_attribution=_load(args.elastic_attribution),
+        elastic_attribution_path=args.elastic_attribution,
+        elastic_attribution_as_reported=_load(args.elastic_attribution_as_reported),
+        elastic_attribution_as_reported_path=args.elastic_attribution_as_reported,
     )
     if runs:
         report["benchmark_runs"] = runs

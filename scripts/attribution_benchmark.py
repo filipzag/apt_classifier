@@ -30,7 +30,15 @@ CTI-HAL reports name their own group in them, which name-sensitive signals (grou
 similarity, actor-behaviour retrieval) can match without reading any tradecraft;
 ``--anonymize-actors`` applies the folds' replacement to the statements first and records what it
 removed, including the software matches lost where a group alias is also a software name
-(Carbanak is both G0008 and S0030).
+(Carbanak is both G0008 and S0030). ``--anonymize strict|tradecraft`` goes further
+(``scripts/report_anonymizer.py``): the report's own attribution prose, vendor cluster names,
+country / nationality / sponsor words and, for tradecraft, ATT&CK malware names.
+
+``--report-set elastic`` reads the Elastic Security Labs posts prepared by
+``scripts/prepare_elastic_reports.py`` (every prose sentence, as the product's no-LLM mode reads a
+pasted report; strict is its headline level). ``--open-set`` adds reports whose actor is in no
+ATT&CK group: they are analysed like the labelled ones and reported apart, since any name given
+there is unsupported (not proven wrong).
 """
 
 from __future__ import annotations
@@ -39,7 +47,6 @@ import argparse
 import copy
 import json
 import random
-import re
 import sys
 import time
 from collections import Counter
@@ -49,13 +56,20 @@ from pathlib import Path
 from statistics import fmean
 from typing import Any
 
-from apt_classifier.attack.kb import AttackKnowledgeBase
-from apt_classifier.attack.related import related_groups
-from apt_classifier.attribution import AttributionStage
-from apt_classifier.classifiers.profile_forest import PROFILE_FOREST_NAME, SOURCE_COUNTRY_NAME
-from apt_classifier.config import Settings
-from apt_classifier.embeddings import SentenceTransformerEmbedder
-from apt_classifier.evaluation import (
+REPO_ROOT = Path(__file__).resolve().parent.parent
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
+from apt_classifier.attack.kb import AttackKnowledgeBase  # noqa: E402
+from apt_classifier.attack.related import related_groups  # noqa: E402
+from apt_classifier.attribution import AttributionStage  # noqa: E402
+from apt_classifier.classifiers.profile_forest import (  # noqa: E402
+    PROFILE_FOREST_NAME,
+    SOURCE_COUNTRY_NAME,
+)
+from apt_classifier.config import Settings  # noqa: E402
+from apt_classifier.embeddings import SentenceTransformerEmbedder  # noqa: E402
+from apt_classifier.evaluation import (  # noqa: E402
     AttributionEvaluationCase,
     AttributionPrediction,
     bootstrap_interval,
@@ -64,42 +78,27 @@ from apt_classifier.evaluation import (
     source_fingerprint,
     write_artifact,
 )
-from apt_classifier.evidence.iocs import match_software_aliases
-from apt_classifier.evidence.models import EvidenceLedger, Observation, Provenance
-from apt_classifier.group_mlp import refit_without_groups
-from apt_classifier.llm import OpenRouterClient
-from apt_classifier.profile_forest import fit_profile_forest
-from apt_classifier.session import AttributionEngine
-from apt_classifier.vectorstore import (
+from apt_classifier.evidence.iocs import match_software_aliases  # noqa: E402
+from apt_classifier.evidence.models import EvidenceLedger, Observation, Provenance  # noqa: E402
+from apt_classifier.group_mlp import refit_without_groups  # noqa: E402
+from apt_classifier.llm import OpenRouterClient  # noqa: E402
+from apt_classifier.profile_forest import fit_profile_forest  # noqa: E402
+from apt_classifier.session import AttributionEngine  # noqa: E402
+from apt_classifier.vectorstore import (  # noqa: E402
     ChromaVectorStore,
     VectorHit,
     _actor_name_pattern,
     _sanitize_procedure,
     normalize_procedure_text,
 )
-
-REPO_ROOT = Path(__file__).resolve().parent.parent
-
-
-def _evidence_name_pattern(names: tuple[str, ...]) -> re.Pattern[str] | None:
-    """The actor-name pattern for *evidence* text (fold statements, real-report statements).
-
-    Like ``vectorstore._actor_name_pattern``, but a name that ends a sentence ("the backdoor known
-    as Carbanak.") is replaced too; a dot followed by a word character still protects file and
-    family names (Patchwork.dll, Silence.Downloader). The indexed procedure sentences keep the
-    index's pattern: changing it there would need a re-index and a combiner refit.
-    """
-    ordered = sorted(
-        (name for name in names if name), key=lambda item: (-len(item), item.casefold())
-    )
-    if not ordered:
-        return None
-    return re.compile(
-        r"(?<![\w.-])(?:" + "|".join(re.escape(name) for name in ordered) + r")"
-        r"(?P<possessive>['’]s)?(?![\w-]|\.\w)",
-        re.IGNORECASE,
-    )
-
+from scripts.report_anonymizer import (  # noqa: E402
+    LEVELS,
+    ReportAnonymizer,
+    actor_names,
+)
+from scripts.report_anonymizer import (  # noqa: E402
+    evidence_name_pattern as _evidence_name_pattern,
+)
 
 FINGERPRINTED_SOURCES = (
     REPO_ROOT / "apt_classifier" / "fusion.py",
@@ -123,11 +122,17 @@ FINGERPRINTED_SOURCES = (
 
 @dataclass(frozen=True)
 class Fold:
-    group_id: str
+    # None for an open-set report: its actor is in no ATT&CK group
+    group_id: str | None
     held_out_techniques: frozenset[str]
     observations: tuple[str, ...]
     held_out_texts: frozenset[str]
     report_id: str = ""
+    # groups also counted correct (umbrella / sub-group), fixed with the labels before any run
+    accept: frozenset[str] = frozenset()
+    kind: str = ""
+    # statements the strict level dropped as the report's own attribution prose, by reason
+    attribution_dropped: tuple[tuple[str, int], ...] = ()
 
 
 class FoldStore:
@@ -210,21 +215,6 @@ class FoldStore:
         return kept[:n_results]
 
 
-def actor_names(kb: AttackKnowledgeBase) -> tuple[str, ...]:
-    """Every ATT&CK group name and alias, longest first, as the replacement pattern needs."""
-    return tuple(
-        sorted(
-            {
-                name.strip()
-                for group in kb.groups.values()
-                for name in (group.name, *group.aliases)
-                if name and name.strip()
-            },
-            key=lambda item: (-len(item), item.casefold()),
-        )
-    )
-
-
 def build_folds(
     kb: AttackKnowledgeBase,
     *,
@@ -276,44 +266,83 @@ def build_folds(
     return folds
 
 
-def load_report_folds(path: Path, *, max_observations: int) -> list[Fold]:
-    """Real-report folds from ``scripts/prepare_cti_hal.py`` output (one fold per report).
+def load_report_folds(
+    path: Path,
+    *,
+    max_observations: int | None,
+    anonymizer: ReportAnonymizer | None = None,
+    sample_seed: int | None = None,
+) -> list[Fold]:
+    """Real-report folds (one per report) from ``prepare_cti_hal.py`` or
+    ``prepare_elastic_reports.py`` output.
 
-    Observations are the report's human-annotated statements; the expected group is the
-    report's subject. Nothing is hidden from the store: these sentences were never indexed,
-    and the group's own documented behaviour is legitimate evidence for a real report.
+    Observations are the report's statements; the expected group is the report's subject
+    (``null`` for an open-set report). Nothing is hidden from the store: these sentences were
+    never indexed, and the group's own documented behaviour is legitimate evidence for a real
+    report. With an ``anonymizer`` (strict and tradecraft) the report's own attribution prose is
+    dropped first, on the text as reported; then at most ``max_observations`` statements are
+    kept (``None`` = all), the first ones, or a seeded random sample in report order when
+    ``sample_seed`` is given (the volume diagnostic). Report-level ``technique_ids`` join the
+    statements' labels as the gold set.
     """
     folds: list[Fold] = []
     for line in Path(path).read_text(encoding="utf-8").splitlines():
         if not line.strip():
             continue
         row = json.loads(line)
-        texts = tuple(
-            str(item["text"]).strip()
+        statements = [
+            item
             for item in row.get("statements", [])
             if len(str(item.get("text", "")).split()) >= 3
-        )[:max_observations]
+        ]
+        dropped: Counter[str] = Counter()
+        if anonymizer is not None and statements:
+            paragraphs = (
+                [item.get("paragraph") for item in statements]
+                if any("paragraph" in item for item in statements)
+                else None
+            )
+            flags = anonymizer.attribution_flags(
+                [str(item["text"]) for item in statements],
+                paragraphs=paragraphs,
+                section_flags=[bool(item.get("section_attribution")) for item in statements],
+            )
+            dropped.update(flag for flag in flags if flag)
+            statements = [item for item, flag in zip(statements, flags, strict=True) if not flag]
+        texts = tuple(str(item["text"]).strip() for item in statements)
+        report_id = str(row.get("report_id") or "")
+        if max_observations is not None and len(texts) > max_observations:
+            if sample_seed is None:
+                texts = texts[:max_observations]
+            else:
+                rng = random.Random(f"{sample_seed}:{report_id}")
+                chosen = sorted(rng.sample(range(len(texts)), max_observations))
+                texts = tuple(texts[index] for index in chosen)
         if not texts:
             continue
         techniques = frozenset(
             technique_id
             for item in row.get("statements", [])
             for technique_id in item.get("technique_ids", [])
-        )
+        ) | frozenset(row.get("technique_ids") or ())
+        group_id = row.get("group_id")
         folds.append(
             Fold(
-                group_id=str(row["group_id"]),
+                group_id=str(group_id) if group_id is not None else None,
                 held_out_techniques=techniques,
                 observations=texts,
                 held_out_texts=frozenset(),
-                report_id=str(row.get("report_id") or ""),
+                report_id=report_id,
+                accept=frozenset(row.get("accept") or ()),
+                kind=str(row.get("kind") or ""),
+                attribution_dropped=tuple(sorted(dropped.items())),
             )
         )
     return folds
 
 
 def anonymize_report_folds(
-    folds: list[Fold], kb: AttackKnowledgeBase
+    folds: list[Fold], kb: AttackKnowledgeBase, *, level: str = "names"
 ) -> tuple[list[Fold], list[dict[str, Any]], dict[str, Any]]:
     """Replace every ATT&CK group name and alias in the report statements with "the adversary".
 
@@ -323,9 +352,18 @@ def anonymize_report_folds(
     G0008 and S0030), so the software matches the replacement removes are counted with the
     engine's own matcher over the joined narrative, as the classifier context reads it.
     Returns the folds, one record per fold, and the totals.
+
+    ``strict`` and ``tradecraft`` (``scripts/report_anonymizer.py``) replace ordinary-word aliases
+    only in their ATT&CK spelling and then mask cluster names, object ids, places and sponsors
+    (and ATT&CK malware for tradecraft); each record then also carries a ``strict`` entry with
+    what was masked, the attribution statements dropped at load, the software lost beyond the
+    names pass (expected empty at strict) and a residual audit. ``names`` is unchanged.
     """
+    if level not in LEVELS:
+        raise ValueError(f"unknown anonymization level {level!r}")
     names = actor_names(kb)
     pattern = _evidence_name_pattern(names)
+    anonymizer = ReportAnonymizer(kb, level) if level != "names" else None
     owners: dict[str, set[str]] = {}
     for group in kb.groups.values():
         for name in (group.name, *group.aliases):
@@ -338,7 +376,10 @@ def anonymize_report_folds(
         replaced: Counter[str] = Counter()
         changed = 0
         for text in fold.observations:
-            found = list(pattern.finditer(text)) if pattern is not None else []
+            if anonymizer is not None:
+                found = anonymizer.name_matches(text)
+            else:
+                found = list(pattern.finditer(text)) if pattern is not None else []
             if not found:
                 texts.append(text)
                 continue
@@ -347,7 +388,11 @@ def anonymize_report_folds(
                 match.group(0).removesuffix(match.group("possessive") or "").casefold()
                 for match in found
             )
-            texts.append(_sanitize_procedure(text, names, pattern=pattern))
+            texts.append(
+                anonymizer.replace_names(text)
+                if anonymizer is not None
+                else _sanitize_procedure(text, names, pattern=pattern)
+            )
         removed: Counter[str] = Counter()
         lost: set[str] = set()
         if changed:
@@ -362,16 +407,34 @@ def anonymize_report_folds(
                 if match.software_id
             )
             removed, lost = before - after, set(before) - set(after)
-        records.append(
-            {
-                "statements_changed": changed,
-                "replacements": sum(replaced.values()),
-                "names": dict(sorted(replaced.items())),
-                "own_group_named": any(fold.group_id in owners.get(name, ()) for name in replaced),
-                "software_matches_removed": sum(removed.values()),
-                "software_ids_removed": sorted(lost),
+        record = {
+            "statements_changed": changed,
+            "replacements": sum(replaced.values()),
+            "names": dict(sorted(replaced.items())),
+            "own_group_named": any(fold.group_id in owners.get(name, ()) for name in replaced),
+            "software_matches_removed": sum(removed.values()),
+            "software_ids_removed": sorted(lost),
+        }
+        if anonymizer is not None:
+            named = Counter(
+                match.software_id
+                for match in match_software_aliases(" ".join(texts), kb)
+                if match.software_id
+            )
+            texts, masked = anonymizer.mask(texts)
+            after_mask = Counter(
+                match.software_id
+                for match in match_software_aliases(" ".join(texts), kb)
+                if match.software_id
+            )
+            record["strict"] = {
+                **masked,
+                "attribution_dropped": dict(fold.attribution_dropped),
+                # software the names pass kept but masking removed (tradecraft: malware, on purpose)
+                "software_lost_beyond_names": sorted(set(named) - set(after_mask)),
+                "residuals": anonymizer.residuals(texts),
             }
-        )
+        records.append(record)
         anonymized.append(replace(fold, observations=tuple(texts)))
     names_replaced: Counter[str] = Counter()
     software_reports: Counter[str] = Counter()
@@ -391,6 +454,36 @@ def anonymize_report_folds(
         # software id -> number of reports in which it is no longer detected
         "software_ids_removed": dict(sorted(software_reports.items())),
     }
+    if anonymizer is not None:
+        strict = [record["strict"] for record in records]
+        masked_counts: Counter[str] = Counter()
+        roles: Counter[str] = Counter()
+        attribution: Counter[str] = Counter()
+        codenames: Counter[str] = Counter()
+        protected: Counter[str] = Counter()
+        lost_beyond: Counter[str] = Counter()
+        malware: Counter[str] = Counter()
+        for item in strict:
+            masked_counts.update(item["replacements"])
+            roles.update(item["gazetteer_roles"])
+            attribution.update(item["attribution_dropped"])
+            codenames.update(item["codenames_kept"])
+            protected.update(item["protected_by_software"])
+            lost_beyond.update(item["software_lost_beyond_names"])
+            malware.update(item.get("malware_masked", {}))
+        totals["strict"] = {
+            "level": level,
+            "replacements": dict(sorted(masked_counts.items())),
+            "gazetteer_roles": dict(sorted(roles.items())),
+            "attribution_statements_dropped": dict(sorted(attribution.items())),
+            "codenames_kept": dict(sorted(codenames.items())),
+            "protected_by_software": dict(sorted(protected.items())),
+            "duplicates_merged": sum(item["duplicates_merged"] for item in strict),
+            # software id -> reports where masking removed it beyond the names pass
+            "software_lost_beyond_names": dict(sorted(lost_beyond.items())),
+            "residuals": sum(len(item["residuals"]) for item in strict),
+            **({"malware_masked": dict(sorted(malware.items()))} if level == "tradecraft" else {}),
+        }
     return anonymized, records, totals
 
 
@@ -546,6 +639,18 @@ def _rank_of(fusion: Any, group_id: str) -> int | None:
     return ranked.index(group_id) + 1 if group_id in ranked else None
 
 
+def _truth_exclusive_software(kb: Any, software_ids: Any, truth: set[str]) -> list[str]:
+    """Detected ATT&CK software that only the truth (or an accepted) group uses: a lookup, not
+    tradecraft, so per-report tables can say which hits came from a malware name."""
+    exclusive = []
+    for software_id in sorted(software_ids or ()):
+        record = kb.software.get(software_id)
+        users = set(getattr(record, "group_ids", ()) or ())
+        if truth and users and users <= truth:
+            exclusive.append(software_id)
+    return exclusive
+
+
 def run_known(
     engine: AttributionEngine,
     folds: list[Fold],
@@ -598,6 +703,17 @@ def run_known(
                 dropped_total["llm_unavailable_at"] = label  # type: ignore[assignment]
                 print(f"stopping: all LLM calls failed at {label}", file=sys.stderr)
                 break
+            # a report with no gold technique labels has no recall (not zero recall)
+            no_gold = None if fold.report_id and not fold.held_out_techniques else 0.0
+            truth = {fold.group_id, *fold.accept} - {None}
+            lenient = [ranked.index(gid) + 1 for gid in truth if gid in ranked]
+            extra: dict[str, Any] = {}
+            if fold.accept or fold.kind:
+                extra = {
+                    "accept": sorted(fold.accept),
+                    "lenient_rank": min(lenient) if lenient else None,
+                    "kind": fold.kind,
+                }
             rows.append(
                 {
                     "group_id": fold.group_id,
@@ -608,8 +724,9 @@ def run_known(
                     "technique_recall": (
                         len(observed & fold.held_out_techniques) / len(fold.held_out_techniques)
                         if fold.held_out_techniques
-                        else 0.0
+                        else no_gold
                     ),
+                    **extra,
                     "rank": ranked.index(fold.group_id) + 1 if fold.group_id in ranked else None,
                     "deterministic_rank": _rank_of(deterministic, fold.group_id),
                     **_combiner_fields(state, fold.group_id),
@@ -625,7 +742,10 @@ def run_known(
                         )
                         / len(fold.held_out_techniques)
                         if fold.held_out_techniques
-                        else 0.0
+                        else no_gold
+                    ),
+                    "truth_exclusive_software": _truth_exclusive_software(
+                        engine.kb, state.context.software_ids, truth
                     ),
                     "eligible_groups": (
                         len(state.context.eligible_group_ids)
@@ -810,9 +930,28 @@ def summarize(
     metrics["median_rank"] = (
         sorted(r if r else 10**6 for r in ranks)[len(ranks) // 2] if ranks else None
     )
-    metrics["mean_technique_recall"] = (
-        fmean(row["technique_recall"] for row in known_rows) if known_rows else 0.0
-    )
+    recalls = [row["technique_recall"] for row in known_rows if row["technique_recall"] is not None]
+    metrics["mean_technique_recall"] = fmean(recalls) if recalls else (None if known_rows else 0.0)
+    if len(recalls) != len(known_rows):
+        # reports without gold technique labels have no recall (Elastic posts without links)
+        metrics["technique_recall_reports"] = len(recalls)
+    if ranks:
+        hits = sum(1 for rank in ranks if rank == 1)
+        metrics["top1_count"] = hits
+        metrics["top1_wilson95"] = [round(value, 4) for value in _wilson(hits, len(ranks))]
+        by_group: dict[str, list[float]] = {}
+        for row in known_rows:
+            by_group.setdefault(row["group_id"], []).append(1.0 if row["rank"] == 1 else 0.0)
+        metrics["group_macro_top1"] = fmean(fmean(values) for values in by_group.values())
+    if any(row.get("accept") for row in known_rows):
+        lenient = [row.get("lenient_rank", row["rank"]) for row in known_rows]
+        metrics["lenient_top1"] = fmean(1.0 if rank == 1 else 0.0 for rank in lenient)
+        metrics["lenient_top3"] = fmean(1.0 if rank and rank <= 3 else 0.0 for rank in lenient)
+        metrics["lenient_named_correct"] = sum(
+            1
+            for row, rank in zip(known_rows, lenient, strict=True)
+            if row["stage"] == named and rank == 1
+        )
     metrics["named_correct"] = sum(1 for row in named_rows if row["rank"] == 1)
     if known_rows and all(row.get("separation") is not None for row in known_rows):
         metrics["separation_auc"] = _auc(
@@ -910,6 +1049,51 @@ def _inactive_combiner_rows(rows: list[dict[str, Any]]) -> list[str]:
     ]
 
 
+def _wilson(hits: int, total: int, z: float = 1.96) -> tuple[float, float]:
+    """Wilson score interval for a proportion; sound at n = 8 and at 0/n or n/n, where the
+    percentile bootstrap collapses to a point."""
+    if total <= 0:
+        return (0.0, 0.0)
+    share = hits / total
+    denominator = 1 + z * z / total
+    centre = (share + z * z / (2 * total)) / denominator
+    half = z * ((share * (1 - share) / total + z * z / (4 * total * total)) ** 0.5) / denominator
+    return (max(0.0, centre - half), min(1.0, centre + half))
+
+
+def open_set_metrics(
+    open_rows: list[dict[str, Any]], known_rows: list[dict[str, Any]]
+) -> dict[str, Any]:
+    """Reports whose actor is in no ATT&CK group: every name given there is unsupported.
+
+    Also the combined named risk (wrong names on the labelled reports plus any name on the open
+    set, over all names) and how often each group leads the open-set rankings, a null for the
+    labelled hits (a group that leads many unrelated reports carries less information).
+    """
+    named = AttributionStage.KNOWN_GROUP_HYPOTHESIS.value
+    stages = Counter(str(row["stage"]) for row in open_rows)
+    names = Counter(str(row.get("leading")) for row in open_rows if row["stage"] == named)
+    leaders = Counter(row["top3"][0] for row in open_rows if row.get("top3"))
+    by_kind: dict[str, dict[str, int]] = {}
+    for row in open_rows:
+        kind = row.get("kind") or "unknown"
+        entry = by_kind.setdefault(kind, {"reports": 0, "named": 0})
+        entry["reports"] += 1
+        entry["named"] += 1 if row["stage"] == named else 0
+    known_named = [row for row in known_rows if row["stage"] == named]
+    wrong = sum(1 for row in known_named if row["rank"] != 1)
+    all_named = len(known_named) + sum(names.values())
+    return {
+        "reports": len(open_rows),
+        "named": sum(names.values()),
+        "named_groups": dict(names.most_common()),
+        "stage_distribution": dict(sorted(stages.items())),
+        "by_kind": by_kind,
+        "leader_counts": dict(leaders.most_common()),
+        "combined_named_risk": (wrong + sum(names.values())) / all_named if all_named else 0.0,
+    }
+
+
 def _auc(positives: list[float], negatives: list[float]) -> float | None:
     """Rank-based AUC of a score for separating two groups (0.5 = uninformative)."""
     if not positives or not negatives:
@@ -935,21 +1119,38 @@ def _coerce(value: str) -> Any:
         return value
 
 
-def default_output(pipeline: str, *, real_reports: bool, anonymize_actors: bool) -> Path:
+# the anonymization level each real-report set publishes as its headline (``*_current``)
+HEADLINE_LEVEL = {"cti_hal": "names", "elastic": "strict"}
+
+
+def default_output(
+    pipeline: str,
+    *,
+    real_reports: bool,
+    anonymize_actors: bool,
+    report_set: str = "cti_hal",
+    anonymization: str | None = None,
+) -> Path:
     """Artifact path when ``--output`` is not given, named as the Makefile targets name it.
 
     Every mode has its own file, so a run never replaces another benchmark's artifact: a
     real-report run used to overwrite ``attribution_heldout_*`` (the ATT&CK folds, which the
     verification collector reads as the attribution gate), and a run on the statements as
-    reported must not replace the anonymized CTI-HAL headline.
+    reported must not replace the anonymized CTI-HAL headline. A report set's headline level
+    writes ``attribution_{set}_current`` (``_production``); any other level writes
+    ``attribution_{set}_{level}``, statements as reported ``attribution_{set}_as_reported``.
     """
     production = pipeline == "production"
     if not real_reports:
         name = "attribution_heldout_" + ("production" if production else "current")
-    elif anonymize_actors:
-        name = "attribution_cti_hal_" + ("production" if production else "current")
+        return REPO_ROOT / "data" / "audits" / f"{name}.json"
+    level = anonymization or ("names" if anonymize_actors else None)
+    if level == HEADLINE_LEVEL[report_set]:
+        name = f"attribution_{report_set}_" + ("production" if production else "current")
     else:
-        name = "attribution_cti_hal_as_reported" + ("_production" if production else "")
+        name = f"attribution_{report_set}_{level or 'as_reported'}" + (
+            "_production" if production else ""
+        )
     return REPO_ROOT / "data" / "audits" / f"{name}.json"
 
 
@@ -1016,11 +1217,45 @@ def main(argv: list[str] | None = None) -> int:
         help="reports.jsonl from scripts/prepare_cti_hal.py: run real-report attribution "
         "instead of the held-out ATT&CK folds (no unknown-actor arm, no evidence hiding)",
     )
-    parser.add_argument(
+    anonymize = parser.add_mutually_exclusive_group()
+    anonymize.add_argument(
         "--anonymize-actors",
         action="store_true",
         help="real-report mode: replace every ATT&CK group name and alias in the statements with "
-        '"the adversary" before analysis, as the held-out folds do (default: statements as reported)',
+        '"the adversary" before analysis, as the held-out folds do (default: statements as '
+        "reported); the same as --anonymize names",
+    )
+    anonymize.add_argument(
+        "--anonymize",
+        choices=LEVELS,
+        help="real-report mode: names (as --anonymize-actors), strict (also the report's own "
+        "attribution prose, vendor cluster names, places and sponsors) or tradecraft (strict "
+        "plus ATT&CK malware names); see scripts/report_anonymizer.py",
+    )
+    parser.add_argument(
+        "--report-set",
+        choices=sorted(HEADLINE_LEVEL),
+        default="cti_hal",
+        help="which real-report set --cti-hal points at; names the artifact and the benchmark "
+        "(cti_hal: names is the headline; elastic: strict is the headline)",
+    )
+    parser.add_argument(
+        "--open-set",
+        type=Path,
+        help="real-report mode: reports whose actor is in no ATT&CK group (group_id null), "
+        "analysed like the labelled ones and reported apart under open_set",
+    )
+    parser.add_argument(
+        "--report-observations",
+        type=int,
+        help="real-report mode: statements read per report (0 = all; default: cti_hal 30, "
+        "elastic all)",
+    )
+    parser.add_argument(
+        "--report-sample-seed",
+        type=int,
+        help="with --report-observations: a seeded random sample in report order instead of "
+        "the first ones (the volume diagnostic)",
     )
     parser.add_argument(
         "--allow-inactive-combiner",
@@ -1036,13 +1271,22 @@ def main(argv: list[str] | None = None) -> int:
         help="override a Settings field for this run (e.g. --set technique_family_weight=2.0)",
     )
     args = parser.parse_args(argv)
-    if args.anonymize_actors and args.cti_hal is None:
+    level = args.anonymize or ("names" if args.anonymize_actors else None)
+    if level is not None and args.cti_hal is None:
         parser.error("--anonymize-actors needs --cti-hal; the ATT&CK folds are always anonymized")
+    if args.cti_hal is None and (
+        args.open_set is not None
+        or args.report_observations is not None
+        or args.report_sample_seed is not None
+    ):
+        parser.error("--open-set and --report-observations need --cti-hal")
     if args.output is None:
         args.output = default_output(
             args.pipeline,
             real_reports=args.cti_hal is not None,
             anonymize_actors=args.anonymize_actors,
+            report_set=args.report_set,
+            anonymization=level,
         )
 
     try:
@@ -1058,14 +1302,41 @@ def main(argv: list[str] | None = None) -> int:
     real_reports = args.cti_hal is not None
     actor_records: list[dict[str, Any]] = []
     actor_totals: dict[str, Any] | None = None
+    open_folds: list[Fold] = []
+    open_records: list[dict[str, Any]] = []
+    open_totals: dict[str, Any] | None = None
+    report_cap: int | None = None
     if real_reports:
-        folds = load_report_folds(args.cti_hal, max_observations=max(args.max_observations, 30))
+        if args.report_observations is not None:
+            report_cap = args.report_observations or None
+        elif args.report_set == "cti_hal":
+            report_cap = max(args.max_observations, 30)
+        dropper = ReportAnonymizer(kb, level) if level in ("strict", "tradecraft") else None
+        loaded = load_report_folds(
+            args.cti_hal,
+            max_observations=report_cap,
+            anonymizer=dropper,
+            sample_seed=args.report_sample_seed,
+        )
+        folds = [fold for fold in loaded if fold.group_id is not None]
+        open_folds = [fold for fold in loaded if fold.group_id is None]
+        if args.open_set is not None:
+            open_folds += load_report_folds(
+                args.open_set,
+                max_observations=report_cap,
+                anonymizer=dropper,
+                sample_seed=args.report_sample_seed,
+            )
         if args.sample is not None:
             folds = sample_folds(folds, args.sample, args.seed)
         elif args.limit is not None:
             folds = folds[: args.limit]
-        if args.anonymize_actors:
-            folds, actor_records, actor_totals = anonymize_report_folds(folds, kb)
+        if level is not None:
+            folds, actor_records, actor_totals = anonymize_report_folds(folds, kb, level=level)
+            if open_folds:
+                open_folds, open_records, open_totals = anonymize_report_folds(
+                    open_folds, kb, level=level
+                )
     else:
         folds = build_folds(
             kb,
@@ -1106,6 +1377,23 @@ def main(argv: list[str] | None = None) -> int:
     # rows follow the folds in order (a truncated production run keeps a prefix)
     for row, record in zip(known_rows, actor_records, strict=False):
         row["actor_name_replacement"] = record
+    open_rows: list[dict[str, Any]] = []
+    if open_folds and not dropped.get("llm_unavailable_at"):
+        started = time.time()
+        try:
+            open_rows, open_dropped = run_known(
+                engine, open_folds, hide_evidence=False, client=client
+            )
+        except LLMUnavailableError as error:
+            print(f"aborted: {error}", file=sys.stderr)
+            if client is not None:
+                client.close()
+            return 2
+        for key in ("technique", "behavior", "profile"):
+            dropped[key] += open_dropped.get(key, 0)
+        for row, record in zip(open_rows, open_records, strict=False):
+            row["actor_name_replacement"] = record
+        known_seconds += time.time() - started
     unknown_folds = (
         []
         if real_reports
@@ -1119,6 +1407,8 @@ def main(argv: list[str] | None = None) -> int:
         client.close()
     unknown_seconds = time.time() - started
     metrics = summarize(known_rows, unknown_rows)
+    if open_folds:
+        metrics["open_set"] = open_set_metrics(open_rows, known_rows)
     fingerprint_inputs = {
         "attack_version": kb.version,
         "embedding_model": settings.embedding_model,
@@ -1159,7 +1449,9 @@ def main(argv: list[str] | None = None) -> int:
     }
     report = {
         "generated_at": datetime.now(UTC).isoformat(),
-        "benchmark": "attribution_cti_hal_reports" if real_reports else "attribution_text_heldout",
+        "benchmark": f"attribution_{args.report_set}_reports"
+        if real_reports
+        else "attribution_text_heldout",
         "source": str(args.cti_hal)
         if real_reports
         else "ATT&CK procedure sentences (held out per group)",
@@ -1178,8 +1470,19 @@ def main(argv: list[str] | None = None) -> int:
             "limit": args.limit,
             "truncated_at": dropped.get("llm_unavailable_at"),
             # the ATT&CK folds are always anonymized; real reports only with --anonymize-actors
-            "actor_names": (
-                "as_reported" if real_reports and not args.anonymize_actors else "anonymized"
+            "actor_names": ("as_reported" if real_reports and level is None else "anonymized"),
+            **(
+                {
+                    "report_set": args.report_set,
+                    "anonymization": level,
+                    # statements read per report (None = all), as applied
+                    "report_observations": report_cap,
+                    "report_sample_seed": args.report_sample_seed,
+                    "open_set": str(args.open_set) if args.open_set is not None else None,
+                    "open_set_reports": len(open_rows),
+                }
+                if real_reports
+                else {}
             ),
         },
         "pipeline_fingerprint": pipeline_fingerprint(fingerprint_inputs),
@@ -1187,13 +1490,15 @@ def main(argv: list[str] | None = None) -> int:
         "leak_control": {
             "dropped_hits": dropped,
             **({"actor_name_replacement": actor_totals} if actor_totals is not None else {}),
+            **({"open_set_actor_name_replacement": open_totals} if open_totals is not None else {}),
         },
         "runtime_seconds": {"known": round(known_seconds, 1), "unknown": round(unknown_seconds, 1)},
         "metrics": metrics,
         "known": known_rows,
         "unknown": unknown_rows,
+        **({"open_set": open_rows} if open_folds else {}),
     }
-    inactive = _inactive_combiner_rows(known_rows + unknown_rows)
+    inactive = _inactive_combiner_rows(known_rows + unknown_rows + open_rows)
     if combiner_expected and inactive and not args.allow_inactive_combiner:
         print(
             f"refusing to write {args.output}: the learned combiner is enabled but was inactive "
@@ -1209,6 +1514,12 @@ def main(argv: list[str] | None = None) -> int:
         )
         for key in (
             "top1",
+            "top1_count",
+            "top1_wilson95",
+            "lenient_top1",
+            "lenient_top3",
+            "top3",
+            "group_macro_top1",
             "cluster_top1",
             "top5",
             "mrr",
@@ -1234,6 +1545,13 @@ def main(argv: list[str] | None = None) -> int:
         if "llm" in metrics:
             print("  llm:", metrics["llm"])
         print("  leak-control dropped hits:", dropped)
+        if "open_set" in metrics:
+            print(
+                "  open set:",
+                {k: v for k, v in metrics["open_set"].items() if k != "leader_counts"},
+            )
+        if actor_totals is not None and "strict" in actor_totals:
+            print("  strict masking:", actor_totals["strict"])
         if actor_totals is not None:
             print(
                 f"  actor names anonymized: {actor_totals['reports_changed']}/"

@@ -7,7 +7,7 @@ EVIDENCEFORGE_CLINIC_DIR ?= ../evidenceforge_clinic
 PUBLIC_BASELINE ?= data/audits/public_heldout_baseline.json
 PUBLIC_CURRENT ?= data/audits/public_heldout_current.json
 
-.PHONY: exemplars fit-forest fit-mlp fit-combiner api api-dev api-local api-auth-demo web-install web-dev web-build web-check run-next setup up down ingest run run-local test lint evidenceforge-eval evidenceforge-eval-all benchmark-public benchmark-curated verify-results check-regression fit-acceptance benchmark-attribution train-reranker generate-synthetic benchmark-cti-hal benchmark-cti-hal-production benchmark-attribution-production
+.PHONY: exemplars fit-forest fit-mlp fit-combiner api api-dev api-local api-auth-demo web-install web-dev web-build web-check run-next setup up down ingest run run-local test lint evidenceforge-eval evidenceforge-eval-all benchmark-public benchmark-curated verify-results check-regression fit-acceptance benchmark-attribution train-reranker generate-synthetic benchmark-cti-hal benchmark-cti-hal-production benchmark-attribution-production prepare-elastic benchmark-elastic benchmark-elastic-production
 
 setup:
 	python3 -m venv --system-site-packages .venv
@@ -126,6 +126,28 @@ benchmark-cti-hal-production:
 
 benchmark-attribution-production:
 	PYTHONPATH=. $(PYTHON) scripts/attribution_benchmark.py --pipeline production --output data/audits/attribution_heldout_production.json
+
+# Elastic Security Labs posts attributed by Elastic to one ATT&CK group, plus an open set of
+# posts on actors outside ATT&CK (labels pre-registered in data/elastic_security_labs/labels.json;
+# post text (c) Elastic, local evaluation only). prepare-elastic downloads the RSS feed once
+# (--download refreshes it). The headline reads every prose sentence at the strict level (the
+# report's attribution prose, cluster names, places and sponsors removed; docs 21.3.4c); names,
+# tradecraft (ATT&CK malware masked too) and as-reported runs sit beside it. Local, no credit.
+ELASTIC_ROOT ?= data/benchmarks/elastic
+prepare-elastic:
+	PYTHONPATH=. $(PYTHON) scripts/prepare_elastic_reports.py --output $(ELASTIC_ROOT)
+
+benchmark-elastic:
+	PYTHONPATH=. $(PYTHON) scripts/attribution_benchmark.py --report-set elastic --cti-hal $(ELASTIC_ROOT)/reports.jsonl --open-set $(ELASTIC_ROOT)/reports_open_set.jsonl --anonymize strict --output data/audits/attribution_elastic_current.json
+	PYTHONPATH=. $(PYTHON) scripts/attribution_benchmark.py --report-set elastic --cti-hal $(ELASTIC_ROOT)/reports.jsonl --anonymize names --output data/audits/attribution_elastic_names.json
+	PYTHONPATH=. $(PYTHON) scripts/attribution_benchmark.py --report-set elastic --cti-hal $(ELASTIC_ROOT)/reports.jsonl --anonymize tradecraft --output data/audits/attribution_elastic_tradecraft.json
+	PYTHONPATH=. $(PYTHON) scripts/attribution_benchmark.py --report-set elastic --cti-hal $(ELASTIC_ROOT)/reports.jsonl --output data/audits/attribution_elastic_as_reported.json
+
+# Production pipeline (technique verifier) on the strict headline reports. Spends OpenRouter
+# credit: about $0.02 and 11 s per sentence, so roughly $15-20 and 2.5 h for the 8 reports.
+# Probe first: add --limit 2 --output data/audits/attribution_elastic_production_sample.json.
+benchmark-elastic-production:
+	PYTHONPATH=. $(PYTHON) scripts/attribution_benchmark.py --pipeline production --report-set elastic --cti-hal $(ELASTIC_ROOT)/reports.jsonl --anonymize strict --output data/audits/attribution_elastic_production.json
 
 # ----- modern front end (FastAPI + React) -----
 api:
