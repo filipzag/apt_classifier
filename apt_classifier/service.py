@@ -35,6 +35,7 @@ from apt_classifier.evidence.models import (
     TechniqueReviewDecision,
 )
 from apt_classifier.llm import OpenRouterClient
+from apt_classifier.platforms import ledger_platforms, normalize_platforms, set_ledger_platforms
 from apt_classifier.questions import parse_interview_answer
 from apt_classifier.report import export_document
 from apt_classifier.separation import discriminate, distinguishing_techniques
@@ -95,6 +96,9 @@ class IntakePayload:
     motivations: str = ""
     objectives: str = ""
     suspected_origins: str = ""
+    # Target OS: every operating system the activity touched (Windows, Linux, macOS, ESXi); empty =
+    # unknown. Techniques documented only for other operating systems are not mapped.
+    target_platforms: str = ""
 
     def free_text(self) -> str:
         parts = [self.narrative.strip()] if self.narrative.strip() else []
@@ -324,6 +328,8 @@ class CaseService:
     def create_case(self, payload: IntakePayload, *, owner: dict[str, Any] | None = None) -> str:
         if not payload.has_input():
             raise ValueError("add at least one observation, alert, indicator or evidence file")
+        # validated before extraction so a typo never costs an LLM call
+        platforms = normalize_platforms(payload.target_platforms, strict=True)
         diagnostics: dict[str, Any] = {}
         with self._engine_lock:
             ledger = self._build_ledger(payload, diagnostics)
@@ -334,6 +340,7 @@ class CaseService:
             )
         case_id = uuid4().hex[:12]
         ledger.case_id = case_id
+        set_ledger_platforms(ledger, platforms)
         state = self._reanalyze(ledger, None, None)
         name = payload.name.strip()[:120] or f"case-{case_id[:8]}"
         with self._lock(case_id):
@@ -399,6 +406,25 @@ class CaseService:
         }
         with self._lock(case_id):
             updated = self._reanalyze(state.ledger, cleaned, state)
+            self._states[case_id] = updated
+            self._save(case_id)
+        return updated
+
+    # ----- target operating systems -----
+    def set_target_platforms(self, case_id: str, platforms: Any) -> AnalysisState:
+        """Change the case's Target OS and map the observations again.
+
+        Techniques documented only for other operating systems leave the candidate pools and
+        compatible ones take their place. Saved verifier verdicts are reused, so in production
+        mode only candidates that are new to the case are sent to the verifier.
+        """
+        values = normalize_platforms(platforms, strict=True)
+        state, _ = self.get(case_id)
+        if values == ledger_platforms(state.ledger):
+            return state
+        with self._lock(case_id):
+            set_ledger_platforms(state.ledger, values)
+            updated = self._reanalyze(state.ledger, state.weights, state)
             self._states[case_id] = updated
             self._save(case_id)
         return updated

@@ -82,6 +82,7 @@ FINGERPRINTED_SOURCES = (
     REPO_ROOT / "apt_classifier" / "attribution.py",
     REPO_ROOT / "apt_classifier" / "session.py",
     REPO_ROOT / "apt_classifier" / "retrieve.py",
+    REPO_ROOT / "apt_classifier" / "platforms.py",
     REPO_ROOT / "apt_classifier" / "classifiers" / "base.py",
     REPO_ROOT / "apt_classifier" / "classifiers" / "naive_bayes.py",
     REPO_ROOT / "apt_classifier" / "classifiers" / "software.py",
@@ -983,6 +984,7 @@ def main(argv: list[str] | None = None) -> int:
             "votes": _forest_votes(engine),
         },
         "source_fingerprint": source_fingerprint(FINGERPRINTED_SOURCES),
+        "platform_from_text": bool(getattr(settings, "technique_platform_from_text", False)),
         "pipeline": args.pipeline,
         "verifier_mode": str(getattr(settings, "technique_verifier_mode", "ambiguous")),
         "verifier_model": (

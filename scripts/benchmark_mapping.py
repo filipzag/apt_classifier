@@ -70,6 +70,7 @@ FINGERPRINTED_SOURCES = (
     REPO_ROOT / "apt_classifier" / "vectorstore.py",
     REPO_ROOT / "apt_classifier" / "acceptance.py",
     REPO_ROOT / "apt_classifier" / "exemplars.py",
+    REPO_ROOT / "apt_classifier" / "platforms.py",
 )
 SUMMARY_METRICS = (
     "micro_precision",
@@ -248,6 +249,7 @@ def run(
             corroboration_accept_min_probability=float(
                 getattr(settings, "technique_corroboration_accept_min_probability", 0.2)
             ),
+            platform_from_text=bool(getattr(settings, "technique_platform_from_text", False)),
             **exemplar_kwargs(settings, exemplar_index),
         )
         candidates = sorted(result.candidates, key=lambda item: item.fused_rank)
@@ -385,6 +387,7 @@ def retrieval_settings(settings: Settings) -> dict[str, Any]:
         "segment_acceptance": getattr(settings, "technique_segment_acceptance", False),
         "hierarchy_parent_mode": getattr(settings, "technique_hierarchy_parent_mode", "off"),
         "rank_by_acceptance": getattr(settings, "technique_rank_by_acceptance", False),
+        "platform_from_text": getattr(settings, "technique_platform_from_text", False),
     }
 
 

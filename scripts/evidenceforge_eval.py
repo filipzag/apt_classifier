@@ -40,6 +40,7 @@ from apt_classifier.evaluation import (  # noqa: E402
 )
 from apt_classifier.evidence.models import EvidenceLedger, Observation, Provenance  # noqa: E402
 from apt_classifier.llm import OpenRouterClient  # noqa: E402
+from apt_classifier.platforms import normalize_platforms, set_ledger_platforms  # noqa: E402
 from apt_classifier.presets import PRESETS  # noqa: E402
 from apt_classifier.session import AttributionEngine  # noqa: E402
 from apt_classifier.vectorstore import ChromaVectorStore  # noqa: E402
@@ -669,8 +670,11 @@ def run_cases(
     *,
     engine: AttributionEngine,
     verify: bool,
+    target_platforms: Sequence[str] = (),
 ) -> list[TechniquePrediction]:
-    """Use the application's shared mapper; local explicitly disables verification."""
+    """Use the application's shared mapper; local explicitly disables verification.
+
+    ``target_platforms`` plays the analyst's case-level Target OS for every case."""
     predictions: list[TechniquePrediction] = []
     for case in cases:
         ledger = EvidenceLedger(
@@ -681,6 +685,7 @@ def run_cases(
                 )
             ]
         )
+        set_ledger_platforms(ledger, list(target_platforms))
         retrieval, _ = engine.map_techniques(
             ledger,
             verify=verify,
@@ -770,6 +775,7 @@ def collect_run_metadata(
         "similarity_threshold": settings.similarity_threshold,
         "acceptance_threshold": settings.technique_acceptance_threshold,
         "relative_margin": settings.technique_relative_margin,
+        "platform_from_text": bool(getattr(settings, "technique_platform_from_text", False)),
     }
     return {
         "scenario_path": str(scenario_path),
@@ -818,8 +824,11 @@ def evaluate_case_set(
     kb: AttackKnowledgeBase,
     bootstrap_samples: int,
     bootstrap_seed: int,
+    target_platforms: Sequence[str] = (),
 ) -> dict[str, Any]:
-    predictions = run_cases(result.cases, engine=engine, verify=verify)
+    predictions = run_cases(
+        result.cases, engine=engine, verify=verify, target_platforms=target_platforms
+    )
     metrics = evaluate_technique_predictions(result.cases, predictions, kb=kb)
     intervals = bootstrap_technique_metrics(
         result.cases,
@@ -872,6 +881,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--bootstrap-samples", type=int, default=1000)
     parser.add_argument("--bootstrap-seed", type=int, default=7)
     parser.add_argument(
+        "--target-os",
+        default="",
+        help="case-level Target OS for every case, e.g. Windows (default: none)",
+    )
+    parser.add_argument(
         "--output-local",
         type=Path,
         default=PROJECT_ROOT / "data" / "audits" / "evidenceforge_local.json",
@@ -884,6 +898,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = parser.parse_args(argv)
     if args.output_local.resolve() == args.output_production.resolve():
         parser.error("local and production output paths must be distinct")
+    try:
+        target_platforms = normalize_platforms(args.target_os, strict=True)
+    except ValueError as exc:
+        parser.error(str(exc))
 
     gt_path = args.evidenceforge_dir / "GROUND_TRUTH.json"
     if not gt_path.is_file():
@@ -934,6 +952,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                     pipeline=pipeline,
                 ),
                 "mode": args.mode,
+                "target_platforms": target_platforms,
                 "results": {
                     mode: evaluate_case_set(
                         case_sets[mode],
@@ -942,6 +961,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                         kb=kb,
                         bootstrap_samples=args.bootstrap_samples,
                         bootstrap_seed=args.bootstrap_seed,
+                        target_platforms=target_platforms,
                     )
                     for mode in selected_modes
                 },

@@ -435,6 +435,42 @@ The analyst can provide optional structured context through the Intake view:
 
 Values are normalized into deduplicated lists by `StrategicContext`. Context is kept separate from attack-action text so words such as “energy,” “government,” or “espionage” do not accidentally become technique retrieval queries.
 
+### 5.7 Target OS (2026-10-01)
+
+ATT&CK records the platforms each technique applies to (131 of the 697 techniques are
+Windows-only, 13 Linux-only, 18 macOS-only). The analyst can state which operating systems the
+affected hosts run, the case's **Target OS**: Windows, Linux, macOS and ESXi, every one the
+activity touched (a Linux DMZ server pivoting to Windows servers is Windows + Linux), empty when
+unknown. A missing operating system hides its techniques (21.3.12). It is chosen in Intake and can be changed on the Technique review
+page, which maps every observation again. Saved verifier verdicts are reused, so in production
+mode only candidates new to the case are sent to the verifier. It is stored in the ledger's
+`metadata["target_platforms"]` rather than a new ledger field, so case files stay readable by
+code that predates it, and it appears in the Markdown export and the JSON audit record.
+
+`apt_classifier/platforms.py` gives every observation a **platform scope**:
+
+1. the platform its log source records (Windows/Sysmon event logs: Windows);
+2. otherwise, when `TECHNIQUE_PLATFORM_FROM_TEXT` is on (the default), the operating systems the observation's own
+   text names ("on the Linux server", Ubuntu, CentOS, macOS, ESXi, Windows, Win32/Win64). Browser
+   user-agent strings and "Kali Linux" (the attacker's own distribution) are ignored, and lower-case
+   "windows" is not the operating system;
+3. otherwise the case's Target OS;
+4. otherwise none (no filtering).
+
+A technique is kept for a scope when ATT&CK lists none of its platforms, when it lists one of the
+scope's operating systems, or when it also lists a platform the operating system says nothing
+about (IaaS, SaaS, Office Suite, Identity Provider, Network Devices, Containers, PRE). So Linux rules
+out Scheduled Task (T1053.005), Registry Run Keys or PowerShell, but never Valid Accounts or a cloud
+technique. Event-log scopes keep their stricter earlier rule: the technique must list Windows.
+The scope is applied before fusion, to dense and lexical hits, so compatible techniques take the
+freed places in the pool (Cron instead of Scheduled Task), and afterwards to cue, structured-signal
+and exemplar-only candidates. The retrieval diagnostics record each observation's scope and its
+source (`platform_scopes`) and the number of dropped cue/signal candidates; Technique review shows
+a badge on observations whose own text or log source set the scope.
+
+Not covered yet: interview questions and the Distinguish step do not consult the Target OS, so a
+Linux case can still be asked about a Windows-only technique.
+
 ---
 
 ## 6. ATT&CK knowledge base construction
@@ -680,9 +716,12 @@ For each positive action observation, the pipeline:
 2. Queries the technique vector store (dense) and the lexical BM25 index. The lexical
    index covers `name`, `description` **and** the anonymized `procedure` sentences, so a
    dense procedure hit can be corroborated lexically.
-3. Determines a platform requirement when the source is a Windows/Sysmon log.
-4. Drops hits below `SIMILARITY_THRESHOLD` (default 0.45) and Linux-only hits for clearly
-   Windows evidence; applies a relative score margin from the best dense hit.
+3. Determines the observation's platform scope (5.7): the platform its log source records
+   (Windows/Sysmon logs: Windows), the operating systems its own text names when
+   `TECHNIQUE_PLATFORM_FROM_TEXT` is on, or else the case's Target OS.
+4. Drops hits below `SIMILARITY_THRESHOLD` (default 0.45) and hits for techniques outside the
+   platform scope; applies a relative score margin from the best dense hit. Cue and
+   structured-signal candidates outside the scope are dropped after the cues are merged.
 5. Fuses dense and lexical ranks per technique (RRF, k=60), adds the name-token,
    cross-validation and cue bonuses, and keeps the top `candidate_pool` (default 12).
 
@@ -3146,6 +3185,47 @@ Under the no-regression rule for both attribution benchmarks this was first kept
 2026-10-01 the product owner made it the default, accepting the one-fold loss on the ATT&CK folds for
 the real-report gains, which hold on the anonymized headline. The previous configuration remains as
 an opt-out (9.13); the published attribution artifacts were regenerated with the new default.
+
+#### 21.3.12 Target OS and operating systems named in the text (2026-10-01)
+
+Measured against a same-code baseline (5.7). With no Target OS and text detection off, all 1,391
+public held-out cases and all nine EvidenceForge bundle/mode runs are identical to the baseline, so
+the change is inert unless used.
+
+**Operating systems named in the observation (`TECHNIQUE_PLATFORM_FROM_TEXT`).** Before measuring,
+the detector was checked on the public train and dev splits only: 786 of 7,610 sentences name an
+operating system (704 Windows, 61 Linux, 48 macOS, 6 ESXi), and the rule would remove 9 of their 983
+gold labels (user-agent strings, multi-OS paragraphs). User agents and "Kali Linux" are ignored since.
+
+| benchmark | without | with | changed |
+|---|---|---|---|
+| Public held-out, pooled (1,391) | F1 0.416, P 0.515, hit@1 0.500, hit@10 0.804 | F1 0.417, P 0.516, hit@1 0.501, hit@10 0.805 | 78 cases, 6 better / 3 worse |
+| Public held-out, expert (157) | P 0.700, hit@1 0.580 | P 0.718, hit@1 0.592 | |
+| CTI-HAL statements (968) | F1 0.379, hit@1 0.383 | F1 0.378, hit@1 0.383 | 14 statements, one correct technique lost |
+| ATT&CK folds, attribution | top-1 0.830, MRR 0.880, 32 named, 0/25 | identical | 1 fold, one extra technique |
+| CTI-HAL attribution, anonymized / as reported | 0.455 / 0.564, 10 / 15 named | identical | 1 report |
+| EvidenceForge, 3 bundles × 3 modes | | identical | one ranking below top-1 |
+
+Neutral everywhere: these texts rarely describe non-Windows hosts, and their "Windows" mentions only
+remove Linux and macOS techniques that were not competing. Two of the three worse public cases are
+user-agent discussions the detector does not recognise ("Mozilla v5.1 (Windows NT …)", "MacOS X
+User-Agents"); the pattern was not tuned on them. One CTI-HAL statement lost Regsvr32 although it is a
+Windows technique: removing other candidates changes the acceptance model's pool features. Adopted as
+the default for what it does on Linux, macOS and ESXi narratives, which the benchmarks cannot show.
+
+**Case Target OS (analyst setting).** EvidenceForge with the Target OS given for every observation:
+
+| bundle (hosts) | setting | narrative F1 / hit@1 | eCAR F1 / hit@1 | Windows-log F1 |
+|---|---|---|---|---|
+| branch office (Windows) | none -> Windows | 0.44 / 0.20 -> 0.44 / 0.20 | 0.67 / 0.50 -> 0.67 / 0.67 | 0.67 -> 1.00 |
+| manufacturing (Windows) | none -> Windows | 0.33 / 0.18 -> unchanged | 0.50 / 0.33 -> unchanged, red herring no longer accepted | unchanged |
+| clinic, held-out (Ubuntu DMZ + Windows) | none -> Windows | 0.36 / 0.33 -> 0.29 / 0.22 | 0.55 / 0.50 -> 0.42 / 0.36 | unchanged |
+| clinic, held-out | none -> Windows + Linux | unchanged | unchanged | unchanged |
+
+A correct Target OS helps or is neutral. A wrong one hurts: the clinic intrusion starts on a Linux
+portal (cron persistence, `/etc/shadow`, `chmod`), and "Windows" removed exactly those techniques. The
+analyst guidance is therefore to pick every operating system the activity touched and to leave the
+field empty when unknown; the setting is never inferred from the evidence.
 
 ## 22. Failure modes and troubleshooting
 

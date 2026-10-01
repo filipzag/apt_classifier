@@ -78,6 +78,8 @@ export const api = {
     request<CasePayload>(`/api/cases/${id}/decisions`, json({ decisions })),
   weights: (id: string, weights: Record<string, number>) =>
     request<CasePayload>(`/api/cases/${id}/weights`, json({ weights })),
+  platforms: (id: string, targetPlatforms: string[]) =>
+    request<CasePayload>(`/api/cases/${id}/platforms`, json({ target_platforms: targetPlatforms })),
   interview: (id: string) => request<InterviewState>(`/api/cases/${id}/interview`),
   answer: (id: string, status: string, text?: string) =>
     request<InterviewState>(`/api/cases/${id}/interview/answer`, json({ status, text })),

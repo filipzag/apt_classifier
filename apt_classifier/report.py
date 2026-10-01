@@ -12,6 +12,7 @@ from typing import Any
 from apt_classifier.attack_flow import build_attack_flow
 from apt_classifier.canvas import build_analyst_canvas
 from apt_classifier.navigator import export_layers
+from apt_classifier.platforms import ledger_platforms
 
 # Stage vocabulary shown to analysts. Icons carry the meaning together with the label so the
 # state is never expressed by colour alone.
@@ -112,6 +113,13 @@ def assessment_markdown(kb: Any, state: Any, *, case_name: str = "") -> str:
     accepted = getattr(state.retrieval, "observed_techniques", {}) or {}
     if accepted:
         lines += ["", "## Accepted ATT&CK techniques"]
+        target = ledger_platforms(state.ledger)
+        if target:
+            lines += [
+                f"Target OS: {', '.join(target)}. Techniques documented only for other operating "
+                "systems were not considered.",
+                "",
+            ]
         names = {m.technique_id: m.technique_name for m in getattr(state.retrieval, "matches", ())}
         lines += [f"- {tid} {names.get(tid, '') or ''}".rstrip() for tid in sorted(accepted)]
     answers = list(getattr(state.ledger, "question_answers", []) or [])

@@ -52,6 +52,10 @@ class StubService:
     def apply_decisions(self, case_id: str, decisions: list[dict[str, Any]]) -> Any:
         raise ValueError("bad replacement")
 
+    def set_target_platforms(self, case_id: str, platforms: Any) -> Any:
+        self.calls.append(("platforms", (case_id, platforms)))
+        raise ValueError("unknown operating system(s): Solaris")
+
     def export(self, case_id: str, kind: str) -> tuple[str, str, str]:
         raise CaseNotFound(case_id)
 
@@ -95,6 +99,15 @@ def test_service_not_started_is_503() -> None:
 def test_create_case_rejects_bad_phases(client: TestClient) -> None:
     response = TestClient(client.app).post("/api/cases", data={"narrative": "x", "phases": "nope"})
     assert response.status_code == 400
+
+
+def test_target_os_errors_are_bad_requests(client: TestClient) -> None:
+    response = client.post("/api/cases/x/platforms", json={"target_platforms": ["Solaris"]})
+    assert response.status_code == 400
+    assert "Solaris" in response.json()["detail"]
+    assert (
+        client.post("/api/cases/x/platforms", json={"target_platforms": "Linux"}).status_code == 422
+    )
 
 
 # ----- real local pipeline -----
@@ -239,3 +252,50 @@ def test_local_flow_end_to_end(local_client: TestClient) -> None:
     assert rescored.status_code == 200 and rescored.json()["weights"]["software_tools"] == 2.0
     assert local_client.delete(f"/api/cases/{case_id}").status_code == 204
     assert local_client.get(f"/api/cases/{case_id}").status_code == 404
+
+
+@pytestmark_local
+def test_local_flow_target_os(local_client: TestClient) -> None:
+    from apt_classifier.platforms import PlatformScope
+
+    techniques = local_client.app.state.service.engine.kb.techniques
+    linux_scope = PlatformScope(("Linux",), "case")
+
+    def windows_only(case: dict[str, Any]) -> set[str]:
+        return {
+            c["technique_id"]
+            for c in case["candidates"]
+            if not linux_scope.allows(techniques[c["technique_id"]].platforms)
+        }
+
+    narrative = (
+        "The attacker created a scheduled task that runs the payload every hour for persistence."
+    )
+    plain = local_client.post("/api/cases", data={"narrative": narrative}).json()
+    assert plain["target_platforms"] == [] and windows_only(plain)  # e.g. T1053.005
+    linux = local_client.post(
+        "/api/cases", data={"narrative": narrative, "target_platforms": "linux"}
+    ).json()
+    assert linux["target_platforms"] == ["Linux"] and linux["platform_options"][0] == "Windows"
+    assert linux["candidates"] and not windows_only(linux)
+    scopes = [o["platform"] for o in linux["observations"] if o["platform"]]
+    assert scopes and all(s == {"platforms": ["Linux"], "source": "case"} for s in scopes)
+
+    # changing the Target OS maps the case again and is saved with it
+    case_id = linux["case_id"]
+    cleared = local_client.post(f"/api/cases/{case_id}/platforms", json={"target_platforms": []})
+    assert cleared.status_code == 200 and cleared.json()["target_platforms"] == []
+    assert windows_only(cleared.json())
+    local_client.post(f"/api/cases/{case_id}/platforms", json={"target_platforms": ["Linux"]})
+    saved = local_client.app.state.service.store.load(case_id)["ledger"]
+    assert saved.metadata["target_platforms"] == ["Linux"]
+    bad = local_client.post(
+        f"/api/cases/{case_id}/platforms", json={"target_platforms": ["Solaris"]}
+    )
+    assert bad.status_code == 400
+    refused = local_client.post(
+        "/api/cases", data={"narrative": narrative, "target_platforms": "Solaris"}
+    )
+    assert refused.status_code == 400
+    for case in (plain, linux):
+        assert local_client.delete(f"/api/cases/{case['case_id']}").status_code == 204

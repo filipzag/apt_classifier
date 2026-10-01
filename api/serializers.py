@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from apt_classifier.platforms import HOST_PLATFORMS, ledger_platforms
 from apt_classifier.report import STAGE_INFO, group_name
 
 
@@ -18,6 +19,9 @@ def _name(kb: Any, group_id: str) -> str:
 
 
 def observations(state: Any) -> list[dict[str, Any]]:
+    # operating systems each observation was mapped under, and where that came from
+    diagnostics = getattr(getattr(state, "retrieval", None), "diagnostics", None) or {}
+    scopes = diagnostics.get("platform_scopes") or {}
     rows = []
     for index, item in enumerate(state.ledger.observations, 1):
         provenance = getattr(item, "provenance", None)
@@ -32,6 +36,7 @@ def observations(state: Any) -> list[dict[str, Any]]:
                 "source_name": getattr(provenance, "source_name", "") if provenance else "",
                 "occurrences": int(getattr(item, "occurrence_count", 1) or 1),
                 "lines": [int(n) for n in (getattr(item, "line_numbers", ()) or ())],
+                "platform": scopes.get(item.id),
             }
         )
     return rows
@@ -508,6 +513,8 @@ def case_payload(
         "summary": summary,
         "next_step": next_step(state),
         "observations": observations(state),
+        "target_platforms": ledger_platforms(state.ledger),
+        "platform_options": list(HOST_PLATFORMS),
         "strategic_context": {
             name: values for name, values in context.field_values().items() if values
         }

@@ -55,6 +55,13 @@ export interface CaseListItem {
   summary: CaseSummary
 }
 
+/** Operating systems an observation was mapped under: recorded by the log source, named in
+ * the observation's text, or the case's Target OS. */
+export interface PlatformScope {
+  platforms: string[]
+  source: 'log' | 'text' | 'case'
+}
+
 export interface Observation {
   id: string
   index: number
@@ -65,6 +72,7 @@ export interface Observation {
   source_name: string
   occurrences: number
   lines: number[]
+  platform: PlatformScope | null
 }
 
 export interface EvidenceItem {
@@ -299,6 +307,9 @@ export interface CasePayload {
   summary: CaseSummary
   next_step: NextStep
   observations: Observation[]
+  /** Case Target OS: every OS the activity touched; empty = unknown (no constraint). */
+  target_platforms: string[]
+  platform_options: string[]
   strategic_context: Record<string, string[]>
   candidate_counts: Record<CandidateState, number>
   candidates: Candidate[]

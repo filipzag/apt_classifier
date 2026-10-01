@@ -3,10 +3,12 @@ import { useMemo, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 
 import { api } from '../api/client'
-import { useApplyDecisions } from '../api/hooks'
+import { useApplyDecisions, useSetPlatforms } from '../api/hooks'
 import type { Candidate, CandidateState, CasePayload, DecisionInput } from '../api/types'
 import { CaseFrame, PageHeader, useCaseId } from '../components/CaseFrame'
+import { PlatformPicker, PlatformScopeBadge } from '../components/PlatformPicker'
 import { Badge, Button, Card, Input, Segmented, Tip, Toggle } from '../components/ui'
+import { PLATFORM_HELP } from '../lib/platforms'
 import { cn, fmt } from '../lib/utils'
 import { useQuery } from '@tanstack/react-query'
 
@@ -125,6 +127,13 @@ function TechniquesView({ caseId, data }: { caseId: string; data: CasePayload })
         }
       />
 
+      <TargetOsCard
+        key={data.target_platforms.join(',')}
+        caseId={caseId}
+        data={data}
+        pendingDecisions={decisions.length}
+      />
+
       <Card className="flex flex-wrap items-center gap-3 py-3">
         <div className="flex flex-wrap items-center gap-1.5">
           {(Object.keys(STATE_META) as CandidateState[]).map((state) => (
@@ -178,7 +187,10 @@ function TechniquesView({ caseId, data }: { caseId: string; data: CasePayload })
               </span>
               <p className="text-sm leading-relaxed">{observation?.text ?? oid}</p>
               {observation ? (
-                <Badge className="ml-auto shrink-0">{observation.source}</Badge>
+                <div className="ml-auto flex shrink-0 items-center gap-1.5">
+                  <PlatformScopeBadge scope={observation.platform} />
+                  <Badge>{observation.source}</Badge>
+                </div>
               ) : null}
             </div>
             <div className="overflow-x-auto">
@@ -347,6 +359,60 @@ function TechniquesView({ caseId, data }: { caseId: string; data: CasePayload })
         </div>
       </div>
     </div>
+  )
+}
+
+/** The case Target OS; changing it maps every observation again. Remounted (key) when the saved
+ * value changes, so the draft always starts from what the case holds. */
+function TargetOsCard({
+  caseId,
+  data,
+  pendingDecisions,
+}: {
+  caseId: string
+  data: CasePayload
+  pendingDecisions: number
+}) {
+  const remap = useSetPlatforms(caseId)
+  const saved = data.target_platforms
+  const [draft, setDraft] = useState<string[]>(saved)
+  const dirty = draft.join(',') !== saved.join(',')
+  const named = data.observations.filter((o) => o.platform?.source === 'text').length
+  return (
+    <Card className="flex flex-wrap items-center gap-x-4 gap-y-2 py-3">
+      <div className="flex items-center gap-1.5">
+        <span className="text-xs font-medium text-text">Target OS</span>
+        <Tip content={PLATFORM_HELP}>
+          <HelpCircle className="size-3.5 text-faint" />
+        </Tip>
+      </div>
+      <PlatformPicker value={draft} onChange={setDraft} disabled={remap.isPending} />
+      <span className="text-xs text-faint">
+        {saved.length ? `mapped for ${saved.join(', ')}` : 'any operating system'}
+        {named
+          ? ` · ${named} ${named === 1 ? 'observation names its own OS' : 'observations name their own OS'}`
+          : ''}
+      </span>
+      {dirty ? (
+        <div className="ml-auto flex items-center gap-2">
+          {pendingDecisions ? (
+            <span className="text-xs text-amber">Apply or reset the pending decisions first</span>
+          ) : null}
+          <Button size="sm" variant="ghost" onClick={() => setDraft(saved)} disabled={remap.isPending}>
+            Cancel
+          </Button>
+          <Button
+            size="sm"
+            variant="primary"
+            disabled={pendingDecisions > 0}
+            loading={remap.isPending}
+            onClick={() => remap.mutate(draft)}
+          >
+            Map again
+          </Button>
+        </div>
+      ) : null}
+    </Card>
   )
 }
 

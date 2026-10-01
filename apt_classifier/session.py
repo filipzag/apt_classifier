@@ -352,6 +352,7 @@ class AttributionEngine:
                 getattr(self.settings, "technique_hierarchy_parent_mode", "off")
             ),
             include_synthetic=bool(getattr(self.settings, "technique_include_synthetic", False)),
+            platform_from_text=bool(getattr(self.settings, "technique_platform_from_text", False)),
             **exemplar_kwargs(self.settings, self.exemplar_index),
         )
         verifications: dict[str, TechniqueCandidateVerificationResult] = {}

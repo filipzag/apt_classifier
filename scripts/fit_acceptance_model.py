@@ -85,6 +85,7 @@ def extract_rows(
             acceptance_threshold=settings.technique_acceptance_threshold,
             relative_margin=settings.technique_relative_margin,
             acceptance_model=None,
+            platform_from_text=bool(getattr(settings, "technique_platform_from_text", False)),
             **exemplar_kwargs(settings, exemplar_index),
         )
         expected = set(case.expected_technique_ids)

@@ -80,6 +80,12 @@ class Settings(BaseSettings):
     # 2026-09-29: real-report accepted recall 0.26 -> 0.31 at flat precision, naming gate clean.
     technique_corroboration_accept_observations: int = 2
     technique_corroboration_accept_min_probability: float = 0.1
+    # An observation that names an operating system ("on the Linux server") is mapped only to
+    # techniques documented for it, overriding the case's Target OS for that observation
+    # (apt_classifier/platforms.py). The case Target OS itself is set per case by the analyst.
+    # Default since 2026-10-01: neutral on every benchmark (public held-out F1 0.416 -> 0.417,
+    # attribution unchanged, docs 21.3.12), which rarely describe non-Windows hosts.
+    technique_platform_from_text: bool = True
     acceptance_model_path: Path = (
         PROJECT_ROOT / "data" / "models" / "acceptance" / "acceptance_model.json"
     )

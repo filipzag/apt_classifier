@@ -33,6 +33,7 @@ The project must use its `.venv`; system transformers v5 is incompatible with AT
 - `apt_classifier/attack/parse.py` — ATT&CK STIX parser (techniques, groups, software, campaigns, detection strategies, analytics, data components).
 - `apt_classifier/attack/kb.py` — Knowledge base data model with defensive objects.
 - `apt_classifier/telemetry.py` — Telemetry-aware collection guidance and negative-evidence validation.
+- `apt_classifier/platforms.py` — Target OS: each observation's platform scope (log source, OS named in its text, the case Target OS in `ledger.metadata["target_platforms"]`) and the rule that drops techniques documented only for other operating systems (docs 5.7).
 - `apt_classifier/evidence/quality.py` — Admiralty-style evidence quality, corroboration, and documented specificity.
 - `apt_classifier/attribution.py` — Open-set attribution stages and calibrated rejection.
 - `apt_classifier/attack_flow.py` — Attack Flow construction and STIX 2.1 export.

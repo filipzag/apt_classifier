@@ -8,7 +8,9 @@ import { api } from '../api/client'
 import { describe, keys, useSystem } from '../api/hooks'
 import { useQueryClient } from '@tanstack/react-query'
 import { PageHeader } from '../components/CaseFrame'
+import { PlatformPicker } from '../components/PlatformPicker'
 import { Button, Callout, Card, Field, Input, Label, SectionTitle, Textarea } from '../components/ui'
+import { PLATFORM_HELP } from '../lib/platforms'
 import { cn } from '../lib/utils'
 
 const PHASES = [
@@ -34,6 +36,7 @@ export function IntakePage() {
   const [alerts, setAlerts] = useState('')
   const [iocs, setIocs] = useState('')
   const [files, setFiles] = useState<File[]>([])
+  const [platforms, setPlatforms] = useState<string[]>([])
   const [context, setContext] = useState({
     target_geographies: '',
     target_industries: '',
@@ -79,6 +82,7 @@ export function IntakePage() {
       form.set('phases', JSON.stringify(phases))
       form.set('alerts', alerts)
       form.set('iocs', iocs)
+      form.set('target_platforms', platforms.join(','))
       Object.entries(context).forEach(([key, value]) => form.set(key, value))
       files.forEach((file) => form.append('files', file, file.name))
       return api.createCase(form)
@@ -117,6 +121,7 @@ export function IntakePage() {
                 setAlerts('')
                 setIocs('')
                 setFiles([])
+                setPlatforms([])
               }}
             >
               <Trash2 className="size-4" /> Clear
@@ -147,6 +152,14 @@ export function IntakePage() {
                   placeholder="The actor gained access through a phishing email carrying a macro-enabled document, executed a PowerShell downloader, created a scheduled task for persistence, dumped LSASS with a renamed procdump, and moved laterally over SMB using stolen credentials…"
                 />
               </Field>
+              <div>
+                <div className="mb-1.5 flex items-baseline justify-between gap-3">
+                  <span className="text-xs font-medium text-text">Target OS</span>
+                  <span className="text-[11px] text-faint">where the activity ran · optional</span>
+                </div>
+                <PlatformPicker value={platforms} onChange={setPlatforms} />
+                <p className="mt-1.5 text-[11px] leading-relaxed text-faint">{PLATFORM_HELP}</p>
+              </div>
             </div>
           </Card>
 

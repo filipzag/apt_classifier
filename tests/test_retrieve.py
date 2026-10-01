@@ -13,6 +13,7 @@ from apt_classifier.evidence.models import (
     TechniqueReviewAction,
     TechniqueReviewDecision,
 )
+from apt_classifier.platforms import set_ledger_platforms
 from apt_classifier.retrieve import (
     _specific_behavior_results,
     apply_candidate_decisions,
@@ -360,6 +361,100 @@ def test_windows_logs_filter_other_platforms_and_distant_vector_hits():
     result = retrieve_techniques(ledger, PlatformStore(), kb)
     assert set(result.observed_techniques) == {"TWIN"}
     assert abs(result.observed_techniques["TWIN"] - 0.665) < 1e-12
+
+
+class WindowsFirstStore(EmptyGroupStore):
+    def query_techniques(self, texts, *, n_results):
+        return [
+            [
+                VectorHit(
+                    "win",
+                    "Recurring job",
+                    {"technique_id": "TWIN", "platforms": "Windows"},
+                    0.05,
+                    0.95,
+                ),
+                VectorHit(
+                    "lin",
+                    "Recurring job",
+                    {"technique_id": "TLINUX", "platforms": "Linux"},
+                    0.08,
+                    0.92,
+                ),
+                VectorHit(
+                    "cloud",
+                    "Recurring job",
+                    {"technique_id": "TCLOUD", "platforms": "IaaS,Windows"},
+                    0.10,
+                    0.90,
+                ),
+            ]
+            for _ in texts
+        ]
+
+
+def _platform_kb() -> AttackKnowledgeBase:
+    return AttackKnowledgeBase(
+        techniques={
+            "TWIN": Technique(id="TWIN", name="Windows Only", platforms=["Windows"]),
+            "TLINUX": Technique(id="TLINUX", name="Linux Only", platforms=["Linux"]),
+            "TCLOUD": Technique(
+                id="TCLOUD", name="Cloud Or Windows", platforms=["IaaS", "Windows"]
+            ),
+            "T1053.005": Technique(id="T1053.005", name="Scheduled Task", platforms=["Windows"]),
+        },
+        groups={"G1": Group(id="G1", name="Group One")},
+    )
+
+
+def _ids(result) -> list[str]:
+    return [c.technique_id for c in sorted(result.candidates, key=lambda c: c.fused_rank)]
+
+
+def test_case_target_os_keeps_only_techniques_documented_for_it():
+    kb = _platform_kb()
+    ledger = EvidenceLedger(observations=[Observation(text="The operator ran a recurring job.")])
+    assert _ids(retrieve_techniques(ledger, WindowsFirstStore(), kb, retrieval_mode="dense")) == [
+        "TWIN",
+        "TLINUX",
+        "TCLOUD",
+    ]
+    set_ledger_platforms(ledger, ["Linux"])
+    scoped = retrieve_techniques(ledger, WindowsFirstStore(), kb, retrieval_mode="dense")
+    # the Windows-only technique leaves the pool; the cloud one is not an OS question
+    assert _ids(scoped) == ["TLINUX", "TCLOUD"]
+    assert scoped.diagnostics["target_platforms"] == ["Linux"]
+    assert scoped.diagnostics["platform_scopes"] == {
+        ledger.observations[0].id: {"platforms": ["Linux"], "source": "case"}
+    }
+
+
+def test_operating_system_named_in_the_observation_overrides_the_case():
+    kb = _platform_kb()
+    ledger = EvidenceLedger(
+        observations=[Observation(text="On the Linux server the operator ran a recurring job.")]
+    )
+    set_ledger_platforms(ledger, ["Windows"])
+    off = retrieve_techniques(ledger, WindowsFirstStore(), kb, retrieval_mode="dense")
+    assert _ids(off) == ["TWIN", "TCLOUD"]
+    named = retrieve_techniques(
+        ledger, WindowsFirstStore(), kb, retrieval_mode="dense", platform_from_text=True
+    )
+    assert _ids(named) == ["TLINUX", "TCLOUD"]
+    assert named.diagnostics["platform_scopes"][ledger.observations[0].id]["source"] == "text"
+
+
+def test_target_os_also_filters_cue_candidates():
+    kb = _platform_kb()
+    ledger = EvidenceLedger(
+        observations=[Observation(text="The operator created a scheduled task for persistence.")]
+    )
+    plain = retrieve_techniques(ledger, EmptyVectorStore(), kb, retrieval_mode="dense")
+    assert "T1053.005" in _ids(plain)
+    set_ledger_platforms(ledger, ["Linux"])
+    scoped = retrieve_techniques(ledger, EmptyVectorStore(), kb, retrieval_mode="dense")
+    assert "T1053.005" not in _ids(scoped)
+    assert scoped.diagnostics["platform_dropped_candidates"] == 1
 
 
 class AggregationStore(EmptyGroupStore):

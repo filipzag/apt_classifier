@@ -14,7 +14,7 @@ See [`docs/TECHNICAL_DOCUMENTATION.md`](docs/TECHNICAL_DOCUMENTATION.md) for the
 
 1. Normalize prose and alerts into atomic attack-action sentences with `openai/gpt-5.6-sol` through OpenRouter.
 2. Parse supported Windows/Sysmon events deterministically without sending bulk logs to an LLM.
-3. Embed observations with `basel/ATTACK-BERT` and retrieve sentence-level ATT&CK techniques plus actor-specific behavior sentences from local ChromaDB.
+3. Embed observations with `basel/ATTACK-BERT` and retrieve sentence-level ATT&CK techniques plus actor-specific behavior sentences from local ChromaDB. With a Target OS set for the case (Windows, Linux, macOS, ESXi), techniques documented only for other operating systems are not mapped (docs 5.7).
 4. Capture optional strategic context: target geography, industry, motivation, intended objective, and independently supported sponsor/origin.
 5. Rank groups with deterministic classifiers plus the analyst-requested CyberRE-LLM vote (the LLM zero-shot vote was removed; the LLM extraction, technique verifier and independent review in steps 1 and 7 remain):
    - Bernoulli Naive Bayes
@@ -224,11 +224,13 @@ the container. There is no authentication; put it behind a reverse proxy with SS
 
 ### Using the app
 
-1. **Intake**: paste the incident narrative (or load the sample), optionally add kill-chain
-   notes, alerts, indicators, log files and strategic context, then **Analyse evidence**. The
-   case is saved automatically under `data/cases/` and can be reopened from the sidebar.
+1. **Intake**: paste the incident narrative (or load the sample), optionally pick the Target OS
+   and add kill-chain notes, alerts, indicators, log files and strategic context, then
+   **Analyse evidence**. The case is saved automatically under `data/cases/` and can be reopened
+   from the sidebar.
 2. **Technique review**: one table of every candidate mapping with its gate reason and evidence.
-   Confirm, reject or replace, then apply; the ranking is recomputed.
+   Confirm, reject or replace, then apply; the ranking is recomputed. Changing the Target OS here
+   maps the observations again.
 3. **Interview**: answer predicted-behaviour questions (yes / no / unknown / not visible) to
    separate the shortlisted groups; optional Elasticsearch gathering per lead.
 4. **Assessment**: the stage decision with its bars and glossary, the ranking chart, a dossier
@@ -358,6 +360,10 @@ All settings are environment variables documented in `.env.example`. Important v
 - `TECHNIQUE_EXEMPLARS_ENABLED=true` (labelled public report sentences as acceptance evidence, `make exemplars`
   then `make fit-acceptance`; CTI-HAL median accepted-technique recall per report 0.31 -> 0.42; `false` restores
   the previous calibrated gate through `ACCEPTANCE_MODEL_FALLBACK_PATH`, see docs 8.2 and 21.3.10)
+- `TECHNIQUE_PLATFORM_FROM_TEXT=true` (an observation that names an operating system, "on the Linux server",
+  is mapped only to techniques documented for it, overriding the case's Target OS for that observation;
+  neutral on every benchmark, see docs 5.7 and 21.3.12). The Target OS itself is set per case: pick every
+  operating system the activity touched, leave it empty when unknown (a wrong one hides the right techniques)
 - `TECHNIQUE_RANK_BY_ACCEPTANCE=true` (order each observation's candidates by the acceptance model's
   probability; held-out hit@1 0.35 -> 0.40 with the accepted set unchanged, see docs 8.2)
 - `TECHNIQUE_CORROBORATION_ACCEPT_OBSERVATIONS=2`, `TECHNIQUE_CORROBORATION_ACCEPT_MIN_PROBABILITY=0.1`

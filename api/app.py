@@ -63,6 +63,11 @@ class WeightsIn(BaseModel):
     weights: dict[str, float]
 
 
+class PlatformsIn(BaseModel):
+    # Windows, Linux, macOS, ESXi: every OS the activity touched; empty = unknown (no constraint)
+    target_platforms: list[str] = Field(default_factory=list, max_length=8)
+
+
 class CyberREIn(BaseModel):
     observation_id: str | None = None
     use_prefilter: bool | None = None
@@ -202,6 +207,7 @@ def create_app(
         motivations: str = Form(""),
         objectives: str = Form(""),
         suspected_origins: str = Form(""),
+        target_platforms: str = Form(""),
         files: list[UploadFile] = File(default=[]),
         svc: CaseService = Depends(get_service),
         user: User = Depends(current_user),
@@ -229,6 +235,7 @@ def create_app(
             motivations=motivations,
             objectives=objectives,
             suspected_origins=suspected_origins,
+            target_platforms=target_platforms,
         )
         # the analysis is CPU/LLM bound: run it off the event loop
         from starlette.concurrency import run_in_threadpool
@@ -272,6 +279,13 @@ def create_app(
         case_id: str, body: WeightsIn, svc: CaseService = Depends(get_service)
     ) -> dict[str, Any]:
         svc.rescore(case_id, body.weights)
+        return _case(svc, case_id)
+
+    @app.post("/api/cases/{case_id}/platforms")
+    def set_platforms(
+        case_id: str, body: PlatformsIn, svc: CaseService = Depends(get_service)
+    ) -> dict[str, Any]:
+        svc.set_target_platforms(case_id, body.target_platforms)
         return _case(svc, case_id)
 
     # ----- interview -----

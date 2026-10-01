@@ -28,6 +28,7 @@ from apt_classifier.exemplars import DEFAULT_TAU as EXEMPLAR_TAU
 from apt_classifier.exemplars import EVIDENCE_SOURCE as EXEMPLAR_SOURCE
 from apt_classifier.exemplars import ExemplarVotes, exemplar_query_text
 from apt_classifier.exemplars import parent_map as exemplar_parent_map
+from apt_classifier.platforms import PlatformScope, ledger_platforms, observation_scope
 from apt_classifier.technique_signals import find_signals
 from apt_classifier.vectorstore import (
     ChromaVectorStore,
@@ -463,8 +464,15 @@ def retrieve_techniques(
     exemplar_tau: float = EXEMPLAR_TAU,
     exemplar_duplicate_similarity: float = EXEMPLAR_DUPLICATE_SIMILARITY,
     exemplar_new_candidates: int = 0,
+    platform_from_text: bool = False,
 ) -> RetrievalResult:
     """Retrieve ATT&CK technique candidates for the positive observations in a ledger.
+
+    Each observation gets a platform scope (:func:`apt_classifier.platforms.observation_scope`):
+    the platform its log source records, the operating systems its text names when
+    ``platform_from_text`` is set, or the case's Target OS stored on the ledger. Techniques
+    documented only for other operating systems are dropped from that observation's hits and
+    candidates, so compatible techniques take their place in the pool.
 
     ``exemplar_index`` (:class:`apt_classifier.exemplars.ExemplarIndex`) adds what the nearest
     labelled real-report sentences say about each candidate as ``exemplar`` evidence (the
@@ -560,10 +568,17 @@ def retrieve_techniques(
     exemplar_added = 0
     candidates: list[TechniqueCandidate] = []
     segmented_observations = 0
+    case_platforms = ledger_platforms(ledger)
+    platform_scopes: dict[str, dict[str, Any]] = {}
+    platform_dropped = 0
     for observation_index, (observation, dense_groups, lexical_groups) in enumerate(
         zip(observations, dense_hits, lexical_hits, strict=True)
     ):
-        required_platform = _required_platform(observation)
+        platform_scope = observation_scope(
+            observation, case_platforms, from_text=platform_from_text
+        )
+        if platform_scope is not None:
+            platform_scopes[observation.id] = platform_scope.to_dict()
         segment_texts = segments[observation_index]
         segment_count = len(dense_groups)
         segmented_observations += int(segment_count > 1)
@@ -573,7 +588,7 @@ def retrieve_techniques(
                 _merge_best(
                     selected_dense,
                     _best_technique_hits(
-                        raw_dense, threshold, required_platform, max_candidates=max(top_k, 1)
+                        raw_dense, threshold, platform_scope, max_candidates=max(top_k, 1)
                     ),
                 )
             selected_lexical: dict[str, VectorHit] = {}
@@ -583,7 +598,7 @@ def retrieve_techniques(
                     _best_lexical_hits(
                         raw_lexical,
                         kb,
-                        required_platform=required_platform,
+                        platform_scope=platform_scope,
                         max_candidates=max(top_k, 1),
                     ),
                 )
@@ -608,7 +623,7 @@ def retrieve_techniques(
                 dense_groups,
                 lexical_groups,
                 threshold=threshold,
-                required_platform=required_platform,
+                platform_scope=platform_scope,
                 top_k=top_k,
                 candidate_pool=candidate_pool,
                 cues_enabled=cues_enabled,
@@ -618,6 +633,13 @@ def retrieve_techniques(
             observation_candidates = _merge_explicit_candidates(
                 observation, kb, observation_candidates
             )
+        if platform_scope is not None:
+            # Retrieved hits were filtered above; this covers cue and structured-signal
+            # candidates. Parents derived below inherit their children's platforms.
+            observation_candidates, dropped = _apply_platform_scope(
+                observation_candidates, kb, platform_scope
+            )
+            platform_dropped += dropped
         if reranker is not None:
             observation_candidates = list(
                 reranker.rerank(observation.text, observation_candidates, kb)
@@ -635,7 +657,7 @@ def retrieve_techniques(
                     observation_candidates,
                     votes,
                     limit=int(exemplar_new_candidates),
-                    required_platform=required_platform,
+                    platform_scope=platform_scope,
                 )
             exemplar_added += len(observation_candidates) - before
             observation_candidates = _attach_exemplar_evidence(observation_candidates, votes)
@@ -695,6 +717,10 @@ def retrieve_techniques(
             "reranker_load_error": getattr(reranker, "load_error", None),
             "exemplars": exemplar_status,
             "exemplar_candidates_added": exemplar_added,
+            "target_platforms": case_platforms,
+            "platform_from_text": platform_from_text,
+            "platform_scopes": platform_scopes,
+            "platform_dropped_candidates": platform_dropped,
             **({"acceptance_model_disabled": acceptance_disabled} if acceptance_disabled else {}),
         },
     )
@@ -792,7 +818,7 @@ def _append_exemplar_candidates(
     votes: ExemplarVotes,
     *,
     limit: int,
-    required_platform: str | None,
+    platform_scope: PlatformScope | None,
 ) -> list[TechniqueCandidate]:
     """Techniques only the exemplars suggest, appended after the retrieved pool (fused score
     0, so they never displace a retrieved candidate); the acceptance model judges them on the
@@ -807,7 +833,7 @@ def _append_exemplar_candidates(
         if technique_id in present or technique_id not in techniques:
             continue
         technique = techniques[technique_id]
-        if not _platform_matches(_record_value(technique, "platforms", ()), required_platform):
+        if not _platform_matches(_record_value(technique, "platforms", ()), platform_scope):
             continue
         output.append(
             TechniqueCandidate(
@@ -913,7 +939,7 @@ def _build_segmented_candidates(
     lexical_groups: list[list[VectorHit]],
     *,
     threshold: float,
-    required_platform: str | None,
+    platform_scope: PlatformScope | None,
     top_k: int,
     candidate_pool: int,
     cues_enabled: bool,
@@ -926,10 +952,10 @@ def _build_segmented_candidates(
     ):
         view = _segment_view(observation, text)
         dense = _best_technique_hits(
-            raw_dense, threshold, required_platform, max_candidates=max(top_k, 1)
+            raw_dense, threshold, platform_scope, max_candidates=max(top_k, 1)
         )
         lexical = _best_lexical_hits(
-            raw_lexical, kb, required_platform=required_platform, max_candidates=max(top_k, 1)
+            raw_lexical, kb, platform_scope=platform_scope, max_candidates=max(top_k, 1)
         )
         for candidate in _build_observation_candidates(
             view,
@@ -1238,7 +1264,7 @@ def _best_lexical_hits(
     hits: list[VectorHit],
     kb: Any,
     *,
-    required_platform: str | None,
+    platform_scope: PlatformScope | None,
     max_candidates: int,
 ) -> dict[str, VectorHit]:
     output: dict[str, VectorHit] = {}
@@ -1246,7 +1272,7 @@ def _best_lexical_hits(
         technique_id = str(hit.metadata.get("technique_id") or "")
         technique = getattr(kb, "techniques", {}).get(technique_id)
         platforms = _record_value(technique, "platforms", ())
-        if not technique_id or not _platform_matches(platforms, required_platform):
+        if not technique_id or not _platform_matches(platforms, platform_scope):
             continue
         if technique_id not in output or hit.similarity > output[technique_id].similarity:
             output[technique_id] = hit
@@ -2539,7 +2565,7 @@ def _behavior_tokens(value: str) -> set[str]:
 def _best_technique_hits(
     hits: list[VectorHit],
     threshold: float,
-    required_platform: str | None = None,
+    platform_scope: PlatformScope | None = None,
     relative_margin: float = 0.12,
     max_candidates: int = 6,
 ) -> dict[str, VectorHit]:
@@ -2547,7 +2573,7 @@ def _best_technique_hits(
         hit
         for hit in hits
         if hit.similarity >= threshold
-        and _platform_matches(hit.metadata.get("platforms"), required_platform)
+        and _platform_matches(hit.metadata.get("platforms"), platform_scope)
     ]
     if not eligible:
         return {}
@@ -2564,25 +2590,33 @@ def _best_technique_hits(
     return best
 
 
-def _platform_matches(platforms: Any, required_platform: str | None) -> bool:
-    if not required_platform or not platforms:
-        return True
-    values = platforms.split(",") if isinstance(platforms, str) else list(platforms)
-    return required_platform.casefold() in {str(value).strip().casefold() for value in values}
+def _platform_matches(platforms: Any, platform_scope: PlatformScope | None) -> bool:
+    return platform_scope is None or platform_scope.allows(platforms)
 
 
-def _required_platform(observation: Any) -> str | None:
-    explicit = observation.metadata.get("platform") if hasattr(observation, "metadata") else None
-    if explicit:
-        return str(explicit)
-    source = str(getattr(getattr(observation, "provenance", None), "source", ""))
-    if getattr(observation, "kind", "") == "winlog" or source == "winlog":
-        return "Windows"
-    return None
+def _apply_platform_scope(
+    candidates: list[TechniqueCandidate], kb: Any, platform_scope: PlatformScope
+) -> tuple[list[TechniqueCandidate], int]:
+    """Drop candidates documented only for operating systems outside the observation's scope
+    and renumber the rest; returns the kept candidates and how many were dropped."""
+    techniques = getattr(kb, "techniques", {}) or {}
+    kept = [
+        candidate
+        for candidate in candidates
+        if platform_scope.allows(
+            _record_value(techniques.get(candidate.technique_id), "platforms", ())
+        )
+    ]
+    if len(kept) == len(candidates):
+        return candidates, 0
+    renumbered = [item.model_copy(update={"fused_rank": rank}) for rank, item in enumerate(kept, 1)]
+    return renumbered, len(candidates) - len(kept)
 
 
 def _source_reliability(observation: Any, hit: VectorHit) -> float:
-    return 0.95 if _required_platform(observation) == "Windows" else 1.0
+    # Windows event logs only (the log-source scope; the case Target OS is not consulted).
+    scope = observation_scope(observation)
+    return 0.95 if scope is not None and scope.platforms == ("Windows",) else 1.0
 
 
 def _aggregate_scores(scores: list[float]) -> float:

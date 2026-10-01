@@ -94,6 +94,21 @@ export function useApplyDecisions(id: string) {
   })
 }
 
+export function useSetPlatforms(id: string) {
+  const write = useCaseWriter(id)
+  return useMutation({
+    mutationFn: (platforms: string[]) => api.platforms(id, platforms),
+    onSuccess: (payload) => {
+      write(payload)
+      const chosen = payload.target_platforms
+      toast.success(chosen.length ? `Target OS: ${chosen.join(', ')}` : 'Target OS cleared', {
+        description: 'Observations were mapped again and the group ranking was recomputed.',
+      })
+    },
+    onError: (error) => toast.error('Could not change the target OS', { description: describe(error) }),
+  })
+}
+
 export function useRescore(id: string) {
   const write = useCaseWriter(id)
   return useMutation({
