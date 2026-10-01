@@ -232,3 +232,52 @@ def test_real_cases_are_learned_and_recorded():
     assert taught.metadata["real_cases"] == 1
     assert taught.group_ids == plain.group_ids
     assert taught.predict(probe)[0][3] > plain.predict(probe)[0][3]
+
+
+def test_classifier_abstains_and_respects_eligibility():
+    from apt_classifier.classifiers.base import ClassifierContext
+    from apt_classifier.group_mlp import GroupMLPClassifier, refit_without_groups
+
+    kb = _kb()
+    model = _fit()
+
+    def ctx(techniques):
+        return ClassifierContext(
+            kb=kb,
+            observed_techniques=techniques,
+            technique_observations={},
+            negative_techniques=set(),
+            semantic_profile_scores={},
+            group_text_scores={},
+            software_ids=set(),
+        )
+
+    empty = ctx({})
+    assert not GroupMLPClassifier(model).classify(empty).applicable
+    assert not GroupMLPClassifier(None).classify(empty).applicable
+    context = ctx({"T4": 1.0, "T5": 1.0})
+    context.eligible_group_ids = {"G1", "G3"}
+    result = GroupMLPClassifier(model).classify(context)
+    assert result.applicable and {e.group_id for e in result.entries} <= {"G1", "G3"}
+
+    reduced = _kb()
+    del reduced.groups["G2"]
+    reduced.recompute_statistics()
+    refit = refit_without_groups(model, reduced)
+    assert "G2" not in refit.group_ids and refit.metadata["params"] == model.metadata["params"]
+
+
+def test_precomputed_draws_drop_removed_groups():
+    from apt_classifier.group_mlp import draw_seeds, precompute_draws, refit_without_groups
+
+    params = {**SMALL, "members": 2}
+    assert draw_seeds(params) == [7, 11, 15, 1007, 1011, 1015]
+    kb = _kb()
+    draws = precompute_draws(kb, params)
+    assert set(draws) == set(draw_seeds(params))
+    model = fit_group_mlp(kb, params=params, device="cpu")
+    reduced = _kb()
+    del reduced.groups["G3"]
+    reduced.recompute_statistics()
+    fast = refit_without_groups(model, reduced, draws)
+    assert "G3" not in fast.group_ids and fast.metadata["precomputed_draws"] is True

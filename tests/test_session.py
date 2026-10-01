@@ -664,3 +664,47 @@ def test_profile_forest_members_are_wired_and_swappable():
     state = engine.analyze(_ledger("PowerShell executed an encoded command."))
     by_name = {r.classifier: r for r in state.classifier_results}
     assert not by_name["profile_forest"].applicable and not by_name["source_country"].applicable
+
+
+def test_group_mlp_at_weight_zero_leaves_the_pipeline_unchanged(tmp_path):
+    """Off (the default) the network is not loaded and adds no weight key, so the fusion and
+    the combiner fingerprint are exactly the pre-network ones; with a weight it votes in the
+    learned_profile family and the fingerprint changes (the combiner must be refitted)."""
+    pytest.importorskip("torch")
+    from apt_classifier.group_mlp import GROUP_MLP_NAME, fit_group_mlp
+
+    kb = _kb()
+    model = fit_group_mlp(
+        kb,
+        params={"samples_per_group": 20, "hidden": [16], "epochs": 2, "size_min": 1, "size_max": 2},
+        device="cpu",
+    )
+    path = model.save(tmp_path / "mlp.npz")
+    off = AttributionEngine(_settings(group_mlp_path=path), kb, FakeStore(), FakeLLM())
+    plain = AttributionEngine(
+        _settings(group_mlp_enabled=False, group_mlp_path=path), kb, FakeStore(), FakeLLM()
+    )
+    assert off.group_mlp is None and off.group_mlp_status == "disabled (weight 0)"
+    assert GROUP_MLP_NAME not in off.default_weights()
+    assert off.combiner_fingerprint == plain.combiner_fingerprint
+    assert all(c.name != GROUP_MLP_NAME for c in off.classifiers)
+
+    on = AttributionEngine(
+        _settings(group_mlp_path=path, group_mlp_weight=1.0), kb, FakeStore(), FakeLLM()
+    )
+    assert on.group_mlp is not None and on.group_mlp_status.startswith("active")
+    assert on.default_weights()[GROUP_MLP_NAME] == 1.0
+    assert _CLASSIFIER_FAMILIES[GROUP_MLP_NAME] == "learned_profile"
+    assert on.combiner_fingerprint != plain.combiner_fingerprint
+    state = on.analyze(_ledger("Mimikatz dumped LSASS credentials"))
+    assert any(r.classifier == GROUP_MLP_NAME for r in state.classifier_results)
+    on.set_group_mlp(None)
+    assert on.group_mlp_status == "disabled"
+
+    missing = AttributionEngine(
+        _settings(group_mlp_path=tmp_path / "none.npz", group_mlp_weight=1.0),
+        kb,
+        FakeStore(),
+        FakeLLM(),
+    )
+    assert missing.group_mlp is None and "not found" in missing.group_mlp_status

@@ -65,6 +65,7 @@ from apt_classifier.evaluation import (
 )
 from apt_classifier.evidence.iocs import match_software_aliases
 from apt_classifier.evidence.models import EvidenceLedger, Observation, Provenance
+from apt_classifier.group_mlp import refit_without_groups
 from apt_classifier.llm import OpenRouterClient
 from apt_classifier.profile_forest import fit_profile_forest
 from apt_classifier.session import AttributionEngine
@@ -92,6 +93,7 @@ FINGERPRINTED_SOURCES = (
     REPO_ROOT / "apt_classifier" / "profile_forest.py",
     REPO_ROOT / "apt_classifier" / "torch_forest.py",
     REPO_ROOT / "apt_classifier" / "classifiers" / "profile_forest.py",
+    REPO_ROOT / "apt_classifier" / "group_mlp.py",
 )
 
 
@@ -625,6 +627,11 @@ def run_unknown(
         if _forest_votes(engine):
             engine.set_profile_forest(_refit_forest_without_actor(engine, reduced))
             forest = "refit without the actor"
+        group_mlp = "off"
+        if getattr(engine, "group_mlp", None) is not None:
+            # exact refit on the reduced knowledge base (fresh draws), never a masked output
+            engine.set_group_mlp(refit_without_groups(engine.group_mlp, reduced))
+            group_mlp = "refit without the actor"
         cost_before = client.total_usage.cost_usd if client is not None else 0.0
         state = engine.analyze(_ledger(fold))
         fusion = state.fusion
@@ -634,6 +641,7 @@ def run_unknown(
                 "group_id": fold.group_id,
                 "observations": len(fold.observations),
                 "profile_forest": forest,
+                "group_mlp": group_mlp,
                 "llm": _llm_accounting(state, client, cost_before),
                 **_separation_fields(state, None, decision),
                 **_combiner_fields(state, None),
@@ -982,6 +990,17 @@ def main(argv: list[str] | None = None) -> int:
             "fingerprint": getattr(engine.profile_forest, "fingerprint", None),
             "votes": _forest_votes(engine),
         },
+        # only when the network votes, so a default run keeps its fingerprint inputs
+        **(
+            {
+                "group_mlp": {
+                    "status": engine.group_mlp_status,
+                    "fingerprint": engine.group_mlp.fingerprint,
+                }
+            }
+            if getattr(engine, "group_mlp", None) is not None
+            else {}
+        ),
         "source_fingerprint": source_fingerprint(FINGERPRINTED_SOURCES),
         "pipeline": args.pipeline,
         "verifier_mode": str(getattr(settings, "technique_verifier_mode", "ambiguous")),

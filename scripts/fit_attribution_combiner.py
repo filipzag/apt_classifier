@@ -42,6 +42,7 @@ from apt_classifier.combiner import (  # noqa: E402
 )
 from apt_classifier.config import Settings  # noqa: E402
 from apt_classifier.embeddings import SentenceTransformerEmbedder  # noqa: E402
+from apt_classifier.group_mlp import precompute_draws, refit_without_groups  # noqa: E402
 from apt_classifier.separation import discriminate, technique_document_counts  # noqa: E402
 from apt_classifier.session import AttributionEngine  # noqa: E402
 from apt_classifier.vectorstore import ChromaVectorStore  # noqa: E402
@@ -302,6 +303,7 @@ def generate_unknown_lists(
     folds = bench.build_folds(kb, seed=seed, limit=limit, **fold_args)
     records = []
     started = time.time()
+    draws = None
     for index, fold in enumerate(folds, 1):
         reduced = copy.deepcopy(kb)
         del reduced.groups[fold.group_id]
@@ -324,6 +326,12 @@ def generate_unknown_lists(
             # the shipped forest knows the removed actor; the null option must be learned from
             # a model that never saw it (same parameters and seed, GPU when available)
             engine.set_profile_forest(bench._refit_forest_without_actor(engine, reduced))  # noqa: SLF001
+        if getattr(engine, "group_mlp", None) is not None:
+            # same rule for the group network; for speed the full knowledge base's draws are
+            # reused without the removed actor's cases (training lists only, never a gate)
+            if draws is None:
+                draws = precompute_draws(kb, engine.group_mlp.metadata.get("params"))
+            engine.set_group_mlp(refit_without_groups(engine.group_mlp, reduced, draws))
         state = engine.analyze(bench._ledger(fold))  # noqa: SLF001
         fusion = state.deterministic_fusion or state.fusion
         if not fusion.entries:
