@@ -289,6 +289,18 @@ def test_local_flow_target_os(local_client: TestClient) -> None:
     local_client.post(f"/api/cases/{case_id}/platforms", json={"target_platforms": ["Linux"]})
     saved = local_client.app.state.service.store.load(case_id)["ledger"]
     assert saved.metadata["target_platforms"] == ["Linux"]
+
+    # the interview and the Distinguish leads never ask about a Windows-only technique
+    def linux_compatible(technique_id: str) -> bool:
+        return linux_scope.allows(techniques[technique_id].platforms)
+
+    interview = local_client.get(f"/api/cases/{case_id}/interview").json()
+    asked = [interview["question"]["technique_id"]] if interview["question"] else []
+    asked += [lead["technique_id"] for lead in interview["leads"]]
+    assert asked and all(linux_compatible(t) for t in asked)
+    distinguish = local_client.get(f"/api/cases/{case_id}/distinguish?top_k=10").json()
+    assert all(linux_compatible(lead["technique_id"]) for lead in distinguish["leads"])
+    assert all(linux_compatible(row["technique_id"]) for row in distinguish["pending"])
     bad = local_client.post(
         f"/api/cases/{case_id}/platforms", json={"target_platforms": ["Solaris"]}
     )

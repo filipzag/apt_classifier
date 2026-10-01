@@ -41,6 +41,7 @@ from apt_classifier.exemplars import exemplar_kwargs, load_exemplar_index
 from apt_classifier.fusion import FusionResult, reciprocal_rank_fusion
 from apt_classifier.llm import OpenRouterClient
 from apt_classifier.origin import OriginAndThreatAssessment, assess_origin_and_threat_type
+from apt_classifier.platforms import ledger_platforms
 from apt_classifier.presets import apply_preset
 from apt_classifier.profile_forest import load_profile_forest
 from apt_classifier.questions import (
@@ -617,6 +618,9 @@ class AttributionEngine:
             alpha=self.settings.nb_alpha,
             beta=self.settings.nb_beta,
             top_n=10,
+            # the case's Target OS (not per-observation text scopes): the interview asks about
+            # the case as a whole, so only the analyst's statement narrows it
+            platforms=ledger_platforms(state.ledger),
         )
 
     def next_question(self, state: AnalysisState) -> SelectedQuestion | None:
@@ -643,6 +647,7 @@ class AttributionEngine:
                 state.context.narrative,
                 model=self.settings.extract_model,
                 effort=self.settings.question_effort,
+                target_platforms=ledger_platforms(state.ledger),
             )
         )
         state.interview_complete = state.current_question is None

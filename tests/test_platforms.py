@@ -48,6 +48,13 @@ def test_scope_keeps_techniques_the_operating_system_says_nothing_about():
     windows_logs = PlatformScope(("Windows",), "log", strict=True)
     assert not windows_logs.allows(["IaaS"])  # event logs keep the stricter rule
     assert windows_logs.allows(["Linux", "Windows"])
+    # what is still worth searching: the scope's OS plus platforms the OS says nothing about
+    assert linux.relevant(["Containers", "ESXi", "Linux", "Windows", "macOS"]) == (
+        "Containers",
+        "Linux",
+    )
+    assert linux.relevant("IaaS,SaaS") == ("IaaS", "SaaS")
+    assert linux.relevant(["Windows"]) == ()
 
 
 def test_observation_scope_precedence():

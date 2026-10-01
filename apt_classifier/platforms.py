@@ -103,11 +103,15 @@ def set_ledger_platforms(ledger: Any, platforms: Any) -> list[str]:
     return values
 
 
-def _folded(platforms: Any) -> set[str]:
+def _listed(platforms: Any) -> list[str]:
     if not platforms:
-        return set()
+        return []
     values = platforms.split(",") if isinstance(platforms, str) else list(platforms)
-    return {str(value).strip().casefold() for value in values if str(value).strip()}
+    return [str(value).strip() for value in values if str(value).strip()]
+
+
+def _folded(platforms: Any) -> set[str]:
+    return {value.casefold() for value in _listed(platforms)}
 
 
 @dataclass(frozen=True)
@@ -132,6 +136,16 @@ class PlatformScope:
             return False
         # Also documented for a non-host platform: the operating system says nothing about it.
         return not values <= _HOST_FOLDED
+
+    def relevant(self, technique_platforms: Any) -> tuple[str, ...]:
+        """A technique's platforms still worth searching under this scope: the scope's operating
+        systems and the platforms an operating system says nothing about (cloud, identity, ...)."""
+        allowed = {platform.casefold() for platform in self.platforms}
+        return tuple(
+            value
+            for value in _listed(technique_platforms)
+            if value.casefold() in allowed or value.casefold() not in _HOST_FOLDED
+        )
 
     def to_dict(self) -> dict[str, Any]:
         return {"platforms": list(self.platforms), "source": self.source}

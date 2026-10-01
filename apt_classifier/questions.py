@@ -1,10 +1,12 @@
 import re
+from collections.abc import Iterable
 from dataclasses import asdict, dataclass
 from math import log2
 from typing import Any
 
 from apt_classifier.evidence.models import EvidenceStatus
 from apt_classifier.llm import OpenRouterClient
+from apt_classifier.platforms import PlatformScope
 
 INTERVIEW_REVISION = 3
 
@@ -201,7 +203,15 @@ def shortlist_questions(
     beta: float = 0.05,
     top_n: int = 10,
     observable_techniques: set[str] | None = None,
+    platforms: Iterable[str] = (),
 ) -> list[QuestionCandidate]:
+    """Unanswered techniques of the candidate groups, ranked by information gain.
+
+    ``platforms`` is the case's Target OS: techniques documented only for other operating
+    systems are not asked about (their absence says nothing about a group when the hosts
+    cannot show them, and a "no" would count against the groups that document them), and the
+    investigation steps name only the platforms still relevant.
+    """
     group_techniques = {
         group_id: set(values) for group_id, values in getattr(kb, "group_techniques", {}).items()
     }
@@ -209,6 +219,15 @@ def shortlist_questions(
     technique_ids -= answered
     if observable_techniques is not None:
         technique_ids &= observable_techniques
+    target = tuple(platforms)
+    scope = PlatformScope(target, "case") if target else None
+    if scope is not None:
+        techniques = getattr(kb, "techniques", {}) or {}
+        technique_ids = {
+            technique_id
+            for technique_id in technique_ids
+            if scope.allows(_record_values(techniques.get(technique_id), "platforms"))
+        }
     candidates = []
     hypothesis_weights = _normalize(posterior)
     if not hypothesis_weights:
@@ -248,7 +267,7 @@ def shortlist_questions(
                     f"{candidate_count} current candidate profiles representing "
                     f"{profile_support:.0%} of current hypothesis weight."
                 ),
-                investigation_steps=_investigation_steps(kb, technique_id),
+                investigation_steps=_investigation_steps(kb, technique_id, scope),
             )
         )
     return sorted(
@@ -264,9 +283,17 @@ def select_question_with_llm(
     *,
     model: str,
     effort: str,
+    target_platforms: Iterable[str] = (),
 ) -> SelectedQuestion | None:
     if not candidates:
         return None
+    target = ", ".join(target_platforms)
+    # only with a Target OS, so every other case keeps the same prompt
+    platform_note = (
+        f"The affected hosts run {target}: phrase the question for those operating systems.\n\n"
+        if target
+        else ""
+    )
     schema = {
         "type": "object",
         "additionalProperties": False,
@@ -282,6 +309,7 @@ def select_question_with_llm(
         "yes/no question that asks what the analyst found after checking the supplied investigation "
         "steps. Never assert that the behavior occurred and avoid naming threat groups. Prefer a "
         "lead that balances investigation_priority, information_gain, and practical observability.\n\n"
+        f"{platform_note}"
         f"Case observations:\n{case_summary[:12000]}\n\n"
         f"Candidates:\n{[asdict(candidate) for candidate in candidates]}"
     )
@@ -420,9 +448,13 @@ def should_stop(
     )
 
 
-def _investigation_steps(kb: Any, technique_id: str) -> tuple[str, ...]:
+def _investigation_steps(
+    kb: Any, technique_id: str, scope: PlatformScope | None = None
+) -> tuple[str, ...]:
     technique = getattr(kb, "techniques", {}).get(technique_id)
     platforms = _record_values(technique, "platforms")
+    if scope is not None:
+        platforms = scope.relevant(platforms)
     tactics = _record_values(technique, "tactics")
     detection = str(_record_value(technique, "detection") or "").strip()
     parent_id = technique_id.split(".", 1)[0]

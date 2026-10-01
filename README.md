@@ -232,7 +232,9 @@ the container. There is no authentication; put it behind a reverse proxy with SS
    Confirm, reject or replace, then apply; the ranking is recomputed. Changing the Target OS here
    maps the observations again.
 3. **Interview**: answer predicted-behaviour questions (yes / no / unknown / not visible) to
-   separate the shortlisted groups; optional Elasticsearch gathering per lead.
+   separate the shortlisted groups; optional Elasticsearch gathering per lead. With a Target OS,
+   techniques documented only for other operating systems are never asked about (here and in the
+   Distinguish leads).
 4. **Assessment**: the stage decision with its bars and glossary, the ranking chart, a dossier
    per candidate, the optional independent AI review, and exports (Markdown, JSON audit,
    Navigator layers, Attack Flow) that are always available.

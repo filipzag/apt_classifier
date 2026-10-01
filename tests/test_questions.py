@@ -52,6 +52,33 @@ def test_shortlist_excludes_answered_and_builds_investigation_leads():
     assert any("process creation" in step.casefold() for step in lead.investigation_steps)
 
 
+def test_target_os_keeps_other_operating_systems_out_of_the_interview():
+    kb = SimpleNamespace(
+        group_techniques={"G1": {"TWIN", "TCRON", "TJOB"}, "G2": {"TWIN", "TCLOUD", "TJOB"}},
+        techniques={
+            "TWIN": SimpleNamespace(name="Scheduled Task", platforms=("Windows",)),
+            "TCRON": SimpleNamespace(name="Cron", platforms=("Linux", "macOS")),
+            "TJOB": SimpleNamespace(
+                name="Scheduled Task/Job", platforms=("Containers", "Linux", "Windows", "macOS")
+            ),
+            "TCLOUD": SimpleNamespace(name="Cloud Accounts", platforms=("IaaS", "SaaS")),
+        },
+    )
+    posterior = {"G1": 0.6, "G2": 0.4}
+    assert {c.technique_id for c in shortlist_questions(kb, posterior, set())} == {
+        "TWIN",
+        "TCRON",
+        "TJOB",
+        "TCLOUD",
+    }
+    linux = shortlist_questions(kb, posterior, set(), platforms=["Linux"])
+    # Windows-only is never asked; cloud techniques are not an OS question
+    assert {c.technique_id for c in linux} == {"TCRON", "TJOB", "TCLOUD"}
+    job = next(c for c in linux if c.technique_id == "TJOB")
+    scope_step = next(s for s in job.investigation_steps if s.startswith("Scope the search"))
+    assert scope_step == "Scope the search to relevant Containers, Linux systems and identities."
+
+
 def test_shortlist_does_not_reask_intake_confirmed_archive_utility():
     kb = SimpleNamespace(
         group_techniques={"G1": {"T1560", "T1560.001"}, "G2": {"T1560.001", "T1041"}},
@@ -126,6 +153,37 @@ def test_llm_selection_preserves_deterministic_investigation_guidance():
     assert selected.hypothesis == expected.hypothesis
     assert selected.investigation_steps == expected.investigation_steps
     assert selected.investigation_priority == expected.investigation_priority
+
+
+def test_llm_question_is_told_the_target_os_only_when_one_is_set():
+    candidates = shortlist_questions(
+        SimpleNamespace(group_techniques={"G1": {"T1"}}, techniques={}), {"G1": 1.0}, set()
+    )
+    prompts: list[str] = []
+
+    def complete(messages, **kwargs):
+        prompts.append(messages[-1]["content"])
+        return SimpleNamespace(parsed={"technique_id": "T1", "question": "Seen?"})
+
+    client = SimpleNamespace(complete=complete)
+    select_question_with_llm(client, candidates, "Observed", model="test/model", effort="low")
+    select_question_with_llm(
+        client,
+        candidates,
+        "Observed",
+        model="test/model",
+        effort="low",
+        target_platforms=["Linux", "ESXi"],
+    )
+    assert "affected hosts" not in prompts[0]
+    assert "The affected hosts run Linux, ESXi" in prompts[1]
+    assert (
+        prompts[1].replace(
+            "The affected hosts run Linux, ESXi: phrase the question for those operating systems.\n\n",
+            "",
+        )
+        == prompts[0]
+    )
 
 
 def test_shortlist_only_contains_techniques_supported_by_weighted_candidates():
