@@ -70,13 +70,15 @@ DEFAULT_PARAMS: dict[str, Any] = {
     "hidden": [1024, 512],
     "dropout": 0.3,
     "input_dropout": 0.15,
-    "members": 5,
+    "members": 1,
     "real_weight": 10,  # repeats of each real case per draw (only with ``real_cases``)
     # optimisation
-    "epochs": 30,
-    "resample_every": 3,
-    "batch_size": 512,
-    "lr": 2e-3,
+    # one network, large batches: as accurate on the campaigns as five averaged networks
+    # (MRR 0.71 vs 0.69) and ~20 s per fit, so benchmark refits per removed actor stay affordable
+    "epochs": 20,
+    "resample_every": 4,
+    "batch_size": 2048,
+    "lr": 4e-3,
     "weight_decay": 1e-4,
     "label_smoothing": 0.1,
     # prediction: logits + prior_power * log(prominence + 1), a knowledge-base base rate
@@ -166,6 +168,8 @@ def training_cases(
     what the group documents), not as a share of the profile: a share would make the count of
     active features reveal how well documented the group is, which real reports do not."""
     p = {**DEFAULT_PARAMS, **(params or {})}
+    if not 1 <= int(p["size_min"]) <= int(p["size_max"]):
+        raise ValueError(f"need 1 <= size_min <= size_max, got {p['size_min']}..{p['size_max']}")
     rng = np.random.default_rng(int(p["seed"]))
     space = features.space
     profiles = group_profiles(kb)
@@ -225,7 +229,11 @@ def training_cases(
                 pool = np.union1d(own, np.concatenate([ts for _, ts in chosen]))
                 named = [column for column, _ in chosen if rng.uniform() < p["software_named"]]
                 matrix[row, named] = 1
-            if other_cumulative[-1] > 0 and rng.uniform() < p["software_false_rate"]:
+            if (
+                other_cumulative.size
+                and other_cumulative[-1] > 0
+                and rng.uniform() < p["software_false_rate"]
+            ):
                 draw = np.searchsorted(
                     other_cumulative, rng.uniform(0, other_cumulative[-1]), "right"
                 )
@@ -458,15 +466,44 @@ class GroupMLP:
         return True, "ok"
 
 
+Draws = dict[int, tuple[np.ndarray, list[str]]]
+
+
+def draw_seeds(params: Mapping[str, Any] | None = None) -> list[int]:
+    """The case-draw seeds one fit uses (every member, every resample)."""
+    p = {**DEFAULT_PARAMS, **(params or {})}
+    every = int(p["resample_every"]) or int(p["epochs"])
+    seeds = []
+    for member in range(max(1, int(p["members"]))):
+        base = int(p["seed"]) + 1000 * member
+        seeds += [base] + [base + e for e in range(every, int(p["epochs"]), every)]
+    return seeds
+
+
+def precompute_draws(kb: Any, params: Mapping[str, Any] | None = None) -> Draws:
+    """Every draw a fit on ``kb`` would make, for refits that only remove groups."""
+    p = {**DEFAULT_PARAMS, **(params or {})}
+    features = MLPFeatures.from_kb(kb)
+    return {seed: training_cases(kb, features, {**p, "seed": seed}) for seed in draw_seeds(p)}
+
+
 def _draw(
     kb: Any,
     features: MLPFeatures,
     p: Mapping[str, Any],
     seed: int,
     real_cases: tuple[np.ndarray, Sequence[str]] | None,
+    draws: Draws | None = None,
 ) -> tuple[np.ndarray, list[str]]:
-    """One synthetic draw, plus the real cases repeated ``real_weight`` times when given."""
-    matrix, groups = training_cases(kb, features, {**p, "seed": seed})
+    """One synthetic draw, plus the real cases repeated ``real_weight`` times when given. With
+    ``draws`` the precomputed draw is reused, keeping only groups still in ``kb``."""
+    if draws is not None and seed in draws:
+        matrix, groups = draws[seed]
+        known = set(getattr(kb, "groups", {}) or {})
+        keep = np.asarray([g in known for g in groups])
+        matrix, groups = matrix[keep], [g for g, k in zip(groups, keep, strict=True) if k]
+    else:
+        matrix, groups = training_cases(kb, features, {**p, "seed": seed})
     repeat = int(p["real_weight"])
     if real_cases is not None and repeat > 0 and len(real_cases[1]):
         matrix = np.concatenate([matrix, np.tile(real_cases[0].astype(np.uint8), (repeat, 1))])
@@ -482,13 +519,14 @@ def _fit_member(
     device: str,
     log: Any,
     real_cases: tuple[np.ndarray, Sequence[str]] | None = None,
+    draws: Draws | None = None,
 ) -> tuple[dict[str, np.ndarray], tuple[str, ...], dict[str, float]]:
     import torch
     import torch.nn.functional as F
 
     torch.manual_seed(seed)
     started = time.time()
-    matrix, groups = _draw(kb, features, p, seed, real_cases)
+    matrix, groups = _draw(kb, features, p, seed, real_cases, draws)
     cases_seconds = time.time() - started
     group_ids = tuple(sorted(set(groups)))
     group_index = {group_id: position for position, group_id in enumerate(group_ids)}
@@ -509,7 +547,7 @@ def _fit_member(
     for epoch in range(epochs):
         if epoch and int(p["resample_every"]) and epoch % int(p["resample_every"]) == 0:
             t0 = time.time()
-            matrix, groups = _draw(kb, features, p, seed + epoch, real_cases)
+            matrix, groups = _draw(kb, features, p, seed + epoch, real_cases, draws)
             cases_seconds += time.time() - t0
             x = None
         if x is None:
@@ -543,12 +581,16 @@ def fit_group_mlp(
     device: str | None = None,
     log: Any = None,
     real_cases: tuple[np.ndarray, Sequence[str]] | None = None,
+    draws: Draws | None = None,
 ) -> GroupMLP:
     """Fit ``members`` networks on synthetic cases from ``kb`` (GPU when available).
 
     ``real_cases`` (feature rows, true groups) are labelled real reports added to every draw
     ``real_weight`` times. The default model uses none; a model fitted with them is derived from
-    that data (CTI-HAL: local evaluation only, never shipped) and the metadata says so."""
+    that data (CTI-HAL: local evaluation only, never shipped) and the metadata says so.
+    ``draws`` (``precompute_draws`` on a larger knowledge base) replaces case generation; the
+    groups missing from ``kb`` are dropped from them. Draws come from ``kb``'s own sampler only
+    approximately then: false positives were drawn by technique popularity over the larger set."""
     p = {**DEFAULT_PARAMS, **(params or {})}
     resolved = resolve_device(device)
     features = MLPFeatures.from_kb(kb)
@@ -557,7 +599,7 @@ def fit_group_mlp(
     seconds = {"cases": 0.0, "training": 0.0}
     for member in range(max(1, int(p["members"]))):
         member_weights, group_ids, spent = _fit_member(
-            kb, features, p, int(p["seed"]) + 1000 * member, resolved, log, real_cases
+            kb, features, p, int(p["seed"]) + 1000 * member, resolved, log, real_cases, draws
         )
         weights.update({f"m{member}.{k}": v for k, v in member_weights.items()})
         seconds = {k: seconds[k] + spent[k] for k in seconds}
@@ -574,6 +616,7 @@ def fit_group_mlp(
             "params": p,
             "device": resolved,
             "real_cases": 0 if real_cases is None else len(real_cases[1]),
+            "precomputed_draws": draws is not None,
             "seconds": {k: round(v, 1) for k, v in seconds.items()},
         },
         device=resolved,
@@ -634,3 +677,57 @@ def load_group_mlp(
     if not ok:
         return None, f"incompatible artifact: {reason}"
     return model, f"active ({model.device})"
+
+
+# ---------------------------------------------------------------------------- pipeline member
+GROUP_MLP_NAME = "group_mlp"
+
+
+def group_mlp_votes(settings: Any) -> bool:
+    """The network joins the ensemble only with a positive weight: at 0 it is not loaded, not
+    run and adds no weight key, so the fusion (and the combiner fingerprint) are unchanged."""
+    return bool(getattr(settings, "group_mlp_enabled", False)) and (
+        float(getattr(settings, "group_mlp_weight", 0.0) or 0.0) > 0
+    )
+
+
+def load_group_mlp_for(settings: Any, kb: Any) -> tuple[GroupMLP | None, str]:
+    """The configured artifact for the engine, fail-closed: ``(model, status)``."""
+    if not group_mlp_votes(settings):
+        return None, "disabled (weight 0)"
+    return load_group_mlp(
+        getattr(settings, "group_mlp_path", ""),
+        kb,
+        device=getattr(settings, "group_mlp_device", None),
+    )
+
+
+def refit_without_groups(model: GroupMLP, reduced_kb: Any, draws: Draws | None = None) -> GroupMLP:
+    """Refit with the model's own parameters on a knowledge base missing some groups (the
+    benchmarks' unknown actor): masking the full model's output would still carry what it
+    learned about the removed group. Exact without ``draws``; see ``fit_group_mlp``."""
+    params = dict(model.metadata.get("params") or {})
+    return fit_group_mlp(reduced_kb, params=params, device=model.device, draws=draws)
+
+
+class GroupMLPClassifier:
+    """Ensemble member: the network's probability for each eligible group. Abstains without a
+    model or without accepted techniques and named software; it cannot make a group eligible."""
+
+    name = GROUP_MLP_NAME
+
+    def __init__(self, model: GroupMLP | None = None) -> None:
+        self.model = model
+
+    def classify(self, context: Any) -> Any:
+        from apt_classifier.classifiers.base import build_result, group_ids
+
+        if self.model is None or not (
+            context.observed_techniques or getattr(context, "software_ids", None)
+        ):
+            return build_result(self.name, context, {}, applicable=False)
+        probabilities = self.model.predict_context(context)
+        allowed = set(group_ids(context))
+        scores = {g: p for g, p in probabilities.items() if g in allowed and p > 0}
+        signals = {g: (f"group_mlp:p={p:.3f}",) for g, p in scores.items()}
+        return build_result(self.name, context, scores, applicable=bool(scores), signals=signals)

@@ -39,6 +39,12 @@ from apt_classifier.evidence.models import (
 )
 from apt_classifier.exemplars import exemplar_kwargs, load_exemplar_index
 from apt_classifier.fusion import FusionResult, reciprocal_rank_fusion
+from apt_classifier.group_mlp import (
+    GROUP_MLP_NAME,
+    GroupMLPClassifier,
+    group_mlp_votes,
+    load_group_mlp_for,
+)
 from apt_classifier.llm import OpenRouterClient
 from apt_classifier.origin import OriginAndThreatAssessment, assess_origin_and_threat_type
 from apt_classifier.platforms import ledger_platforms
@@ -100,6 +106,8 @@ _CLASSIFIER_FAMILIES = {
     CYBERRE_CLASSIFIER_NAME: "cyberre_llm",
     PROFILE_FOREST_NAME: "learned_profile",
     SOURCE_COUNTRY_NAME: "origin",
+    # a learned profile model like the group forest: no new independent family for the gate
+    GROUP_MLP_NAME: "learned_profile",
 }
 
 
@@ -256,6 +264,9 @@ class AttributionEngine:
             software_idf=bool(getattr(self.settings, "software_idf_enabled", True)),
             profile_forest=self.profile_forest,
         )
+        self.group_mlp, self.group_mlp_status = load_group_mlp_for(self.settings, knowledge_base)
+        if self.group_mlp is not None:
+            self.classifiers = (*self.classifiers, GroupMLPClassifier(self.group_mlp))
         self.telemetry_profile: Any = None
         self.exemplar_index, self.exemplar_status = load_exemplar_index(self.settings)
         self.acceptance_model, self.acceptance_model_status = load_acceptance_model(
@@ -971,6 +982,18 @@ class AttributionEngine:
             if getattr(classifier, "name", None) in {PROFILE_FOREST_NAME, SOURCE_COUNTRY_NAME}:
                 classifier.model = model
 
+    def set_group_mlp(self, model: Any) -> None:
+        """Swap the group network; the benchmarks refit it without the removed actor."""
+        self.group_mlp = model
+        self.group_mlp_status = (
+            f"active ({getattr(model, 'device', '?')}, injected)"
+            if model is not None
+            else "disabled"
+        )
+        for classifier in self.classifiers:
+            if getattr(classifier, "name", None) == GROUP_MLP_NAME:
+                classifier.model = model
+
     def family_weights(self) -> dict[str, float]:
         """Per-family RRF budgets from settings (single definition for every fusion call)."""
         return {
@@ -1000,6 +1023,12 @@ class AttributionEngine:
             "weighted_jaccard": getattr(self.settings, "jaccard_weight", 1.0),
             PROFILE_FOREST_NAME: getattr(self.settings, "profile_forest_weight", 0.0),
             SOURCE_COUNTRY_NAME: getattr(self.settings, "source_country_weight", 0.0),
+            # only when it votes: an extra key would change the combiner fingerprint
+            **(
+                {GROUP_MLP_NAME: float(self.settings.group_mlp_weight)}
+                if group_mlp_votes(self.settings)
+                else {}
+            ),
         }
 
     def _score(

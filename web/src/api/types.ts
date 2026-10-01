@@ -24,6 +24,7 @@ export interface SystemInfo {
   exemplars?: string
   /** random-forest group and source-country models, e.g. "active (cuda)" */
   profile_forest?: string
+  group_mlp?: string
   index: {
     ok: boolean
     technique_sentences?: number
