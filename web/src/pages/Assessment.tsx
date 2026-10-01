@@ -8,6 +8,7 @@ import { CaseFrame, PageHeader, useCaseId } from '../components/CaseFrame'
 import { GateMetric, RankedBars, RankHeatmap } from '../components/charts'
 import { DossierPanel } from '../components/Dossier'
 import { STAGE_META, StageBadge, stageIcon } from '../components/StageBadge'
+import { Top3StateBadge } from '../components/TopThree'
 import { Badge, Button, Callout, Card, DataTable, Label, Metric, SectionTitle, Segmented, Tabs } from '../components/ui'
 import { cn, fmt, pct, titleCase } from '../lib/utils'
 
@@ -54,6 +55,16 @@ function AssessmentView({ caseId, data }: { caseId: string; data: CasePayload })
               <div className="flex flex-wrap items-center gap-2">
                 <StageBadge stage={decision.stage} />
                 <span className="text-xs text-muted">{meta.summary}</span>
+                {data.top3 && data.top3.state !== 'empty' ? (
+                  <button
+                    type="button"
+                    className="focus-ring rounded-full"
+                    onClick={() => navigate(`/cases/${caseId}/distinguish`)}
+                    aria-label="Open the top-three comparison"
+                  >
+                    <Top3StateBadge summary={data.top3} />
+                  </button>
+                ) : null}
               </div>
               <div className="mt-4 flex items-start gap-3">
                 <span

@@ -916,48 +916,30 @@ def test_unknown_arm_refits_only_the_voting_forest(monkeypatch):
     )
 
 
-def test_attribution_summary_reports_top_three_promotions():
+def test_attribution_summary_reports_top_one_given_top_three_and_the_guard():
     from scripts.attribution_benchmark import summarize
 
-    def row(group, rank, before, promoted, stage="known_group_shortlist", separation=0.1):
+    def row(group, rank, guard=False):
         return {
             "group_id": group,
             "report_id": f"r-{group}-{rank}",
             "rank": rank,
-            "rank_before_top3": before,
             "top3": [group] if rank == 1 else ["G0999", group],
-            "stage": stage,
+            "stage": "known_group_shortlist",
             "technique_recall": 0.5,
             "observations": 5,
-            "separation": separation,
-            "margin": 0.0,
-            "top3_promoted": promoted,
-            "top3_promotion": {"promoted": "x", "blocked": False} if promoted else None,
+            "leader_guard_fired": guard,
         }
 
-    known = [
-        row("G1", 1, 3, True),  # recovered from third place
-        row("G2", 2, 1, True, separation=0.2),  # a correct leader pushed down
-        row("G3", 1, 1, False, stage="known_group_hypothesis", separation=0.8),
-        row("G4", 3, 3, False, separation=0.3),
-        row("G5", 7, 7, False),
-    ]
-    known[3]["top3_promotion"] = {"promoted": "G9", "blocked": True}
+    known = [row("G1", 1), row("G2", 2), row("G3", 1, guard=True), row("G4", 3), row("G5", 7)]
     metrics = summarize(known, [])
     assert metrics["top1_given_top3"] == pytest.approx(2 / 4)
     assert metrics["pairwise_12"] == pytest.approx(2 / 3)
-    assert metrics["top3_promotions"] == 2
-    assert metrics["top3_promotion_wins"] == 1
-    assert metrics["top3_promotion_losses"] == 1
-    assert metrics["top3_promoted_named"] == 0
-    assert metrics["top3_blocked"] == 1
-    assert metrics["top3_promoted_wrong_max_separation"] == pytest.approx(0.2)
-    assert metrics["wrong_leader_max_separation"] == pytest.approx(0.3)
+    assert metrics["leader_guard_fired"] == 1
     # rows recorded before the instrumentation keep the old shape
     for item in known:
-        for key in ("top3_promoted", "top3_promotion", "rank_before_top3"):
-            item.pop(key)
-    assert "top3_promotions" not in summarize(known, [])
+        item.pop("leader_guard_fired")
+    assert "leader_guard_fired" not in summarize(known, [])
 
 
 def test_attribution_benchmark_lists_rows_scored_without_an_enabled_combiner():

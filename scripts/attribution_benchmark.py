@@ -68,7 +68,6 @@ from apt_classifier.evidence.models import EvidenceLedger, Observation, Provenan
 from apt_classifier.llm import OpenRouterClient
 from apt_classifier.profile_forest import fit_profile_forest
 from apt_classifier.session import AttributionEngine
-from apt_classifier.top3 import order_before_promotion
 from apt_classifier.vectorstore import (
     ChromaVectorStore,
     VectorHit,
@@ -93,7 +92,6 @@ FINGERPRINTED_SOURCES = (
     REPO_ROOT / "apt_classifier" / "profile_forest.py",
     REPO_ROOT / "apt_classifier" / "torch_forest.py",
     REPO_ROOT / "apt_classifier" / "classifiers" / "profile_forest.py",
-    REPO_ROOT / "apt_classifier" / "top3.py",
 )
 
 
@@ -458,12 +456,12 @@ def _combiner_fields(state: Any, truth: str | None) -> dict[str, Any]:
     }
 
 
-def _top3_fields(state: Any, truth: str | None, ranked: list[str]) -> dict[str, Any]:
-    """Top-three stage diagnostics and exact-replay inputs per row (docs 10.10): for the first
-    three places their combiner probability, RRF rank and classifier ranks; the accepted
-    techniques with their confidences, the actor-behaviour matches of the gate window (ids and
-    scores only, never text), decisive software and negative answers, so ``discriminate`` can be
-    replayed offline; the promotion record, and whether the leader-consistency guard fired."""
+def _top3_fields(state: Any, ranked: list[str]) -> dict[str, Any]:
+    """Top-three diagnostics and exact-replay inputs per row (docs 10.10): for the first three
+    places their combiner probability, RRF rank and classifier ranks; the accepted techniques
+    with their confidences, the actor-behaviour matches of the gate window (ids and scores only,
+    never text), decisive software and negative answers, so ``discriminate`` can be replayed
+    offline; and whether the leader-consistency guard fired."""
     context = state.context
     discrimination = getattr(context, "discrimination", None)
     window = (
@@ -474,11 +472,7 @@ def _top3_fields(state: Any, truth: str | None, ranked: list[str]) -> dict[str, 
     rrf_ranks = info.get("rrf_ranks") or {}
     deterministic = state.deterministic_fusion or state.fusion
     entries = deterministic.by_group()
-    record = info.get("top3")
-    promoted = bool(
-        record and not record.get("blocked") and ranked and ranked[0] == record.get("promoted")
-    )
-    fields: dict[str, Any] = {
+    return {
         "top3_detail": [
             {
                 "group_id": group_id,
@@ -506,18 +500,12 @@ def _top3_fields(state: Any, truth: str | None, ranked: list[str]) -> dict[str, 
         ),
         "decisive_software": dict(getattr(context, "decisive_software", {}) or {}),
         "negative_techniques": sorted(getattr(context, "negative_techniques", ()) or ()),
-        "top3_promotion": record,
-        "top3_promoted": promoted,
         "leader_guard_fired": bool(
             discrimination is not None
             and deterministic.entries
             and discrimination.leader_id != deterministic.entries[0].group_id
         ),
     }
-    if truth is not None:
-        before = order_before_promotion(ranked, record)
-        fields["rank_before_top3"] = before.index(truth) + 1 if truth in before else None
-    return fields
 
 
 def _rank_of(fusion: Any, group_id: str) -> int | None:
@@ -627,7 +615,7 @@ def run_known(
                     "margin": decision.margin if decision else None,
                     "maturity": decision.maturity_score if decision else None,
                     "leading": decision.leading_group_id if decision else None,
-                    **_top3_fields(state, fold.group_id, ranked),
+                    **_top3_fields(state, ranked),
                 }
             )
             for key, value in proxy.dropped.items():
@@ -707,7 +695,7 @@ def run_unknown(
                 "margin": decision.margin if decision else None,
                 "maturity": decision.maturity_score if decision else None,
                 "top3": [entry.group_id for entry in fusion.entries[:3]],
-                **_top3_fields(state, None, [entry.group_id for entry in fusion.entries]),
+                **_top3_fields(state, [entry.group_id for entry in fusion.entries]),
             }
         )
     return rows
@@ -835,8 +823,10 @@ def summarize(
         metrics["pairwise_12"] = (
             fmean(1.0 if row["rank"] == 1 else 0.0 for row in in_top2) if in_top2 else None
         )
-    if any("top3_promoted" in row for row in known_rows + unknown_rows):
-        metrics.update(_top3_summary(known_rows, unknown_rows, named))
+    if any("leader_guard_fired" in row for row in known_rows + unknown_rows):
+        metrics["leader_guard_fired"] = sum(
+            1 for row in known_rows + unknown_rows if row.get("leader_guard_fired")
+        )
     all_rows = known_rows + unknown_rows
     if all_rows and any("llm" in row for row in all_rows):
         llm_rows = [row["llm"] for row in all_rows if "llm" in row]
@@ -852,55 +842,6 @@ def summarize(
         stages["unknown"][row["stage"]] = stages["unknown"].get(row["stage"], 0) + 1
     metrics["stage_distribution"] = stages
     return metrics
-
-
-def _top3_summary(
-    known_rows: list[dict[str, Any]], unknown_rows: list[dict[str, Any]], named: str
-) -> dict[str, Any]:
-    """Top-three stage counts: promotions and their effect on the truth's place, promoted
-    leaders that reached a name (must be 0), blocked promotions, and the guard band inputs
-    (highest separation of a wrong leader, promoted or not)."""
-    promoted = [row for row in known_rows if row.get("top3_promoted")]
-    wrong_promoted = [row for row in promoted if row["rank"] != 1]
-    wrong_kept = [
-        row
-        for row in known_rows
-        if row["rank"] != 1 and not row.get("top3_promoted") and row.get("separation") is not None
-    ]
-    return {
-        "top3_promotions": len(promoted),
-        "top3_promotion_wins": sum(
-            1 for row in promoted if row["rank"] == 1 and row.get("rank_before_top3") != 1
-        ),
-        "top3_promotion_losses": sum(
-            1 for row in promoted if row["rank"] != 1 and row.get("rank_before_top3") == 1
-        ),
-        "top3_promoted_named": sum(
-            1
-            for row in promoted + [r for r in unknown_rows if r.get("top3_promoted")]
-            if row["stage"] == named
-        ),
-        "top3_blocked": sum(
-            1
-            for row in known_rows + unknown_rows
-            if (row.get("top3_promotion") or {}).get("blocked")
-        ),
-        "top3_unknown_promotions": sum(1 for row in unknown_rows if row.get("top3_promoted")),
-        "top3_promoted_wrong_max_separation": max(
-            (
-                float(row["separation"])
-                for row in wrong_promoted
-                if row.get("separation") is not None
-            ),
-            default=None,
-        ),
-        "wrong_leader_max_separation": max(
-            (float(row["separation"]) for row in wrong_kept), default=None
-        ),
-        "leader_guard_fired": sum(
-            1 for row in known_rows + unknown_rows if row.get("leader_guard_fired")
-        ),
-    }
 
 
 def _inactive_combiner_rows(rows: list[dict[str, Any]]) -> list[str]:
@@ -1138,15 +1079,8 @@ def main(argv: list[str] | None = None) -> int:
             "fingerprint": getattr(engine.profile_forest, "fingerprint", None),
             "votes": _forest_votes(engine),
         },
+        # the channel weights the gate window was scored with (offline replays read them)
         "discrimination_weights": dict(vars(engine.discrimination_weights)),
-        "top3": {
-            "promotion_margin": float(
-                getattr(settings, "attribution_top3_promotion_margin", 0.0) or 0.0
-            ),
-            "contradiction_tolerance": float(
-                getattr(settings, "attribution_top3_contradiction_tolerance", 0.75)
-            ),
-        },
         "source_fingerprint": source_fingerprint(FINGERPRINTED_SOURCES),
         "pipeline": args.pipeline,
         "verifier_mode": str(getattr(settings, "technique_verifier_mode", "ambiguous")),

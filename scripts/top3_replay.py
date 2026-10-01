@@ -2,12 +2,12 @@
 
 Reads ``scripts/attribution_benchmark.py`` artifacts (rows carry the shortlist order ``top3``
 and the gate window's per-channel discrimination ``topk``) and applies
-``apt_classifier.top3.decide_promotion`` -- the function the engine runs -- without re-running
-the pipeline. For each artifact it prints top-1 before and after, the rows won and lost, the
-change in MRR, the promotions that were blocked by the contradiction guard, the slack (largest D
-gap a correct leader faced, smallest gap a recovered truth needed) and, for promoted leaders,
-the separation they would have against the naming bars (they are never named; this is the
-danger margin). Rows recorded with the stage on are replayed from the order the rule saw.
+``apt_classifier.top3.decide_promotion`` without re-running the pipeline, as if the promoted
+group were moved to first place. For each artifact it prints top-1 before and after, the rows
+won and lost, the change in MRR, the promotions the contradiction guard blocks, the slack
+(largest D gap a correct leader faced, smallest gap a recovered truth needed) and, for promoted
+leaders, the separation they would have against the naming bars. The rule was measured and not
+adopted (docs 10.10, 21.3.12); the script stays for re-checking it, or a variant, on new rows.
 
     PYTHONPATH=. .venv/bin/python scripts/top3_replay.py data/audits/top3/baseline_*.json \\
         --margin 1.25 --tolerance 0.75
@@ -31,7 +31,7 @@ from apt_classifier.separation import (  # noqa: E402
     DiscriminationResult,
     DiscriminationWeights,
 )
-from apt_classifier.top3 import decide_promotion, order_before_promotion  # noqa: E402
+from apt_classifier.top3 import decide_promotion  # noqa: E402
 
 CHANNELS = ("technique", "behavior", "software", "negative", "soft")
 
@@ -103,11 +103,9 @@ def replay(
     after_ranks: list[int | None] = []
     for row in known_rows:
         truth = row["group_id"]
-        order = order_before_promotion(row.get("top3") or [], row.get("top3_promotion"))
+        order = list(row.get("top3") or [])
         discrimination = discrimination_for(row, weights)
         rank = row.get("rank")
-        if row.get("top3_promotion") and not row["top3_promotion"].get("blocked"):
-            rank = row.get("rank_before_top3", rank)
         before_ranks.append(rank)
         totals = discrimination.by_group()
         if rank == 1 and order and order[0] in totals:
@@ -152,7 +150,7 @@ def replay(
         else:
             out["neutral_promotions"] += 1
     for row in unknown_rows:
-        order = order_before_promotion(row.get("top3") or [], row.get("top3_promotion"))
+        order = list(row.get("top3") or [])
         promotion = decide_promotion(
             order, discrimination_for(row, weights), margin=margin, tolerance=tolerance
         )

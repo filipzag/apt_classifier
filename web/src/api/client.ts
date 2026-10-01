@@ -10,6 +10,7 @@ import type {
   InterviewState,
   Me,
   SystemInfo,
+  Top3View,
   User,
 } from './types'
 
@@ -89,8 +90,12 @@ export const api = {
       `/api/cases/${id}/cyberre`,
       json({ observation_id: observationId, use_prefilter: usePrefilter }),
     ),
-  distinguish: (id: string, topK: number) =>
-    request<DistinguishResponse>(`/api/cases/${id}/distinguish?top_k=${topK}`),
+  /** topK null = the naming gate's own window (the default view) */
+  distinguish: (id: string, topK: number | null) =>
+    request<DistinguishResponse>(
+      `/api/cases/${id}/distinguish${topK === null ? '' : `?top_k=${topK}`}`,
+    ),
+  top3: (id: string) => request<Top3View>(`/api/cases/${id}/top3`),
   dossier: (id: string, groupId: string) => request<Dossier>(`/api/cases/${id}/dossier/${groupId}`),
   canvas: (id: string, topGroups: number, maxEvidence: number) =>
     request<Graph>(`/api/cases/${id}/canvas?top_groups=${topGroups}&max_evidence=${maxEvidence}`),

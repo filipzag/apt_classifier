@@ -247,10 +247,6 @@ def summarize_attribution(payload: dict[str, Any]) -> dict[str, Any]:
         "leader_probability_auc",
         "top1_given_top3",
         "pairwise_12",
-        "top3_promotions",
-        "top3_promotion_wins",
-        "top3_promotion_losses",
-        "top3_promoted_named",
         "llm",
     )
     return {

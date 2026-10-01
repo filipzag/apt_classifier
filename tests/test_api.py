@@ -176,6 +176,12 @@ def test_local_flow_end_to_end(local_client: TestClient) -> None:
     assert {"separation", "techniques", "pending", "leads", "leader"} <= set(distinguish)
     assert all("delta_separation" in item for item in distinguish["pending"])
     assert all({"delta_yes", "delta_no"} <= set(item) for item in distinguish["leads"])
+    # by default the view replays the naming gate's own window: same separation as the decision
+    gate_view = local_client.get(f"/api/cases/{case_id}/distinguish").json()
+    current = local_client.get(f"/api/cases/{case_id}").json()
+    assert gate_view["top_k"] == max(2, gate_view["gate_top_k"])
+    assert gate_view["leader"]["group_id"] == current["decision"]["leading_group_id"]
+    assert gate_view["separation"] == pytest.approx(current["decision"]["separation"], abs=1e-3)
 
     top = case["ranking"][0]["group_id"]
     dossier = local_client.get(f"/api/cases/{case_id}/dossier/{top}").json()

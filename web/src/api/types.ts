@@ -306,6 +306,8 @@ export interface CasePayload {
   techniques: AcceptedTechnique[]
   ranking: RankingEntry[]
   decision: DecisionInfo | null
+  /** state of the first three candidates (null when it could not be computed) */
+  top3: Top3Summary | null
   origin: OriginInfo
   behaviour_matches: BehaviourMatch[]
   strategic_matches: StrategicMatch[]
@@ -459,6 +461,8 @@ export interface DistinguishLead {
 
 export interface DistinguishResponse {
   top_k: number
+  /** size of the naming gate's window (combiner top 5 plus RRF top 5), the default top_k */
+  gate_top_k: number
   separation: number
   leader_total: number
   leader: { group_id: string | null; name: string | null }
@@ -481,6 +485,98 @@ export interface DistinguishResponse {
   techniques: DistinguishTechnique[]
   pending: DistinguishPending[]
   leads: DistinguishLead[]
+}
+
+export type Top3State = 'named' | 'overlap' | 'split' | 'thin' | 'not_separated' | 'empty'
+
+export interface Top3Summary {
+  state: Top3State
+  label: string
+  summary: string
+  leader?: { group_id: string; name: string }
+  other?: { group_id: string; name: string } | null
+}
+
+/** another top-three member holds clearly more exclusive evidence than the leader */
+export interface Top3Contest {
+  promoted: string
+  previous_leader: string
+  from_rank: number
+  gap: number
+  leader_advantage: number
+  advantage_channel: string | null
+  blocked: boolean
+  margin: number
+  tolerance: number
+}
+
+export interface Top3Channels {
+  technique: number
+  behavior: number
+  software: number
+  soft: number
+  negative: number
+  total: number
+}
+
+export interface Top3Candidate {
+  group_id: string
+  name: string
+  rank: number
+  relative_score: number
+  channels: Top3Channels | null
+  combiner_probability: number | null
+  rrf_rank: number | null
+  profile_size: number
+  broad_profile: boolean
+  named_software: { id: string; name: string }[]
+  /** ATT&CK's own description and campaigns, not an inference from this case */
+  documented: {
+    origins: { country: string; sentence: string }[]
+    type: 'state-sponsored' | 'criminal' | 'mixed' | null
+    state_markers: string[]
+    criminal_markers: string[]
+    motivations: string[]
+  }
+}
+
+export interface Top3OneSided {
+  techniques: { technique_id: string; name: string; confidence: number; specificity: number }[]
+  technique_count: number
+  software: { id: string; name: string }[]
+  behavior_wins: { observation_id: string; text: string }[]
+  behavior_win_count: number
+}
+
+export interface Top3Pair {
+  a: string
+  b: string
+  a_name: string
+  b_name: string
+  separation: number
+  favours: string | null
+  related_reason: string | null
+  containment: number
+  overlap_cluster: boolean
+  a_only: Top3OneSided
+  b_only: Top3OneSided
+}
+
+export interface Top3View extends Top3Summary {
+  contest: Top3Contest | null
+  candidates: Top3Candidate[]
+  pairs: Top3Pair[]
+  /** channel weights the naming gate scored the exclusive evidence with */
+  weights: Record<'technique' | 'behavior' | 'software' | 'soft' | 'negative', number> | null
+  display_order_differs?: boolean
+  combiner_note?: string
+  thresholds: {
+    separation: number
+    min_discriminative: number
+    clear_lead: number
+    tolerance: number
+    thin_evidence: number
+  }
 }
 
 export interface User {

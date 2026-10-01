@@ -218,13 +218,6 @@ class Settings(BaseSettings):
     )
     attribution_combiner_top_n: int = 20
     attribution_combiner_blend: float = 0.5
-    # Top-three promotion (apt_classifier/top3.py, docs 10.10): within the combiner's first three
-    # places, move the group with the most gate-window discriminative mass to first place when it
-    # leads the current leader by at least this margin (0 = off) and the leader's largest
-    # weighted single-channel advantage over it is at most the tolerance. A promoted leader is
-    # never named in the same analysis. Combiner path only; not in the combiner fingerprint.
-    attribution_top3_promotion_margin: float = 0.0
-    attribution_top3_contradiction_tolerance: float = 0.75
     # Activity clustering (opt-in)
     activity_clusters_enabled: bool = False
     activity_clusters_db_path: Path = PROJECT_ROOT / "data" / "activity_clusters.db"

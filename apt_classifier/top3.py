@@ -1,43 +1,39 @@
-"""Distinguishing the top three: a guarded promotion within the shortlist's first three places.
+"""Distinguishing the top three: the exclusive-evidence promotion rule (measured, not adopted).
 
 The learned combiner (combiner.py) orders the shortlist by how the classifiers agree; the
 candidate-relative discrimination (separation.py) measures, for the naming gate's window, the
 observed evidence each candidate explains that the others do not (its discriminative mass D).
-When the two disagree by a wide margin inside the top three, the combiner's leader is usually
-wrong (docs 10.10): this module moves the top-three member with the largest D to first place
-when
+The rule asks whether a top-three member holds clearly more of that evidence than the leader:
 
-- its D exceeds the leader's by at least ``margin`` (``ATTRIBUTION_TOP3_PROMOTION_MARGIN``,
-  0 = off), and
+- its D exceeds the leader's by at least ``margin``, and
 - no single evidence channel clearly favours the leader: the leader's largest weighted
-  per-channel advantage over it is at most ``tolerance``
-  (``ATTRIBUTION_TOP3_CONTRADICTION_TOLERANCE``).
+  per-channel advantage over it is at most ``tolerance`` (negative evidence counts for the
+  leader when the rival carries more).
 
-The guard can only remove promotions. A promoted leader is never named in the same analysis
-(``attribution.assess_attribution``), so the naming gate's promise does not depend on the rule.
-
-Everything here is a pure function of recorded values, shared by the engine
-(``AttributionEngine._fuse``), the offline replay (``scripts/top3_replay.py``) and the analyst's
-Top-three view. The module lies outside the combiner fingerprint (fusion.py, separation.py,
-classifiers/), so changing it never invalidates the combiner artifact.
+Pre-registered on 2026-10-01 as a reorder (move that member to first place, never name it),
+it lifted the seed-7 folds +5/-0 but only +1/-1 and +1/-0 on the fresh seeds 41 and 53, so it
+does not reorder anything (docs 10.10, 21.3.12). It remains as a pure function for the
+offline replay (``scripts/top3_replay.py``) and as the "evidence pulls both ways" signal of the
+analyst's Top-three view (``top3_view.py``). Neither the engine nor the combiner imports it.
 """
 
 from __future__ import annotations
 
 from collections.abc import Sequence
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from typing import Any
 
-from apt_classifier.fusion import FusionResult
-
 PROMOTION_POOL = 3
+# the pre-registered values (docs 10.10); found on the seed-7 folds and CTI-HAL
+PREREGISTERED_MARGIN = 1.25
+PREREGISTERED_TOLERANCE = 0.75
 # channels that add to the discriminative mass; negative evidence subtracts (see separation.py)
 POSITIVE_CHANNELS = ("technique", "behavior", "software", "soft")
 
 
 @dataclass(frozen=True)
 class Promotion:
-    """A promotion decision inside the top three (``blocked`` ones are recorded, not applied)."""
+    """What the rule says about a shortlist: ``promoted`` would move up unless ``blocked``."""
 
     promoted: str
     previous_leader: str
@@ -86,13 +82,14 @@ def decide_promotion(
     order: Sequence[str],
     discrimination: Any,
     *,
-    margin: float,
-    tolerance: float,
+    margin: float = PREREGISTERED_MARGIN,
+    tolerance: float = PREREGISTERED_TOLERANCE,
     pool: int = PROMOTION_POOL,
 ) -> Promotion | None:
-    """The promotion the rule makes for the shortlist ``order`` (group ids, leader first), or
-    None. ``discrimination`` is the gate window's ``DiscriminationResult``; members of the pool
-    it did not score are ignored. Ties on D keep the better-placed group."""
+    """The rule's verdict for the shortlist ``order`` (group ids, leader first), or None when
+    no top-three member leads the leader's D by ``margin``. ``discrimination`` is the gate
+    window's ``DiscriminationResult``; pool members it did not score are ignored. Ties on D
+    keep the better-placed group."""
     if margin <= 0 or discrimination is None or not getattr(discrimination, "scores", ()):
         return None
     by_group = discrimination.by_group()
@@ -118,39 +115,3 @@ def decide_promotion(
         margin=float(margin),
         tolerance=float(tolerance),
     )
-
-
-def apply_promotion(fusion: FusionResult, promotion: Promotion | None) -> FusionResult:
-    """Move the promoted group to first place; the groups it passed shift down one place.
-
-    Each position keeps its original score and relative score, so the scores stay monotone, the
-    margin and every set of the first N places are unchanged except for the order inside the
-    first ``from_rank`` places. A blocked or absent promotion returns the input unchanged.
-    """
-    if promotion is None or promotion.blocked:
-        return fusion
-    entries = list(fusion.entries)
-    ids = [entry.group_id for entry in entries]
-    if promotion.promoted not in ids:
-        return fusion
-    index = ids.index(promotion.promoted)
-    if index == 0:
-        return fusion
-    moved = [entries[index], *entries[:index], *entries[index + 1 :]]
-    return replace(
-        fusion,
-        entries=tuple(
-            replace(entry, score=slot.score, relative_score=slot.relative_score, rank=rank)
-            for rank, (entry, slot) in enumerate(zip(moved, entries, strict=True), 1)
-        ),
-    )
-
-
-def order_before_promotion(order: Sequence[str], record: dict[str, Any] | None) -> list[str]:
-    """The shortlist order the rule saw, from the displayed order and its promotion record."""
-    order = list(order)
-    if not record or record.get("blocked") or not order or order[0] != record.get("promoted"):
-        return order
-    from_rank = int(record.get("from_rank") or 1)
-    head = order[1:from_rank]
-    return [*head, order[0], *order[from_rank:]]

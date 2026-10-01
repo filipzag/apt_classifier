@@ -495,7 +495,12 @@ def next_step(state: Any) -> dict[str, str]:
 
 
 def case_payload(
-    kb: Any, state: Any, meta: Any, thresholds: Any, summary: dict[str, Any]
+    kb: Any,
+    state: Any,
+    meta: Any,
+    thresholds: Any,
+    summary: dict[str, Any],
+    top3: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     context = state.ledger.strategic_context
     return {
@@ -519,6 +524,7 @@ def case_payload(
         "techniques": techniques(state),
         "ranking": ranking(kb, state),
         "decision": decision(kb, state, thresholds),
+        "top3": top3,
         "origin": origin(kb, state),
         "behaviour_matches": behaviour_matches(kb, state),
         "strategic_matches": strategic_matches(kb, state),

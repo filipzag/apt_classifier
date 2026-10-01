@@ -2,11 +2,12 @@ import { ArrowRight, Check, Crosshair, MessageSquare, X } from 'lucide-react'
 import { useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 
-import { describe, useApplyDecisions, useDistinguish } from '../api/hooks'
+import { describe, useApplyDecisions, useDistinguish, useTop3 } from '../api/hooks'
 import type { CasePayload, DistinguishResponse } from '../api/types'
 import { CaseFrame, PageHeader, useCaseId } from '../components/CaseFrame'
 import { GateMetric } from '../components/charts'
-import { Badge, Button, Callout, Card, Field, Label, SectionTitle, Spinner, Tip } from '../components/ui'
+import { TopThreePanel } from '../components/TopThree'
+import { Badge, Button, Callout, Card, Field, Label, SectionTitle, Spinner, Tabs, Tip } from '../components/ui'
 import { cn, fmt, pct } from '../lib/utils'
 
 export function DistinguishPage() {
@@ -27,28 +28,14 @@ function DeltaChip({ value, label }: { value: number; label?: string }) {
 
 function DistinguishView({ caseId, data }: { caseId: string; data: CasePayload }) {
   const navigate = useNavigate()
-  const [topK, setTopK] = useState(Math.min(10, Math.max(2, data.ranking.length)))
+  // null = the naming gate's own window, so the separation here equals the decision's
+  const [topK, setTopK] = useState<number | null>(null)
   const query = useDistinguish(caseId, topK)
   const apply = useApplyDecisions(caseId)
   const result = query.data
 
-  return (
-    <div className="space-y-5">
-      <PageHeader
-        step="Step 3 · Distinguish"
-        title="What separates the shortlist"
-        lead="After the ensemble picks the top candidates, only evidence the other shortlisted groups cannot explain counts towards naming one of them. This view shows the techniques doing that work and which pending mappings or interview leads would change the separation the most."
-        action={
-          <Button variant="outline" onClick={() => navigate(`/cases/${caseId}/interview`)}>
-            Continue to interview <ArrowRight className="size-4" />
-          </Button>
-        }
-      />
-      {!data.ranking.length ? (
-        <Callout tone="warning" title="No shortlist yet">
-          Add more concrete evidence first; nothing can be distinguished without candidate groups.
-        </Callout>
-      ) : query.isLoading ? (
+  const shortlist =
+    query.isLoading ? (
         <Card>
           <Spinner label="Replaying the separation for every pending candidate and lead…" />
         </Card>
@@ -84,16 +71,27 @@ function DistinguishView({ caseId, data }: { caseId: string; data: CasePayload }
                   so confirming a generic technique changes nothing; confirming an exclusive one does.
                 </p>
                 <div className="mt-3 flex flex-wrap items-end gap-4">
-                  <Field label={`Shortlist size: top ${topK}`} className="w-52">
+                  <Field
+                    label={`Shortlist size: top ${result.top_k}${result.top_k === result.gate_top_k ? ' (naming gate window)' : ''}`}
+                    className="w-64"
+                  >
                     <input
                       type="range"
                       min={2}
                       max={Math.max(2, Math.min(15, data.ranking.length))}
-                      value={topK}
-                      onChange={(e) => setTopK(Number(e.target.value))}
+                      value={result.top_k}
+                      onChange={(e) => {
+                        const value = Number(e.target.value)
+                        setTopK(value === result.gate_top_k ? null : value)
+                      }}
                       className="w-full accent-cyan-400"
                     />
                   </Field>
+                  {result.top_k !== result.gate_top_k ? (
+                    <Button size="sm" variant="ghost" onClick={() => setTopK(null)}>
+                      Back to the gate window ({result.gate_top_k})
+                    </Button>
+                  ) : null}
                   {result.contrast_enabled ? (
                     <Badge tone="violet">contrastive near misses on</Badge>
                   ) : (
@@ -144,7 +142,9 @@ function DistinguishView({ caseId, data }: { caseId: string; data: CasePayload }
                         <span className="mono text-[11px] text-faint">{item.technique_id}</span>
                         <span className="text-[11px] text-muted">p {fmt(item.probability)} · exclusivity {pct(item.exclusivity, 0)} · specificity {pct(item.specificity, 0)}</span>
                         {!item.keeps_leader ? (
-                          <Badge tone="rose">leader → {item.new_leader_name}</Badge>
+                          <Tip content="The group with the most evidence the rest of the shortlist cannot explain would change: the naming gate would then be scored against it.">
+                            <Badge tone="rose">evidence favourite → {item.new_leader_name}</Badge>
+                          </Tip>
                         ) : null}
                       </div>
                       <p className="mt-1.5 text-xs leading-relaxed text-muted">{item.observation}</p>
@@ -220,9 +220,62 @@ function DistinguishView({ caseId, data }: { caseId: string; data: CasePayload }
             </Card>
           </div>
         </>
+      )
+
+  return (
+    <div className="space-y-5">
+      <PageHeader
+        step="Step 3 · Distinguish"
+        title="What separates the shortlist"
+        lead="After the ensemble picks the top candidates, only evidence the other shortlisted groups cannot explain counts towards naming one of them. This view shows the techniques doing that work and which pending mappings or interview leads would change the separation the most."
+        action={
+          <Button variant="outline" onClick={() => navigate(`/cases/${caseId}/interview`)}>
+            Continue to interview <ArrowRight className="size-4" />
+          </Button>
+        }
+      />
+      {!data.ranking.length ? (
+        <Callout tone="warning" title="No shortlist yet">
+          Add more concrete evidence first; nothing can be distinguished without candidate groups.
+        </Callout>
+      ) : (
+        <Tabs
+          defaultValue="top3"
+          tabs={[
+            { value: 'top3', label: 'Top three', content: <TopThreeTab caseId={caseId} /> },
+            {
+              value: 'shortlist',
+              label: 'Whole shortlist',
+              content: (
+                <div className="space-y-5">
+                  {shortlist}
+                </div>
+              ),
+            },
+          ]}
+        />
       )}
     </div>
   )
+}
+
+function TopThreeTab({ caseId }: { caseId: string }) {
+  const query = useTop3(caseId)
+  if (query.isLoading) {
+    return (
+      <Card>
+        <Spinner label="Comparing the first three candidates…" />
+      </Card>
+    )
+  }
+  if (query.isError || !query.data) {
+    return (
+      <Callout tone="danger" title="Could not compare the top three">
+        {describe(query.error)}
+      </Callout>
+    )
+  }
+  return <TopThreePanel view={query.data} />
 }
 
 function TechniqueMatrix({ result }: { result: DistinguishResponse }) {
