@@ -17,6 +17,7 @@ data/clusters/
 
 # added 2026-09-29
 data/cases/
+data/logs/
 data/hf-cache/
 scratchpad/
 node_modules/
