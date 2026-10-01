@@ -1165,7 +1165,9 @@ in 17 s and the country forest (300 trees, balanced classes, leaf size 3) in 15 
 GB of GPU memory. A prediction takes about 12 ms. `make fit-forest` writes the artifact
 (`data/models/forest/profile_forest.npz`, 56 MB, no pickle, fingerprinted, pinned to the ATT&CK
 version, loaded fail-closed) and `data/audits/profile_forest_fit.json`. `PROFILE_FOREST_DEVICE`
-selects `auto` (GPU when present), `cuda` or `cpu`.
+selects `auto` (GPU when present), `cuda` or `cpu`. When another process has filled the GPU, the
+running app moves prediction to the CPU instead of failing the analysis (2026-10-01; predictions
+are identical, only slower), and the system panel shows the device in use.
 
 **Ensemble members:** `profile_forest` votes with the group probability. `source_country` votes for
 every group with the probability of that group's own class, so the 83 unattributed groups are

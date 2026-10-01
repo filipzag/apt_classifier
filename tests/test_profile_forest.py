@@ -138,6 +138,31 @@ def test_fit_save_load_round_trip_and_fail_closed_loader(tmp_path):
     assert "invalid" in load_profile_forest(tampered, kb)[1]
 
 
+def test_prediction_falls_back_to_the_cpu_when_the_gpu_is_full(monkeypatch):
+    import torch
+
+    import apt_classifier.profile_forest as module
+
+    kb = _kb()
+    model = fit_profile_forest(kb, params=SMALL, device="cpu")
+    vector = model.space.vector(["T4", "T5"])
+    expected = model.predict(vector)
+    real = module.ForestPredictor
+
+    def predictor(arrays, device):
+        if str(device).startswith("cuda"):
+            raise torch.OutOfMemoryError("CUDA out of memory")
+        return real(arrays, device)
+
+    monkeypatch.setattr(module, "ForestPredictor", predictor)
+    monkeypatch.setattr(torch.cuda, "empty_cache", lambda: None)
+    model._group_predictor = model._country_predictor = None
+    model.device = "cuda"  # loaded on a GPU that another process has since filled
+    groups, countries = model.predict(vector)
+    assert model.device == "cpu"
+    assert np.array_equal(groups, expected[0]) and np.array_equal(countries, expected[1])
+
+
 def _context(kb, techniques, strategic=None):
     context = ClassifierContext(
         kb=kb,

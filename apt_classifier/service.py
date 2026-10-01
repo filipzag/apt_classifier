@@ -179,6 +179,13 @@ class CaseService:
         except Exception as exc:  # noqa: BLE001 - health is informational
             index = {"ok": False, "error": str(exc)[:200]}
         status = getattr(self.engine, "acceptance_model_status", None)
+        forest = getattr(self.engine, "profile_forest", None)
+        # the device can change after loading (CPU fallback when the GPU fills up)
+        forest_status = (
+            f"active ({forest.device})"
+            if forest is not None and hasattr(forest, "device")
+            else str(getattr(self.engine, "profile_forest_status", "unavailable"))
+        )
         return {
             "mode": "local" if self.local_mode else "production",
             "attack_version": str(getattr(self.engine.kb, "version", "") or ""),
@@ -194,7 +201,7 @@ class CaseService:
             else str(status),
             "combiner": str(getattr(self.engine, "combiner_status", "unavailable")),
             "exemplars": str(getattr(self.engine, "exemplar_status", "unavailable")),
-            "profile_forest": str(getattr(self.engine, "profile_forest_status", "unavailable")),
+            "profile_forest": forest_status,
             "index": index,
             "llm_spend_usd": round(float(getattr(usage, "cost_usd", 0.0) or 0.0), 4),
             "cases": len(self.store.list()),

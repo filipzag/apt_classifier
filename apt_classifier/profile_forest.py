@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import time
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
@@ -39,6 +40,7 @@ from apt_classifier.memo import ObjectMemo
 from apt_classifier.origin import documented_origin_table
 from apt_classifier.torch_forest import ForestArrays, ForestPredictor, fit_forest, resolve_device
 
+_LOG = logging.getLogger(__name__)
 SCHEMA_VERSION = 1
 KIND = "profile_forest"
 MAIN_COUNTRIES = ("China", "Russia", "Iran", "North Korea")
@@ -304,7 +306,28 @@ class ProfileForest:
             self._country_predictor = ForestPredictor(self.country_forest, self.device)
         return self._group_predictor, self._country_predictor
 
+    def _fall_back_to_cpu(self, error: Exception) -> None:
+        """Another process filled the GPU: move to the CPU for the rest of the process.
+
+        Inference is fixed-point and identical on both devices (torch_forest), so only the
+        speed changes; failing the analysis would turn a busy GPU into an HTTP 500."""
+        import torch
+
+        _LOG.warning("profile forest: GPU memory exhausted (%s); predicting on the CPU", error)
+        self._group_predictor = self._country_predictor = None
+        torch.cuda.empty_cache()
+        self.device = "cpu"
+
     def predict(self, vectors: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+        import torch
+
+        try:
+            group_predictor, country_predictor = self._predictors()
+            return group_predictor.predict_proba(vectors), country_predictor.predict_proba(vectors)
+        except torch.OutOfMemoryError as error:
+            if self.device == "cpu":
+                raise
+            self._fall_back_to_cpu(error)
         group_predictor, country_predictor = self._predictors()
         return group_predictor.predict_proba(vectors), country_predictor.predict_proba(vectors)
 
