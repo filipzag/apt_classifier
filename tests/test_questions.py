@@ -113,6 +113,68 @@ def test_scope_step_names_places_to_search_not_platform_labels():
     assert "Scope the search to Linux hosts and ESXi hypervisors." in steps["TESX"]
 
 
+def test_investigation_steps_follow_the_target_os():
+    from apt_classifier.attack.kb import (
+        Analytic,
+        AttackKnowledgeBase,
+        DetectionStrategy,
+        LogSource,
+        Technique,
+    )
+    from apt_classifier.platforms import PlatformScope
+    from apt_classifier.questions import _investigation_steps
+    from apt_classifier.telemetry import TelemetrySource
+
+    kb = AttackKnowledgeBase(
+        version="19.2",
+        techniques={
+            "T1055": Technique(id="T1055", name="Process Injection", platforms=["Linux", "Windows"])
+        },
+        groups={},
+        detection_strategies={
+            "DET1": DetectionStrategy(
+                id="DET1", name="Injection", analytic_ids=["ANW", "ANL"], technique_ids=["T1055"]
+            )
+        },
+        analytics={
+            "ANW": Analytic(
+                id="ANW",
+                name="Windows",
+                description="Sysmon process access to another process.",
+                platforms=["Windows"],
+                log_source_refs=[LogSource(name="WinEventLog:Sysmon", channel="EventCode=10")],
+            ),
+            "ANL": Analytic(
+                id="ANL",
+                name="Linux",
+                description="ptrace calls against another process.",
+                platforms=["Linux"],
+                log_source_refs=[LogSource(name="auditd:SYSCALL", channel="None")],
+            ),
+        },
+    )
+    linux = _investigation_steps(kb, "T1055", PlatformScope(("Linux",), "case"))
+    assert linux[0] == "[ANL] Sources: auditd:SYSCALL. ptrace calls against another process."
+    assert not any("WinEventLog" in step for step in linux)
+    both = _investigation_steps(kb, "T1055")
+    assert any("WinEventLog:Sysmon (EventCode=10)" in step for step in both)
+    assert any(step.startswith("[ANL]") for step in both)
+    # ATT&CK's literal "None" channel is not shown
+    assert TelemetrySource(name="Malware Repository", channel="None").label == "Malware Repository"
+
+    # the hand-written fallback (no analytics) names Windows telemetry: not for a Linux case
+    plain = AttackKnowledgeBase(
+        version="19.2",
+        techniques={"T1105": Technique(id="T1105", name="Ingress", platforms=["Linux", "Windows"])},
+        groups={},
+    )
+    assert any("Sysmon" in s for s in _investigation_steps(plain, "T1105"))
+    assert not any(
+        "Sysmon" in s
+        for s in _investigation_steps(plain, "T1105", PlatformScope(("Linux",), "case"))
+    )
+
+
 def test_shortlist_does_not_reask_intake_confirmed_archive_utility():
     kb = SimpleNamespace(
         group_techniques={"G1": {"T1560", "T1560.001"}, "G2": {"T1560.001", "T1041"}},
