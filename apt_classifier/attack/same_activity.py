@@ -11,7 +11,11 @@ listed here with its verdict.
 The review (2026-10-02, ATT&CK 19.2) read the description sentences in which one group names the
 other and the alias lists. Five independent classification passes and a judge on the three split
 pairs labelled the 37 pairs: 13 same activity, 18 distinct, 5 unclear, 1 false match ("Bitter"
-inside "Operation Bitter Biscuit"). Only "same activity" counts; unclear counts as not.
+inside "Operation Bitter Biscuit"). Only "same activity" counts; unclear counts as not. Since
+``attack/related.py`` matches names as proper nouns the false match is no longer a description
+link at all (36 remain). Its entry stays so that the cluster rule and the Top-three view would
+still treat the pair as no link if a looser matcher revived it; ``related_groups`` itself does
+not read this table.
 
 Fail closed: a description link that is not in this table (a newer ATT&CK version) is never same
 activity until it is reviewed, and a listed pair counts only while the knowledge base still
@@ -83,6 +87,8 @@ NOT_SAME_ACTIVITY: dict[frozenset[str], str] = {
     _pair("G0102", "G1011"): "unclear: closely linked with ransomware deployment",
     _pair("G0119", "G1020"): "distinct: partnered to provide access",
     _pair("G0121", "G1008"): "distinct: mimics the other group's infection chain",
+    # no longer matched since attack/related.py matches names as proper nouns; kept for the
+    # cluster rule and the Top-three view (related_groups does not read this table)
     _pair("G0131", "G1002"): "false match: 'Bitter' inside the name Operation Bitter Biscuit",
     _pair("G1003", "G1031"): "distinct: analysis indicates these are distinct clusters",
     _pair("G1004", "G1057"): "distinct: members of one broader collective",

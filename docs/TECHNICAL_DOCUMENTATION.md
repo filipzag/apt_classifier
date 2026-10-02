@@ -1446,6 +1446,25 @@ fusion only and is reproducible across processes.
   the attribution benchmark reports `cluster_top1` and `named_risk_cluster_aware`, which
   count a related group at rank 1 as correct. Carbanak/FIN7 (description cross-references) and Sandworm Team/APT38 (rarely
   shared software) are the pairs that occur on the benchmarks.
+  Since 2026-10-02 names are matched in descriptions as proper nouns (`name_pattern`):
+  - a name written in capitals (BITTER, ZINC, APT41) matches only as written;
+  - any other name keeps its capital first letter, while the rest may differ in case ("Winnti
+    group"). A name that starts lowercase may also start a sentence ("MenuPass").
+
+  Before, the match ignored case, which linked Tonto Team to BITTER through "Operation Bitter
+  Biscuit" in Tonto Team's description. Three independent passes checked every place on ATT&CK
+  19.2 where a description names another group: 51 places, or 100 name-and-alias hits, because
+  ATT&CK repeats each group's name as its first alias. The passes found that link to be the only
+  pair without a real reference, so the change removes exactly that pair: 86 related pairs
+  remain, 36 of them by description, and every other match is written exactly as the name is.
+  Two other places name the Carbanak *malware*, but the same descriptions also name the Carbanak
+  group.
+  In the published artifacts the pair appears only in `leader_related_groups` of the two seed-7
+  folds where Tonto Team or BITTER is both the truth and the leader. That is a display field, and
+  no row has the truth and the leader or the top three across the pair, so no metric moves. A
+  rerun would clear that field and change the source fingerprint. A rule that skips every match
+  after "Operation" was not used, because ATT&CK operation names can be the group's own
+  ("Operation Lotus Blossom").
 - "Independent evidence families" counts only families whose classifier ranks the
   leading group within the top 10 (`SUPPORT_RANK_LIMIT`); classifiers that rank every
   group (Naive Bayes, group description) do not count as support by mere presence.
@@ -1736,8 +1755,9 @@ pair as a whole is clearly ahead. The cluster step names the pair, for example "
   Assessment page, but never as one cluster.
 - **Selection.** The twin with the largest gate-window mass among the qualifying members wins;
   pairs only.
-- **The reviewed table (ATT&CK 19.2, 2026-10-02).** 87 group pairs are related: 37 through a
-  description reference and 50 only through shared rare malware. Five independent
+- **The reviewed table (ATT&CK 19.2, 2026-10-02).** At review time 87 group pairs were related:
+  37 through a description reference and 50 only through shared rare malware. Since the
+  proper-noun matching (10.6), the false match below is gone, leaving 86 and 36. Five independent
   classification passes read the sentences behind the 37 description links and the alias lists,
   and a judge decided the 3 pairs they split on. 33 of the 37 were unanimous. The labels:
   - 13 same activity, which are the only ones that count: FIN7 / Carbanak, Carbanak / Cobalt
@@ -1750,7 +1770,7 @@ pair as a whole is clearly ahead. The cluster step names the pair, for example "
 
   Any verdict against a pair also blocks the nesting route. For example, APT30 / Naikon nest
   fully but "do not appear to be exact matches". A false match is no ATT&CK link at all, and it
-  is not shown as one.
+  is not shown as one; the proper-noun matching no longer produces it.
 
   The table fails closed. A description link on a newer ATT&CK version is neither the same
   activity nor a nesting twin until it is reviewed (`unreviewed_description_pairs`). A listed

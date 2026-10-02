@@ -104,3 +104,79 @@ def test_memo_does_not_serve_one_user_limit_for_another():
     # S0030 is used by exactly two groups (Carbanak, FIN7) in this KB, so both limits keep it
     assert "G0046" in strict.get("G0008", {}) and "G0046" in default.get("G0008", {})
     assert related_groups(kb) == default
+
+
+def test_names_match_as_proper_nouns():
+    from apt_classifier.attack.related import name_pattern
+
+    # an all-capital vendor name matches only as written
+    assert name_pattern("BITTER").search("the BITTER group")
+    assert not name_pattern("BITTER").search("Operation Bitter Biscuit (2017)")
+    assert not name_pattern("ZINC").search("zinc and Zinc")
+    # other names keep a capital first letter; the rest may differ in case
+    assert name_pattern("Winnti Group").search("the Winnti group cluster")
+    assert not name_pattern("Snake").search("a snake in the grass")
+    assert name_pattern("Snake").search("used Snake malware")
+    # a name that starts in lowercase may also start a sentence
+    assert name_pattern("menuPass").search("MenuPass targeted")
+    assert name_pattern("menuPass").search("linked to menuPass")
+    # whole words only, as before
+    assert not name_pattern("APT41").search("APT410")
+    assert not name_pattern("Threat Group-3390").search("Threat Group-33901")
+
+
+def test_operation_names_and_ordinary_words_do_not_link_groups():
+    kb = AttackKnowledgeBase(
+        version="proper-nouns",
+        groups={
+            "G0131": Group(
+                id="G0131",
+                name="Tonto Team",
+                description="Tonto Team acted through Operation Bitter Biscuit (2017).",
+            ),
+            "G1002": Group(id="G1002", name="BITTER", description="BITTER is a South Asian group."),
+            "G0010": Group(
+                id="G0010",
+                name="Turla",
+                aliases=["Snake"],
+                description="Turla is a Russian group.",
+            ),
+            "G0044": Group(id="G0044", name="Winnti Group", description="Winnti Group is Chinese."),
+            "G0096": Group(
+                id="G0096",
+                name="APT41",
+                description="APT41 overlaps with the Winnti group; a snake was drawn on a slide.",
+            ),
+            "G0001": Group(id="G0001", name="Axiom", description="Axiom works with BITTER."),
+        },
+    )
+    related = related_groups(kb)
+    assert "G1002" not in related["G0131"]  # "Bitter" in an operation name is not BITTER
+    assert "G0010" not in related["G0096"]  # "snake" is not Turla's alias Snake
+    assert "G0044" in related["G0096"]  # "Winnti group" is Winnti Group
+    assert "G1002" in related["G0001"]  # "BITTER" as written is
+
+
+def test_the_real_knowledge_base_loses_only_the_false_match():
+    from pathlib import Path
+
+    import pytest
+
+    from apt_classifier.attack.kb import load_knowledge_base
+    from apt_classifier.attack.related import description_links
+
+    path = Path(__file__).resolve().parents[1] / "data" / "kb" / "attack_kb.json"
+    if not path.exists():
+        pytest.skip("ATT&CK knowledge base not ingested")
+    kb = load_knowledge_base(path)
+    if str(kb.version) != "19.2":
+        pytest.skip(f"counts were checked on ATT&CK 19.2, not {kb.version}")
+    related = related_groups(kb)
+    pairs = {tuple(sorted((a, b))) for a, others in related.items() for b in others}
+    described = {
+        tuple(sorted((a, b))) for a, others in description_links(kb).items() for b in others
+    }
+    # 87 related pairs (37 by description) before the proper-noun matching; Tonto Team / BITTER
+    # through "Operation Bitter Biscuit" was the only false one
+    assert len(pairs) == 86 and len(described) == 36
+    assert ("G0131", "G1002") not in pairs

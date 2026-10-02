@@ -7,6 +7,12 @@ result is used to present a leading hypothesis together with the documented grou
 cannot be told apart from (Carbanak and FIN7, Sandworm Team and APT28), and to report a
 cluster-aware top-1 in the attribution benchmark next to the strict one.
 
+Names are matched as proper nouns (``name_pattern``): an all-capital vendor name (BITTER, ZINC,
+NICKEL) must match exactly, and any other name keeps its capital first letter (a name that starts
+in lowercase, like menuPass, may also start a sentence), so an ordinary word ("snake", "zinc",
+"bitter") never links a group. Before 2026-10-02 the match ignored case, which
+linked Tonto Team to BITTER through "Operation Bitter Biscuit" in Tonto Team's description.
+
 ``related_groups`` keeps one reason per pair (shared software first), so a pair that both shares
 software and is named in a description reads as the software link there. ``description_links``
 keeps only the description references: the documented-cluster gate names a pair that only
@@ -73,13 +79,27 @@ def related_groups(
     return _RELATED_CACHE.put(kb, stamp, result)
 
 
+def name_pattern(name: str) -> re.Pattern[str]:
+    """A whole-word pattern for a group name or alias as a proper noun in prose.
+
+    An all-capital name ("BITTER", "APT41", "BRONZE BUTLER") matches only as written. Any other
+    name keeps a capital first letter and may differ in case after it ("Winnti group" for
+    "Winnti Group"), so lowercase ordinary words never match ("snake" is not Turla's "Snake");
+    a name that starts in lowercase may also start a sentence ("MenuPass" for "menuPass").
+    """
+    if name.isupper():
+        body = re.escape(name)
+    else:
+        first = name[0]
+        head = f"[{first}{first.upper()}]" if first.islower() else re.escape(first)
+        body = head + (f"(?i:{re.escape(name[1:])})" if len(name) > 1 else "")
+    return re.compile(rf"(?<![\w-]){body}(?![\w-])")
+
+
 def _description_references(groups: dict[str, Any]) -> list[tuple[str, str, str]]:
     """(group, other, reason) for every group whose description names another group."""
     patterns = {
-        group_id: [
-            re.compile(rf"(?<![\w-]){re.escape(name)}(?![\w-])", re.IGNORECASE)
-            for name in _group_names(group)
-        ]
+        group_id: [name_pattern(name) for name in _group_names(group)]
         for group_id, group in groups.items()
     }
     references = []
