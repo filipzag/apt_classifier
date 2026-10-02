@@ -33,33 +33,31 @@ from apt_classifier.classifiers.strategic_context import (
     _profile_texts as _strategic_profile_texts,
 )
 from apt_classifier.origin import documented_origins, documented_threat_type
+from apt_classifier.overlap_cluster import (
+    OVERLAP_CONTAINMENT,
+    OVERLAP_SEPARATION,
+    cluster_label,
+    pair_separation,
+)
 from apt_classifier.separation import distinguishing_techniques
 from apt_classifier.top3 import PREREGISTERED_MARGIN, PREREGISTERED_TOLERANCE, decide_promotion
 
 CHANNELS = ("technique", "behavior", "software", "soft", "negative", "total")
 # largest top-three discriminative mass at or below this: too little exclusive evidence
 THIN_EVIDENCE = 1.5
-# documented-overlap pairs whose profiles nest or whose evidence does not separate them
-OVERLAP_CONTAINMENT = 0.8
-OVERLAP_SEPARATION = 0.5
 # a profile in the largest tenth of ATT&CK explains more techniques by default
 BROAD_PROFILE_QUANTILE = 0.9
 ONE_SIDED_LIMIT = 8
 
 STATE_LABELS = {
     "named": "Named",
+    "named_cluster": "Named documented-overlap cluster",
     "overlap": "Documented overlap",
     "split": "Evidence pulls both ways",
     "thin": "Too little exclusive evidence",
     "not_separated": "Leader not separated",
     "empty": "No shortlist",
 }
-
-
-def pair_separation(own: float, other: float, floor: float) -> float:
-    """Candidate-relative separation of one group over another, as the gate computes it."""
-    denominator = max(own, other, floor)
-    return max(-1.0, min(1.0, (own - other) / denominator)) if denominator > 0 else 0.0
 
 
 def documented_motivations(kb: Any, group_id: str) -> list[str]:
@@ -262,7 +260,17 @@ def build_top3_view(
     if runner_up and runner_up not in names:
         runner_name += " (outside the top three)"
     separation = float(getattr(decision, "separation", 0.0) or 0.0) if decision else 0.0
-    if named:
+    cluster_members = tuple(getattr(decision, "named_cluster", ()) or ()) if decision else ()
+    if decision is not None and decision.stage.value == "known_cluster_hypothesis":
+        state_key = "named_cluster"
+        cluster_runner = getattr(decision, "cluster_runner_up_id", None)
+        summary = (
+            f"{cluster_label(kb, cluster_members)} is named as a cluster: together the pair clears "
+            f"the naming bar against {_name(kb, cluster_runner) if cluster_runner else 'the rest'} "
+            f"(cluster separation {float(getattr(decision, 'cluster_separation', 0.0)):.2f}), but "
+            "the evidence does not separate the two members. Report the cluster, not either member."
+        )
+    elif named:
         state_key = "named"
         summary = (
             f"{names[leader]} is named: its exclusive evidence clears the naming bar against "
@@ -303,7 +311,9 @@ def build_top3_view(
             f"{names[leader]} leads, but its exclusive evidence does not clear the naming bar "
             f"against {runner_name} (separation {separation:.2f} < {separation_bar:.2f})."
         )
-    if state_key == "overlap" and overlap is not None:
+    if state_key == "named_cluster" and len(cluster_members) > 1:
+        other = cluster_members[1]
+    elif state_key == "overlap" and overlap is not None:
         other = overlap["b"]
     elif state_key == "split" and contest is not None:
         other = contest.promoted

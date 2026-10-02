@@ -47,6 +47,7 @@ from apt_classifier.group_mlp import (
 )
 from apt_classifier.llm import OpenRouterClient
 from apt_classifier.origin import OriginAndThreatAssessment, assess_origin_and_threat_type
+from apt_classifier.overlap_cluster import cluster_candidate
 from apt_classifier.platforms import ledger_platforms
 from apt_classifier.presets import apply_preset
 from apt_classifier.profile_forest import load_profile_forest
@@ -300,6 +301,14 @@ class AttributionEngine:
             hypothesis_specificity=float(
                 getattr(self.settings, "attribution_hypothesis_specificity", 0.0)
             ),
+            cluster_naming=bool(getattr(self.settings, "attribution_cluster_naming", False)),
+            cluster_min_probability=float(
+                getattr(self.settings, "attribution_cluster_min_probability", 0.8)
+            ),
+            cluster_min_discriminative=float(
+                getattr(self.settings, "attribution_cluster_min_discriminative", 3.5)
+            ),
+            cluster_scope=str(getattr(self.settings, "attribution_cluster_scope", "full")),
         )
 
     def map_techniques(
@@ -913,6 +922,20 @@ class AttributionEngine:
                 behavior_threshold=float(self.settings.behavior_similarity_threshold),
                 soft_techniques=getattr(context, "contrast_techniques", None) or None,
             )
+            # the leader's documented-overlap twin in the gate window and the merged pair's
+            # evidence (overlap_cluster.py); recorded always, used by the stage only when
+            # ATTRIBUTION_CLUSTER_NAMING is on
+            candidate = cluster_candidate(
+                self.kb,
+                context.discrimination,
+                context,
+                probabilities=probabilities,
+                floor=float(getattr(self.settings, "attribution_separation_floor", 1.0)),
+                tool_weight_cap=float(getattr(self.settings, "software_tool_weight_cap", 1.5)),
+                behavior_threshold=float(self.settings.behavior_similarity_threshold),
+                soft_techniques=getattr(context, "contrast_techniques", None) or None,
+            )
+            context.combiner["cluster"] = candidate.to_dict() if candidate is not None else None
             return fusion
         context.combiner = None
         blend = float(getattr(self.settings, "attribution_rerank_blend", 0.5))

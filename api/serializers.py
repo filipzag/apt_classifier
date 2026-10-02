@@ -158,6 +158,25 @@ def ranking(kb: Any, state: Any, limit: int = 20) -> list[dict[str, Any]]:
     return rows
 
 
+def _named_cluster(kb: Any, item: Any) -> dict[str, Any] | None:
+    members = tuple(getattr(item, "named_cluster", ()) or ())
+    if item.stage.value != "known_cluster_hypothesis" or not members:
+        return None
+    from apt_classifier.overlap_cluster import cluster_label
+
+    runner = getattr(item, "cluster_runner_up_id", None)
+    return {
+        "members": [{"group_id": gid, "name": _name(kb, gid)} for gid in members],
+        "label": cluster_label(kb, members),
+        "reason": str(getattr(item, "cluster_reason", "") or ""),
+        "separation": float(getattr(item, "cluster_separation", 0.0) or 0.0),
+        "discriminative": float(getattr(item, "cluster_discriminative", 0.0) or 0.0),
+        "probability": getattr(item, "cluster_probability", None),
+        "runner_up_group_id": runner,
+        "runner_up_name": _name(kb, runner) if runner else None,
+    }
+
+
 def decision(kb: Any, state: Any, thresholds: Any) -> dict[str, Any] | None:
     item = getattr(state, "attribution_decision", None)
     if item is None:
@@ -172,6 +191,14 @@ def decision(kb: Any, state: Any, thresholds: Any) -> dict[str, Any] | None:
         "summary": info.get("summary", ""),
         "advice": info.get("advice", ""),
         "named": item.stage.value == "known_group_hypothesis",
+        "named_kind": (
+            "group"
+            if item.stage.value == "known_group_hypothesis"
+            else "cluster"
+            if item.stage.value == "known_cluster_hypothesis"
+            else None
+        ),
+        "named_cluster": _named_cluster(kb, item),
         "leading_group_id": item.leading_group_id,
         "leading_group_name": item.leading_group_name
         or (_name(kb, item.leading_group_id) if item.leading_group_id else ""),

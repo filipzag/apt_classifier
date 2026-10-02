@@ -5,6 +5,7 @@ export type Stage =
   | 'unresolved_activity_cluster'
   | 'known_group_shortlist'
   | 'known_group_hypothesis'
+  | 'known_cluster_hypothesis'
 
 export type CandidateState = 'auto_accepted' | 'needs_review' | 'auto_rejected'
 
@@ -43,6 +44,8 @@ export interface CaseSummary {
   stage?: Stage | null
   leading_group?: string | null
   leading_group_name?: string | null
+  /** members of a named documented-overlap cluster, leader first */
+  named_cluster?: string[]
   accepted_techniques?: number
   answers?: number
 }
@@ -144,12 +147,26 @@ export interface RankingEntry {
   discrimination: Discrimination | null
 }
 
+export interface NamedCluster {
+  members: { group_id: string; name: string }[]
+  label: string
+  reason: string
+  separation: number
+  discriminative: number
+  probability: number | null
+  runner_up_group_id: string | null
+  runner_up_name: string | null
+}
+
 export interface DecisionInfo {
   stage: Stage
   label: string
   summary: string
   advice: string
+  /** a single group is named (a named cluster is reported through named_kind / named_cluster) */
   named: boolean
+  named_kind?: 'group' | 'cluster' | null
+  named_cluster?: NamedCluster | null
   leading_group_id: string | null
   leading_group_name: string
   leading_score: number
@@ -499,7 +516,14 @@ export interface DistinguishResponse {
   leads: DistinguishLead[]
 }
 
-export type Top3State = 'named' | 'overlap' | 'split' | 'thin' | 'not_separated' | 'empty'
+export type Top3State =
+  | 'named'
+  | 'named_cluster'
+  | 'overlap'
+  | 'split'
+  | 'thin'
+  | 'not_separated'
+  | 'empty'
 
 export interface Top3Summary {
   state: Top3State

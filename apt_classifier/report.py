@@ -41,6 +41,15 @@ STAGE_INFO: dict[str, dict[str, str]] = {
         "summary": "One documented group clears the evidence bar.",
         "advice": "Check the documented-overlap note and run the independent review before reporting.",
     },
+    "known_cluster_hypothesis": {
+        "label": "Named documented-overlap cluster",
+        "icon": "🟢",
+        "summary": (
+            "Two groups ATT&CK documents as overlapping together clear the evidence bar; the "
+            "evidence does not separate them."
+        ),
+        "advice": "Report the cluster, not either member, and run the independent review first.",
+    },
 }
 
 SHORT_STAGE = {
@@ -48,6 +57,7 @@ SHORT_STAGE = {
     "unresolved_activity_cluster": "Cluster",
     "known_group_shortlist": "Shortlist",
     "known_group_hypothesis": "Named",
+    "known_cluster_hypothesis": "Named cluster",
 }
 
 
@@ -79,7 +89,18 @@ def assessment_markdown(kb: Any, state: Any, *, case_name: str = "") -> str:
                 f"**Best-supported alternative:** {group_name(kb, runner)}"
                 + (" (documented-related)" if getattr(decision, "runner_up_related", False) else "")
             )
-        if decision.leading_group_name:
+        members = tuple(getattr(decision, "named_cluster", ()) or ())
+        if decision.stage.value == "known_cluster_hypothesis" and members:
+            lines.append(
+                "**Leading hypothesis (documented-overlap cluster):** "
+                + " / ".join(group_name(kb, gid) for gid in members)
+            )
+            lines.append(
+                f"**Why a cluster:** ATT&CK documents {getattr(decision, 'cluster_reason', '')}. "
+                "The evidence separates the pair from the rest of the shortlist but not the "
+                "members from each other; do not report either member alone."
+            )
+        elif decision.leading_group_name:
             role = (
                 "Leading hypothesis"
                 if decision.stage.value == "known_group_hypothesis"

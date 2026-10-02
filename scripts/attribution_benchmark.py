@@ -580,6 +580,23 @@ def _combiner_artifact(settings: Any, engine: Any) -> dict[str, Any] | None:
     }
 
 
+def _cluster_fields(state: Any, decision: Any) -> dict[str, Any]:
+    """The named documented-overlap cluster (if any) and the engine's cluster candidate for the
+    leader (recorded whether or not cluster naming is on, so the gate can be replayed)."""
+    info = (
+        state.context.combiner if isinstance(getattr(state.context, "combiner", None), dict) else {}
+    )
+    return {
+        "named_cluster": list(getattr(decision, "named_cluster", ()) or ()) if decision else [],
+        "cluster_separation": getattr(decision, "cluster_separation", None) if decision else None,
+        "cluster_discriminative": (
+            getattr(decision, "cluster_discriminative", None) if decision else None
+        ),
+        "cluster_probability": getattr(decision, "cluster_probability", None) if decision else None,
+        "cluster_candidate": info.get("cluster"),
+    }
+
+
 def _rank_of(fusion: Any, group_id: str) -> int | None:
     ranked = [entry.group_id for entry in fusion.entries]
     return ranked.index(group_id) + 1 if group_id in ranked else None
@@ -692,6 +709,7 @@ def run_known(
                     "margin": decision.margin if decision else None,
                     "maturity": decision.maturity_score if decision else None,
                     "leading": decision.leading_group_id if decision else None,
+                    **_cluster_fields(state, decision),
                     **_top3_fields(state, ranked),
                 }
             )
@@ -779,6 +797,7 @@ def run_unknown(
                 "maturity": decision.maturity_score if decision else None,
                 "top3": [entry.group_id for entry in fusion.entries[:3]],
                 "software_ids": sorted(state.context.software_ids),
+                **_cluster_fields(state, decision),
                 **_top3_fields(state, [entry.group_id for entry in fusion.entries]),
             }
         )
@@ -794,6 +813,8 @@ def summarize(
     known_rows: list[dict[str, Any]], unknown_rows: list[dict[str, Any]]
 ) -> dict[str, Any]:
     named = AttributionStage.KNOWN_GROUP_HYPOTHESIS.value
+    cluster = AttributionStage.KNOWN_CLUSTER_HYPOTHESIS.value
+    named_stages = {named, cluster}
     cases = [
         AttributionEvaluationCase(
             case_id=_case_id("known", index, row),
@@ -811,12 +832,18 @@ def summarize(
     ]
     predictions = [
         AttributionPrediction(
-            _case_id("known", index, row), tuple(row["top3"]), row["stage"] == named
+            _case_id("known", index, row),
+            tuple(row["top3"]),
+            row["stage"] in named_stages,
+            tuple(row.get("named_cluster") or ()),
         )
         for index, row in enumerate(known_rows)
     ] + [
         AttributionPrediction(
-            _case_id("unknown", index, row), tuple(row["top3"]), row["stage"] == named
+            _case_id("unknown", index, row),
+            tuple(row["top3"]),
+            row["stage"] in named_stages,
+            tuple(row.get("named_cluster") or ()),
         )
         for index, row in enumerate(unknown_rows)
     ]
@@ -898,6 +925,28 @@ def summarize(
         metrics["deterministic_top1"] = fmean(1.0 if r == 1 else 0.0 for r in det)
         metrics["deterministic_top5"] = fmean(1.0 if r and r <= 5 else 0.0 for r in det)
         metrics["deterministic_mrr"] = fmean(1.0 / r if r else 0.0 for r in det)
+    clusters = [row for row in known_rows if row["stage"] == cluster]
+    unknown_clusters = sum(1 for row in unknown_rows if row["stage"] == cluster)
+    if clusters or unknown_clusters or any("named_cluster" in row for row in known_rows):
+        # a cluster name is correct when the truth is a member (named_risk above counts it so);
+        # named_correct keeps its single-group meaning
+        correct = [row for row in clusters if row["group_id"] in (row.get("named_cluster") or ())]
+        metrics["named_cluster_correct"] = len(correct)
+        metrics["named_cluster_wrong"] = len(clusters) - len(correct) + unknown_clusters
+        metrics["named_cluster_recovered"] = sum(1 for row in correct if row["rank"] != 1)
+        metrics["cluster_coverage"] = (
+            (len(clusters) + unknown_clusters) / (len(known_rows) + len(unknown_rows))
+            if known_rows or unknown_rows
+            else 0.0
+        )
+        singles = [row for row in known_rows if row["stage"] == named]
+        single_unknown = sum(1 for row in unknown_rows if row["stage"] == named)
+        single_total = len(singles) + single_unknown
+        metrics["named_risk_single"] = (
+            (sum(1 for row in singles if row["rank"] != 1) + single_unknown) / single_total
+            if single_total
+            else 0.0
+        )
     if known_rows:
         metrics["top3"] = fmean(
             1.0 if row["rank"] and row["rank"] <= 3 else 0.0 for row in known_rows

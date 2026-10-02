@@ -37,7 +37,7 @@ def _render_stage(engine: AttributionEngine, state: AnalysisState) -> None:
         st.info("No attribution decision is available for this case.")
         return
     info = STAGE_INFO.get(decision.stage.value, {})
-    named = decision.stage.value == "known_group_hypothesis"
+    named = decision.stage.value in {"known_group_hypothesis", "known_cluster_hypothesis"}
     with st.container(border=True):
         head = st.columns([2.2, 1, 1, 1])
         head[0].markdown(f"### {stage_badge(decision.stage.value)}")
@@ -69,7 +69,15 @@ def _render_stage(engine: AttributionEngine, state: AnalysisState) -> None:
             head[3].caption(f"naming bar {thresholds.hypothesis_separation:.2f}")
         else:
             head[3].caption("informational")
-        if decision.leading_group_name:
+        members = tuple(getattr(decision, "named_cluster", ()) or ())
+        if decision.stage.value == "known_cluster_hypothesis" and members:
+            from apt_classifier.overlap_cluster import cluster_label
+
+            st.markdown(
+                f"**Named documented-overlap cluster:** {cluster_label(engine.kb, members)} · "
+                "report the cluster, not either member"
+            )
+        elif decision.leading_group_name:
             role = "Named hypothesis" if named else "Closest documented group (not an attribution)"
             st.markdown(
                 f"**{role}:** {decision.leading_group_name} ({decision.leading_group_id}) · "

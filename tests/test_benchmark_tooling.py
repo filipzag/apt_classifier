@@ -1031,3 +1031,52 @@ def test_combiner_fields_record_window_probabilities_and_the_rrf_order_to_60():
         SimpleNamespace(context=SimpleNamespace(discrimination=None, combiner=None)), "G05"
     )
     assert off["combiner_status"] is None and off["truth_in_window"] is False
+
+
+def test_attribution_summary_counts_cluster_names_by_membership():
+    from scripts.attribution_benchmark import summarize
+
+    def row(group, rank, stage, cluster=()):
+        return {
+            "group_id": group,
+            "report_id": f"r-{group}-{rank}-{stage}",
+            "rank": rank,
+            "top3": [group] if rank == 1 else ["G0999", group],
+            "stage": stage,
+            "technique_recall": 0.5,
+            "observations": 5,
+            "named_cluster": list(cluster),
+        }
+
+    known = [
+        row("G1", 1, "known_group_hypothesis"),
+        row("G2", 2, "known_cluster_hypothesis", ("G0999", "G2")),  # recovered by the cluster
+        row("G3", 1, "known_cluster_hypothesis", ("G3", "G4")),
+        row("G5", 2, "known_cluster_hypothesis", ("G0999", "G6")),  # wrong cluster
+        row("G7", 1, "known_group_shortlist"),
+    ]
+    unknown = [
+        {
+            "group_id": "G8",
+            "rank": None,
+            "top3": ["G9"],
+            "stage": "known_cluster_hypothesis",
+            "named_cluster": ["G9", "G10"],
+        },
+        {
+            "group_id": "G11",
+            "rank": None,
+            "top3": ["G12"],
+            "stage": "known_group_shortlist",
+            "named_cluster": [],
+        },
+    ]
+    metrics = summarize(known, unknown)
+    assert metrics["named_cluster_correct"] == 2
+    assert metrics["named_cluster_recovered"] == 1
+    assert metrics["named_cluster_wrong"] == 2  # one known, one removed actor
+    assert metrics["named_correct"] == 1  # single-group names keep their meaning
+    # named risk counts every name: 1 single + 3 known clusters + 1 removed actor, 2 wrong
+    assert metrics["named_risk"] == pytest.approx(2 / 5)
+    assert metrics["named_risk_single"] == 0.0
+    assert metrics["cluster_coverage"] == pytest.approx(4 / 7)

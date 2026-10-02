@@ -303,6 +303,7 @@ class CaseService:
             "observations": len(state.ledger.observations),
             "stage": decision.stage.value if decision else None,
             "leading_group": decision.leading_group_id if decision else leader,
+            "named_cluster": list(getattr(decision, "named_cluster", ()) or ()) if decision else [],
             "accepted_techniques": len(getattr(state.retrieval, "observed_techniques", {}) or {}),
             "answers": len(state.ledger.question_answers),
         }

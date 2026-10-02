@@ -193,3 +193,20 @@ def test_each_candidate_lists_its_documented_overlap_with_rank():
     assert fin7["related"][0]["reason"]
     apt29 = next(c for c in view["candidates"] if c["group_id"] == "G0016")
     assert apt29["related"] == []
+
+
+def test_named_cluster_state():
+    kb = _kb()
+    state = _state(kb, ["G0046", "G0008", "G0016"])
+    state.attribution_decision = SimpleNamespace(
+        stage=AttributionStage("known_cluster_hypothesis"),
+        named_cluster=("G0046", "G0008"),
+        cluster_runner_up_id="G0016",
+        cluster_separation=0.67,
+        runner_up_group_id="G0016",
+        separation=0.1,
+    )
+    view = build_top3_view(kb, state)
+    assert view["state"] == "named_cluster"
+    assert view["other"]["group_id"] == "G0008"
+    assert "FIN7 / Carbanak (documented overlap)" in view["summary"]

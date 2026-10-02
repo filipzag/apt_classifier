@@ -11,6 +11,7 @@ const TOP3_STATE_META: Record<
   { callout: 'info' | 'warning' | 'success'; badge: 'emerald' | 'amber' | 'neutral'; icon: ReactNode }
 > = {
   named: { callout: 'success', badge: 'emerald', icon: <Scale className="size-4" /> },
+  named_cluster: { callout: 'success', badge: 'emerald', icon: <Link2 className="size-4" /> },
   overlap: { callout: 'warning', badge: 'amber', icon: <Link2 className="size-4" /> },
   split: { callout: 'warning', badge: 'amber', icon: <GitCompareArrows className="size-4" /> },
   thin: { callout: 'info', badge: 'neutral', icon: <Sparkles className="size-4" /> },

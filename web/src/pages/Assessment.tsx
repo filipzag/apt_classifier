@@ -47,7 +47,7 @@ function AssessmentView({ caseId, data }: { caseId: string; data: CasePayload })
           <div
             className={cn(
               'pointer-events-none absolute -right-20 -top-20 size-64 rounded-full blur-3xl',
-              decision.named ? 'bg-emerald/15' : 'bg-accent/10',
+              decision.named || decision.named_cluster ? 'bg-emerald/15' : 'bg-accent/10',
             )}
           />
           <div className="relative grid gap-6 lg:grid-cols-[minmax(0,1.3fr)_minmax(0,1fr)]">
@@ -70,19 +70,40 @@ function AssessmentView({ caseId, data }: { caseId: string; data: CasePayload })
                 <span
                   className={cn(
                     'grid size-11 shrink-0 place-items-center rounded-xl',
-                    decision.named ? 'bg-emerald-soft text-emerald' : 'bg-surface-3 text-muted',
+                    decision.named || decision.named_cluster ? 'bg-emerald-soft text-emerald' : 'bg-surface-3 text-muted',
                   )}
                 >
                   {stageIcon(decision.stage, 'size-5')}
                 </span>
                 <div className="min-w-0">
-                  <Label>{decision.named ? 'Named hypothesis' : 'Closest documented group (not an attribution)'}</Label>
-                  <div className="mt-0.5 text-2xl font-semibold tracking-tight">
-                    {decision.leading_group_name || 'No candidate'}
-                    {decision.leading_group_id ? (
-                      <span className="mono ml-2 text-sm font-normal text-faint">{decision.leading_group_id}</span>
-                    ) : null}
-                  </div>
+                  <Label>
+                    {decision.named_cluster
+                      ? 'Named cluster hypothesis (documented overlap)'
+                      : decision.named
+                        ? 'Named hypothesis'
+                        : 'Closest documented group (not an attribution)'}
+                  </Label>
+                  {decision.named_cluster ? (
+                    <>
+                      <div className="mt-0.5 text-2xl font-semibold tracking-tight">{decision.named_cluster.label}</div>
+                      <div className="mt-1 text-xs text-muted">
+                        ATT&CK documents {decision.named_cluster.reason}. The pair separates from{' '}
+                        {decision.named_cluster.runner_up_name ?? 'the rest of the shortlist'} (cluster separation{' '}
+                        {fmt(decision.named_cluster.separation, 2)}, mass {fmt(decision.named_cluster.discriminative, 2)}
+                        {decision.named_cluster.probability !== null
+                          ? `, combined probability ${fmt(decision.named_cluster.probability, 2)}`
+                          : ''}
+                        ), but the evidence does not separate the two. Report the cluster, not either member.
+                      </div>
+                    </>
+                  ) : (
+                    <div className="mt-0.5 text-2xl font-semibold tracking-tight">
+                      {decision.leading_group_name || 'No candidate'}
+                      {decision.leading_group_id ? (
+                        <span className="mono ml-2 text-sm font-normal text-faint">{decision.leading_group_id}</span>
+                      ) : null}
+                    </div>
+                  )}
                   {decision.runner_up_name ? (
                     <div className="mt-1 text-xs text-muted">
                       Best-supported alternative:{' '}
@@ -125,7 +146,7 @@ function AssessmentView({ caseId, data }: { caseId: string; data: CasePayload })
                     {fmt(decision.decisive_software.factor, 1)}.
                   </Callout>
                 ) : null}
-                {!decision.named ? (
+                {!decision.named && !decision.named_cluster ? (
                   <Callout tone="info" title="No named group meets the evidence bar">
                     {meta.advice} The ranking below is a shortlist of the closest documented groups.
                   </Callout>

@@ -467,3 +467,132 @@ def test_separation_gate_never_names_a_group_promoted_above_the_scored_leader():
         kb, fusion, context, thresholds=thresholds, discrimination=scored
     )
     assert consistent.stage is AttributionStage.KNOWN_GROUP_HYPOTHESIS
+
+
+def _cluster_thresholds(**overrides):
+    base = dict(
+        min_techniques=2,
+        min_independent_evidence_families=2,
+        min_maturity_score=0.3,
+        hypothesis_maturity_score=0.99,
+        hypothesis_margin=0.0,
+        gate_mode="separation",
+        hypothesis_separation=0.5,
+        hypothesis_min_discriminative=0.2,
+        cluster_naming=True,
+        cluster_min_probability=0.8,
+        cluster_min_discriminative=0.2,
+    )
+    base.update(overrides)
+    return MaturityThresholds(**base)
+
+
+def _candidate(**overrides):
+    base = {
+        "members": ["G1", "G2"],
+        "reason": "Alpha description references Beta",
+        "nested": False,
+        "containment": 0.5,
+        "pair_separation": 0.1,
+        "separation": 0.7,
+        "discriminative": 1.0,
+        "runner_up_id": None,
+        "probability": 0.9,
+    }
+    base.update(overrides)
+    return base
+
+
+def test_documented_cluster_is_named_when_the_pair_clears_its_bars():
+    kb = _separation_kb()
+    shared = _context(techniques={"T2": 1.0, "T3": 1.0})  # nothing separates the two groups
+    combiner = {"leader_probability": 0.5, "cluster": _candidate()}
+    off = assess_attribution(
+        kb,
+        _two_candidates(),
+        shared,
+        thresholds=_cluster_thresholds(cluster_naming=False),
+        combiner=combiner,
+    )
+    assert off.stage is AttributionStage.KNOWN_GROUP_SHORTLIST and off.named_cluster == ()
+    on = assess_attribution(
+        kb, _two_candidates(), shared, thresholds=_cluster_thresholds(), combiner=combiner
+    )
+    assert on.stage is AttributionStage.KNOWN_CLUSTER_HYPOTHESIS
+    assert on.named_cluster == ("G1", "G2") and on.leading_group_id == "G1"
+    assert on.cluster_probability == 0.9 and "Documented-overlap cluster" in on.rationale
+    assert on.to_dict()["named_cluster"] == ["G1", "G2"]
+    # each bar on its own keeps the shortlist
+    for bad in (
+        {"probability": 0.79},
+        {"probability": None},
+        {"separation": 0.49},
+        {"discriminative": 0.1},
+        {"members": ["G2", "G1"]},  # the candidate must belong to the leader
+    ):
+        held = assess_attribution(
+            kb,
+            _two_candidates(),
+            shared,
+            thresholds=_cluster_thresholds(),
+            combiner={"leader_probability": 0.5, "cluster": _candidate(**bad)},
+        )
+        assert held.stage is AttributionStage.KNOWN_GROUP_SHORTLIST, bad
+    # nested scope ignores a non-nesting pair; the maturity gate never names clusters
+    for thresholds in (
+        _cluster_thresholds(cluster_scope="nested"),
+        _cluster_thresholds(gate_mode="maturity"),
+    ):
+        decision = assess_attribution(
+            kb, _two_candidates(), shared, thresholds=thresholds, combiner=combiner
+        )
+        assert decision.stage is not AttributionStage.KNOWN_CLUSTER_HYPOTHESIS
+
+
+def test_no_cluster_when_the_leader_consistency_guard_fires():
+    from apt_classifier.separation import discriminate
+
+    kb = _separation_kb()
+    context = _context(techniques={"T2": 1.0, "T3": 1.0})
+    swapped = _fusion(
+        [
+            _fusion_entry("G2", 70.0, rank_std=1.0, classifier_ranks={"nb": 1, "jaccard": 1}),
+            _fusion_entry(
+                "G1", 60.0, rank=2, rank_std=1.0, classifier_ranks={"nb": 2, "jaccard": 2}
+            ),
+        ]
+    )
+    scored_for_g1 = discriminate(kb, _two_candidates(), context)
+    decision = assess_attribution(
+        kb,
+        swapped,
+        context,
+        thresholds=_cluster_thresholds(),
+        discrimination=scored_for_g1,
+        combiner={"cluster": _candidate(members=["G2", "G1"])},
+    )
+    assert decision.stage is AttributionStage.KNOWN_GROUP_SHORTLIST
+
+
+def test_a_single_name_with_a_nested_twin_becomes_the_cluster_or_is_held_back():
+    kb = _separation_kb()
+    exclusive = _context(techniques={"T1": 1.0, "T2": 1.0})  # Alpha clears alone on T1
+    thresholds = _cluster_thresholds()
+    plain = assess_attribution(kb, _two_candidates(), exclusive, thresholds=thresholds)
+    assert plain.stage is AttributionStage.KNOWN_GROUP_HYPOTHESIS
+    nested = _candidate(nested=True, containment=1.0)
+    upgraded = assess_attribution(
+        kb, _two_candidates(), exclusive, thresholds=thresholds, combiner={"cluster": nested}
+    )
+    assert upgraded.stage is AttributionStage.KNOWN_CLUSTER_HYPOTHESIS
+    failing = _candidate(nested=True, containment=1.0, probability=0.5)
+    held = assess_attribution(
+        kb, _two_candidates(), exclusive, thresholds=thresholds, combiner={"cluster": failing}
+    )
+    assert held.stage is AttributionStage.KNOWN_GROUP_SHORTLIST
+    assert "documented nested twin" in held.rationale
+    # a non-nesting related group does not touch a single name
+    single = assess_attribution(
+        kb, _two_candidates(), exclusive, thresholds=thresholds, combiner={"cluster": _candidate()}
+    )
+    assert single.stage is AttributionStage.KNOWN_GROUP_HYPOTHESIS
