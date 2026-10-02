@@ -253,10 +253,10 @@ class Settings(BaseSettings):
     # Documented-overlap clusters (overlap_cluster.py, docs 10.11 / 21.3.15): name the gate
     # leader together with its ATT&CK-documented twin when the merged pair clears the separation
     # bar, this mass (3.0 for a nesting pair) and a combined combiner probability. The full-scope
-    # rule passed its confirmation on fresh seeds 43/47 (docs 21.3.15); the product owner then
-    # narrowed it to the "documented" scope below, which stays off until its own confirmation on
-    # the unused seeds 59/61 passes.
-    attribution_cluster_naming: bool = False
+    # rule passed on fresh seeds 43/47; the product owner narrowed it to the "documented" scope
+    # below, which passed its own pre-registered confirmation on the unused seeds 59/61 on
+    # 2026-10-02 (docs 21.3.15 A′: no wrong cluster, single names unchanged, replay exact).
+    attribution_cluster_naming: bool = True
     attribution_cluster_min_probability: float = 0.8
     attribution_cluster_min_discriminative: float = 3.5
     # Which ATT&CK links make a twin: "documented" (ATT&CK documents the pair as the same activity,
