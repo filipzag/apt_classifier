@@ -27,15 +27,19 @@ fixed sample of source records (``copy_sample_ids_json``, ``copy_sample_sha256``
 other metadata or count, or sampled records rewritten or re-embedded in place); ``--verify-only``
 compares every record.
 
-Verification: count, ids, documents and metadata equal, embeddings bit for bit
-(``view(np.uint32)``), the record hash, the HNSW configuration echo against the requested
-settings (pass the ones the copy was made with when verifying it later; a server that ignored
-``max_neighbors`` or ``ef_construction`` fails it: copy under a new name such as ``-r2``, never
-delete), and ANN recall against brute force at each ``--recall-k``: recall counts how many of the
-exact top-k (ties at the k-th similarity included) Chroma returns, over ``--query-vectors``
-(an ``.npy`` of query embeddings, e.g. dev and train query texts embedded by the tuning harness)
-or ``--self-queries`` stored vectors, restricted to ``--fields`` like the runtime filter. Exit 0
-when every check passes and mean recall reaches ``--min-recall``, 1 otherwise, 2 when refused.
+Verification (after a copy, or alone with ``--verify-only`` on an existing copy, which is never
+recreated): count, ids, documents and metadata equal, the record hash, embeddings within
+``--tolerance`` (default 1e-6) of the source's (Chroma re-normalises every vector in float32 on
+insert, so a copy is never bit-identical; rows bit-identical, the largest component difference and
+the norm range are reported), the source's own embeddings bit for bit as they were copied
+(``copy_embeddings_sha256``), the HNSW configuration echo against the requested settings (pass
+the ones the copy was made with when verifying it later; a server that ignored ``max_neighbors``
+or ``ef_construction`` fails it: copy under a new name such as ``-r2``, never delete), and ANN
+recall against brute force at each ``--recall-k``: recall counts how many of the exact top-k
+(ties at the k-th similarity included) Chroma returns, over ``--query-vectors`` (an ``.npy`` of
+query embeddings, e.g. dev and train query texts embedded by the tuning harness) or
+``--self-queries`` stored vectors, restricted to ``--fields`` like the runtime filter. Exit 0 when
+every check passes and mean recall reaches ``--min-recall``, 1 otherwise, 2 when refused.
 """
 
 from __future__ import annotations
@@ -59,15 +63,18 @@ from apt_classifier.evaluation import write_artifact  # noqa: E402
 from apt_classifier.vectorstore import (  # noqa: E402
     COLLECTION_COPY_SCHEMA_VERSION,
     COPY_CONTENT_SAMPLE,
+    COPY_EMBEDDING_TOLERANCE,
     GROUP_COLLECTION,
     TECHNIQUE_COLLECTION,
     batched_query,
     canonical_json,
     collection_copy_status,
+    embedding_deviation,
     hnsw_configuration,
     records_hash,
     sample_records_sha256,
     spread_sample_ids,
+    within_tolerance,
 )
 from scripts.run_tooling import add_output_guard_arguments, enforce_output_guard  # noqa: E402
 
@@ -272,13 +279,14 @@ def verify_copy(
     recall_k: list[int],
     fields: list[str] | None,
     min_recall: float,
+    tolerance: float = COPY_EMBEDDING_TOLERANCE,
 ) -> dict[str, Any]:
     checks: list[dict[str, Any]] = []
 
     def check(label: str, passed: bool, detail: Any = None) -> None:
         checks.append({"check": label, "passed": bool(passed), "detail": detail})
 
-    ok, reason = collection_copy_status(target, source)
+    ok, reason = collection_copy_status(target, source, tolerance=tolerance)
     check("copy still mirrors its source (name, id, metadata, count, sampled content)", ok, reason)
     copied = read_records(target)
     check("ids", copied["ids"] == records["ids"], len(copied["ids"]))
@@ -288,12 +296,28 @@ def verify_copy(
         [canonical_json(item or {}) for item in copied["metadatas"]]
         == [canonical_json(item or {}) for item in records["metadatas"]],
     )
+    # Chroma re-normalised every vector in float32 when the copy was written: within tolerance
+    deviation = embedding_deviation(copied["embeddings"], records["embeddings"])
     check(
-        "embeddings bitwise",
-        copied["embeddings"].shape == records["embeddings"].shape
-        and np.array_equal(
-            copied["embeddings"].view(np.uint32), records["embeddings"].view(np.uint32)
-        ),
+        f"embeddings within {tolerance:g} of the source",
+        copied["ids"] == records["ids"] and within_tolerance(deviation, tolerance),
+        {
+            key: deviation.get(key)
+            for key in (
+                "rows",
+                "identical_rows",
+                "differing_rows",
+                "max_abs_diff",
+                "shape_mismatch",
+            )
+            if key in deviation
+        },
+    )
+    # the source itself bit for bit as it was copied (Chroma returns its stored floats unchanged)
+    check(
+        "source embeddings unchanged since the copy (copy_embeddings_sha256)",
+        embeddings_sha256(records["embeddings"])
+        == dict(target.metadata or {}).get("copy_embeddings_sha256"),
     )
     expected_hash = dict(target.metadata or {}).get("copy_records_hash")
     check(
@@ -302,7 +326,17 @@ def verify_copy(
         expected_hash,
     )
     echoed = hnsw_configuration(target)
-    report: dict[str, Any] = {"hnsw": echoed}
+    report: dict[str, Any] = {
+        "hnsw": echoed,
+        "tolerance": float(tolerance),
+        "embeddings": {
+            **deviation,
+            "source_norm_range": [
+                embedding_deviation(records["embeddings"]).get(key)
+                for key in ("norm_min", "norm_max")
+            ],
+        },
+    }
     if requested_hnsw:
         mismatched = {
             key: {"requested": value, "reported": echoed.get(key)}
@@ -359,6 +393,12 @@ def main(argv: list[str] | None = None, *, client: Any = None) -> int:
     parser.add_argument("--fields", nargs="+", help="restrict recall to these technique fields")
     parser.add_argument("--recall-k", type=int, nargs="+", default=[90, 300])
     parser.add_argument("--min-recall", type=float, default=0.999)
+    parser.add_argument(
+        "--tolerance",
+        type=float,
+        default=COPY_EMBEDDING_TOLERANCE,
+        help="largest |diff| of an embedding component against the source (default 1e-6)",
+    )
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--verify-only", action="store_true")
     parser.add_argument("--list", action="store_true")
@@ -368,6 +408,8 @@ def main(argv: list[str] | None = None, *, client: Any = None) -> int:
     add_output_guard_arguments(parser)
     args = parser.parse_args(argv)
 
+    if not (np.isfinite(args.tolerance) and args.tolerance >= 0.0):
+        parser.error(f"--tolerance {args.tolerance} is not a finite number >= 0")
     settings = Settings()
     client = client if client is not None else _client(settings)
     if args.list:
@@ -451,6 +493,7 @@ def main(argv: list[str] | None = None, *, client: Any = None) -> int:
         recall_k=list(args.recall_k),
         fields=args.fields,
         min_recall=float(args.min_recall),
+        tolerance=float(args.tolerance),
     )
     report.update(
         {

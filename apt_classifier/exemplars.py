@@ -18,10 +18,11 @@ its rank and count, and the nearest exemplar text for display. These become acce
 retrieval missed. The artifact is ``.npz`` with a JSON manifest, pinned to the embedding model
 and revision, integrity-checked by a fingerprint, and loaded fail-closed.
 
-The library can also be served from a ChromaDB collection holding the same bytes
+The library can also be served from a ChromaDB collection the npz was copied into
 (``apt_classifier.exemplar_store``, ``TECHNIQUE_EXEMPLAR_BACKEND=chroma|auto``); the default
-``npz`` backend is the artifact above. Either way the votes come from the same exact search over
-a verified in-memory copy, so both backends give bit-identical results.
+``npz`` backend is the artifact above. Chroma re-normalises the vectors on insert, so the library
+it serves has its own fingerprint (an acceptance model runs only on the library it was fitted
+on). Either way the votes come from the same exact search over a verified in-memory copy.
 """
 
 from __future__ import annotations
@@ -536,6 +537,33 @@ class ExemplarIndex:
         )
 
 
+_FINGERPRINT_RE = re.compile(r"^[0-9a-f]{24}$")
+
+
+def configured_library_fingerprint(settings: Any) -> str:
+    """``technique_exemplar_library_fingerprint``: the fingerprint the served library must have
+    (``""`` when none is pinned). Raises ``ValueError`` unless it is empty or 24 lower-case hex
+    digits (:meth:`ExemplarIndex.compute_fingerprint`)."""
+    value = str(getattr(settings, "technique_exemplar_library_fingerprint", "") or "").strip()
+    if value and not _FINGERPRINT_RE.match(value):
+        raise ValueError(
+            f"TECHNIQUE_EXEMPLAR_LIBRARY_FINGERPRINT {value!r} is not a library fingerprint "
+            "(24 lower-case hex digits)"
+        )
+    return value
+
+
+def pinned_fingerprint_problem(fingerprint: str, pinned: str) -> str | None:
+    """Why a library of ``fingerprint`` is refused under the pin ``pinned`` (``None`` when it
+    is not pinned or matches)."""
+    if not pinned or fingerprint == pinned:
+        return None
+    return (
+        f"library {fingerprint} is not the pinned TECHNIQUE_EXEMPLAR_LIBRARY_FINGERPRINT "
+        f"{pinned} (its vectors, labels or manifest changed since the fingerprint was registered)"
+    )
+
+
 def parent_map(kb: Any) -> dict[str, str | None]:
     techniques = getattr(kb, "techniques", {}) or {}
     return {tid: getattr(t, "parent_id", None) for tid, t in techniques.items()}
@@ -547,6 +575,9 @@ def load_exemplar_index(settings: Any, *, client: Any = None) -> tuple[Any, str]
     ``technique_exemplar_backend`` picks the source: ``npz`` (default) the artifact,
     ``chroma`` the verified Chroma collection only (``None`` when it is unusable), ``auto`` the
     collection with the artifact as a visible fallback (``active (npz fallback: <reason>)``).
+    A Chroma library checked against neither the npz nor a pinned
+    ``technique_exemplar_library_fingerprint`` reads ``active (unverified: <why>)``; a pinned
+    fingerprint refuses any other library on both backends.
     ``client`` is the vector store's Chroma client; the loader never builds one of its own, so a
     store without a client (the test fakes) never reaches the network."""
     if not bool(getattr(settings, "technique_exemplars_enabled", False)):
@@ -561,7 +592,7 @@ def load_exemplar_index(settings: Any, *, client: Any = None) -> tuple[Any, str]
 
     store, reason = load_chroma_exemplar_store(settings, client)
     if store is not None:
-        return store, "active"
+        return store, store.status
     if backend == "chroma":
         return None, f"chroma exemplar store unavailable: {reason}"
     index, status = _load_npz_index(settings)
@@ -586,6 +617,13 @@ def _load_npz_index(settings: Any) -> tuple[ExemplarIndex | None, str]:
     )
     if not ok:
         return None, f"incompatible artifact: {reason}"
+    try:
+        pinned = configured_library_fingerprint(settings)
+    except ValueError as error:
+        return None, str(error)
+    problem = pinned_fingerprint_problem(index.fingerprint, pinned)
+    if problem is not None:
+        return None, f"incompatible artifact: {problem}"
     return index, "active"
 
 

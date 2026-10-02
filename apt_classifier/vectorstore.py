@@ -57,6 +57,9 @@ _ARTICLE_BEFORE_ADVERSARY_RE = re.compile(r"\b(?:an?|the)\s+(the adversary)", re
 COLLECTION_COPY_SCHEMA_VERSION = 2
 # records of the source hashed at copy time and compared at load (cheap: one get by ids)
 COPY_CONTENT_SAMPLE = 64
+# a copy's embeddings against its source's: Chroma re-normalises vectors in float32 on insert
+# (about 1e-8 per component), so they are compared within this, never bit for bit
+COPY_EMBEDDING_TOLERANCE = 1e-6
 
 
 def batched_query(
@@ -112,9 +115,9 @@ def spread_sample_ids(ids: Iterable[str], size: int) -> list[str]:
     return sorted({ordered[(position * len(ordered)) // count] for position in range(count)})
 
 
-def sample_records_sha256(collection: Any, ids: Sequence[str]) -> str:
-    """SHA-256 over (id, document, canonical metadata, float32 embedding) of ``ids`` as the
-    collection holds them now, in sorted id order (a missing record hashes as missing)."""
+def _records_by_id(collection: Any, ids: Sequence[str]) -> dict[str, tuple[Any, Any, Any]]:
+    """``id -> (embedding, document, metadata)`` of ``ids`` as the collection holds them now
+    (one ``get``; missing records are absent)."""
     wanted = sorted(str(item) for item in ids)
     page = (
         collection.get(ids=wanted, include=["embeddings", "documents", "metadatas"])
@@ -125,7 +128,7 @@ def sample_records_sha256(collection: Any, ids: Sequence[str]) -> str:
     embeddings = page.get("embeddings")
     documents = page.get("documents") or [None] * len(returned)
     metadatas = page.get("metadatas") or [None] * len(returned)
-    records = {
+    return {
         item_id: (
             embeddings[position] if embeddings is not None else None,
             documents[position],
@@ -133,6 +136,9 @@ def sample_records_sha256(collection: Any, ids: Sequence[str]) -> str:
         )
         for position, item_id in enumerate(returned)
     }
+
+
+def _records_sha256(wanted: Sequence[str], records: Mapping[str, tuple[Any, Any, Any]]) -> str:
     digest = hashlib.sha256()
     for item_id in wanted:
         record = records.get(item_id)
@@ -147,6 +153,107 @@ def sample_records_sha256(collection: Any, ids: Sequence[str]) -> str:
     return digest.hexdigest()
 
 
+def sample_records_sha256(collection: Any, ids: Sequence[str]) -> str:
+    """SHA-256 over (id, document, canonical metadata, float32 embedding) of ``ids`` as the
+    collection holds them now, in sorted id order (a missing record hashes as missing)."""
+    wanted = sorted(str(item) for item in ids)
+    return _records_sha256(wanted, _records_by_id(collection, wanted))
+
+
+def embedding_deviation(values: Any, reference: Any = None) -> dict[str, Any]:
+    """How far float32 vectors are from unit length and, given ``reference`` vectors of the same
+    records, from those: rows bit-identical and the largest component difference (float64 over
+    the float32 values). Chroma re-normalises every vector in float32 on insert, so a copy of a
+    collection is equal to its source only within a tolerance, never bit for bit."""
+    vectors = np.ascontiguousarray(np.asarray(values, dtype=np.float32))
+    if vectors.ndim == 1:
+        vectors = vectors[None, :] if vectors.size else vectors.reshape(0, 0)
+    rows = int(len(vectors))
+    norms = np.linalg.norm(vectors.astype(np.float64), axis=1) if rows else np.zeros(0)
+    report: dict[str, Any] = {
+        "rows": rows,
+        "finite": bool(np.isfinite(vectors).all()),
+        "norm_min": float(norms.min()) if rows else None,
+        "norm_max": float(norms.max()) if rows else None,
+        "max_norm_deviation": float(np.max(np.abs(norms - 1.0))) if rows else 0.0,
+        "compared_with_source": reference is not None,
+    }
+    if reference is None:
+        return report
+    other = np.ascontiguousarray(np.asarray(reference, dtype=np.float32))
+    if other.ndim == 1:
+        other = other[None, :] if other.size else other.reshape(0, 0)
+    if other.shape != vectors.shape:
+        report.update(
+            {
+                "shape_mismatch": [list(vectors.shape), list(other.shape)],
+                "identical_rows": 0,
+                "differing_rows": rows,
+                "max_abs_diff": float("inf"),
+            }
+        )
+        return report
+    identical = (
+        np.all(vectors.view(np.uint32) == other.view(np.uint32), axis=1)
+        if vectors.size
+        else np.ones(rows, dtype=bool)
+    )
+    difference = np.abs(vectors.astype(np.float64) - other.astype(np.float64))
+    report.update(
+        {
+            "identical_rows": int(identical.sum()),
+            "differing_rows": int(rows - identical.sum()),
+            "max_abs_diff": float(difference.max()) if difference.size else 0.0,
+        }
+    )
+    return report
+
+
+def within_tolerance(deviation: Mapping[str, Any], tolerance: float) -> bool:
+    """Whether :func:`embedding_deviation` against a reference is inside ``tolerance`` (finite
+    vectors of the same shape, every component within it; ``NaN`` never is)."""
+    return (
+        bool(deviation.get("finite"))
+        and bool(deviation.get("compared_with_source"))
+        and not deviation.get("shape_mismatch")
+        and float(deviation.get("max_abs_diff", float("inf"))) <= float(tolerance)
+    )
+
+
+def copy_sample_problem(
+    copy_records: Mapping[str, tuple[Any, Any, Any]],
+    source_records: Mapping[str, tuple[Any, Any, Any]],
+    *,
+    tolerance: float,
+) -> str | None:
+    """Why the copy's sampled records do not mirror the source's (``None`` when they do): every
+    id present, documents and metadata equal, embeddings within ``tolerance``."""
+    missing = sorted(set(source_records) - set(copy_records))
+    if missing:
+        return f"{len(missing)} sampled records are missing from the copy (e.g. {missing[0]})"
+    ids = sorted(source_records)
+    for item_id in ids:
+        _, document, metadata = source_records[item_id]
+        _, copied_document, copied_metadata = copy_records[item_id]
+        if copied_document != document or canonical_json(dict(copied_metadata or {})) != (
+            canonical_json(dict(metadata or {}))
+        ):
+            return f"sampled record {item_id} has another document or metadata than its source"
+    if not ids:
+        return None
+    if any(copy_records[item][0] is None or source_records[item][0] is None for item in ids):
+        return "sampled records came back without their embeddings"
+    deviation = embedding_deviation(
+        [copy_records[item][0] for item in ids], [source_records[item][0] for item in ids]
+    )
+    if not within_tolerance(deviation, tolerance):
+        return (
+            f"sampled embeddings differ from the source by up to {deviation.get('max_abs_diff')} "
+            f"(tolerance {tolerance:g})"
+        )
+    return None
+
+
 def hnsw_configuration(collection: Any) -> dict[str, Any]:
     """The HNSW settings a collection reports (``configuration_json["hnsw"]``), ``{}`` if none."""
     configuration = getattr(collection, "configuration_json", None) or {}
@@ -154,15 +261,20 @@ def hnsw_configuration(collection: Any) -> dict[str, Any]:
     return dict(hnsw) if isinstance(hnsw, Mapping) else {}
 
 
-def collection_copy_status(copy: Any, source: Any) -> tuple[bool, str]:
+def collection_copy_status(
+    copy: Any, source: Any, *, tolerance: float = COPY_EMBEDDING_TOLERANCE
+) -> tuple[bool, str]:
     """Whether ``copy`` still mirrors ``source``: same source name, id, metadata, count and
     sampled content.
 
     The copy records its source when it is made; a re-ingest (new id or count), a metadata
     change, or a compatible in-place re-ingest that rewrote the sampled records (new text, or
-    the same text re-embedded) makes it stale. A rewrite that spares every sampled record is
-    not seen (the full hashes, ``copy_records_hash`` and ``copy_embeddings_sha256``, need the
-    whole source; ``scripts/sync_attack_collection_copy.py --verify-only`` compares them)."""
+    the same text re-embedded) makes it stale: the source's sampled records must hash exactly as
+    they did at copy time. The copy's own sampled records must equal the source's (ids,
+    documents, metadata) with embeddings within ``tolerance`` (Chroma re-normalised them when
+    the copy was written). A rewrite that spares every sampled record is not seen (the full
+    hashes, ``copy_records_hash`` and ``copy_embeddings_sha256``, need the whole source;
+    ``scripts/sync_attack_collection_copy.py --verify-only`` compares every record)."""
     metadata = dict(copy.metadata or {})
     if "copy_of" not in metadata:
         return False, "not a collection copy (no copy_of metadata)"
@@ -188,13 +300,18 @@ def collection_copy_status(copy: Any, source: Any) -> tuple[bool, str]:
         sample = None
     if not isinstance(sample, list) or not metadata.get("copy_sample_sha256"):
         return False, "copy records no content sample of its source"
-    if sample_records_sha256(source, [str(item) for item in sample]) != metadata.get(
-        "copy_sample_sha256"
-    ):
+    wanted = sorted(str(item) for item in sample)
+    source_records = _records_by_id(source, wanted)
+    if _records_sha256(wanted, source_records) != metadata.get("copy_sample_sha256"):
         return False, (
             f"source {source.name} content changed since the copy was made (records rewritten "
             "or re-embedded in place)"
         )
+    problem = copy_sample_problem(
+        _records_by_id(copy, wanted), source_records, tolerance=float(tolerance)
+    )
+    if problem is not None:
+        return False, f"copy content does not mirror {source.name}: {problem}"
     return True, "ok"
 
 

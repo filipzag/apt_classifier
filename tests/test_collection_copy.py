@@ -327,3 +327,60 @@ def test_ingest_refuses_to_write_while_a_copy_is_configured(tmp_path):
     with pytest.raises(RuntimeError, match="ingestion writes only"):
         store.upsert(SimpleNamespace(techniques={}, groups={}))
     assert client.writes() == []
+
+
+def test_a_renormalising_server_copy_is_verified_within_tolerance(tmp_path):
+    """Chroma re-normalises every vector in float32 on insert: the copy of an already stored
+    (normalised) source differs in the last bits; it is accepted within the tolerance."""
+    client = _seeded(normalise_vectors=True)
+    assert copy_main(_copy_args(tmp_path), client=client) == 0
+    report = json.loads((tmp_path / "copy.json").read_text())
+    assert report["ok"] and report["tolerance"] == 1e-6
+    embeddings = report["embeddings"]
+    assert embeddings["identical_rows"] < embeddings["rows"] == 300
+    assert 0.0 < embeddings["max_abs_diff"] <= 1e-6
+    passed = {item["check"]: item["passed"] for item in report["checks"]}
+    assert passed["embeddings within 1e-06 of the source"]
+    target = _target_name(client)
+    copy = client.collections[target]
+    source = client.collections[TECHNIQUE_COLLECTION]
+    assert collection_copy_status(copy, source) == (True, "ok")
+    # --verify-only on the existing copy: verified again, nothing written
+    client.calls.clear()
+    assert copy_main(_copy_args(tmp_path, "--verify-only", "--overwrite"), client=client) == 0
+    assert client.writes() == []
+    # a tighter tolerance refuses the re-normalised copy
+    assert (
+        copy_main(
+            _copy_args(tmp_path, "--verify-only", "--overwrite", "--tolerance", "0"), client=client
+        )
+        == 1
+    )
+
+
+def test_a_copy_whose_vectors_drift_beyond_tolerance_is_refused(tmp_path):
+    client = _seeded()
+    assert copy_main(_copy_args(tmp_path), client=client) == 0
+    target = _target_name(client)
+    copy = client.collections[target]
+    source = client.collections[TECHNIQUE_COLLECTION]
+    sampled = json.loads(copy.metadata["copy_sample_ids_json"])
+    vector = copy._records[sampled[0]][0]
+    copy.tamper(sampled[0], embedding=vector + np.float32(1e-4))
+    ok, reason = collection_copy_status(copy, source)
+    assert not ok and "copy content does not mirror" in reason and "tolerance" in reason
+    assert copy_main(_copy_args(tmp_path, "--verify-only", "--overwrite"), client=client) == 1
+    report = json.loads((tmp_path / "copy.json").read_text())
+    failed = {item["check"] for item in report["checks"] if not item["passed"]}
+    assert "embeddings within 1e-06 of the source" in failed
+    store = _store(client, technique_collection_name=target)
+    with pytest.raises(RuntimeError, match="cannot stand in"):
+        store.query_techniques(["credential dumping"], n_results=5)
+    # a sampled record with another document in the copy is refused too
+    client = _seeded()
+    assert copy_main(_copy_args(tmp_path, "--overwrite"), client=client) == 0
+    copy = client.collections[_target_name(client)]
+    copy.tamper(json.loads(copy.metadata["copy_sample_ids_json"])[1], document="edited")
+    ok, reason = collection_copy_status(copy, client.collections[TECHNIQUE_COLLECTION])
+    assert not ok and "another document or metadata" in reason
+    assert all(name != TECHNIQUE_COLLECTION for _, name, _ in client.writes())

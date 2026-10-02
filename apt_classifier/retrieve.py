@@ -584,7 +584,7 @@ def retrieve_techniques(
     candidates, so compatible techniques take their place in the pool.
 
     ``exemplar_index`` (:class:`apt_classifier.exemplars.ExemplarIndex`, or the Chroma-served
-    :class:`apt_classifier.exemplar_store.ChromaExemplarStore`, which gives identical votes)
+    :class:`apt_classifier.exemplar_store.ChromaExemplarStore`, a library with its own fingerprint)
     adds what the nearest labelled real-report sentences say about each candidate as
     ``exemplar`` evidence (the acceptance model reads it) and appends up to
     ``exemplar_new_candidates`` techniques that only the exemplars suggest. An acceptance model

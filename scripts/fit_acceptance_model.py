@@ -26,6 +26,15 @@ Threshold (``--threshold-selection``):
 ``--dump-rows PATH`` writes the feature rows, labels, guards, folds and probabilities as ``.npz``
 for the tuning harness's fit check.
 
+Exemplar library (``--exemplar-backend``, default ``TECHNIQUE_EXEMPLAR_BACKEND``): with
+``chroma`` the model is fitted on the Chroma library, whose vectors Chroma re-normalised on
+insert, so it has its own fingerprint. The artifact records that fingerprint
+(``metadata.exemplar_fingerprint``, ``retrieval_contract.exemplar_fingerprint``), the backend
+(``metadata.exemplar_backend``, ``retrieval_contract.exemplar_backend``) and the npz the library
+was copied from (``metadata.exemplars.source_fingerprint``); the runtime refuses it on any other
+library, the npz included. Pass ``--require-exemplar-backend chroma`` so a fallback to the npz
+stops the fit instead.
+
 An existing ``--output`` (or ``--dump-rows``) is replaced only with ``--overwrite``, and a path
 that resolves outside the repository (a worktree's ``data/models`` symlink) only with
 ``--allow-shared-output``.
@@ -96,6 +105,43 @@ from scripts.run_tooling import (
 )
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
+
+
+def exemplar_library_backend(index: Any) -> str | None:
+    """``npz`` or ``chroma``: where the library the model is fitted on was read from."""
+    return str(getattr(index, "backend", "npz") or "npz") if index is not None else None
+
+
+def exemplar_fit_metadata(settings: Any, exemplar_index: Any) -> dict[str, Any]:
+    """What the artifact records about the exemplar library it was fitted on. The runtime
+    refuses the model unless that library is loaded (``exemplar_fingerprint``: the npz's, or
+    the Chroma library's own, recomputed from the vectors Chroma returns); the backend is
+    recorded here and in the retrieval contract, the npz a Chroma library was copied from in
+    ``exemplars.source_fingerprint``."""
+    if exemplar_index is None:
+        return {"exemplar_fingerprint": None, "exemplar_backend": None, "exemplars": None}
+    backend = exemplar_library_backend(exemplar_index)
+    return {
+        "exemplar_fingerprint": exemplar_index.fingerprint,
+        "exemplar_backend": backend,
+        "exemplars": {
+            "fingerprint": exemplar_index.fingerprint,
+            "backend": backend,
+            "source_fingerprint": getattr(
+                exemplar_index, "source_fingerprint", exemplar_index.fingerprint
+            ),
+            "collection": getattr(exemplar_index, "collection_name", None),
+            "count": len(exemplar_index),
+            **{
+                k: v
+                for k, v in exemplar_kwargs(settings, exemplar_index).items()
+                if k != "exemplar_index"
+            },
+            "store": exemplar_signature(exemplar_index),
+        },
+    }
+
+
 DEFAULT_OUTPUT = REPO_ROOT / "data" / "models" / "acceptance" / "acceptance_model.json"
 # an out-of-fold threshold this far from the in-sample runtime one is flagged in the metadata
 THRESHOLD_GAP_FLAG = 0.03
@@ -452,6 +498,16 @@ def main(argv: list[str] | None = None) -> int:
         if problem:
             parser.error(f"{problem} ({exemplar_status})")
     print(f"exemplars: {exemplar_status}")
+    if exemplar_index is not None:
+        print(
+            f"exemplar library: backend {exemplar_library_backend(exemplar_index)}, fingerprint "
+            f"{exemplar_index.fingerprint}"
+            + (
+                f" (copied from npz {exemplar_index.source_fingerprint})"
+                if getattr(exemplar_index, "source_fingerprint", None)
+                else ""
+            )
+        )
     started = time.time()
     fitted = extract_rows(
         cases,
@@ -496,23 +552,7 @@ def main(argv: list[str] | None = None) -> int:
     operating_point, selection = selected.operating_point, selected.selection
     model.threshold = float(operating_point["threshold"])
     model.metadata = {
-        # the runtime refuses this model unless the same exemplar index is loaded
-        "exemplar_fingerprint": exemplar_index.fingerprint if exemplar_index is not None else None,
-        "exemplars": (
-            {
-                "fingerprint": exemplar_index.fingerprint,
-                "count": len(exemplar_index),
-                **{
-                    k: v
-                    for k, v in exemplar_kwargs(settings, exemplar_index).items()
-                    if k != "exemplar_index"
-                },
-                # where the library was read from (the votes are identical on every backend)
-                "store": exemplar_signature(exemplar_index),
-            }
-            if exemplar_index is not None
-            else None
-        ),
+        **exemplar_fit_metadata(settings, exemplar_index),
         "split": args.split,
         "datasets": sorted(set(args.datasets)),
         "case_count": len(cases),

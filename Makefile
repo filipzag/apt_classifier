@@ -83,15 +83,22 @@ exemplars:
 # Copy the npz library once into a new Chroma collection (technique_exemplars-<fingerprint>-...),
 # the only Chroma write of the exemplar migration (ask before running it on the shared server);
 # an existing collection is verified, never changed. Serve it with TECHNIQUE_EXEMPLAR_BACKEND.
+# Chroma re-normalises the vectors on insert, so the served library has its own fingerprint
+# (verified within TECHNIQUE_EXEMPLAR_TOLERANCE of the npz): an acceptance model fitted on the npz
+# does not run on it; fit on it with fit_acceptance_model.py --exemplar-backend chroma. The
+# verification compares that fingerprint with TECHNIQUE_EXEMPLAR_LIBRARY_FINGERPRINT when set
+# (the registered library; the loader then refuses any other vectors, npz or not) and warns
+# when it is not.
 exemplars-chroma:
 	PYTHONPATH=. $(PYTHON) scripts/sync_exemplars_to_chroma.py --overwrite
 
 exemplars-chroma-verify:
 	PYTHONPATH=. $(PYTHON) scripts/sync_exemplars_to_chroma.py --verify-only --report data/audits/exemplar_chroma_verify.json --overwrite
 
-# npz against the Chroma copy, levels L1-L4 (read-only; one GPU job to embed the query texts).
+# npz against the Chroma library, levels L1-L4 under the Plan-B tolerances (read-only; one GPU job
+# to embed the query texts); L4 runs the npz-fitted model on the Chroma library as a diagnostic.
 exemplar-equivalence:
-	PYTHONPATH=. $(PYTHON) scripts/exemplar_backend_equivalence.py \
+	PYTHONPATH=. $(PYTHON) scripts/exemplar_backend_equivalence.py --allow-library-mismatch \
 		--sets self public:dev public:test cti_hal evidenceforge:branch-office evidenceforge:manufacturing \
 		--evidenceforge-bundle branch-office $(EVIDENCEFORGE_DIR) $(EVIDENCEFORGE_SCENARIO) \
 		--evidenceforge-bundle manufacturing $(EVIDENCEFORGE_MFG_DIR) data/evidenceforge/heldout-manufacturing/scenario.yaml \

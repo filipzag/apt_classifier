@@ -268,11 +268,22 @@ class Settings(BaseSettings):
     # technique over the whole text and its sentences. Tuning knobs (docs 21.3.15): the
     # acceptance model refuses to run on values it was not fitted with.
     technique_exemplar_segment_votes: str = "off"
-    # Where the library is read from: "npz" (the artifact above), "chroma" (a verified copy in
-    # the collection below, written once by scripts/sync_exemplars_to_chroma.py; unusable ->
-    # no exemplars) or "auto" (the collection, else the npz with a visible reason). Results are
-    # bit-identical on every backend (apt_classifier/exemplar_store.py).
+    # Where the library is read from: "npz" (the artifact above), "chroma" (the collection
+    # below, written once by scripts/sync_exemplars_to_chroma.py; unusable -> no exemplars) or
+    # "auto" (the collection, else the npz with a visible reason). Chroma re-normalises vectors
+    # on insert, so the Chroma library is its own library with its own fingerprint (recomputed
+    # from the vectors it returns): an acceptance model fitted on the npz does not run on it
+    # (apt_classifier/exemplar_store.py).
     technique_exemplar_backend: str = "npz"
+    # The Chroma library is accepted only when every vector norm is within this of 1 and, when
+    # the npz it was copied from is present, every component within this of the npz's.
+    technique_exemplar_tolerance: float = 1e-6
+    # The fingerprint the served library must have (empty: not pinned). For a Chroma library it
+    # is the one recomputed from the vectors Chroma returns (the sync report's
+    # library_fingerprint; T1.env pins it): any changed vector is refused, with or without the
+    # npz. Without the npz and without a pin the Chroma library is only norm-checked and its
+    # status reads "active (unverified: ...)". Checked on both backends.
+    technique_exemplar_library_fingerprint: str = ""
     # empty: technique_exemplars-<npz fingerprint>-s1-m<M>-efc<ef_construction>
     technique_exemplar_collection: str = ""
     # "exact" searches the verified local copy; "hnsw" also asks Chroma for the candidates and

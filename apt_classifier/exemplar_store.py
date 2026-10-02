@@ -1,28 +1,46 @@
-"""The exemplar library in ChromaDB: a verified, read-only copy of the npz exemplar index.
+"""The exemplar library in ChromaDB: Chroma is the source, the npz a backup.
 
 ``scripts/sync_exemplars_to_chroma.py`` writes the npz library once into a new collection
-(``technique_exemplars-<fingerprint>-s1-m<M>-efc<ef_construction>``): one record per exemplar
+(``technique_exemplars-<npz fingerprint>-s1-m<M>-efc<ef_construction>``): one record per exemplar
 row with the exact text as document, the npz embedding row as vector (copied, never re-embedded)
 and the row's labels and source as metadata. The collection metadata carries the npz manifest
-verbatim (``source_metadata_json``), the fingerprint and a hash over every record.
+verbatim (``source_metadata_json``), the npz fingerprint and a hash over every record; it is
+written once and never modified.
+
+Chroma re-normalises every vector in float32 when it is inserted, so some rows come back a few
+ulps away from the npz (2026-10-02: 99 of 120 sampled rows bit-identical, max |diff| 7.45e-9).
+The library Chroma serves is therefore a library of its own (decided 2026-10-02: Chroma is the
+source). Its identity is the fingerprint recomputed from the vectors, labels and manifest Chroma
+returns (:attr:`ChromaExemplarStore.fingerprint`); the collection metadata's ``fingerprint`` is
+the immutable :attr:`ChromaExemplarStore.source_fingerprint`, the npz it was copied from. An
+acceptance model records the fingerprint of the library it was fitted on, so a model fitted on
+the npz is refused on the Chroma library (and the reverse) unless the two are bit-identical.
 
 At runtime :func:`load_chroma_exemplar_store` opens the collection with ``get_collection`` only
 (it never creates, modifies, adds, upserts or deletes), downloads every record and refuses the
-copy unless it is complete and identical: kind and schema, embedding model and revision, count
-and rows ``0..N-1``, the fingerprint recomputed from the downloaded vectors and labels (against
-the collection's own and, when the npz exists, the npz's), the record hash, and the HNSW
-configuration (cosine, ``ef_search`` at least ``technique_exemplar_hnsw_ef_search``). The
-verified copy is memoised per client and collection, so the per-fold engines of a benchmark
-share one download.
+library unless it checks out exactly (kind and schemas, embedding model and revision, count and
+rows ``0..N-1``, the record hash over ids, documents and metadata, the HNSW configuration:
+cosine, ``ef_search`` at least ``technique_exemplar_hnsw_ef_search``) and within
+``technique_exemplar_tolerance`` (default 1e-6): every vector norm within the tolerance of 1
+and, when the npz it was copied from is present, every component within the tolerance of the
+npz's (a present npz of another library, or one whose manifest cannot be read, is refused).
 
-Votes never use Chroma's distances (the server re-normalises its own float32 copy). With
-``search="exact"`` the store answers from the verified copy exactly as the npz would. With
-``search="hnsw"`` it also asks Chroma for each query's nearest records; Chroma only proposes
-candidates, the votes still come from the exact window of the local similarity row, and a query
-whose exact window is not inside Chroma's results is counted as a ``recall_miss``. Results are
-therefore bit-identical on every backend and search; the counters measure the ANN index. A
-failed Chroma query falls back to the local search (``search_fallbacks``) unless the backend is
-strict (``chroma``), where it raises.
+The record hash does not cover the vectors and the collection metadata cannot carry the library
+fingerprint (it is known only after the insert), so the vectors themselves are verified only
+against the npz or against ``technique_exemplar_library_fingerprint`` (the sync report's
+``library_fingerprint``, pinned in T1.env), which refuses any other library bit for bit. A
+library checked against neither (no npz, no pin) is served with the status ``active
+(unverified: ...)`` (:attr:`ChromaExemplarStore.status`), and ``--require-exemplar-backend
+chroma`` refuses it. The verified library is memoised per client, collection id and source (the
+entry holds the library fingerprint), so the per-fold engines of a benchmark share one download.
+
+Votes never use Chroma's distances. With ``search="exact"`` the store answers from the verified
+library exactly as an npz of the same vectors would. With ``search="hnsw"`` it also asks Chroma
+for each query's nearest records; Chroma only proposes candidates, the votes still come from the
+exact window of the local similarity row, and a query whose exact window is not inside Chroma's
+results is counted as a ``recall_miss``. Exact and hnsw search therefore give bit-identical votes
+on the same library; the counters measure the ANN index. A failed Chroma query falls back to the
+local search (``search_fallbacks``) unless the backend is strict (``chroma``), where it raises.
 """
 
 from __future__ import annotations
@@ -47,13 +65,16 @@ from apt_classifier.exemplars import (
     ExemplarIndex,
     ExemplarVotes,
     _unit,
+    configured_library_fingerprint,
     embedding_compatibility,
+    pinned_fingerprint_problem,
     window_size,
 )
 from apt_classifier.memo import ObjectMemo
 from apt_classifier.vectorstore import (
     batched_query,
     canonical_json,
+    embedding_deviation,
     hnsw_configuration,
 )
 from apt_classifier.vectorstore import records_hash as compute_records_hash
@@ -63,6 +84,14 @@ STORE_SCHEMA_VERSION = 1
 COLLECTION_PREFIX = "technique_exemplars-"
 SEARCH_MODES = ("exact", "hnsw")
 GET_PAGE = 1000  # records per get() while downloading the library
+# technique_exemplar_tolerance: vector norms within this of 1 and, against the source npz, every
+# component within this (Chroma's float32 re-normalisation moves components by about 1e-8)
+DEFAULT_TOLERANCE = 1e-6
+# what a library checked neither against the npz nor against a pinned fingerprint lacks
+UNVERIFIED_REASON = (
+    "no source npz to compare the vectors with and no TECHNIQUE_EXEMPLAR_LIBRARY_FINGERPRINT "
+    "pinned; only the vector norms were checked"
+)
 # Collection metadata written once at creation (scripts/sync_exemplars_to_chroma.py).
 REQUIRED_METADATA = (
     "kind",
@@ -76,7 +105,7 @@ REQUIRED_METADATA = (
 
 
 class ExemplarStoreError(ValueError):
-    """The collection is not a complete, identical copy of an exemplar library."""
+    """The collection is not a complete, verified exemplar library."""
 
 
 @runtime_checkable
@@ -169,16 +198,27 @@ def collection_metadata(
 
 
 def npz_fingerprint(path: Any) -> str | None:
-    """The fingerprint recorded in an npz exemplar artifact, ``None`` when there is none
-    (reads the manifest only, not the vectors)."""
+    """The fingerprint recorded in an npz exemplar artifact (reads the manifest only, not the
+    vectors); ``None`` when no path is configured or no file is there. Raises
+    :class:`ExemplarStoreError` when a file is there but its manifest cannot be read or names no
+    fingerprint: a present npz is what the Chroma library's vectors are compared with, so it is
+    never skipped silently."""
     if not path or not Path(path).is_file():
         return None
     try:
         with np.load(Path(path), allow_pickle=False) as payload:
-            value = json.loads(str(payload["metadata"])).get("fingerprint")
-    except (OSError, ValueError, KeyError, TypeError, json.JSONDecodeError):
-        return None
-    return str(value) if value else None
+            manifest = json.loads(str(payload["metadata"]))
+    except Exception as error:  # BadZipFile, EOFError, pickled or non-npz data, no manifest
+        raise ExemplarStoreError(
+            f"the npz artifact {path} is present but unreadable ({type(error).__name__}: "
+            f"{error}): repair it, or move it away to serve the Chroma library unverified"
+        ) from error
+    value = manifest.get("fingerprint") if isinstance(manifest, dict) else None
+    if not value:
+        raise ExemplarStoreError(
+            f"the npz artifact {path} is present but its manifest names no fingerprint"
+        )
+    return str(value)
 
 
 # ----- download and verification -----
@@ -219,9 +259,13 @@ def _metadata_problems(
 
 
 def read_exemplar_collection(collection: Any, metadata: Mapping[str, Any]) -> ExemplarIndex:
-    """Download every record and rebuild the library in npz row order; raises
-    :class:`ExemplarStoreError` unless rows ``0..N-1`` are present once each, the labels parse,
-    and the recomputed record hash and fingerprint match the collection metadata."""
+    """Download every record and build the Chroma library in npz row order; raises
+    :class:`ExemplarStoreError` unless rows ``0..N-1`` are present once each, the labels parse
+    and the record hash recomputed from the ids, documents and metadata matches the collection's.
+
+    The library's ``metadata`` is the source manifest with ``fingerprint`` replaced by the
+    fingerprint recomputed from the downloaded vectors and labels (the library's identity) and
+    ``source_fingerprint`` set to the collection's (the npz it was copied from)."""
     count = int(metadata["count"])
     ids = [record_id(row) for row in range(count)]
     vectors: list[Any] = [None] * count
@@ -258,18 +302,66 @@ def read_exemplar_collection(collection: Any, metadata: Mapping[str, Any]) -> Ex
         for label, record in zip(labels, metadatas, strict=True)
     ):
         raise ExemplarStoreError("record label counts do not match their labels")
-    index = ExemplarIndex(
-        embeddings=np.ascontiguousarray(np.asarray(vectors, dtype=np.float32)),
+    try:
+        embeddings = np.ascontiguousarray(np.asarray(vectors, dtype=np.float32))
+    except (TypeError, ValueError) as error:
+        raise ExemplarStoreError(f"record embeddings are malformed: {error}") from error
+    if embeddings.ndim != 2 or len(embeddings) != count:
+        raise ExemplarStoreError(f"record embeddings have shape {embeddings.shape}")
+    library = ExemplarIndex(
+        embeddings=embeddings,
         labels=labels,
         texts=tuple(str(document) for document in documents),
         sources=sources,
         metadata=json.loads(str(metadata["source_metadata_json"])),
     )
-    if index.compute_fingerprint() != index.fingerprint:
-        raise ExemplarStoreError(
-            "fingerprint recomputed from the downloaded vectors and labels does not match"
+    library.metadata["fingerprint"] = library.compute_fingerprint()
+    library.metadata["source_fingerprint"] = str(metadata["fingerprint"])
+    library.metadata["library_backend"] = "chroma"
+    return library
+
+
+def library_deviation(vectors: np.ndarray, source: np.ndarray | None = None) -> dict[str, Any]:
+    """How far a library's vectors are from unit length and, given the ``source`` vectors (the
+    npz they were copied from), from those (:func:`apt_classifier.vectorstore.
+    embedding_deviation`)."""
+    return embedding_deviation(vectors, source)
+
+
+def tolerance_problems(deviation: Mapping[str, Any], tolerance: float) -> list[str]:
+    """Why a library's :func:`library_deviation` is outside ``tolerance`` (empty when it is
+    inside; ``NaN`` and infinite values never are)."""
+    problems: list[str] = []
+    if not deviation.get("finite", False):
+        problems.append("vectors are not all finite")
+    deviation_from_unit = float(deviation.get("max_norm_deviation", float("inf")))
+    if not deviation_from_unit <= tolerance:
+        problems.append(
+            f"a vector norm is {deviation_from_unit:.3g} from 1 (tolerance {tolerance:g})"
         )
-    return index
+    if deviation.get("compared_with_source"):
+        if deviation.get("shape_mismatch"):
+            problems.append(f"vectors have shape {deviation['shape_mismatch']} (library, npz)")
+        difference = float(deviation.get("max_abs_diff", float("inf")))
+        if not difference <= tolerance:
+            problems.append(
+                f"vectors differ from the source npz by up to {difference:.3g} "
+                f"(tolerance {tolerance:g})"
+            )
+    return problems
+
+
+def source_problems(library: ExemplarIndex, source: ExemplarIndex) -> list[str]:
+    """Exact differences between the Chroma library and the npz it was copied from besides the
+    vectors (labels, texts, sources, count)."""
+    problems = []
+    if len(library) != len(source):
+        problems.append(f"{len(library)} records, the source npz has {len(source)}")
+    else:
+        for name in ("labels", "texts", "sources"):
+            if getattr(library, name) != getattr(source, name):
+                problems.append(f"{name} differ from the source npz")
+    return problems
 
 
 # ----- query accounting -----
@@ -299,7 +391,11 @@ def _add_totals(stats: Mapping[str, int]) -> None:
 # ----- runtime store -----
 @dataclass(eq=False)  # identity semantics: comparing stores would compare vector arrays
 class ChromaExemplarStore:
-    """The exemplar library served from a verified Chroma collection (see the module notes)."""
+    """The exemplar library served from a verified Chroma collection (see the module notes).
+
+    ``index`` is the Chroma library itself (the vectors Chroma returned, in npz row order); its
+    fingerprint is the library's identity. ``source_fingerprint`` is the npz the collection was
+    copied from, ``verification`` how the library compared with the tolerance checks."""
 
     index: ExemplarIndex
     collection: Any
@@ -311,6 +407,9 @@ class ChromaExemplarStore:
     server_version: str | None = None
     hnsw: dict[str, Any] = field(default_factory=dict)
     records_hash: str = ""
+    source_fingerprint: str = ""
+    tolerance: float = DEFAULT_TOLERANCE
+    verification: dict[str, Any] = field(default_factory=dict)
     _local: threading.local = field(default_factory=threading.local, init=False, repr=False)
     _rows: dict[str, int] = field(default_factory=dict, init=False, repr=False)
 
@@ -327,6 +426,7 @@ class ChromaExemplarStore:
 
     @property
     def fingerprint(self) -> str:
+        """The library's identity: recomputed from the vectors and labels Chroma returned."""
         return self.index.fingerprint
 
     @property
@@ -358,6 +458,19 @@ class ChromaExemplarStore:
         return self.index.compatible_with(embedding_model, embedding_revision)
 
     @property
+    def verified(self) -> bool:
+        """The vectors were checked against the npz they were copied from (within the
+        tolerance) or against a pinned library fingerprint (bit for bit); norms alone are not a
+        verification."""
+        return bool(self.verification.get("verified_against"))
+
+    @property
+    def status(self) -> str:
+        """The loader status: ``active``, or ``active (unverified: ...)`` when the library was
+        checked against neither the npz nor a pinned fingerprint."""
+        return "active" if self.verified else f"active (unverified: {UNVERIFIED_REASON})"
+
+    @property
     def search_class(self) -> str:
         """``exact`` unless the candidate search can miss part of the window: HNSW with an
         ``ef_search`` below the library size or less than twice the window requested."""
@@ -380,8 +493,19 @@ class ChromaExemplarStore:
             "overfetch": float(self.overfetch),
             "search_class": self.search_class,
             "fingerprint": self.fingerprint,
+            "source_fingerprint": self.source_fingerprint,
             "records_hash": self.records_hash,
             "count": len(self),
+            "tolerance": float(self.tolerance),
+            "verification": {
+                key: self.verification.get(key)
+                for key in (
+                    "compared_with_source",
+                    "identical_rows",
+                    "max_abs_diff",
+                    "max_norm_deviation",
+                )
+            },
         }
 
     @property
@@ -447,7 +571,19 @@ class ChromaExemplarStore:
 
 
 # ----- loader -----
-_VERIFIED: ObjectMemo[ExemplarIndex] = ObjectMemo(capacity=4)
+@dataclass(frozen=True, eq=False)
+class VerifiedLibrary:
+    """A downloaded library that passed every check, with its deviation from the tolerances."""
+
+    index: ExemplarIndex
+    verification: dict[str, Any]
+
+    @property
+    def fingerprint(self) -> str:
+        return self.index.fingerprint
+
+
+_VERIFIED: ObjectMemo[VerifiedLibrary] = ObjectMemo(capacity=4)
 
 
 def configured_collection_name(settings: Any) -> tuple[str | None, str]:
@@ -456,7 +592,10 @@ def configured_collection_name(settings: Any) -> tuple[str | None, str]:
     name = str(getattr(settings, "technique_exemplar_collection", "") or "").strip()
     if name:
         return name, "configured"
-    fingerprint = npz_fingerprint(getattr(settings, "technique_exemplar_index_path", None))
+    try:
+        fingerprint = npz_fingerprint(getattr(settings, "technique_exemplar_index_path", None))
+    except ExemplarStoreError as error:
+        return None, f"no TECHNIQUE_EXEMPLAR_COLLECTION configured and {error}"
     if fingerprint is None:
         return None, (
             "no TECHNIQUE_EXEMPLAR_COLLECTION configured and no npz artifact to derive it from"
@@ -471,12 +610,60 @@ def configured_collection_name(settings: Any) -> tuple[str | None, str]:
     )
 
 
+def configured_tolerance(settings: Any) -> float:
+    """``technique_exemplar_tolerance`` (default 1e-6); raises ``ValueError`` when it is not a
+    finite number at or above 0."""
+    value = getattr(settings, "technique_exemplar_tolerance", DEFAULT_TOLERANCE)
+    tolerance = float(DEFAULT_TOLERANCE if value is None else value)
+    if not (math.isfinite(tolerance) and tolerance >= 0.0):
+        raise ValueError(f"exemplar tolerance {value!r} is not a finite number >= 0")
+    return tolerance
+
+
+def verify_library(
+    collection: Any,
+    metadata: Mapping[str, Any],
+    *,
+    tolerance: float,
+    source: ExemplarIndex | None = None,
+) -> VerifiedLibrary:
+    """Download the library (:func:`read_exemplar_collection`) and hold it to the tolerances:
+    norms within ``tolerance`` of 1 and, given the ``source`` npz, every component within
+    ``tolerance`` of it and labels, texts and sources equal. Raises :class:`ExemplarStoreError`
+    with every reason otherwise."""
+    library = read_exemplar_collection(collection, metadata)
+    deviation = library_deviation(
+        library.embeddings, source.embeddings if source is not None else None
+    )
+    problems = tolerance_problems(deviation, tolerance)
+    if source is not None:
+        problems.extend(source_problems(library, source))
+    if problems:
+        raise ExemplarStoreError("; ".join(problems))
+    return VerifiedLibrary(library, {**deviation, "tolerance": float(tolerance)})
+
+
+def _source_npz(path: Any, fingerprint: str) -> ExemplarIndex:
+    """The npz the collection was copied from (its own fingerprint check included)."""
+    try:
+        source = ExemplarIndex.load(path)
+    except (ValueError, KeyError, TypeError, OSError, json.JSONDecodeError) as error:
+        raise ExemplarStoreError(f"the source npz {path} is unreadable: {error}") from error
+    if source is None or source.fingerprint != fingerprint:
+        raise ExemplarStoreError(f"the source npz {path} changed while it was read")
+    return source
+
+
 def load_chroma_exemplar_store(
     settings: Any, client: Any
 ) -> tuple[ChromaExemplarStore | None, str]:
-    """Open and verify the configured exemplar collection: ``(store, "ok")`` or
-    ``(None, reason)``. Read-only (``get_collection``, ``count``, ``get``, ``query`` later);
-    never raises for an unusable collection."""
+    """Open and verify the configured exemplar collection: ``(store, "ok")``, ``(store, "ok
+    (unverified: ...)")`` when neither the npz nor a pinned fingerprint was there to check the
+    vectors against (:attr:`ChromaExemplarStore.status`), or ``(None, reason)``. Read-only
+    (``get_collection``, ``count``, ``get``, ``query`` later); never raises for an unusable
+    collection. The store's ``fingerprint`` is the Chroma library's own; ``source_fingerprint``
+    the npz the collection was copied from; ``technique_exemplar_library_fingerprint``, when
+    set, must equal the former."""
     if client is None:
         return None, "no Chroma client (the vector store has none)"
     search = str(getattr(settings, "technique_exemplar_search", "exact") or "exact").lower()
@@ -485,6 +672,11 @@ def load_chroma_exemplar_store(
     overfetch = float(getattr(settings, "technique_exemplar_overfetch", 2.0))
     if not overfetch >= 1.0:
         return None, f"exemplar overfetch {overfetch} is below 1"
+    try:
+        tolerance = configured_tolerance(settings)
+        pinned = configured_library_fingerprint(settings)
+    except (TypeError, ValueError) as error:
+        return None, str(error)
     name, how = configured_collection_name(settings)
     if name is None:
         return None, how
@@ -512,27 +704,50 @@ def load_chroma_exemplar_store(
                 f"collection {name} searches with ef_search {hnsw.get('ef_search')!r}, "
                 f"below the configured {required_ef}"
             )
-        npz = npz_fingerprint(getattr(settings, "technique_exemplar_index_path", None))
+        npz_path = getattr(settings, "technique_exemplar_index_path", None)
+        npz = npz_fingerprint(npz_path)
         if npz is not None and npz != metadata["fingerprint"]:
             return None, (
-                f"collection {name} holds library {metadata['fingerprint']}, the npz artifact "
-                f"is {npz}: resync or point TECHNIQUE_EXEMPLAR_COLLECTION elsewhere"
+                f"collection {name} was copied from library {metadata['fingerprint']}, the npz "
+                f"artifact is {npz}: resync or point TECHNIQUE_EXEMPLAR_COLLECTION elsewhere"
             )
-        stamp = (str(collection.id), name, metadata["fingerprint"], metadata["records_hash"], count)
-        index = _VERIFIED.get(client, stamp)
-        if index is None:
-            index = _VERIFIED.put(client, stamp, read_exemplar_collection(collection, metadata))
+        # verified once per client, collection and source; the entry holds the library
+        # fingerprint, which is known only after the download
+        stamp = (
+            str(collection.id),
+            name,
+            str(metadata["fingerprint"]),
+            str(metadata["records_hash"]),
+            count,
+            tolerance,
+            npz,
+        )
+        verified = _VERIFIED.get(client, stamp)
+        if verified is None:
+            source = _source_npz(npz_path, npz) if npz is not None else None
+            verified = _VERIFIED.put(
+                client,
+                stamp,
+                verify_library(collection, metadata, tolerance=tolerance, source=source),
+            )
     except ExemplarStoreError as error:
         return None, f"collection {name}: {error}"
     except Exception as error:  # the server went away mid-download
         return None, f"collection {name} unreadable: {type(error).__name__}: {error}"
+    problem = pinned_fingerprint_problem(verified.fingerprint, pinned)
+    if problem is not None:
+        return None, f"collection {name}: {problem}"
+    verified_against = [
+        *(["source npz"] if verified.verification.get("compared_with_source") else []),
+        *(["pinned library fingerprint"] if pinned else []),
+    ]
     try:
         server_version = str(client.get_version())
     except Exception:
         server_version = None
     backend = str(getattr(settings, "technique_exemplar_backend", "auto") or "auto").lower()
     store = ChromaExemplarStore(
-        index=index,
+        index=verified.index,
         collection=collection,
         search=search,
         overfetch=overfetch,
@@ -542,8 +757,15 @@ def load_chroma_exemplar_store(
         server_version=server_version,
         hnsw=hnsw,
         records_hash=str(metadata["records_hash"]),
+        source_fingerprint=str(metadata["fingerprint"]),
+        tolerance=tolerance,
+        verification={
+            **verified.verification,
+            "pinned_fingerprint": pinned or None,
+            "verified_against": verified_against,
+        },
     )
-    return store, "ok"
+    return store, "ok" if store.verified else f"ok (unverified: {UNVERIFIED_REASON})"
 
 
 def clear_memo() -> None:

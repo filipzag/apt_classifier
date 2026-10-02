@@ -23,9 +23,11 @@ Exemplar backend
 :func:`add_exemplar_backend_arguments` gives a script ``--exemplar-backend``,
 ``--exemplar-search`` (overrides of ``TECHNIQUE_EXEMPLAR_BACKEND`` / ``_SEARCH`` for the run, see
 :func:`exemplar_setting_overrides`) and ``--require-exemplar-backend X``: the run stops with exit
-2 when the library did not load from ``X`` (:func:`exemplar_backend_problem` right after loading)
-or when a Chroma exemplar query fell back to the local search (checked again at the end). Recall
-misses of an HNSW search are reported in the artifact, never refused: the votes stay exact.
+2 when the library did not load from ``X`` (:func:`exemplar_backend_problem` right after loading),
+when a Chroma library was verified against neither the npz nor a pinned
+``TECHNIQUE_EXEMPLAR_LIBRARY_FINGERPRINT`` (status ``active (unverified: ...)``), or when a Chroma
+exemplar query fell back to the local search (checked again at the end). Recall misses of an
+HNSW search are reported in the artifact, never refused: the votes stay exact.
 """
 
 from __future__ import annotations
@@ -206,6 +208,9 @@ def exemplar_identity(
         "signature": signature,
     }
     if (signature or {}).get("backend") == "chroma":
+        # the Chroma library has its own fingerprint (Chroma re-normalised the vectors); the
+        # npz it was copied from is recorded beside it
+        identity["source_fingerprint"] = getattr(index, "source_fingerprint", None)
         # counters at the time the identity is taken (the end of the run in the benchmarks)
         identity["query_totals"] = exemplar_query_totals()
     return identity
@@ -249,6 +254,12 @@ def exemplar_backend_problem(index: Any, required: str | None) -> str | None:
     backend = str(getattr(index, "backend", "npz") or "npz")
     if backend != required:
         return f"--require-exemplar-backend {required}: the library loaded from {backend}"
+    if backend == "chroma" and not getattr(index, "verified", True):
+        return (
+            f"--require-exemplar-backend {required}: the Chroma library "
+            f"{getattr(index, 'fingerprint', None)} was verified against neither the npz nor a "
+            "pinned TECHNIQUE_EXEMPLAR_LIBRARY_FINGERPRINT (only its norms were checked)"
+        )
     fallbacks = exemplar_query_totals().get("search_fallbacks", 0) if backend == "chroma" else 0
     if fallbacks:
         return (

@@ -10,6 +10,7 @@ import pytest
 
 from apt_classifier.acceptance import (
     CONTRACT_1_KEYS,
+    CONTRACT_RECORD_KEYS,
     EXEMPLAR_CONTRACT_KEYS,
     FEATURE_NAMES,
     FEATURE_SCHEMA_VERSION,
@@ -278,7 +279,11 @@ def test_legacy_contract_is_the_serving_default():
     """LEGACY_CONTRACT must equal what the default serving settings produce (except the exemplar
     fingerprint, which a legacy artifact supplies itself)."""
     runtime = _default_contract("fp-1")
-    assert set(runtime) == {"contract_version", *RETRIEVAL_CONTRACT_KEYS}
+    assert set(runtime) == {"contract_version", *RETRIEVAL_CONTRACT_KEYS, *CONTRACT_RECORD_KEYS}
+    # the backend is recorded beside the compared keys, never compared itself
+    assert not set(CONTRACT_RECORD_KEYS) & set(RETRIEVAL_CONTRACT_KEYS)
+    assert runtime["exemplar_backend"] == "npz"
+    assert _default_contract(None)["exemplar_backend"] is None
     assert set(LEGACY_CONTRACT) == set(runtime)
     assert {key: runtime[key] for key in runtime if key != "exemplar_fingerprint"} == {
         key: LEGACY_CONTRACT[key] for key in runtime if key != "exemplar_fingerprint"

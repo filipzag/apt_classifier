@@ -10,12 +10,16 @@ import pytest
 from apt_classifier import exemplar_store
 from apt_classifier.exemplar_store import load_chroma_exemplar_store
 from scripts.exemplar_backend_equivalence import (
+    PLAN_B,
     CachedEmbedder,
     compare_mapping_runs,
+    compare_mapping_tolerance,
     compare_vote_lists,
+    neighbour_lists,
     recall_level,
     refused_set,
     run_vote_levels,
+    tolerance_vote_level,
     vote_differences,
 )
 from tests.test_exemplar_store import _library, _settings, _synced
@@ -28,8 +32,8 @@ def _fresh_memo():
     exemplar_store.clear_memo()
 
 
-def _stores():
-    client, index, name = _synced()
+def _stores(**client_options):
+    client, index, name = _synced(**client_options)
     exact, _ = load_chroma_exemplar_store(_settings(name), client)
     hnsw, _ = load_chroma_exemplar_store(_settings(name, search="hnsw"), client)
     return client, index, name, exact, hnsw
@@ -61,6 +65,136 @@ def test_vote_levels_pass_when_the_copy_is_identical():
     # raw recall@window is informational: float32 vs float64 order at the window edge can swap
     assert report["L2"]["self"]["default_k"]["raw_recall_at_window_mean"] > 0.999
     assert client.writes() == []
+
+
+def test_vote_levels_judge_a_renormalising_server_by_plan_b():
+    """The real server: the Chroma library differs from the npz in the last bits. L1 compares
+    the two libraries under Plan B; L2 and L3 stay inside the Chroma library, bit for bit."""
+    client, index, name, exact, hnsw = _stores(normalise_vectors=True)
+    assert exact.fingerprint != index.fingerprint
+    _, queries = _library()
+    report = run_vote_levels(
+        index,
+        exact,
+        hnsw,
+        {"self": index.embeddings, "queries": queries},
+        levels=("L1", "L2", "L3"),
+        parents={"T1059.001": "T1059"},
+        k=64,
+        tau=0.05,
+        duplicate_similarity=0.95,
+        batch_size=37,
+        wide_k=256,
+        wide_k_sets=("queries",),
+    )
+    assert all(entry["passed"] for level in report.values() for entry in level.values())
+    level = report["L1"]["self"]
+    assert level["criteria"] == "plan_b" and level["queries"] == len(index)
+    assert level["share_identical_neighbour_order"] >= PLAN_B["min_identical_neighbour_share"]
+    assert level["max_feature_diff"] < PLAN_B["max_feature_diff"]
+    assert 0.0 < level["max_cosine_change"] < 1e-5
+    assert level["queries_with_feature_diff_at_tolerance"] == 0
+    assert level["max_feature_diff_where_the_window_kept_its_order"] <= level["max_feature_diff"]
+    assert 0.99 <= level["neighbour_lists"]["64"]["share_identical_voters"] <= 1.0
+    assert set(report["L1"]["queries"]["neighbour_lists"]) == {"64", "256"}
+    assert report["L3"]["self"]["differences"] == 0  # hnsw and exact: one library
+    assert report["L2"]["self"]["default_k"]["recall_misses"] == 0
+    assert client.writes() == []
+
+
+def test_plan_b_fails_when_neighbour_lists_or_features_move():
+    index, queries = _library()
+    rng = np.random.default_rng(1)
+    moved = index.embeddings + rng.normal(scale=0.05, size=index.embeddings.shape)
+    moved = (moved / np.linalg.norm(moved, axis=1, keepdims=True)).astype(np.float32)
+    other = type(index)(moved, index.labels, index.texts, index.sources, dict(index.metadata))
+    report = tolerance_vote_level(
+        index,
+        other,
+        queries,
+        batch_size=64,
+        k=64,
+        parent_of={},
+        tau=0.05,
+        duplicate_similarity=0.95,
+    )
+    assert not report["passed"] and report["criteria"] == "plan_b"
+    assert report["share_identical_neighbour_order"] < PLAN_B["min_identical_neighbour_share"]
+    assert report["max_feature_diff"] >= PLAN_B["max_feature_diff"]
+    assert report["share_with_changed_technique_ranks"] > 0
+    # the same library is bit for bit identical under either criterion
+    same = tolerance_vote_level(
+        index, index, queries, batch_size=64, k=64, bitwise=True, parent_of={}, tau=0.05
+    )
+    assert same["passed"] and same["differences"] == 0 and same["max_feature_diff"] == 0.0
+    lists = neighbour_lists(index, other, queries[:10], ks=[4], batch_size=3)
+    assert lists["queries"] == 10 and lists["neighbour_lists"]["4"]["window"] == 24
+
+
+def _mapping_block(cases, *, changed_accepted=0, changed_states=0, probability_shift=0.0):
+    rows = []
+    for number in range(cases):
+        accepted = ["T1"] if number >= changed_accepted else ["T1", "T2"]
+        state = "auto_accepted" if number >= changed_states else "needs_review"
+        rows.append(
+            {
+                "case_id": f"c{number}",
+                "ranked_technique_ids": ["T1", "T2"],
+                "accepted_technique_ids": accepted,
+                "candidates": [
+                    {
+                        "technique_id": "T1",
+                        "fused_rank": 1,
+                        "state": "auto_accepted",
+                        "acceptance_probability": 0.6 + probability_shift,
+                    },
+                    {"technique_id": "T2", "fused_rank": 2, "state": state},
+                ],
+            }
+        )
+    return {
+        "cases": rows,
+        "pooled": {"metrics": {"micro_f1": 0.5 + probability_shift, "case_count": cases}},
+        "datasets": {"tram": {"metrics": {"micro_f1": 0.4}}},
+    }
+
+
+def test_plan_b_mapping_comparison_counts_what_changed():
+    base = _mapping_block(1000)
+    within = compare_mapping_tolerance(
+        base, _mapping_block(1000, changed_accepted=5, changed_states=7, probability_shift=1e-6)
+    )
+    assert within["passed"] and within["changed_accepted"] == 5
+    assert within["changed_accepted_share"] == 0.005 and within["changed_states"] == 7
+    assert within["changed_candidates"] == 0
+    assert abs(within["max_probability_diff"] - 1e-6) < 1e-9
+    assert abs(within["metric_deltas"]["pooled"]["micro_f1"] - 1e-6) < 1e-9
+    assert within["metric_deltas"]["datasets"]["tram"] == {"micro_f1": 0.0}
+    beyond = compare_mapping_tolerance(base, _mapping_block(1000, changed_accepted=6))
+    assert not beyond["passed"] and beyond["changed_accepted"] == 6
+    assert beyond["examples"]["accepted"][:2] == ["c0", "c1"]
+    missing = _mapping_block(1000)
+    missing["cases"].pop()
+    assert not compare_mapping_tolerance(base, missing)["passed"]
+
+
+def test_the_library_mismatch_override_exists_only_in_the_equivalence_tool():
+    """--allow-library-mismatch is a diagnostic of this tool: no setting, no other script and no
+    product code can run a model on a library it was not fitted on."""
+    from pathlib import Path
+
+    from apt_classifier.config import Settings
+
+    root = Path(__file__).resolve().parents[1]
+    holders = sorted(
+        str(path.relative_to(root))
+        for folder in ("apt_classifier", "api", "app", "scripts")
+        for path in (root / folder).rglob("*.py")
+        if "allow_library_mismatch" in path.read_text(encoding="utf-8")
+        or "allow-library-mismatch" in path.read_text(encoding="utf-8")
+    )
+    assert holders == ["scripts/exemplar_backend_equivalence.py"]
+    assert not [name for name in Settings.model_fields if "mismatch" in name]
 
 
 def test_recall_level_reports_misses_while_the_votes_stay_identical():
@@ -163,8 +297,17 @@ def test_clinic_and_elastic_sets_are_refused():
 
 
 # ----- L4 end to end (fake Chroma, fake dense store, fake embedder, a tiny contract-less model)
-def _l4_main(tmp_path, monkeypatch, *, ignore_contract_at_load=False, **settings_changes):
-    """Run ``main --levels L4`` the way R11 does, on fakes only; returns (exit code, L4 block)."""
+def _l4_main(
+    tmp_path,
+    monkeypatch,
+    *,
+    ignore_contract_at_load=False,
+    normalise_vectors=False,
+    extra_args=(),
+    **settings_changes,
+):
+    """Run ``main --levels L4`` the way R11 does, on fakes only; returns (exit code, L4 block,
+    or ``None`` when nothing was written)."""
     import json
     import zlib
 
@@ -179,7 +322,7 @@ def _l4_main(tmp_path, monkeypatch, *, ignore_contract_at_load=False, **settings
     from apt_classifier.vectorstore import VectorHit
     from tests.test_exemplar_store import MODEL, REVISION
 
-    client, index, name = _synced(index=_library(count=200)[0])
+    client, index, name = _synced(index=_library(count=200)[0], normalise_vectors=normalise_vectors)
     npz_path = index.save(tmp_path / "exemplars.npz")
     technique_ids = sorted({label for labels in index.labels for label in labels} | {"T1566"})
     kb = AttackKnowledgeBase(
@@ -304,10 +447,13 @@ def _l4_main(tmp_path, monkeypatch, *, ignore_contract_at_load=False, **settings
             str(output),
             "--allow-shared-output",
             "--overwrite",
+            *extra_args,
         ],
         client=client,
     )
     assert not client.writes()
+    if not output.exists():
+        return code, None
     return code, json.loads(output.read_text(encoding="utf-8"))["levels"]["L4"]
 
 
@@ -341,3 +487,35 @@ def test_l4_fails_when_the_model_is_refused_inside_retrieval(tmp_path, monkeypat
         assert not entry["model_scored"] and entry["probability_rows"] == 0
         assert entry["model_refused_cases"] > 0
         assert any("dense_overfetch 90" in reason for reason in entry["model_refused_reasons"])
+
+
+def test_l4_on_a_renormalising_server_needs_the_diagnostic_flag(tmp_path, monkeypatch, capsys):
+    """The shipped-style model was fitted on the npz: the runtime refuses it on the Chroma
+    library, so L4 runs only with --allow-library-mismatch, which loads it as for the npz and
+    runs it under the Chroma library's fingerprint to count what the re-normalisation changes."""
+    code, level = _l4_main(tmp_path, monkeypatch, normalise_vectors=True)
+    assert code == 2 and level is None
+    assert "--allow-library-mismatch" in capsys.readouterr().err
+    exemplar_store.clear_memo()
+    code, level = _l4_main(
+        tmp_path / "flag",
+        monkeypatch,
+        normalise_vectors=True,
+        extra_args=["--allow-library-mismatch"],
+    )
+    assert code == 0 and level["passed"], level
+    npz_fp = level["arms"]["npz"]["library"]
+    for arm in ("chroma_exact", "chroma_hnsw"):
+        entry = level["arms"][arm]
+        assert entry["library"] != npz_fp
+        assert entry["acceptance_exemplar_fingerprint"] == entry["library"]
+        assert "diagnostic --allow-library-mismatch" in entry["acceptance_model_status"]
+        assert entry["model_active"] and entry["model_scored"] and entry["probability_rows"] > 0
+    for cues in ("public:dev", "public:dev:no_cues"):
+        block = level[cues]
+        assert block["npz_repeat"]["passed"] and block["npz_repeat"]["differences"] == 0
+        assert block["chroma_hnsw_vs_exact"]["passed"]
+        assert block["chroma_hnsw_vs_exact"]["differences"] == 0
+        for arm in ("chroma_exact", "chroma_hnsw"):
+            assert block[arm]["criteria"] == "plan_b" and block[arm]["passed"]
+            assert "metric_deltas" in block[arm] and "changed_states" in block[arm]

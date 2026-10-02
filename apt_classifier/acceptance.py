@@ -125,6 +125,11 @@ RETRIEVAL_CONTRACT_KEYS: tuple[str, ...] = (
     "dense_collection",
     *EXEMPLAR_CONTRACT_KEYS,
 )
+# Recorded in a contract but never compared: where the exemplar library was read from ("npz" or
+# "chroma"). The library's identity is ``exemplar_fingerprint`` (recomputed from the vectors), so
+# two backends serving bit-identical vectors are the same library; Chroma re-normalises on
+# insert, so its library has its own fingerprint and a model fitted on the npz is refused there.
+CONTRACT_RECORD_KEYS: tuple[str, ...] = ("exemplar_backend",)
 _FLOAT_KEYS = frozenset(
     {
         "similarity_threshold",
@@ -192,6 +197,7 @@ LEGACY_CONTRACT: dict[str, Any] = {
     "exemplar_vote_norm": DEFAULT_VOTE_NORM,
     "exemplar_segment_votes": DEFAULT_SEGMENT_VOTES,
     "exemplar_search_class": "exact",
+    "exemplar_backend": "npz",
 }
 
 
@@ -221,9 +227,10 @@ def retrieval_contract(
 
     ``kwargs`` are the keyword arguments ``retrieve_techniques`` runs with
     (:func:`apt_classifier.retrieve.retrieval_kwargs`), ``source`` the exemplar library whose
-    votes the candidates carry (``None`` when exemplars are off or unavailable). The lexical
-    fields are those of ``lexical_fields``, else of ``kwargs["lexical_index"]``, else the
-    fields ``retrieve_techniques`` builds its own index with."""
+    votes the candidates carry (``None`` when exemplars are off or unavailable): its
+    fingerprint is compared, its backend only recorded (:data:`CONTRACT_RECORD_KEYS`). The
+    lexical fields are those of ``lexical_fields``, else of ``kwargs["lexical_index"]``, else
+    the fields ``retrieve_techniques`` builds its own index with."""
     if lexical_fields is None:
         lexical_fields = getattr(kwargs.get("lexical_index"), "fields", None) or None
     if lexical_fields is None:
@@ -235,6 +242,7 @@ def retrieval_contract(
         )
     fingerprint = getattr(source, "fingerprint", None) if source is not None else None
     search_class = getattr(source, "search_class", "exact") if source is not None else None
+    backend = str(getattr(source, "backend", "npz") or "npz") if source is not None else None
     values = {
         "similarity_threshold": kwargs["threshold"],
         "top_k": kwargs["top_k"],
@@ -263,6 +271,8 @@ def retrieval_contract(
     return {
         "contract_version": RETRIEVAL_CONTRACT_VERSION,
         **{key: _contract_value(key, values[key]) for key in RETRIEVAL_CONTRACT_KEYS},
+        # recorded, not compared (CONTRACT_RECORD_KEYS)
+        "exemplar_backend": backend,
     }
 
 
