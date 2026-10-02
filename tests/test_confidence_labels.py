@@ -534,6 +534,11 @@ def test_labels_on_or_off_never_change_decisions_rankings_or_exports(
     engine = off.engine
     if engine.combiner is None:
         pytest.skip(f"learned combiner not active: {engine.combiner_status}")
+    off = CaseService(  # the off arm is explicit: the shipped default is on
+        off.settings.model_copy(update={"confidence_labels_enabled": False}),
+        engine=engine,
+        cases_dir=cases,
+    )
     artifact = tmp_path_factory.mktemp("labels") / "labels.json"
     _calibrator(
         attack_version=str(engine.kb.version),
