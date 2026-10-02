@@ -32,7 +32,9 @@ def related_groups(
 ) -> dict[str, dict[str, str]]:
     """Map each group id to ``{related_group_id: reason}``; symmetric; memoized per KB."""
     groups = getattr(kb, "groups", {}) or {}
-    stamp = (str(getattr(kb, "version", "")), len(groups))
+    # the parameter is part of the stamp: a call with another user limit must not be served the
+    # table cached for the default one
+    stamp = (str(getattr(kb, "version", "")), len(groups), int(rare_software_max_users))
     cached = _RELATED_CACHE.get(kb, stamp)
     if cached is not None:
         return cached

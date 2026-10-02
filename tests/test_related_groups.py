@@ -94,3 +94,13 @@ def test_shared_admin_utility_does_not_relate_groups():
     related = related_groups(kb)
     assert "G2" in related["G1"] and "Implant" in related["G1"]["G2"]
     assert "G3" not in related["G1"]  # only the utility is shared with G3
+
+
+def test_memo_does_not_serve_one_user_limit_for_another():
+    kb = _kb()
+    default = related_groups(kb)
+    strict = related_groups(kb, rare_software_max_users=2)
+    assert strict is not default
+    # S0030 is used by exactly two groups (Carbanak, FIN7) in this KB, so both limits keep it
+    assert "G0046" in strict.get("G0008", {}) and "G0046" in default.get("G0008", {})
+    assert related_groups(kb) == default
