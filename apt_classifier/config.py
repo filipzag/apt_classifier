@@ -260,8 +260,10 @@ class Settings(BaseSettings):
     attribution_cluster_scope: str = "full"
     # Calibrated confidence labels on the Top-three view (apt_classifier/confidence_labels.py,
     # scripts/fit_confidence_labels.py): display only, never a gate, pinned to the combiner
-    # artifact above. Off until the pre-registered check on the fresh seeds 43/47 passes.
-    confidence_labels_enabled: bool = False
+    # artifact above. Adopted 2026-10-02 after the pre-registered check on fresh seeds 43/47
+    # (docs 21.3.15: "strong" wrong 4.2% pooled, calibration error 0.041). Fails closed (no
+    # labels) when the artifact is missing or was fitted against a different combiner.
+    confidence_labels_enabled: bool = True
     confidence_labels_path: Path = (
         PROJECT_ROOT / "data" / "models" / "calibration" / "confidence_labels.json"
     )
