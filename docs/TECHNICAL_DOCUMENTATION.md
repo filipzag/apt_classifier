@@ -2697,7 +2697,16 @@ settings and no LLM verifier.
 - `--ablate-cues` runs every mode twice, with and without the regex cue tables.
 - `scripts/check_regression.py` (`make check-regression`) fails when pooled micro-F1 drops
   by more than 0.02 or hit@10 by more than 0.03 against
-  `data/audits/public_heldout_baseline.json`.
+  `data/audits/public_heldout_baseline.json`. It displays parent-aware F1 but never gates
+  on it.
+- Parent-aware precision, recall and F1 give one-to-one credit when an accepted id equals
+  an expected id or is its parent or sub-technique, counted as a maximum matching between
+  the accepted and expected sets of each case. Before the fix on 2026-10-02 (artifacts up to
+  and including that day's runs) the pairing was first-fit over Python sets, so the same
+  predictions could score differently under another `PYTHONHASHSEED`. On the current public artifact only the `expert` slice with cues moved
+  (parent-aware precision 0.7265 to 0.7350, F1 0.2665 to 0.2696, pooled F1 0.4505 to
+  0.4511). The maximum matching always gives the top of that range, which is also the value
+  the published artifacts hold, so no published number changes.
 
 Label characteristics: `tram` rows are single sentences (median 15 words, about 1.1
 labels per case), `expert` rows are report paragraphs (median 62 words, about 3.3 labels

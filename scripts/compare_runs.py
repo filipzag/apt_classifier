@@ -54,9 +54,11 @@ REVIEW = "needs_review"
 VISIBLE_STATES = frozenset({ACCEPTED, REVIEW})
 # the ranking metrics depend on the full ranked list, of which artifacts store the top ten
 RANKING_METRICS = ("hit_at_1", "hit_at_3", "hit_at_10", "mrr", "ndcg_at_10")
-# Parent-aware matching in apt_classifier/evaluation.py iterates Python sets greedily, so
-# identical case rows can score differently under another PYTHONHASHSEED: reported, never
-# an identity failure (the case rows and accepted sets are compared exactly).
+# Artifacts written before the maximum-matching fix (up to and including the 2026-10-02 runs,
+# e.g. R01-R37 of the Chroma exemplar programme) computed parent-aware metrics with a
+# first-fit pairing over Python sets, so identical case rows could score differently under
+# another PYTHONHASHSEED. Differences there are reported, never an identity failure; case
+# rows and accepted sets compare exactly, and they determine the parent-aware counts.
 ORDER_DEPENDENT_METRICS = frozenset(
     {"parent_aware_precision", "parent_aware_recall", "parent_aware_f1"}
 )

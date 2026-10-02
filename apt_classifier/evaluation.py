@@ -305,24 +305,10 @@ def evaluate_technique_predictions(
         for cutoff in hit_counts:
             hit_counts[cutoff] += int(any(label in expected for label in ranked[:cutoff]))
         ndcg_values.append(_ndcg(ranked[:10], expected))
-        matched_expected: set[str] = set()
-        matched_accepted: set[str] = set()
-        for predicted_id in accepted:
-            match = next(
-                (
-                    expected_id
-                    for expected_id in expected
-                    if expected_id not in matched_expected
-                    and _hierarchy_compatible(predicted_id, expected_id, kb)
-                ),
-                None,
-            )
-            if match is not None:
-                matched_expected.add(match)
-                matched_accepted.add(predicted_id)
-        parent_tp += len(matched_accepted)
-        parent_fp += len(accepted - matched_accepted)
-        parent_fn += len(expected - matched_expected)
+        matched = _hierarchy_matching(accepted, expected, kb)
+        parent_tp += matched
+        parent_fp += len(accepted) - matched
+        parent_fn += len(expected) - matched
     precision, recall, f1 = _prf(true_positive, false_positive, false_negative)
     parent_precision, parent_recall, parent_f1 = _prf(parent_tp, parent_fp, parent_fn)
     macro = [_prf(*counts) for counts in per_label.values()]
@@ -579,6 +565,37 @@ def _hierarchy_compatible(predicted: str, expected: str, kb: Any) -> bool:
     predicted_parent = getattr(predicted_item, "parent_id", None)
     expected_parent = getattr(expected_item, "parent_id", None)
     return predicted_parent == expected or expected_parent == predicted
+
+
+def _hierarchy_matching(accepted: set[str], expected: set[str], kb: Any) -> int:
+    """Size of a maximum one-to-one matching between accepted and expected ids, where two ids
+    may pair when ``_hierarchy_compatible`` (equal, or parent and sub-technique). Augmenting
+    paths over sorted ids: the count never depends on set iteration order (PYTHONHASHSEED),
+    which a first-fit pairing did."""
+    if not accepted or not expected:
+        return 0
+    expected_ids = sorted(expected)
+    candidates = {
+        predicted_id: [
+            expected_id
+            for expected_id in expected_ids
+            if _hierarchy_compatible(predicted_id, expected_id, kb)
+        ]
+        for predicted_id in sorted(accepted)
+    }
+    owner: dict[str, str] = {}
+
+    def augment(predicted_id: str, visited: set[str]) -> bool:
+        for expected_id in candidates[predicted_id]:
+            if expected_id in visited:
+                continue
+            visited.add(expected_id)
+            if expected_id not in owner or augment(owner[expected_id], visited):
+                owner[expected_id] = predicted_id
+                return True
+        return False
+
+    return sum(augment(predicted_id, set()) for predicted_id in candidates)
 
 
 def _prf(tp: int, fp: int, fn: int) -> tuple[float, float, float]:

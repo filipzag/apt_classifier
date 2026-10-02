@@ -116,6 +116,98 @@ def test_technique_metrics_include_negative_and_hierarchy_scores():
     assert metrics["abstention_recall"] == 1.0
 
 
+HIERARCHY_KB = SimpleNamespace(
+    techniques={
+        "T1566": SimpleNamespace(parent_id=None),
+        "T1566.001": SimpleNamespace(parent_id="T1566"),
+        "T1566.002": SimpleNamespace(parent_id="T1566"),
+        "T1059": SimpleNamespace(parent_id=None),
+        "T1059.001": SimpleNamespace(parent_id="T1059"),
+        "T1105": SimpleNamespace(parent_id=None),
+    }
+)
+
+
+def test_parent_aware_metrics_use_a_maximum_matching():
+    """Worked example: a first-fit pairing could spend T1566.001 on the parent T1566 and leave
+    T1566.002 (which can only pair with T1566) unmatched; the maximum matching pairs both. In
+    one process the old pairing failed this only under some hash seeds, so the regression guard
+    for it is the subprocess test below, which runs the same case under several seeds."""
+    cases = [TechniqueEvaluationCase("c", "doc", "x", ("T1566", "T1566.001"))]
+    predictions = [TechniquePrediction.from_ranked("c", ("T1566.001", "T1566.002"), accepted=None)]
+    metrics = evaluate_technique_predictions(cases, predictions, kb=HIERARCHY_KB)
+    assert metrics["micro_precision"] == 0.5
+    assert metrics["parent_aware_precision"] == 1.0
+    assert metrics["parent_aware_recall"] == 1.0
+
+
+def test_hierarchy_matching_is_maximum_on_every_small_case():
+    """Brute force over every subset pair of a small hierarchy: the matching size equals the
+    best one-to-one pairing found by trying every permutation."""
+    from itertools import combinations, permutations
+
+    from apt_classifier.evaluation import _hierarchy_compatible, _hierarchy_matching
+
+    ids = sorted(HIERARCHY_KB.techniques)
+    subsets = [set(combo) for size in range(4) for combo in combinations(ids, size)]
+
+    def brute_force(accepted: set[str], expected: set[str]) -> int:
+        left, right = sorted(accepted), sorted(expected)
+        if len(left) > len(right):
+            left, right = right, left
+            swapped = True
+        else:
+            swapped = False
+        best = 0
+        for chosen in permutations(right, len(left)):
+            pairs = zip(left, chosen, strict=True)
+            best = max(
+                best,
+                sum(
+                    _hierarchy_compatible(b, a, HIERARCHY_KB)
+                    if swapped
+                    else _hierarchy_compatible(a, b, HIERARCHY_KB)
+                    for a, b in pairs
+                ),
+            )
+        return best
+
+    for accepted in subsets:
+        for expected in subsets:
+            assert _hierarchy_matching(accepted, expected, HIERARCHY_KB) == brute_force(
+                accepted, expected
+            ), (accepted, expected)
+
+
+def test_parent_aware_metrics_do_not_depend_on_the_hash_seed():
+    """Set iteration order of strings follows PYTHONHASHSEED; the metric must not."""
+    import os
+    import subprocess
+    import sys
+
+    script = (
+        "from types import SimpleNamespace as N\n"
+        "from apt_classifier.evaluation import TechniqueEvaluationCase as C, "
+        "TechniquePrediction as P, evaluate_technique_predictions as e\n"
+        "kb = N(techniques={'T1566': N(parent_id=None), 'T1566.001': N(parent_id='T1566'),"
+        " 'T1566.002': N(parent_id='T1566')})\n"
+        "m = e([C('c', 'd', 'x', ('T1566', 'T1566.001'))],"
+        " [P.from_ranked('c', ('T1566.001', 'T1566.002'))], kb=kb)\n"
+        "print(m['parent_aware_f1'])\n"
+    )
+    values = set()
+    for seed in ("0", "1", "2", "3", "4", "5"):
+        completed = subprocess.run(
+            [sys.executable, "-c", script],
+            check=True,
+            capture_output=True,
+            text=True,
+            env={**os.environ, "PYTHONHASHSEED": seed},
+        )
+        values.add(completed.stdout.strip())
+    assert values == {"1.0"}
+
+
 def test_attribution_metrics_measure_unknown_rejection():
     cases = [
         AttributionEvaluationCase("known", "doc-one", "G1"),

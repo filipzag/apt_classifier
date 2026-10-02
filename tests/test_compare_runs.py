@@ -500,8 +500,9 @@ def test_summary_composes_the_ledger(tmp_path: Path, capsys):
 
 
 def test_mapping_identity_reports_order_dependent_metrics_without_failing():
-    """Parent-aware metrics depend on set iteration order (PYTHONHASHSEED): the same case rows
-    can score differently, so a difference there is listed but is not an identity failure."""
+    """Artifacts written before the maximum-matching fix scored parent-aware metrics in set
+    iteration order (PYTHONHASHSEED), so the same case rows could score differently: a
+    difference there is listed but is not an identity failure."""
 
     def artifact(parent_f1: float, micro_f1: float = 0.5) -> dict:
         row = {"case_id": "c1", "accepted_technique_ids": ["T1059"], "candidates": []}
