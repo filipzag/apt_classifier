@@ -1030,16 +1030,16 @@ def test_the_prereg_file_matches_the_plan():
     assert prereg.dev_datasets == ("tram", "expert", "derived_procedures")
     assert prereg.dev_cases == 1147
     # Chroma is the source: the library is the Chroma collection's, whose fingerprint the sync
-    # report gives; until prereg-fill writes it the file holds the placeholder
+    # report gave (prereg-fill wrote it before the registration commit, R10v2)
     assert prereg.exemplar_library == {
-        "fingerprint": EXEMPLAR_LIBRARY_PLACEHOLDER,
+        "fingerprint": REGISTERED_LIBRARY_FINGERPRINT,
         "count": 6360,
         "split": "train",
         "backend": "chroma",
         "source_fingerprint": "0f8d2e19a59967c63b03ea71",
         "tolerance": 1e-6,
     }
-    assert prereg.exemplar_library_placeholder
+    assert not prereg.exemplar_library_placeholder
     registered = prereg.payload["fixed"]["exemplar_library"]
     assert registered["collection"] == prereg.payload["fixed"]["hnsw"]["exemplar_collection"]
     assert registered["tolerance"] == 1e-6
@@ -1855,9 +1855,22 @@ def _sync_report(fingerprint: str, *, tolerance: Any = 1e-6, **library_changes) 
     }
 
 
+REGISTERED_LIBRARY_FINGERPRINT = "d8fbb0565e9addeaa3cb048c"
+
+
+def _unfilled_prereg_text() -> str:
+    """The committed pre-registration as it was before prereg-fill wrote the library
+    fingerprint (the registered file holds the filled value)."""
+    text = DEFAULT_PREREG.read_text(encoding="utf-8")
+    assert text.count(json.dumps(REGISTERED_LIBRARY_FINGERPRINT)) == 1
+    return text.replace(
+        json.dumps(REGISTERED_LIBRARY_FINGERPRINT), json.dumps(EXEMPLAR_LIBRARY_PLACEHOLDER)
+    )
+
+
 def test_prereg_fill_writes_the_chroma_library_fingerprint_and_nothing_else(tmp_path, capsys):
     target = tmp_path / "prereg.json"
-    original = DEFAULT_PREREG.read_text(encoding="utf-8")
+    original = _unfilled_prereg_text()
     target.write_text(original, encoding="utf-8")
     fingerprint = "c0ffee" * 4
     assert is_library_fingerprint(fingerprint) and not is_library_fingerprint(
@@ -1911,7 +1924,7 @@ def test_the_registered_exemplar_tolerance_is_enforced(tmp_path, monkeypatch):
     assert prereg.exemplar_library["tolerance"] == fixed["technique_exemplar_tolerance"] == 1e-6
     # 1. prereg-fill: the loosened report of the finding, and every way short of 1e-06
     target = tmp_path / "prereg.json"
-    original = DEFAULT_PREREG.read_text(encoding="utf-8")
+    original = _unfilled_prereg_text()
     target.write_text(original, encoding="utf-8")
     fingerprint = "c0ffee" * 4
     for report, needle in (
