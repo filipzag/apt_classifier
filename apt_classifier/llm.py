@@ -56,36 +56,65 @@ def local_llm_enabled(settings: Any) -> bool:
     return bool(_setting(settings, "local_llm_enabled", False))
 
 
+_TAGS_CACHE: dict[str, tuple[float, list[str] | None]] = {}
+_TAGS_TTL_SECONDS = 30.0
+
+
 def local_llm_models(settings: Any, timeout: float = 2.0) -> list[str] | None:
-    """Models pulled on the local Ollama server, or None when it is disabled or unreachable."""
+    """Models pulled on the local Ollama server, or None when it is disabled or unreachable.
+
+    Cached for 30 s per URL: the Streamlit UI asks on every rerun."""
     if not local_llm_enabled(settings):
         return None
     url = str(_setting(settings, "local_llm_url", "http://localhost:11434")).rstrip("/")
+    cached = _TAGS_CACHE.get(url)
+    if cached is not None and time.monotonic() - cached[0] < _TAGS_TTL_SECONDS:
+        return cached[1]
     try:
         response = httpx.get(f"{url}/api/tags", timeout=timeout)
         response.raise_for_status()
-        return [str(row.get("name", "")) for row in response.json().get("models", [])]
+        models = [str(row.get("name", "")) for row in response.json().get("models", [])]
     except (httpx.HTTPError, ValueError, AttributeError):
-        return None
+        models = None
+    _TAGS_CACHE[url] = (time.monotonic(), models)
+    return models
+
+
+def local_llm_ready(settings: Any) -> bool:
+    """The local server answers and has the fallback model pulled (``ollama pull``)."""
+    pulled = local_llm_models(settings)
+    if pulled is None:
+        return False
+    name = str(_setting(settings, "local_llm_fallback_model", "")).removeprefix(LOCAL_PREFIX)
+    return any(tag in {name, f"{name}:latest"} for tag in pulled)
 
 
 def llm_available(settings: Any) -> bool:
-    """True when some LLM can answer: an OpenRouter key, or a reachable local server."""
-    return _optional_api_key(settings) is not None or local_llm_models(settings) is not None
+    """True when some LLM can answer: an OpenRouter key, or a local server with the model."""
+    return _optional_api_key(settings) is not None or local_llm_ready(settings)
 
 
-def extraction_uses_llm(client: Any, settings: Any) -> bool:
-    """Whether prose is normalised by an LLM rather than split into sentences.
+def prose_normalisation(client: Any, settings: Any) -> tuple[str, str | None]:
+    """How report prose becomes observations: ``("extract", model)`` when OpenRouter answers
+    the extract model (whole-report extraction), ``("sentences", model)`` when a local model
+    answers it (split, then each sentence rewritten 1:1, ``evidence/standardise.py``) and
+    ``("split", None)`` without an LLM.
 
-    Only when OpenRouter answers the extract model or it is an explicit ``local/`` model, never
-    through the local fallback: the 4B rewriting whole reports lowered CTI-HAL technique F1
-    from 0.431 to 0.370 (it drops actions), and rewriting sentence by sentence was a wash over
-    all 55 reports (0.459 -> 0.472, 22 better, 20 worse; docs 16.4a).
+    A local model never rewrites a whole report: the 4B dropped actions (CTI-HAL technique F1
+    0.431 -> 0.370); one sentence at a time it gained over the plain split on all 55 CTI-HAL
+    reports (0.459 -> 0.472; docs 16.4a).
     """
     if client is None:
-        return False
-    direct = getattr(client, "answers_directly", None)
-    return True if direct is None else bool(direct(str(getattr(settings, "extract_model", ""))))
+        return "split", None
+    model = str(getattr(settings, "extract_model", ""))
+    resolve = getattr(client, "resolve_model", None)
+    if resolve is None:  # test fakes: a plain client extracts
+        return "extract", model
+    try:
+        resolved = resolve(model)
+    except RuntimeError:
+        return "split", None
+    return ("sentences", resolved) if is_local_model(resolved) else ("extract", resolved)
 
 
 def build_llm_client(settings: Any) -> "OpenRouterClient | None":

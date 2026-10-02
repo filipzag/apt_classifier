@@ -133,7 +133,7 @@ benchmark-attribution-production:
 	PYTHONPATH=. $(PYTHON) scripts/attribution_benchmark.py --pipeline production --output data/audits/attribution_heldout_production.json
 
 # ----- local LLM (Ollama; LOCAL_LLM_ENABLED=true + local/ model ids, see .env.example) -----
-LOCAL_LLM_MODELS ?= qwen3.5:9b qwen3.5:4b
+LOCAL_LLM_MODELS ?= qwen3.5:4b
 llm-pull:
 	for model in $(LOCAL_LLM_MODELS); do ollama pull $$model || exit 1; done
 

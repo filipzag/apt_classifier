@@ -16,11 +16,12 @@ class Settings(BaseSettings):
     )
 
     openrouter_api_key: SecretStr | None = None
-    # Local LLM (Ollama, docs: AGENTS.md "Local LLM"). Model ids prefixed ``local/`` in the
-    # per-task settings below run on it; without an OpenRouter key every other model id falls
-    # back to local_llm_fallback_model. Off by default: the defaults stay on OpenRouter until
-    # the local model has passed the mapping and naming gates.
-    local_llm_enabled: bool = False
+    # Local LLM (Ollama, docs 16.4a). Model ids prefixed ``local/`` in the per-task settings
+    # below run on it; without an OpenRouter key every other model id falls back to
+    # local_llm_fallback_model. On by default (product owner, 2026-10-02): it is used only
+    # when the server answers with the fallback model pulled; with an OpenRouter key nothing
+    # changes unless a model id starts with ``local/``.
+    local_llm_enabled: bool = True
     local_llm_url: str = "http://localhost:11434"
     # The 4B fits the 8 GB laptop GPU next to the app and a benchmark; the 9B (6.1 GiB) only
     # when nothing else holds GPU memory (docs 16.4a).

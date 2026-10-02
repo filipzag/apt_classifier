@@ -248,6 +248,12 @@ function AdminNav() {
   )
 }
 
+const PROSE_LABEL: Record<string, string> = {
+  extract: 'extracted by the OpenRouter model',
+  sentences: 'split, then rewritten sentence by sentence by the local model',
+  split: 'split into sentences',
+}
+
 const PROVIDER_LABEL: Record<string, string> = {
   openrouter: 'Production',
   local: 'Production · local LLM',
@@ -273,7 +279,7 @@ function SystemFooter({ system }: { system?: SystemInfo }) {
               <div>Embedder {system.embedding_model}</div>
               {!local && system.llm_models ? (
                 <div>
-                  Extraction {system.llm_models.extraction ?? 'off'} · verifier {system.llm_models.verifier ?? 'off'} · CyberRE{' '}
+                  Prose {PROSE_LABEL[system.prose_normalisation ?? 'extract']} · verifier {system.llm_models.verifier ?? 'off'} · CyberRE{' '}
                   {system.llm_models.cyberre ?? 'off'} · review {system.llm_models.review ?? 'off'}
                 </div>
               ) : !local ? (

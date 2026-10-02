@@ -14,7 +14,7 @@ class FakeSettings:
         self.key = key
         self.local_llm_enabled = local
         self.local_llm_url = "http://ollama.test:11434"
-        self.local_llm_fallback_model = "local/qwen3.5:9b"
+        self.local_llm_fallback_model = "local/qwen3.5:4b"
         self.local_llm_num_ctx = 32768
         self.local_llm_keep_alive = "30m"
         self.local_llm_timeout = 300.0
@@ -54,6 +54,13 @@ def openrouter_response(content):
             "usage": {"prompt_tokens": 10, "completion_tokens": 5, "cost": 0.01},
         },
     )
+
+
+@pytest.fixture(autouse=True)
+def _fresh_tags_cache():
+    llm._TAGS_CACHE.clear()
+    yield
+    llm._TAGS_CACHE.clear()
 
 
 def client_for(settings, responses):
@@ -144,14 +151,14 @@ def test_local_fenced_json_is_accepted():
 
 def test_remote_model_falls_back_to_local_without_key():
     client, calls = client_for(FakeSettings(key=None), [ollama_response('{"result":"ok"}')])
-    assert client.resolve_model("anthropic/claude-sonnet-5") == "local/qwen3.5:9b"
+    assert client.resolve_model("anthropic/claude-sonnet-5") == "local/qwen3.5:4b"
     result = client.complete(
         [{"role": "user", "content": "x"}],
         model="anthropic/claude-sonnet-5",
         effort="max",
         schema=SCHEMA,
     )
-    assert result.model == "local/qwen3.5:9b"
+    assert result.model == "local/qwen3.5:4b"
     assert str(calls[0].url).endswith("/api/chat")
 
 
@@ -203,11 +210,11 @@ def test_llm_available_with_reachable_local_server(monkeypatch):
     def fake_get(url, timeout):
         assert url == "http://ollama.test:11434/api/tags"
         return httpx.Response(
-            200, json={"models": [{"name": "qwen3.5:9b"}]}, request=httpx.Request("GET", url)
+            200, json={"models": [{"name": "qwen3.5:4b"}]}, request=httpx.Request("GET", url)
         )
 
     monkeypatch.setattr(llm.httpx, "get", fake_get)
-    assert llm.local_llm_models(FakeSettings()) == ["qwen3.5:9b"]
+    assert llm.local_llm_models(FakeSettings()) == ["qwen3.5:4b"]
     assert llm.llm_available(FakeSettings())
     assert not llm.llm_available(FakeSettings(local=False))
     assert llm.llm_available(FakeSettings(key="k", local=False))
@@ -252,19 +259,33 @@ def test_model_that_does_not_fit_fails_once_with_a_gpu_message():
     assert len(calls) == 1  # no pointless reload attempts
 
 
-def test_prose_extraction_never_goes_to_the_local_fallback():
-    from apt_classifier.llm import extraction_uses_llm
+def test_prose_goes_to_openrouter_extraction_or_local_sentence_rewriting():
+    from apt_classifier.llm import prose_normalisation
 
     no_key = OpenRouterClient(FakeSettings(key=None))
-    assert not no_key.answers_directly("openai/gpt-5.6-sol")
-    assert not extraction_uses_llm(no_key, FakeSettings(extract_model="openai/gpt-5.6-sol"))
-    assert extraction_uses_llm(no_key, FakeSettings(extract_model="local/qwen3.5:4b"))
+    remote = FakeSettings(extract_model="openai/gpt-5.6-sol")
+    assert prose_normalisation(no_key, remote) == ("sentences", "local/qwen3.5:4b")
+    local = FakeSettings(extract_model="local/qwen3.5:9b")
+    assert prose_normalisation(no_key, local) == ("sentences", "local/qwen3.5:9b")
     with_key = OpenRouterClient(FakeSettings(key="k"))
-    assert extraction_uses_llm(with_key, FakeSettings(extract_model="openai/gpt-5.6-sol"))
-    assert not extraction_uses_llm(None, FakeSettings())
+    assert prose_normalisation(with_key, remote) == ("extract", "openai/gpt-5.6-sol")
+    assert prose_normalisation(None, remote) == ("split", None)
 
-    class DuckClient:  # test fakes without the method keep extracting
+    class DuckClient:  # test fakes without resolve_model keep whole-report extraction
         def complete(self, *args, **kwargs):
             raise AssertionError
 
-    assert extraction_uses_llm(DuckClient(), FakeSettings())
+    assert prose_normalisation(DuckClient(), remote)[0] == "extract"
+
+
+def test_local_llm_counts_as_available_only_with_the_model_pulled(monkeypatch):
+    tags = {"models": [{"name": "qwen3:4b"}]}
+
+    def fake_get(url, timeout):
+        return httpx.Response(200, json=tags, request=httpx.Request("GET", url))
+
+    monkeypatch.setattr(llm.httpx, "get", fake_get)
+    assert not llm.llm_available(FakeSettings())  # server up, fallback model missing
+    llm._TAGS_CACHE.clear()
+    tags["models"].append({"name": "qwen3.5:4b"})
+    assert llm.llm_available(FakeSettings())

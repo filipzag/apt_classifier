@@ -344,9 +344,7 @@ All settings are environment variables documented in `.env.example`. Important v
 - `EMBEDDING_MODEL=basel/ATTACK-BERT` (pinned by `EMBEDDING_MODEL_REVISION`)
 - `EXTRACT_MODEL=openai/gpt-5.6-sol`
 - `REVIEW_MODEL=anthropic/claude-sonnet-5`
-- `LOCAL_LLM_ENABLED=false` (local LLM via Ollama: prefix a task's model with `local/`, e.g.
-  `EXTRACT_MODEL=local/qwen3.5:4b`; GPU only; without a key the review falls back to
-  `LOCAL_LLM_FALLBACK_MODEL`; `make llm-pull`, `make llm-check`; docs 16.4a)
+- `LOCAL_LLM_ENABLED=true` (local LLM via Ollama, GPU only, used when Ollama answers with `LOCAL_LLM_FALLBACK_MODEL` pulled: without an OpenRouter key it verifies ambiguous techniques, rewrites report prose sentence by sentence and runs the review; with a key only `local/` model ids use it; `make llm-pull`, `make llm-check`; docs 16.4a)
 - `SIMILARITY_THRESHOLD=0.45`
 - `BEHAVIOR_SIMILARITY_THRESHOLD=0.55`
 - `THREAT_INTEL_DAYS=30`

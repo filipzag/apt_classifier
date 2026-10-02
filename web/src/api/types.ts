@@ -38,6 +38,9 @@ export interface SystemInfo {
   llm_provider?: 'openrouter' | 'local' | 'hybrid' | 'none'
   /** model that answers each task (`local/…` runs on Ollama); null when unavailable */
   llm_models?: Record<'extraction' | 'verifier' | 'cyberre' | 'review', string | null>
+  /** how report prose becomes observations: OpenRouter whole-report extraction, the local
+   * model rewriting each split sentence, or the plain sentence split */
+  prose_normalisation?: 'extract' | 'sentences' | 'split'
   cases: number
   elastic_mcp: boolean
   classifier_weights: Record<string, number>

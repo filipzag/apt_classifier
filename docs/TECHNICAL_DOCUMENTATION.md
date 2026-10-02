@@ -2420,14 +2420,17 @@ For Anthropic schema-constrained calls, configured `max/xhigh` effort is mapped 
 
 ### 16.4a Local LLM (Ollama), hybrid routing
 
-Added 2026-10-02; opt-in, the defaults stay on OpenRouter until the local model has passed
-the mapping and naming gates. `OpenRouterClient` routes by model id: ids prefixed `local/`
-(for example `EXTRACT_MODEL=local/qwen3.5:9b`) go to the Ollama server at `LOCAL_LLM_URL` when
-`LOCAL_LLM_ENABLED=true`; every other id goes to OpenRouter. Without an OpenRouter key, a remote
-id (in practice the review's `anthropic/claude-sonnet-5`) is answered by
-`LOCAL_LLM_FALLBACK_MODEL`, so the hybrid set-up keeps the review on Claude when a key exists and
-runs it locally otherwise. The system endpoint reports `llm_provider`
-(`openrouter`/`local`/`hybrid`/`none`) and the model answering each task (`llm_models`).
+Added 2026-10-02 and on by default (`LOCAL_LLM_ENABLED=true`, product owner's decision): the
+local model is used only when the Ollama server at `LOCAL_LLM_URL` answers with
+`LOCAL_LLM_FALLBACK_MODEL` pulled. `OpenRouterClient` routes by model id: ids prefixed `local/`
+(for example `TECHNIQUE_VERIFIER_MODEL=local/qwen3.5:4b`) go to Ollama; every other id goes to
+OpenRouter. Without an OpenRouter key a remote id is answered by `LOCAL_LLM_FALLBACK_MODEL`, so
+with a key nothing changes unless a model id starts with `local/`, and without one the
+technique verifier, the prose normaliser, interview phrasing and the review run locally instead
+of being switched off. Benchmarks are unaffected: their local pipeline builds no LLM client and
+their production pipeline is run with a key. The system endpoint reports `llm_provider`
+(`openrouter`/`local`/`hybrid`/`none`), the model answering each task (`llm_models`) and
+`prose_normalisation` (`extract`/`sentences`/`split`).
 
 - **Model choice (research 2026-10-02):** Qwen3.5 (Apache-2.0, March 2026; vendor IFEval 91.5 for
   the 9B, 89.8 for the 4B). Its hybrid attention (Gated DeltaNet:full = 3:1) keeps the KV cache for
@@ -2467,16 +2470,25 @@ runs it locally otherwise. The system endpoint reports `llm_provider`
   bundle, micro-F1 no verifier -> 4B -> GPT-5.6: narrative 0.357 -> 0.378 -> 0.526, windows
   0.600 -> 0.571 -> 0.571, ecar 0.545 -> 0.571 -> 0.615. Most remaining false accepts are
   interpreter techniques (T1059.x) for commands whose labelled purpose is something else.
-- **Prose extraction, measured 2026-10-02 (CTI-HAL statements joined into prose, deterministic
-  mapping, no verifier):** the 4B rewriting whole reports with the production prompt lowered
-  technique F1 from 0.431 to 0.370 on 14 reports because it leaves actions out. Rewriting the
-  sentence split one sentence at a time (each sentence kept, at most rewritten) gained on those
-  14 reports (0.431 -> 0.503) but not on the other 41 (0.470 -> 0.460); over all 55 it is a wash
-  (0.459 -> 0.472, 22 reports better, 20 worse). Prose is therefore never sent to the local
-  fallback model (`extraction_uses_llm`): without a key it is split into sentences unless
-  `EXTRACT_MODEL` names a `local/` model explicitly.
-- **Availability:** with no key, the app leaves local mode only when Ollama answers `/api/tags`
-  at start-up; `make api-local` / `make run-local` force no-LLM mode with `LOCAL_LLM_ENABLED=false`.
+- **Prose normaliser, measured 2026-10-02 (CTI-HAL statements joined into prose, deterministic
+  mapping, no verifier):** the 4B rewriting whole reports with the production extraction prompt
+  lowered technique F1 from 0.431 to 0.370 on 14 reports because it leaves actions out. Splitting
+  first and letting the 4B rewrite each sentence 1:1 (thinking off) gained on those 14 reports
+  (0.431 -> 0.503), not on the other 41 (0.470 -> 0.460), and over all 55 F1 0.459 -> 0.472
+  (precision 0.552 -> 0.564, recall 0.393 -> 0.405; 22 reports better, 20 worse). The product
+  owner adopted it as the local prose normaliser: `prose_normalisation` sends prose to OpenRouter's
+  whole-report extraction when OpenRouter answers the extract model, to
+  `evidence/standardise.py` when a local model does, and to the plain split without an LLM. The
+  split decides coverage: an omitted sentence, a rewrite under three words ("None.") and a failed
+  call keep the split sentence; a rewritten observation keeps its line provenance and the
+  original sentence in `provenance.metadata["original_sentence"]`; at most 60 sentences go into
+  one call. Alerts stay on the plain split (not measured), and the case diagnostics record
+  `normalization: local_llm_sentences` with rewritten/kept/failed counts.
+- **Availability:** `llm_available` needs an OpenRouter key or the local server answering
+  `/api/tags` with the fallback model pulled (cached 30 s per URL), so an old Ollama without the
+  model leaves the app in local mode. The API decides once at start-up. `make api-local` /
+  `make run-local` force no-LLM mode, and the test suite switches the local LLM off in
+  `tests/conftest.py`.
 
 ### 16.5 Review limitations
 

@@ -15,7 +15,8 @@ from app.ui.local_extract import local_observations
 from apt_classifier.config import Settings
 from apt_classifier.evidence.extract import extract_evidence
 from apt_classifier.evidence.models import EvidenceLedger, StrategicContext
-from apt_classifier.llm import extraction_uses_llm
+from apt_classifier.evidence.standardise import standardise_observations
+from apt_classifier.llm import prose_normalisation
 from apt_classifier.session import AttributionEngine
 
 SAMPLE_PATH = Path(__file__).resolve().parents[3] / "data" / "samples" / "case_observation.txt"
@@ -58,10 +59,13 @@ def _build_ledger(
     context: StrategicContext,
     diagnostics: dict[str, Any],
 ) -> EvidenceLedger:
-    if runtime.local_only(settings) or not extraction_uses_llm(engine.llm, settings):
-        # No LLM for prose (none configured, or only the local fallback model, which loses
-        # actions): structured files and IOCs are parsed locally by the extractor; prose is
-        # split into sentences here so nothing is silently dropped.
+    prose_mode, prose_model = prose_normalisation(
+        None if runtime.local_only(settings) else engine.llm, settings
+    )
+    if prose_mode != "extract":
+        # No OpenRouter extraction: structured files and IOCs are parsed locally by the
+        # extractor; prose is split into sentences here so nothing is silently dropped, and a
+        # local model then rewrites each sentence 1:1 (docs 16.4a).
         ledger = extract_evidence(
             None,
             iocs=iocs or None,
@@ -70,9 +74,16 @@ def _build_ledger(
             kb=engine.kb,
             strategic_context=context,
         )
-        ledger.observations.extend(local_observations(free_text))
+        prose = local_observations(free_text)
+        if prose_mode == "sentences":
+            prose = standardise_observations(
+                prose, engine.llm, model=str(prose_model), diagnostics=diagnostics
+            )
+        ledger.observations.extend(prose)
         ledger.observations.extend(local_observations(alerts, source="alerts"))
-        diagnostics["normalization"] = "local_sentence_split"
+        diagnostics["normalization"] = (
+            "local_llm_sentences" if prose_mode == "sentences" else "local_sentence_split"
+        )
         return ledger
     return extract_evidence(
         engine.llm,

@@ -35,7 +35,8 @@ from apt_classifier.evidence.models import (
     TechniqueReviewAction,
     TechniqueReviewDecision,
 )
-from apt_classifier.llm import OpenRouterClient, extraction_uses_llm, is_local_model
+from apt_classifier.evidence.standardise import standardise_observations
+from apt_classifier.llm import OpenRouterClient, is_local_model, prose_normalisation
 from apt_classifier.llm import llm_available as _llm_available
 from apt_classifier.platforms import ledger_platforms, normalize_platforms, set_ledger_platforms
 from apt_classifier.questions import parse_interview_answer
@@ -259,8 +260,8 @@ class CaseService:
                 models[task] = resolve(model) if callable(resolve) else model
             except RuntimeError:
                 models[task] = None
-        if not extraction_uses_llm(client, settings):
-            models["extraction"] = None  # prose is split into sentences
+        prose_mode, prose_model = prose_normalisation(client, settings)
+        models["extraction"] = prose_model  # None: prose is split into sentences
         used = {model for model in models.values() if model}
         local = {model for model in used if is_local_model(model)}
         if not used:
@@ -271,7 +272,7 @@ class CaseService:
             provider = "local"
         else:
             provider = "hybrid"
-        return {"llm_provider": provider, "llm_models": models}
+        return {"llm_provider": provider, "llm_models": models, "prose_normalisation": prose_mode}
 
     def sample_text(self) -> str:
         return SAMPLE_PATH.read_text(encoding="utf-8") if SAMPLE_PATH.is_file() else ""
@@ -295,7 +296,8 @@ class CaseService:
     def _build_ledger(self, payload: IntakePayload, diagnostics: dict[str, Any]) -> EvidenceLedger:
         context = payload.context()
         files = list(payload.files) or None
-        if not extraction_uses_llm(self.engine.llm, self.engine.settings):
+        prose_mode, prose_model = prose_normalisation(self.engine.llm, self.engine.settings)
+        if prose_mode != "extract":
             ledger = extract_evidence(
                 None,
                 iocs=payload.iocs or None,
@@ -304,9 +306,17 @@ class CaseService:
                 kb=self.engine.kb,
                 strategic_context=context,
             )
-            ledger.observations.extend(local_observations(payload.free_text()))
+            prose = local_observations(payload.free_text())
+            if prose_mode == "sentences":
+                # local model: split first, then each sentence rewritten 1:1 (docs 16.4a)
+                prose = standardise_observations(
+                    prose, self.engine.llm, model=str(prose_model), diagnostics=diagnostics
+                )
+            ledger.observations.extend(prose)
             ledger.observations.extend(local_observations(payload.alerts, source="alerts"))
-            diagnostics["normalization"] = "local_sentence_split"
+            diagnostics["normalization"] = (
+                "local_llm_sentences" if prose_mode == "sentences" else "local_sentence_split"
+            )
             return ledger
         return extract_evidence(
             self.engine.llm,
