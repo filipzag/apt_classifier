@@ -54,6 +54,12 @@ REVIEW = "needs_review"
 VISIBLE_STATES = frozenset({ACCEPTED, REVIEW})
 # the ranking metrics depend on the full ranked list, of which artifacts store the top ten
 RANKING_METRICS = ("hit_at_1", "hit_at_3", "hit_at_10", "mrr", "ndcg_at_10")
+# Parent-aware matching in apt_classifier/evaluation.py iterates Python sets greedily, so
+# identical case rows can score differently under another PYTHONHASHSEED: reported, never
+# an identity failure (the case rows and accepted sets are compared exactly).
+ORDER_DEPENDENT_METRICS = frozenset(
+    {"parent_aware_precision", "parent_aware_recall", "parent_aware_f1"}
+)
 DEFAULT_CURVE = tuple(round(value, 2) for value in np.arange(0.05, 0.96, 0.05))
 LOW_PRECISION = 0.30  # lower edge of the combiner's training precision band
 
@@ -179,11 +185,16 @@ def compare_mapping_identity(
                 (right.get("datasets") or {}).get(dataset) or {},
             )
         metric_differences: dict[str, list[str]] = {}
+        order_dependent: dict[str, list[str]] = {}
         for label, (block_a, block_b) in metric_blocks.items():
             for part in ("metrics", "bootstrap_confidence_intervals"):
                 keys, only_a, only_b = compare_records(
                     block_a.get(part) or {}, block_b.get(part) or {}
                 )
+                loose = [key for key in keys if key in ORDER_DEPENDENT_METRICS]
+                keys = [key for key in keys if key not in ORDER_DEPENDENT_METRICS]
+                if loose:
+                    order_dependent[f"{label}.{part}"] = loose
                 if keys or (not block_a) != (not block_b):
                     metric_differences[f"{label}.{part}"] = keys or ["<missing>"]
         mode_identical = differing_cases == 0 and not metric_differences
@@ -194,6 +205,7 @@ def compare_mapping_identity(
             "differing_cases": differing_cases,
             "examples": examples,
             "metric_differences": metric_differences,
+            "order_dependent_metric_differences": order_dependent,
             "candidate_fields_only_in_base": sorted(fields_only["base"]),
             "candidate_fields_only_in_current": sorted(fields_only["current"]),
             "pipeline_fingerprint_equal": left.get("pipeline_fingerprint")

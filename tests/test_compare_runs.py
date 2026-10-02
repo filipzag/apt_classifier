@@ -497,3 +497,27 @@ def test_summary_composes_the_ledger(tmp_path: Path, capsys):
     assert main(["summary", "--ledger", str(ledger), "--output", str(tmp_path / "s.json")]) == 0
     assert json.loads((tmp_path / "s.json").read_text(encoding="utf-8"))["git_commits"] == ["abc"]
     capsys.readouterr()
+
+
+def test_mapping_identity_reports_order_dependent_metrics_without_failing():
+    """Parent-aware metrics depend on set iteration order (PYTHONHASHSEED): the same case rows
+    can score differently, so a difference there is listed but is not an identity failure."""
+
+    def artifact(parent_f1: float, micro_f1: float = 0.5) -> dict:
+        row = {"case_id": "c1", "accepted_technique_ids": ["T1059"], "candidates": []}
+        metrics = {"micro_f1": micro_f1, "parent_aware_f1": parent_f1}
+        return {
+            "case_set_hash": "h",
+            "results": {"hybrid": {"cases": [row], "pooled": {"metrics": metrics}}},
+        }
+
+    report = compare_mapping_identity(artifact(0.45), artifact(0.44), modes=["hybrid"])
+    mode = report["modes"]["hybrid"]
+    assert report["identical"] is True
+    assert mode["metric_differences"] == {}
+    assert mode["order_dependent_metric_differences"] == {"pooled.metrics": ["parent_aware_f1"]}
+    changed = compare_mapping_identity(
+        artifact(0.45), artifact(0.45, micro_f1=0.6), modes=["hybrid"]
+    )
+    assert changed["identical"] is False
+    assert changed["modes"]["hybrid"]["metric_differences"] == {"pooled.metrics": ["micro_f1"]}
