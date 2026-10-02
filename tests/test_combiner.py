@@ -270,3 +270,34 @@ def test_an_artifact_can_use_a_subset_of_the_current_features():
         )
     with pytest.raises(ValueError):
         AttributionCombiner.from_dict({**payload, "feature_schema_version": 0})
+
+
+def test_loader_refuses_a_model_fitted_on_another_window(tmp_path):
+    rng = np.random.default_rng(3)
+    model = AttributionCombiner.fit(
+        _synthetic_lists(rng, 40), attack_version="19.2", pipeline_fingerprint="fp1"
+    )
+    path = model.save(tmp_path / "c.json")
+    kb = SimpleNamespace(version="19.2")
+
+    def settings(top_n):
+        return SimpleNamespace(
+            attribution_combiner_enabled=True,
+            attribution_combiner_path=path,
+            attribution_combiner_top_n=top_n,
+        )
+
+    assert load_attribution_combiner(settings(model.top_n), kb, fingerprint="fp1")[1] == "active"
+    loaded, status = load_attribution_combiner(settings(40), kb, fingerprint="fp1")
+    assert loaded is None and "top_n" in status and "incompatible" in status
+
+
+def test_fit_script_refuses_evaluation_seeds_and_shipped_paths(tmp_path):
+    import pytest
+
+    from scripts.fit_attribution_combiner import main
+
+    with pytest.raises(SystemExit):
+        main(["--seeds", "43", "--output", str(tmp_path / "c.json")])
+    with pytest.raises(SystemExit):
+        main(["--seeds", "11"])  # default output/lists/report are the shipped files

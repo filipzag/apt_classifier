@@ -32,11 +32,13 @@ from enum import StrEnum
 from typing import Any
 
 from apt_classifier.attack.related import related_to
+from apt_classifier.classifiers.base import kb_mapping
 from apt_classifier.evidence.quality import (
     compute_technique_specificity,
 )
 from apt_classifier.fusion import FusionResult
 from apt_classifier.separation import discriminate
+from apt_classifier.software_questions import cluster_negative, leader_only_negative
 
 
 class AttributionStage(StrEnum):
@@ -44,6 +46,8 @@ class AttributionStage(StrEnum):
     UNRESOLVED_ACTIVITY_CLUSTER = "unresolved_activity_cluster"
     KNOWN_GROUP_SHORTLIST = "known_group_shortlist"
     KNOWN_GROUP_HYPOTHESIS = "known_group_hypothesis"
+    # two groups ATT&CK documents as overlapping, named together (overlap_cluster.py, docs 10.11)
+    KNOWN_CLUSTER_HYPOTHESIS = "known_cluster_hypothesis"
 
 
 @dataclass(frozen=True)
@@ -71,6 +75,14 @@ class AttributionDecision:
     runner_up_group_id: str | None = None
     runner_up_related: bool = False
     gate_mode: str = "maturity"
+    # documented-overlap cluster named instead of a single group (leader first), with the merged
+    # pair's separation and mass against the rest of the gate window and its combiner probability
+    named_cluster: tuple[str, ...] = ()
+    cluster_separation: float = 0.0
+    cluster_discriminative: float = 0.0
+    cluster_probability: float | None = None
+    cluster_reason: str = ""
+    cluster_runner_up_id: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -92,6 +104,12 @@ class AttributionDecision:
             "runner_up_group_id": self.runner_up_group_id,
             "runner_up_related": self.runner_up_related,
             "gate_mode": self.gate_mode,
+            "named_cluster": list(self.named_cluster),
+            "cluster_separation": self.cluster_separation,
+            "cluster_discriminative": self.cluster_discriminative,
+            "cluster_probability": self.cluster_probability,
+            "cluster_reason": self.cluster_reason,
+            "cluster_runner_up_id": self.cluster_runner_up_id,
         }
 
 
@@ -118,6 +136,16 @@ class MaturityThresholds:
     hypothesis_separation: float = 0.5
     hypothesis_min_discriminative: float = 3.0
     hypothesis_specificity: float = 0.0
+    # Documented-overlap clusters (overlap_cluster.py, docs 10.11): off unless enabled. A cluster
+    # needs the separation bar, this mass (the single bar for a nested pair) and the members'
+    # combined combiner probability. The scope says which ATT&CK links make a twin: "documented"
+    # (ATT&CK documents the same activity, attack/same_activity.py, or the profiles nest), "full"
+    # (any ATT&CK relation, shared rare malware included) or "nested" (nesting profiles only);
+    # the engine selects the twin under it.
+    cluster_naming: bool = False
+    cluster_min_probability: float = 0.8
+    cluster_min_discriminative: float = 3.5
+    cluster_scope: str = "documented"
 
 
 SUPPORT_RANK_LIMIT = 10
@@ -255,12 +283,23 @@ def assess_attribution(
     calibration_artifact: Any = None,
     discrimination: Any = None,
     combiner: Any = None,
+    negative_software: Any = None,
+    negative_software_weight: float = 0.3,
+    software_guard: dict[str, Any] | None = None,
 ) -> AttributionDecision:
     """Assess the attribution stage from the fusion result.
 
     The decision is deterministic and reproducible. If a calibration artifact
     is provided and valid, a pipeline-bound calibrated probability is emitted.
     Otherwise, only qualitative maturity is reported.
+
+    Software interview answers (software_questions.py, docs 21.3.15 C) enter in a fixed order:
+    (1) the single-name gate, which also holds the "found" rules of ``software_guard`` (a name
+    must not rest on interview answers alone, and a name the interview software enabled must
+    belong to a group that documents found malware); (2) the documented-cluster step on the
+    discrimination before any "not found" answer, under the same rules; (3) the "not found"
+    filter last (``negative_software``): it lowers only the unit holding the leader and may only
+    move a hypothesis or a cluster to the shortlist, never back into step 2.
     """
     thresholds = thresholds or MaturityThresholds()
     calibration = _combiner_calibration(combiner)
@@ -296,6 +335,21 @@ def assess_attribution(
         "runner_up_related": bool(discrimination.runner_up_related),
         "gate_mode": thresholds.gate_mode,
     }
+    # step 3's input, computed up front so every stage reports the separation it was judged on
+    not_found = tuple(sorted({str(item) for item in (negative_software or ()) if item}))
+    leader_effect = (
+        leader_only_negative(discrimination, kb, not_found, negative_software_weight)
+        if not_found and discrimination.scores
+        else None
+    )
+    reported_separation = float(discrimination.separation)
+    if leader_effect is not None:
+        reported_separation = float(leader_effect.separation)
+        separation_fields["separation"] = round(reported_separation, 3)
+        separation_fields["separation_factors"] = {
+            **separation_fields["separation_factors"],
+            "negative_software": leader_effect.to_dict(),
+        }
     leading = fusion.entries[0]
     leading_group = getattr(kb, "groups", {}).get(leading.group_id)
     leading_name = (
@@ -333,11 +387,74 @@ def assess_attribution(
     failed = _hypothesis_gate_failures(thresholds, maturity, margin, discrimination)
     # The separation was scored for the ensemble's rank-1 candidate. If a re-ranking put another
     # group first, that group's separation is unknown here: never name it on borrowed evidence.
-    if discrimination.leader_id and discrimination.leader_id != leading.group_id:
+    guard_fired = bool(discrimination.leader_id and discrimination.leader_id != leading.group_id)
+    if guard_fired:
         failed.append(
             f"the re-ranking placed {leading.group_id} above {discrimination.leader_id}, "
             "whose evidence the separation was scored for"
         )
+    # (1) the single gate holds the "found" rules too
+    guard = (
+        software_guard if isinstance(software_guard, dict) and software_guard.get("found") else None
+    )
+    if guard is not None:
+        failed.extend(_found_failures(kb, guard, (leading.group_id,), cluster=False))
+    # (2) the cluster step, on the discrimination before any "not found" answer
+    cluster_step, candidate = _cluster_step(thresholds, combiner, leading.group_id, guard_fired)
+    cluster_blocked: list[str] = []
+    if cluster_step == "cluster" and candidate is not None and guard is not None:
+        members = tuple(str(gid) for gid in candidate["members"])
+        cluster_blocked = _found_failures(kb, guard, members, cluster=True)
+        if cluster_blocked:
+            cluster_step = ""
+    cluster_fields = {
+        "leading_group_id": leading.group_id,
+        "leading_group_name": leading_name,
+        "leading_score": leading.relative_score,
+        "margin": round(margin, 3),
+        "maturity_score": maturity,
+        "maturity_factors": factors,
+        "related_leading_groups": _related(kb, leading.group_id),
+        **separation_fields,
+        **calibration,
+    }
+    # a leader that clears alone keeps its single name unless its twin nests inside it
+    if cluster_step == "cluster" and candidate is not None and (failed or candidate.get("nested")):
+        # (3) the "not found" filter on the cluster: it can only send it to the shortlist
+        demoted = _cluster_negative_failures(
+            kb, thresholds, candidate, discrimination, not_found, negative_software_weight
+        )
+        if not demoted:
+            return _cluster_decision(kb, candidate, cluster_fields)
+        failed = [*failed, *demoted]
+    elif not failed and candidate is not None and candidate.get("nested"):
+        # the leader clears alone, but its nested documented twin can never be ruled out by the
+        # leader's own evidence (all of the twin's documented techniques are the leader's too)
+        twin = str(candidate["members"][1])
+        failed.append(
+            f"documented nested twin {twin} in the window cannot be ruled out and the pair does "
+            f"not clear the cluster bars (cluster separation {candidate['separation']:.2f}, "
+            f"mass {candidate['discriminative']:.2f}"
+            + (f"; {'; '.join(cluster_blocked)}" if cluster_blocked else "")
+            + ")"
+        )
+    if not failed and leader_effect is not None:
+        # (3) the "not found" filter on the single name: it can only add failed conditions
+        failed.extend(
+            _negative_failures(
+                thresholds,
+                float(discrimination.separation),
+                float(leader_effect.separation),
+                float(discrimination.leader_total),
+                float(leader_effect.total),
+                minimum=float(thresholds.hypothesis_min_discriminative),
+                label="the leader's",
+            )
+        )
+    if failed and cluster_blocked:
+        # say why the cluster was not named either (the nested hold-back already says it)
+        joined = " ".join(failed)
+        failed.extend([reason for reason in cluster_blocked if reason not in joined])
     if failed:
         return AttributionDecision(
             stage=AttributionStage.KNOWN_GROUP_SHORTLIST,
@@ -353,7 +470,7 @@ def assess_attribution(
             rationale=(
                 f"Known-group shortlist: {leading_name} ({leading.group_id}) leads at "
                 f"{leading.relative_score:.2f} with maturity {maturity:.3f} and separation "
-                f"{discrimination.separation:.2f}, but does not meet the naming bar "
+                f"{reported_separation:.2f}, but does not meet the naming bar "
                 f"({'; '.join(failed)})."
             ),
             **calibration,
@@ -395,13 +512,179 @@ def assess_attribution(
         rationale=(
             f"Known-group hypothesis: {leading_name} ({leading.group_id}) is the leading "
             f"hypothesis at {leading.relative_score:.2f} with maturity {maturity:.3f} and "
-            f"separation {discrimination.separation:.2f} from "
+            f"separation {reported_separation:.2f} from "
             f"{discrimination.runner_up_id or 'no alternative'}. "
             f"This is a hypothesis, not confirmation."
         ),
         is_calibrated=is_calibrated,
         calibrated_probability=calibrated_probability,
         calibration_note=calibration_note,
+    )
+
+
+def _cluster_step(
+    thresholds: MaturityThresholds, combiner: Any, leader_id: str, guard_fired: bool
+) -> tuple[str, dict[str, Any] | None]:
+    """("cluster", candidate) when the leader's documented-overlap cluster clears its bars,
+    ("", candidate) when a candidate exists but does not, ("", None) otherwise. The candidate is
+    computed by the engine (overlap_cluster.cluster_candidate) and recorded on the combiner
+    state; without an active combiner there is no probability and so no cluster."""
+    if not thresholds.cluster_naming or thresholds.gate_mode == "maturity" or guard_fired:
+        return "", None
+    candidate = combiner.get("cluster") if isinstance(combiner, dict) else None
+    if not isinstance(candidate, dict) or not candidate.get("members"):
+        return "", None
+    if str(candidate["members"][0]) != leader_id:
+        return "", None
+    nested = bool(candidate.get("nested"))
+    if thresholds.cluster_scope == "nested" and not nested:
+        return "", None
+    # the engine already selects the twin under the scope; this keeps a candidate recorded under
+    # a wider scope (or before the link field existed) from naming a pair ATT&CK does not
+    # document as the same activity
+    if thresholds.cluster_scope == "documented" and candidate.get("link") not in (
+        "same_activity",
+        "nesting",
+    ):
+        return "", None
+    probability = candidate.get("probability")
+    bar = (
+        thresholds.hypothesis_min_discriminative
+        if nested
+        else max(thresholds.hypothesis_min_discriminative, thresholds.cluster_min_discriminative)
+    )
+    passes = (
+        probability is not None
+        and float(probability) >= thresholds.cluster_min_probability
+        and float(candidate.get("separation", 0.0)) >= thresholds.hypothesis_separation
+        and float(candidate.get("discriminative", 0.0)) >= bar
+    )
+    return ("cluster" if passes else ""), candidate
+
+
+def _cluster_decision(
+    kb: Any, candidate: dict[str, Any], fields: dict[str, Any]
+) -> AttributionDecision:
+    from apt_classifier.overlap_cluster import cluster_label
+
+    members = tuple(str(gid) for gid in candidate["members"])
+    label = cluster_label(kb, members)
+    runner = candidate.get("runner_up_id")
+    return AttributionDecision(
+        stage=AttributionStage.KNOWN_CLUSTER_HYPOTHESIS,
+        cluster_id=None,
+        named_cluster=members,
+        cluster_separation=round(float(candidate.get("separation", 0.0)), 3),
+        cluster_discriminative=round(float(candidate.get("discriminative", 0.0)), 3),
+        cluster_probability=(
+            round(float(candidate["probability"]), 4)
+            if candidate.get("probability") is not None
+            else None
+        ),
+        cluster_reason=str(candidate.get("reason", "")),
+        cluster_runner_up_id=runner,
+        rationale=(
+            f"Documented-overlap cluster: {label}. ATT&CK link: {candidate.get('reason', '')}"
+            f". Together the pair separates from {runner or 'the rest of the shortlist'} "
+            f"(cluster separation {float(candidate.get('separation', 0.0)):.2f}, mass "
+            f"{float(candidate.get('discriminative', 0.0)):.2f}, combined probability "
+            f"{float(candidate.get('probability') or 0.0):.2f}); the evidence does not separate "
+            "the two members. Report the cluster, not either member. This is a hypothesis, "
+            "not confirmation."
+        ),
+        **fields,
+    )
+
+
+def _found_failures(
+    kb: Any, guard: dict[str, Any], members: tuple[str, ...], *, cluster: bool
+) -> list[str]:
+    """The "found" rules for one named unit (the leader, or the cluster's members).
+
+    - With ``requires_lead`` the unit's separation in the gate window without the interview
+      software (computed by the engine) must be >= 0: a name never rests on answers alone.
+    - When the case would not be named without the interview software (``named_without`` False),
+      a member must document at least one found malware: a "found" only enables its own group."""
+    who = "the cluster" if cluster else "the name"
+    reasons: list[str] = []
+    if guard.get("requires_lead", True):
+        value = guard.get("cluster_separation_without" if cluster else "separation_without")
+        if value is None:
+            reasons.append(f"{who} cannot be checked without the interview software")
+        elif float(value) < 0:
+            reasons.append(
+                f"{who} would rest on interview answers alone (separation {float(value):.2f} "
+                "< 0 without the found software)"
+            )
+    if guard.get("named_without") is False:
+        found = {str(item) for item in guard.get("found") or ()}
+        group_software = kb_mapping(kb, "group_software")
+        if not any(found & set(group_software.get(gid, ()) or ()) for gid in members):
+            reasons.append(
+                f"only the interview software names the case and {' / '.join(members)} "
+                "documents none of the found malware"
+            )
+    return reasons
+
+
+def _negative_failures(
+    thresholds: MaturityThresholds,
+    separation_before: float,
+    separation: float,
+    total_before: float,
+    total: float,
+    *,
+    minimum: float,
+    label: str,
+) -> list[str]:
+    """Naming-bar conditions that the "not found" answers newly fail (separation-type gates
+    only; the maturity bar never reads the separation)."""
+    if str(thresholds.gate_mode or "maturity") not in {"separation", "both"}:
+        return []
+    failed: list[str] = []
+    bar = float(thresholds.hypothesis_separation)
+    if separation_before >= bar > separation:
+        failed.append(
+            f"{label} separation {separation:.2f} < {bar:.2f} after the not-found interview "
+            f"answers ({separation_before:.2f} before)"
+        )
+    if total_before >= minimum > total:
+        failed.append(
+            f"{label} discriminative evidence {total:.2f} < {minimum:.2f} after the not-found "
+            f"interview answers ({total_before:.2f} before)"
+        )
+    return failed
+
+
+def _cluster_negative_failures(
+    kb: Any,
+    thresholds: MaturityThresholds,
+    candidate: dict[str, Any],
+    discrimination: Any,
+    not_found: tuple[str, ...],
+    weight: float,
+) -> list[str]:
+    """Step 3 for a named cluster: the merged pair's mass and separation after the "not found"
+    answers any member documents, against the same cluster bars."""
+    if not not_found:
+        return []
+    effect = cluster_negative(candidate, discrimination, kb, not_found, weight)
+    if effect.penalty <= 0:
+        return []
+    nested = bool(candidate.get("nested"))
+    minimum = (
+        thresholds.hypothesis_min_discriminative
+        if nested
+        else max(thresholds.hypothesis_min_discriminative, thresholds.cluster_min_discriminative)
+    )
+    return _negative_failures(
+        thresholds,
+        effect.separation_before,
+        effect.separation,
+        effect.total_before,
+        effect.total,
+        minimum=float(minimum),
+        label="the cluster's",
     )
 
 

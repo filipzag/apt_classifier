@@ -997,3 +997,317 @@ def test_attribution_benchmark_lists_rows_scored_without_an_enabled_combiner():
         {"group_id": "G3", "combiner_status": None},  # no fusion, no status
     ]
     assert _inactive_combiner_rows(rows) == ["G2:r2"]
+
+
+def test_combiner_fields_record_window_probabilities_and_the_rrf_order_to_60():
+    from types import SimpleNamespace
+
+    from scripts.attribution_benchmark import _combiner_fields
+
+    entries = [SimpleNamespace(group_id=f"G{i:02d}") for i in range(70)]
+    # combiner reordered the head (top 3 of the RRF top 4); the tail stays in RRF order
+    head_order = ["G02", "G00", "G03", "G01"]
+    fusion = SimpleNamespace(
+        entries=[SimpleNamespace(group_id=g) for g in head_order] + entries[4:]
+    )
+    window = SimpleNamespace(scores=[SimpleNamespace(group_id=g) for g in ("G02", "G00", "G05")])
+    context = SimpleNamespace(
+        discrimination=window,
+        combiner={
+            "status": "active",
+            "probabilities": {"G00": 0.2, "G01": 0.1, "G02": 0.6, "G03": 0.05},
+            "rrf_ranks": {"G00": 1, "G01": 2, "G02": 3, "G03": 4},
+            "leader_probability": 0.6,
+            "null_probability": 0.05,
+        },
+    )
+    state = SimpleNamespace(context=context, deterministic_fusion=fusion, fusion=fusion)
+    fields = _combiner_fields(state, "G05")
+    assert fields["rrf_top60"][:5] == ["G00", "G01", "G02", "G03", "G04"]
+    assert len(fields["rrf_top60"]) == 60
+    assert fields["window_probabilities"] == {"G02": 0.6, "G00": 0.2, "G05": 0.0}
+    assert fields["truth_in_window"] is True and fields["rrf_rank"] is None
+    off = _combiner_fields(
+        SimpleNamespace(context=SimpleNamespace(discrimination=None, combiner=None)), "G05"
+    )
+    assert off["combiner_status"] is None and off["truth_in_window"] is False
+
+
+def test_attribution_summary_counts_cluster_names_by_membership():
+    from scripts.attribution_benchmark import summarize
+
+    def row(group, rank, stage, cluster=()):
+        return {
+            "group_id": group,
+            "report_id": f"r-{group}-{rank}-{stage}",
+            "rank": rank,
+            "top3": [group] if rank == 1 else ["G0999", group],
+            "stage": stage,
+            "technique_recall": 0.5,
+            "observations": 5,
+            "named_cluster": list(cluster),
+        }
+
+    known = [
+        row("G1", 1, "known_group_hypothesis"),
+        row("G2", 2, "known_cluster_hypothesis", ("G0999", "G2")),  # recovered by the cluster
+        row("G3", 1, "known_cluster_hypothesis", ("G3", "G4")),
+        row("G5", 2, "known_cluster_hypothesis", ("G0999", "G6")),  # wrong cluster
+        row("G7", 1, "known_group_shortlist"),
+    ]
+    unknown = [
+        {
+            "group_id": "G8",
+            "rank": None,
+            "top3": ["G9"],
+            "stage": "known_cluster_hypothesis",
+            "named_cluster": ["G9", "G10"],
+        },
+        {
+            "group_id": "G11",
+            "rank": None,
+            "top3": ["G12"],
+            "stage": "known_group_shortlist",
+            "named_cluster": [],
+        },
+    ]
+    metrics = summarize(known, unknown)
+    assert metrics["named_cluster_correct"] == 2
+    assert metrics["named_cluster_recovered"] == 1
+    assert metrics["named_cluster_wrong"] == 2  # one known, one removed actor
+    assert metrics["named_correct"] == 1  # single-group names keep their meaning
+    # named risk counts every name: 1 single + 3 known clusters + 1 removed actor, 2 wrong
+    assert metrics["named_risk"] == pytest.approx(2 / 5)
+    assert metrics["named_risk_single"] == 0.0
+    assert metrics["cluster_coverage"] == pytest.approx(4 / 7)
+
+
+def test_software_interview_enumeration_walks_every_answer_path_through_the_pipeline():
+    """The enumerated simulation on a tiny fixture: every found / not-found path is scored by the
+    real engine (re-running it with the answers added, as an analyst answer is), the leaf
+    probabilities of the answer model sum to one, the criteria are computed, and the rows of a
+    run without the flag are exactly the rows of a run with it minus the simulation."""
+    from apt_classifier.evidence.models import EvidenceStatus, QuestionAnswer
+    from scripts.attribution_benchmark import (
+        Fold,
+        _ledger,
+        _path_probability,
+        run_known,
+        summarize_software_interview,
+    )
+    from tests.test_software_questions import LSASS, POWERSHELL, software_engine
+
+    engine = software_engine()
+    fold = Fold(
+        group_id="G3",
+        held_out_techniques=frozenset({"T1059.001", "T1003.001"}),
+        observations=(POWERSHELL, LSASS),
+        held_out_texts=frozenset(),
+    )
+    plain, _ = run_known(engine, [fold], hide_evidence=False)
+    simulated, _ = run_known(engine, [fold], hide_evidence=False, software_interview=True)
+    simulation = simulated[0].pop("software_interview")
+    assert "software_interview" not in plain[0]
+    assert json.dumps(simulated[0], sort_keys=True, default=str) == json.dumps(
+        plain[0], sort_keys=True, default=str
+    )
+
+    nodes = simulation["nodes"]
+    leaves = [node for node in nodes if node["leaf"]]
+    assert simulation["baseline_named"] == [] and not nodes[0]["leaf"]
+    assert 2 <= len(leaves) <= 8 and len(nodes) == 2 * len(leaves) - 1
+    assert all(len(node["path"].split("|")) <= 3 for node in leaves)
+    truth = set(simulation["truth_documents"])
+    assert truth <= {"S0103", "S0104", "S0108"}
+    for q, fp in ((0.1, 0.0), (0.3, 0.05), (1.0, 0.0)):
+        total = sum(_path_probability(node["path"], truth, q, fp) for node in leaves)
+        assert total == pytest.approx(1.0)
+    # every leaf is what the engine decides for a case analysed with exactly those answers
+    for node in leaves:
+        ledger = _ledger(fold)
+        for step in node["path"].split("|"):
+            software_id, _, answer = step.split(":")
+            ledger.add_question_answer(
+                QuestionAnswer(
+                    question=f"Did you find {software_id}?",
+                    kind="software",
+                    software_id=software_id,
+                    status=EvidenceStatus.POSITIVE if answer == "F" else EvidenceStatus.NEGATIVE,
+                )
+            )
+        replayed = engine.analyze(ledger).attribution_decision
+        named = (
+            [replayed.leading_group_id]
+            if replayed.stage.value == "known_group_hypothesis"
+            else list(replayed.named_cluster)
+        )
+        assert named == node["named"], node
+
+    row = {**simulated[0], "software_interview": simulation}
+    unknown = {
+        "group_id": "G9",
+        "software_interview": {
+            "baseline_named": [],
+            "truth_documents": [],
+            "nodes": [
+                {"path": "", "stage": "sho", "named": [], "separation": 0.1, "leaf": False},
+                {
+                    "path": "S0101:1:F",
+                    "stage": "hyp",
+                    "named": ["G1"],
+                    "separation": 0.9,
+                    "leaf": True,
+                },
+                {"path": "S0101:1:N", "stage": "sho", "named": [], "separation": 0.1, "leaf": True},
+            ],
+        },
+    }
+    summary = summarize_software_interview([row], [unknown], cluster_naming=False)
+    assert summary["mode"] == "enumerate" and summary["rows_asked"] == 2
+    assert set(summary["criteria"]) == {f"C{index}" for index in range(1, 9)}
+    expected = summary["expected"]
+    assert set(expected) == {f"q={q},fp={fp}" for q in (0.1, 0.3, 1.0) for fp in (0.0, 0.05)}
+    # a removed actor is named only through a wrong "found": 0 at fp 0, fp itself at 0.05
+    assert expected["q=0.3,fp=0.0"]["removed_named"] == 0.0
+    assert expected["q=0.3,fp=0.05"]["removed_named"] == pytest.approx(0.05)
+    assert summary["criteria"]["C1"]["possible_removed_leaves"] == 0
+    assert summary["criteria"]["C4"]["pass"] and summary["criteria"]["C7"]["pass"]
+    assert summary["criteria"]["C3"]["pass"] and summary["criteria"]["C8"]["pass"] is None
+    # a "not found" that names something is a monotonicity violation
+    broken = json.loads(json.dumps(unknown))
+    broken["software_interview"]["nodes"][2]["named"] = ["G2"]
+    violated = summarize_software_interview([], [broken], cluster_naming=True)
+    assert violated["criteria"]["C7"] == {"violations": 1, "pass": False}
+    assert violated["criteria"]["C4"]["rows_changed"] == 1
+    assert violated["criteria"]["C8"]["pass"] is not None
+
+
+def test_software_interview_replay_runs_on_a_fixture_row(tmp_path: Path):
+    """The offline replay (C6 cross-check) reproduces the recorded separation from the row's
+    replay inputs, asks the same first question, and compares its expected gains with the
+    pipeline's enumerated simulation."""
+    from scripts.attribution_benchmark import Fold, run_known, summarize_software_interview
+    from scripts.software_interview_replay import RowReplay, replay_artifact
+    from tests.test_software_questions import (
+        LSASS,
+        POWERSHELL,
+        software_engine,
+        software_kb,
+    )
+
+    engine = software_engine()
+    fold = Fold(
+        group_id="G3",
+        held_out_techniques=frozenset({"T1059.001", "T1003.001"}),
+        observations=(POWERSHELL, LSASS),
+        held_out_texts=frozenset(),
+    )
+    rows, _ = run_known(engine, [fold], hide_evidence=False, software_interview=True)
+    overrides = {
+        key: getattr(engine.settings, key)
+        for key in (
+            "technique_mapping_preset",
+            "attribution_combiner_enabled",
+            "attribution_min_maturity",
+            "interview_software_questions",
+        )
+    }
+    artifact = {
+        "parameters": {"seed": 1, "settings_overrides": overrides},
+        "fingerprint_inputs": {"thresholds": dict(engine.attribution_thresholds.__dict__)},
+        "known": rows,
+        "unknown": [],
+        "software_interview": summarize_software_interview(rows, [], cluster_naming=False),
+    }
+    path = tmp_path / "artifact.json"
+    path.write_text(json.dumps(artifact, default=str), encoding="utf-8")
+    kb = software_kb()
+    result = replay_artifact(path, kb)
+    assert result["replay_checks"] == {"rows": 1, "skipped": 0, "separation_matches": 1}
+    replayed = result["rows"]["known"][0]["software_interview"]
+    pipeline = rows[0]["software_interview"]
+    assert replayed["nodes"][0]["path"] == "" and not replayed["nodes"][0]["leaf"]
+    first = lambda nodes: sorted({n["path"].split("|")[0].split(":")[0] for n in nodes[1:]})  # noqa: E731
+    assert first(replayed["nodes"]) == first(pipeline["nodes"])
+    assert set(result["pipeline_comparison"]["gained_replay_minus_pipeline"]) == {
+        "q=0.1",
+        "q=0.3",
+        "q=1.0",
+    }
+    assert result["pipeline_comparison"]["C6"] in {True, False}
+    # a found for the leader's own malware names it in the fixed-window replay
+    replay = RowReplay(kb, rows[0], engine.settings, artifact["fingerprint_inputs"]["thresholds"])
+    assert replay.leader == "G3"
+    assert replay.decide({"S0103"}, set()) == ["G3"]
+    assert replay.decide({"S0101"}, set()) == []  # a rival's malware never names the leader
+    assert replay.decide({"S0103"}, {"S0104", "S0108"}) == []  # not found lowers it below the bar
+
+
+def test_removed_actor_rows_record_software_and_answer_with_the_actors_own_list():
+    """Removed-actor rows keep their software ids, and the simulation answers with the removed
+    actor's own ATT&CK list: malware it shares with one other group looks exclusive to that
+    group once it is removed, and a "found" then names the wrong group (C1 counts it)."""
+    from scripts.attribution_benchmark import Fold, run_unknown, summarize_software_interview
+    from tests.test_session import FakeStore
+    from tests.test_software_questions import LSASS, POWERSHELL, software_kb, software_settings
+
+    fold = Fold(
+        group_id="G3",
+        held_out_techniques=frozenset(),
+        observations=(f"{POWERSHELL} The Greenfin implant was loaded.", LSASS),
+        held_out_texts=frozenset(),
+    )
+    # two questions per candidate, so Bravo is also asked about the shared malware
+    rows = run_unknown(
+        software_settings(interview_software_per_group=2),
+        software_kb(),
+        FakeStore(),
+        [fold],
+        software_interview=True,
+    )
+    row = rows[0]
+    assert row["software_ids"] == ["S0103"]  # named in the text, though its only user is gone
+    simulation = row["software_interview"]
+    assert simulation["truth_documents"] == ["S0106"]  # shared with Bravo before the removal
+    risky = [node for node in simulation["nodes"] if node["path"].endswith("S0106:2:F")]
+    assert risky and risky[0]["named"] == ["G2"]
+    summary = summarize_software_interview([], rows, cluster_naming=False)
+    assert summary["criteria"]["C1"]["possible_removed_leaves"] == 1
+    assert not summary["criteria"]["C1"]["pass"]
+    assert summary["expected"]["q=1.0,fp=0.0"]["removed_named"] == pytest.approx(1.0)
+
+
+def test_cluster_replay_uses_the_scope_each_artifact_recorded(tmp_path, capsys):
+    from scripts.cluster_replay import main, recorded_scope
+
+    assert recorded_scope({}) == "full"  # artifacts from before the setting
+    assert recorded_scope(
+        {"fingerprint_inputs": {"thresholds": {"cluster_scope": "documented"}}}
+    ) == ("documented")
+    candidate = {
+        "members": ["G1", "G2"],
+        "reason": "shared rarely used software KillDisk (S0607)",
+        "link": "shared_software",
+        "nested": False,
+        "separation": 0.8,
+        "discriminative": 5.0,
+        "probability": 0.95,
+    }
+    row = {
+        "group_id": "G1",
+        "rank": 1,
+        "leading": "G1",
+        "stage": "known_group_shortlist",
+        "cluster_candidate": candidate,
+    }
+    artifact = tmp_path / "off.json"
+    artifact.write_text(json.dumps({"known": [row], "unknown": []}), encoding="utf-8")
+
+    def replayed(*extra):
+        assert main([str(artifact), "--json", *extra]) == 0
+        return json.loads(capsys.readouterr().out.strip().splitlines()[-1])
+
+    recorded = replayed()  # no recorded scope: the first rule, which names the pair
+    assert recorded["scope"] == "full" and len(recorded["cluster_correct"]) == 1
+    narrowed = replayed("--scope", "documented")
+    assert narrowed["scope"] == "documented" and narrowed["cluster_correct"] == []

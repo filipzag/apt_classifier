@@ -644,4 +644,11 @@ def load_attribution_combiner(
     ok, reason = model.compatible_with(str(getattr(kb, "version", "") or ""), fingerprint)
     if not ok:
         return None, f"incompatible artifact: {reason}"
+    configured = int(getattr(settings, "attribution_combiner_top_n", model.top_n) or model.top_n)
+    if configured != int(model.top_n):
+        # a model fitted on top-N lists scores only that window; another N silently changes
+        # which candidates it can reorder
+        return None, (
+            f"incompatible artifact: top_n (fitted on {model.top_n}, configured {configured})"
+        )
     return model, "active"

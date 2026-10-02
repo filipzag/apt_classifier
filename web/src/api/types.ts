@@ -5,6 +5,7 @@ export type Stage =
   | 'unresolved_activity_cluster'
   | 'known_group_shortlist'
   | 'known_group_hypothesis'
+  | 'known_cluster_hypothesis'
 
 export type CandidateState = 'auto_accepted' | 'needs_review' | 'auto_rejected'
 
@@ -47,6 +48,8 @@ export interface CaseSummary {
   stage?: Stage | null
   leading_group?: string | null
   leading_group_name?: string | null
+  /** members of a named documented-overlap cluster, leader first */
+  named_cluster?: string[]
   accepted_techniques?: number
   answers?: number
 }
@@ -148,12 +151,26 @@ export interface RankingEntry {
   discrimination: Discrimination | null
 }
 
+export interface NamedCluster {
+  members: { group_id: string; name: string }[]
+  label: string
+  reason: string
+  separation: number
+  discriminative: number
+  probability: number | null
+  runner_up_group_id: string | null
+  runner_up_name: string | null
+}
+
 export interface DecisionInfo {
   stage: Stage
   label: string
   summary: string
   advice: string
+  /** a single group is named (a named cluster is reported through named_kind / named_cluster) */
   named: boolean
+  named_kind?: 'group' | 'cluster' | null
+  named_cluster?: NamedCluster | null
   leading_group_id: string | null
   leading_group_name: string
   leading_score: number
@@ -165,7 +182,9 @@ export interface DecisionInfo {
   runner_up_group_id: string | null
   runner_up_name: string | null
   runner_up_related: boolean
-  related_groups: { group_id: string; name: string; reason: string }[]
+  // ATT&CK-related groups; only "same_activity" documents the same actor (a cluster), the rest are
+  // different actors ATT&CK merely links (shared rare malware, or a description calling them distinct)
+  related_groups: { group_id: string; name: string; reason: string; link: string }[]
   rationale: string
   cluster_id: string | null
   gate_mode: string
@@ -350,6 +369,13 @@ export interface InterviewQuestion {
   probability_yes: number
   information_gain: number
   investigation_priority: number
+  /** "software": a fixed-wording question about one malware entry (found / not found / not checked) */
+  kind?: 'technique' | 'software'
+  software_id?: string | null
+  /** top-three place of the one candidate ATT&CK documents the malware for */
+  target_rank?: number | null
+  /** predicted change of the naming gate's separation if the malware is found */
+  delta_found?: number | null
 }
 
 export interface InterviewLead {
@@ -366,7 +392,14 @@ export interface InterviewState {
   complete: boolean
   stop_reason: string | null
   selection_error: string | null
-  answered: { question: string; technique_id: string | null; status: string; text: string | null }[]
+  answered: {
+    question: string
+    technique_id: string | null
+    status: string
+    text: string | null
+    kind?: 'technique' | 'software'
+    software_id?: string | null
+  }[]
   max_questions: number
   question: InterviewQuestion | null
   leads: InterviewLead[]
@@ -475,6 +508,18 @@ export interface DistinguishLead {
   first_step: string
 }
 
+export interface DistinguishSoftware {
+  software_id: string
+  name: string
+  group_id: string
+  group_name: string
+  target_rank: number
+  users: string[]
+  delta_found: number
+  delta_not_found: number
+  technique_count: number
+}
+
 export interface DistinguishResponse {
   top_k: number
   /** size of the naming gate's window (combiner top 5 plus RRF top 5), the default top_k */
@@ -501,9 +546,18 @@ export interface DistinguishResponse {
   techniques: DistinguishTechnique[]
   pending: DistinguishPending[]
   leads: DistinguishLead[]
+  /** malware only one top-three candidate documents: what the software questions ask about */
+  software?: DistinguishSoftware[]
 }
 
-export type Top3State = 'named' | 'overlap' | 'split' | 'thin' | 'not_separated' | 'empty'
+export type Top3State =
+  | 'named'
+  | 'named_cluster'
+  | 'overlap'
+  | 'split'
+  | 'thin'
+  | 'not_separated'
+  | 'empty'
 
 export interface Top3Summary {
   state: Top3State
@@ -511,6 +565,35 @@ export interface Top3Summary {
   summary: string
   leader?: { group_id: string; name: string }
   other?: { group_id: string; name: string } | null
+  /** calibrated confidence label (display only, never a decision); null when off */
+  confidence?: Top3Confidence | null
+}
+
+/** per-label counts of one evaluation set, from the calibration artifact */
+export interface Top3ConfidenceMeasured {
+  source: string
+  rows: number
+  strong: { n: number; right: number }
+  set: { n: number; right: number }
+  open: { n: number; truth_in_top3: number }
+}
+
+/** How often cases like this one were right on ATT&CK test folds (confidence_labels.py) */
+export interface Top3Confidence {
+  label: 'strong' | 'set' | 'open'
+  /** wording: named_lower = named by the gate, calibrated label lower; named_cluster = the gate's pair */
+  text_key: 'strong' | 'one_of_these' | 'open' | 'named_lower' | 'named_cluster'
+  /** calibrated probability that the shown answer holds (null when open) */
+  probability: number | null
+  p_leader: number | null
+  p_top2: number | null
+  p_top3: number | null
+  set_size: number
+  group_ids: string[]
+  members: { group_id: string; name: string }[]
+  thresholds: { strong: number; set: number }
+  measured: { folds: Top3ConfidenceMeasured | null; real_reports: Top3ConfidenceMeasured | null }
+  note: string
 }
 
 /** another top-three member holds clearly more exclusive evidence than the leader */
@@ -547,7 +630,13 @@ export interface Top3Candidate {
   broad_profile: boolean
   named_software: { id: string; name: string }[]
   /** groups ATT&CK documents as overlapping with this one, with their rank in this case */
-  related: { group_id: string; name: string; reason: string; rank: number | null }[]
+  related: {
+    group_id: string
+    name: string
+    reason: string
+    link: 'same_activity' | 'nesting' | 'description' | 'shared_software'
+    rank: number | null
+  }[]
   /** ATT&CK's own description and campaigns, not an inference from this case */
   documented: {
     origins: { country: string; sentence: string }[]
@@ -574,7 +663,11 @@ export interface Top3Pair {
   separation: number
   favours: string | null
   related_reason: string | null
+  // how ATT&CK links the pair: the same activity (reviewed table), nesting profiles, a description mention
+  // that is not the same activity, or only rare shared malware (null: not linked)
+  link: 'same_activity' | 'nesting' | 'description' | 'shared_software' | null
   containment: number
+  // one cluster under the naming gate's scope (not for a shared-malware-only link by default)
   overlap_cluster: boolean
   a_only: Top3OneSided
   b_only: Top3OneSided
@@ -587,6 +680,17 @@ export interface Top3View extends Top3Summary {
   /** channel weights the naming gate scored the exclusive evidence with */
   weights: Record<'technique' | 'behavior' | 'software' | 'soft' | 'negative', number> | null
   display_order_differs?: boolean
+  /** "not found" software interview answers and their effect on the leader's separation */
+  negative_software?: {
+    software_ids: string[]
+    applied: string[]
+    penalty: number
+    total_before: number
+    total: number
+    separation_before: number
+    separation: number
+    members: string[]
+  } | null
   combiner_note?: string
   thresholds: {
     separation: number

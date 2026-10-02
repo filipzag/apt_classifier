@@ -74,9 +74,11 @@ When no named group meets the evidence bar (stages below *known group hypothesis
 view says so explicitly and labels the leader as the closest documented group, not an attribution;
 on the attribution benchmarks every named known group was correct (32 of 32 on the ATT&CK folds; 10 of 10
 on the CTI-HAL real reports with the group names removed from the text, 15 of 15 with them left in) and
-all 25 actors removed from ATT&CK were correctly left unnamed. When the leader has documented overlap with another
-group (ATT&CK cross-references or rarely shared tooling, for example Carbanak and FIN7), the view says
-so, because the evidence usually cannot separate them.
+all 25 actors removed from ATT&CK were correctly left unnamed. When ATT&CK documents the leader and another
+group as the same or overlapping activity (a reviewed table of its own description text, for example
+Carbanak and FIN7, or nesting profiles), the view says so, because the evidence usually cannot separate them.
+Groups ATT&CK only links through rarely shared malware, or names in order to call them distinct, are shown as
+"ATT&CK-linked" and are kept apart (docs 10.11).
 
 The LLM zero-shot opinion was removed from the ensemble on 2026-09-30 to keep ranking deterministic and cheaper; it had changed the analyst-facing rank in one of ten measured reports. CyberRE-LLM output has its own bounded family and re-orders only the ranking the analyst sees: the stage decision (and so the naming gate) and the independent reviewer read a fusion computed without it (docs 9.11, 9.12, 16.2).
 
@@ -162,8 +164,10 @@ measured before the exemplars) narrative micro-F1 was 0.53, recall 0.56.
 
 **Attribution (text in, group out; 153 held-out groups):** top-1 0.83 (was 0.38 before the fusion work and
 0.60 before the learned combiner; 0.84 before the source-country vote, which costs one fold here and gains on real
-reports), top-3 0.93, top-5 0.96, MRR 0.88. With the separation gate 32 known groups are named, all correct, and 0/25 removed
-actors are named (was 4): named risk 0.00 (was 0.56) at 18% coverage.
+reports), top-3 0.93, top-5 0.96, MRR 0.88. With the separation gate 32 known groups are named, all correct, plus one
+documented same-activity cluster (APT38 / Lazarus Group, docs 10.11), and 0/25 removed actors are named (was 4): named
+risk 0.00 (was 0.56) at 18% coverage. That 0/25 is seed 7; across the seven fold seeds used on 2026-10-02 the gate named
+4 of 175 removed actors (about 2%), each just above the separation bar (docs 21.3.15).
 
 **CTI-HAL real reports (55 reports, 6 groups; local evaluation only):** statement mapping F1 0.38 (was 0.32 before the
 exemplars), recall 0.34 (was 0.25), hit@1 0.38 (was 0.33); median accepted-technique recall per report 0.42 (was 0.31).
@@ -173,8 +177,8 @@ folds: **top-1 0.46** (0.44 before the source-country vote), cluster-aware top-1
 fix, docs 21.3.14); 10 reports
 reached a named hypothesis, all correct (8 before the source-country vote). With the statements as reported (27 of the 55 reports name their own
 group in them) the same pipeline gives top-1 0.56 (was 0.36 before the tool cap, decisive-malware boost, discriminative
-re-ranking, combiner, exemplars and country vote), cluster-aware top-1 0.71, top-5 0.73, MRR 0.64, and 15 named, all
-correct (was 3 under the maturity gate; at the
+re-ranking, combiner, exemplars and country vote), cluster-aware top-1 0.71, top-5 0.73, MRR 0.64, and 19 named, all
+correct: 13 single groups and 6 FIN7 / Carbanak clusters (15 single names before cluster naming; was 3 under the maturity gate; at the
 previous bar of 0.78 the gate named 7 and 3 were wrong, which is why the bar was raised); every earlier before/after
 comparison in this README and the docs was measured that way. Four of the six top-1 answers lost to the replacement
 are malware evidence removed with the name (Carbanak is both a group and its malware; a diagnostic run keeping such

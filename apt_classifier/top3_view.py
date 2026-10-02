@@ -33,33 +33,33 @@ from apt_classifier.classifiers.strategic_context import (
     _profile_texts as _strategic_profile_texts,
 )
 from apt_classifier.origin import documented_origins, documented_threat_type
+from apt_classifier.overlap_cluster import (
+    DEFAULT_CLUSTER_SCOPE,
+    cluster_label,
+    link_kind,
+    link_reason,
+    pair_separation,
+    twin_link,
+)
 from apt_classifier.separation import distinguishing_techniques
 from apt_classifier.top3 import PREREGISTERED_MARGIN, PREREGISTERED_TOLERANCE, decide_promotion
 
 CHANNELS = ("technique", "behavior", "software", "soft", "negative", "total")
 # largest top-three discriminative mass at or below this: too little exclusive evidence
 THIN_EVIDENCE = 1.5
-# documented-overlap pairs whose profiles nest or whose evidence does not separate them
-OVERLAP_CONTAINMENT = 0.8
-OVERLAP_SEPARATION = 0.5
 # a profile in the largest tenth of ATT&CK explains more techniques by default
 BROAD_PROFILE_QUANTILE = 0.9
 ONE_SIDED_LIMIT = 8
 
 STATE_LABELS = {
     "named": "Named",
+    "named_cluster": "Named documented-overlap cluster",
     "overlap": "Documented overlap",
     "split": "Evidence pulls both ways",
     "thin": "Too little exclusive evidence",
     "not_separated": "Leader not separated",
     "empty": "No shortlist",
 }
-
-
-def pair_separation(own: float, other: float, floor: float) -> float:
-    """Candidate-relative separation of one group over another, as the gate computes it."""
-    denominator = max(own, other, floor)
-    return max(-1.0, min(1.0, (own - other) / denominator)) if denominator > 0 else 0.0
 
 
 def documented_motivations(kb: Any, group_id: str) -> list[str]:
@@ -88,8 +88,13 @@ def build_top3_view(
     separation_bar: float = 0.5,
     min_discriminative: float = 3.0,
     behavior_threshold: float = 0.55,
+    cluster_scope: str = DEFAULT_CLUSTER_SCOPE,
 ) -> dict[str, Any]:
-    """Head-to-head view of the decision's first three candidates and a plain-language state."""
+    """Head-to-head view of the decision's first three candidates and a plain-language state.
+
+    A pair is an "overlap cluster" under the same rule (and scope) the naming gate's cluster step
+    uses; a pair ATT&CK relates only through shared rare malware is shown with that link but is
+    not called one cluster under the default "documented" scope."""
     fusion = state.deterministic_fusion or state.fusion
     context = state.context
     decision = getattr(state, "attribution_decision", None)
@@ -158,10 +163,13 @@ def build_top3_view(
                         {
                             "group_id": other,
                             "name": _name(kb, other),
-                            "reason": reason,
+                            "reason": link_reason(kb, gid, other) or reason,
+                            "link": link_kind(kb, gid, other),
                             "rank": fused_rank.get(other),
                         }
                         for other, reason in related_to(kb, gid).items()
+                        # a reviewed false match is no ATT&CK link (attack/same_activity.py)
+                        if link_kind(kb, gid, other) is not None
                     ),
                     key=lambda item: (item["rank"] is None, item["rank"] or 0, item["group_id"]),
                 ),
@@ -225,11 +233,12 @@ def build_top3_view(
     for index, first in enumerate(ids):
         for second in ids[index + 1 :]:
             separation = pair_separation(mass(first), mass(second), floor)
-            reason = related_to(kb, first).get(second)
             profile_a = set(group_techniques.get(first, ()))
             profile_b = set(group_techniques.get(second, ()))
             smaller = min(len(profile_a), len(profile_b))
             containment = len(profile_a & profile_b) / smaller if smaller else 0.0
+            twin = twin_link(kb, first, second, separation=separation, scope=cluster_scope)
+            kind = link_kind(kb, first, second)
             pairs.append(
                 {
                     "a": first,
@@ -238,12 +247,11 @@ def build_top3_view(
                     "b_name": names[second],
                     "separation": round(separation, 4),
                     "favours": first if separation > 0 else second if separation < 0 else None,
-                    "related_reason": reason,
+                    # the link the kind rests on, whatever the separation
+                    "related_reason": link_reason(kb, first, second, kind) if kind else None,
+                    "link": kind,
                     "containment": round(containment, 3),
-                    "overlap_cluster": bool(reason)
-                    and (
-                        containment >= OVERLAP_CONTAINMENT or abs(separation) < OVERLAP_SEPARATION
-                    ),
+                    "overlap_cluster": twin is not None,
                     "a_only": one_sided(first, second),
                     "b_only": one_sided(second, first),
                 }
@@ -262,7 +270,17 @@ def build_top3_view(
     if runner_up and runner_up not in names:
         runner_name += " (outside the top three)"
     separation = float(getattr(decision, "separation", 0.0) or 0.0) if decision else 0.0
-    if named:
+    cluster_members = tuple(getattr(decision, "named_cluster", ()) or ()) if decision else ()
+    if decision is not None and decision.stage.value == "known_cluster_hypothesis":
+        state_key = "named_cluster"
+        cluster_runner = getattr(decision, "cluster_runner_up_id", None)
+        summary = (
+            f"{cluster_label(kb, cluster_members)} is named as a cluster: together the pair clears "
+            f"the naming bar against {_name(kb, cluster_runner) if cluster_runner else 'the rest'} "
+            f"(cluster separation {float(getattr(decision, 'cluster_separation', 0.0)):.2f}), but "
+            "the evidence does not separate the two members. Report the cluster, not either member."
+        )
+    elif named:
         state_key = "named"
         summary = (
             f"{names[leader]} is named: its exclusive evidence clears the naming bar against "
@@ -303,7 +321,9 @@ def build_top3_view(
             f"{names[leader]} leads, but its exclusive evidence does not clear the naming bar "
             f"against {runner_name} (separation {separation:.2f} < {separation_bar:.2f})."
         )
-    if state_key == "overlap" and overlap is not None:
+    if state_key == "named_cluster" and len(cluster_members) > 1:
+        other = cluster_members[1]
+    elif state_key == "overlap" and overlap is not None:
         other = overlap["b"]
     elif state_key == "split" and contest is not None:
         other = contest.promoted
@@ -326,6 +346,13 @@ def build_top3_view(
         if discrimination is not None
         else None,
         "display_order_differs": [e.group_id for e in state.fusion.entries[:3]] != ids,
+        # "not found" software interview answers and what they did to the leader's separation
+        # (software_questions.py); None without such answers
+        "negative_software": (
+            (getattr(decision, "separation_factors", None) or {}).get("negative_software")
+            if decision is not None
+            else None
+        ),
         "combiner_note": (
             "Learned combiner probability (fitted on ATT&CK folds): how often a leader with these "
             "features was right there. Not a probability that the true group is one of these "
@@ -336,5 +363,8 @@ def build_top3_view(
 
 
 def top3_summary(view: dict[str, Any]) -> dict[str, Any]:
-    """The light part of the view carried in every case payload (Assessment badge)."""
-    return {key: view.get(key) for key in ("state", "label", "summary", "leader", "other")}
+    """The light part of the view carried in every case payload (Assessment badge), with the
+    calibrated confidence label the service adds (confidence_labels.py; None when off)."""
+    return {
+        key: view.get(key) for key in ("state", "label", "summary", "leader", "other", "confidence")
+    }

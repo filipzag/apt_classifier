@@ -125,7 +125,12 @@ export function DashboardPage() {
                       <Crosshair className="size-3.5 text-faint" />
                       {item.summary.leading_group_name ? (
                         <span className="truncate">
-                          {stage === 'known_group_hypothesis' ? 'Named' : 'Closest'}:{' '}
+                          {stage === 'known_group_hypothesis'
+                            ? 'Named'
+                            : stage === 'known_cluster_hypothesis'
+                              ? 'Named cluster'
+                              : 'Closest'}
+                          :{' '}
                           <span className="text-text">{item.summary.leading_group_name}</span>
                         </span>
                       ) : (

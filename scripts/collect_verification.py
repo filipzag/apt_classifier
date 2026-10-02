@@ -247,8 +247,15 @@ def summarize_attribution(payload: dict[str, Any]) -> dict[str, Any]:
         "leader_probability_auc",
         "top3",
         "cluster_top3",
+        "same_activity_top1",
+        "same_activity_top3",
         "top1_given_top3",
         "pairwise_12",
+        "named_cluster_correct",
+        "named_cluster_wrong",
+        "named_cluster_recovered",
+        "cluster_coverage",
+        "named_risk_single",
         "llm",
     )
     return {
