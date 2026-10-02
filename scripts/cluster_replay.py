@@ -4,7 +4,10 @@ Reads a ``scripts/attribution_benchmark.py`` artifact run with ``ATTRIBUTION_CLU
 off, whose rows record the engine's cluster candidate (``cluster_candidate``: the leader's
 documented twin in the gate window, the merged pair's separation and mass, the members' combined
 combiner probability), and applies the stage rule ``attribution.assess_attribution`` uses when
-the setting is on. It reports the pre-registered counts of docs 21.3.15 (A1-A5): correct and
+the setting is on. The recorded candidate was selected under the run's
+``ATTRIBUTION_CLUSTER_SCOPE``, so replay with the same ``--scope``: a narrower scope here only
+drops candidates and cannot find the lighter twin the engine would have picked instead. It
+reports the pre-registered counts of docs 21.3.15 (A1-A5): correct and
 wrong cluster names, removed actors named through a cluster, single names upgraded or held back,
 and removed-actor rows that clear two of the three cluster bars. With ``--on`` it compares the
 replay with an artifact run with the setting on, row for row (A4).
@@ -31,7 +34,14 @@ CLUSTER = "known_cluster_hypothesis"
 SHORTLIST = "known_group_shortlist"
 
 
-def thresholds_for(args: argparse.Namespace) -> MaturityThresholds:
+def recorded_scope(artifact: dict[str, Any]) -> str:
+    """The cluster scope an artifact's candidates were selected under; artifacts from before the
+    setting recorded no scope and were selected under the first rule ("full")."""
+    thresholds = (artifact.get("fingerprint_inputs") or {}).get("thresholds") or {}
+    return str(thresholds.get("cluster_scope") or "full")
+
+
+def thresholds_for(args: argparse.Namespace, scope: str | None = None) -> MaturityThresholds:
     return MaturityThresholds(
         gate_mode="separation",
         hypothesis_separation=args.separation,
@@ -39,7 +49,7 @@ def thresholds_for(args: argparse.Namespace) -> MaturityThresholds:
         cluster_naming=True,
         cluster_min_probability=args.min_probability,
         cluster_min_discriminative=args.cluster_min_discriminative,
-        cluster_scope=args.scope,
+        cluster_scope=scope or args.scope or "full",
     )
 
 
@@ -83,6 +93,7 @@ def replay(artifact: dict[str, Any], thresholds: MaturityThresholds) -> dict[str
         "single_named_off": 0,
         "single_named_on": 0,
         "single_correct_on": 0,
+        "removed_single_named": [],
         "cluster_correct": [],
         "cluster_wrong": [],
         "cluster_recovered": 0,
@@ -103,9 +114,11 @@ def replay(artifact: dict[str, Any], thresholds: MaturityThresholds) -> dict[str
             predictions.append({"label": label, **result})
             if arm == "known" and row.get("stage") == HYPOTHESIS:
                 out["single_named_off"] += 1
-            if result["stage"] == HYPOTHESIS:
+            if result["stage"] == HYPOTHESIS and arm == "known":
                 out["single_named_on"] += 1
-                out["single_correct_on"] += int(arm == "known" and row.get("rank") == 1)
+                out["single_correct_on"] += int(row.get("rank") == 1)
+            elif result["stage"] == HYPOTHESIS:
+                out["removed_single_named"].append(f"{label} as {row.get('leading')}")
             if result["stage"] == CLUSTER:
                 members = result["named_cluster"]
                 if arm == "unknown":
@@ -156,15 +169,28 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--min-discriminative", type=float, default=3.0)
     parser.add_argument("--cluster-min-discriminative", type=float, default=3.5)
     parser.add_argument("--min-probability", type=float, default=0.8)
-    parser.add_argument("--scope", choices=("full", "nested"), default="full")
+    parser.add_argument(
+        "--scope",
+        choices=("documented", "full", "nested"),
+        default=None,
+        help="default: the scope each artifact recorded (candidates were selected under it)",
+    )
     parser.add_argument("--json", action="store_true")
     args = parser.parse_args(argv)
     if args.on and len(args.on) != len(args.off):
         parser.error("--on needs one artifact per off artifact")
-    thresholds = thresholds_for(args)
     status = 0
     for index, path in enumerate(args.off):
-        result = replay(json.loads(path.read_text(encoding="utf-8")), thresholds)
+        artifact = json.loads(path.read_text(encoding="utf-8"))
+        scope = args.scope or recorded_scope(artifact)
+        if args.scope and args.scope != recorded_scope(artifact):
+            print(
+                f"note: {path.name} was recorded under scope {recorded_scope(artifact)!r}; a "
+                f"replay under {args.scope!r} only drops candidates and cannot find the twin the "
+                "engine would select under it",
+                file=sys.stderr,
+            )
+        result = replay(artifact, thresholds_for(args, scope))
         mismatches = (
             compare(result["predictions"], json.loads(args.on[index].read_text(encoding="utf-8")))
             if args.on
@@ -175,9 +201,9 @@ def main(argv: list[str] | None = None) -> int:
             summary["on_mismatches"] = mismatches
             status = status or int(bool(mismatches))
         if args.json:
-            print(json.dumps({"artifact": path.name, **summary}))
+            print(json.dumps({"artifact": path.name, "scope": scope, **summary}))
             continue
-        print(f"== {path.name} (scope {args.scope})")
+        print(f"== {path.name} (scope {scope})")
         print(
             f"  single names: {summary['single_named_off']} off -> {summary['single_named_on']} "
             f"on ({summary['single_correct_on']} correct); upgraded {len(summary['upgrades'])}, "
@@ -189,7 +215,13 @@ def main(argv: list[str] | None = None) -> int:
             f"{len(summary['cluster_wrong'])} wrong; removed actors named via a cluster: "
             f"{len(summary['removed_named_by_cluster'])}"
         )
-        for key in ("cluster_correct", "cluster_wrong", "removed_named_by_cluster", "held_back"):
+        for key in (
+            "cluster_correct",
+            "cluster_wrong",
+            "removed_named_by_cluster",
+            "removed_single_named",
+            "held_back",
+        ):
             for item in summary[key]:
                 print(f"    {key}: {item}")
         print(f"  removed actors clearing 2 of 3 cluster bars: {summary['removed_two_of_three']}")

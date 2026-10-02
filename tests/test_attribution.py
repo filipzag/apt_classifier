@@ -490,7 +490,8 @@ def _cluster_thresholds(**overrides):
 def _candidate(**overrides):
     base = {
         "members": ["G1", "G2"],
-        "reason": "Alpha description references Beta",
+        "reason": "ATT&CK: Alpha may be linked to Beta",
+        "link": "same_activity",
         "nested": False,
         "containment": 0.5,
         "pair_separation": 0.1,
@@ -547,6 +548,64 @@ def test_documented_cluster_is_named_when_the_pair_clears_its_bars():
             kb, _two_candidates(), shared, thresholds=thresholds, combiner=combiner
         )
         assert decision.stage is not AttributionStage.KNOWN_CLUSTER_HYPOTHESIS
+
+
+def test_documented_scope_never_names_a_pair_that_only_shares_rare_malware():
+    kb = _separation_kb()
+    shared = _context(techniques={"T2": 1.0, "T3": 1.0})
+    malware_only = _candidate(
+        reason="shared rarely used software KillDisk (S0607)", link="shared_software"
+    )
+    combiner = {"leader_probability": 0.5, "cluster": malware_only}
+    default = assess_attribution(
+        kb, _two_candidates(), shared, thresholds=_cluster_thresholds(), combiner=combiner
+    )
+    assert default.stage is AttributionStage.KNOWN_GROUP_SHORTLIST
+    assert default.named_cluster == ()
+    # the pre-registered full scope names it; nesting profiles qualify under the default scope
+    full = assess_attribution(
+        kb,
+        _two_candidates(),
+        shared,
+        thresholds=_cluster_thresholds(cluster_scope="full"),
+        combiner=combiner,
+    )
+    assert full.stage is AttributionStage.KNOWN_CLUSTER_HYPOTHESIS
+    nested = assess_attribution(
+        kb,
+        _two_candidates(),
+        shared,
+        thresholds=_cluster_thresholds(),
+        combiner={
+            "leader_probability": 0.5,
+            "cluster": _candidate(link="nesting", nested=True, containment=1.0),
+        },
+    )
+    assert nested.stage is AttributionStage.KNOWN_CLUSTER_HYPOTHESIS
+    # a description that calls the pair distinct (APT30 / Naikon nest fully) never names it,
+    # and neither does a mere mention
+    for candidate in (
+        _candidate(link="description", nested=True, containment=1.0),
+        _candidate(link="description"),
+    ):
+        distinct = assess_attribution(
+            kb,
+            _two_candidates(),
+            shared,
+            thresholds=_cluster_thresholds(),
+            combiner={"leader_probability": 0.5, "cluster": candidate},
+        )
+        assert distinct.stage is not AttributionStage.KNOWN_CLUSTER_HYPOTHESIS, candidate
+    # a candidate recorded before the link field existed counts only when it nests
+    legacy = {key: value for key, value in _candidate().items() if key != "link"}
+    held = assess_attribution(
+        kb,
+        _two_candidates(),
+        shared,
+        thresholds=_cluster_thresholds(),
+        combiner={"leader_probability": 0.5, "cluster": legacy},
+    )
+    assert held.stage is AttributionStage.KNOWN_GROUP_SHORTLIST
 
 
 def test_no_cluster_when_the_leader_consistency_guard_fires():

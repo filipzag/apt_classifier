@@ -239,7 +239,7 @@ function CandidateCard({ candidate, view, max }: { candidate: Top3Candidate; vie
 
       {candidate.related.length ? (
         <div className="mt-2 flex flex-wrap items-center gap-1.5 text-[11px] text-muted">
-          <Link2 className="size-3 text-amber" /> documented overlap
+          <Link2 className="size-3 text-amber" /> ATT&CK-linked
           {candidate.related.slice(0, 4).map((r) => (
             <Tip key={r.group_id} content={r.reason}>
               <span>
@@ -369,7 +369,12 @@ function PairRow({ pair }: { pair: Top3Pair }) {
             <Tip content={`ATT&CK links these groups: ${pair.related_reason}. Documented profile overlap ${pct(pair.containment, 0)}.`}>
               <span>
                 <Badge tone="amber">
-                  <Link2 className="size-3" /> {pair.overlap_cluster ? 'documented overlap · one cluster' : 'documented-related'}
+                  <Link2 className="size-3" />{' '}
+                  {pair.overlap_cluster
+                    ? 'documented overlap · one cluster'
+                    : pair.link === 'shared_software'
+                      ? 'shares rare malware'
+                      : 'ATT&CK-linked'}
                 </Badge>
               </span>
             </Tip>

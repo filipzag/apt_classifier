@@ -12,6 +12,7 @@ from typing import Any
 from apt_classifier.attack_flow import build_attack_flow
 from apt_classifier.canvas import build_analyst_canvas
 from apt_classifier.navigator import export_layers
+from apt_classifier.overlap_cluster import recorded_cluster_scope, split_related
 from apt_classifier.platforms import ledger_platforms
 
 # Stage vocabulary shown to analysts. Icons carry the meaning together with the label so the
@@ -96,7 +97,7 @@ def assessment_markdown(kb: Any, state: Any, *, case_name: str = "") -> str:
                 + " / ".join(group_name(kb, gid) for gid in members)
             )
             lines.append(
-                f"**Why a cluster:** ATT&CK documents {getattr(decision, 'cluster_reason', '')}. "
+                f"**Why a cluster:** ATT&CK link: {getattr(decision, 'cluster_reason', '')}. "
                 "The evidence separates the pair from the rest of the shortlist but not the "
                 "members from each other; do not report either member alone."
             )
@@ -108,10 +109,22 @@ def assessment_markdown(kb: Any, state: Any, *, case_name: str = "") -> str:
             )
             lines.append(f"**{role}:** {decision.leading_group_name} ({decision.leading_group_id})")
         related = getattr(decision, "related_leading_groups", {}) or {}
-        if related:
+        same, other = split_related(
+            kb,
+            decision.leading_group_id or "",
+            related,
+            scope=recorded_cluster_scope(state),
+            named_cluster=tuple(getattr(decision, "named_cluster", ()) or ()),
+        )
+        if same:
             lines.append(
-                "**Documented overlap:** "
-                + "; ".join(f"{group_name(kb, gid)}: {reason}" for gid, reason in related.items())
+                "**Documented overlap (same or overlapping activity):** "
+                + "; ".join(f"{group_name(kb, gid)}: {reason}" for gid, reason in same)
+            )
+        if other:
+            lines.append(
+                "**ATT&CK-linked, not documented as the same actor:** "
+                + "; ".join(f"{group_name(kb, gid)}: {reason}" for gid, reason, _ in other)
             )
         decisive = getattr(state.context, "decisive_software", {}) or {}
         if float(decisive.get("factor", 1.0) or 1.0) > 1.0:

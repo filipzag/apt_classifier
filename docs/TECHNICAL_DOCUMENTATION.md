@@ -1672,7 +1672,7 @@ wins that only one side documents. A state banner leads, first match wins:
 | state | condition |
 |---|---|
 | named | the decision named the leader |
-| overlap | the leader and another top-three group are documented-related and their profiles nest (containment >= 0.8) or their pair separation is below 0.5 |
+| overlap | the leader and another top-three group are a documented twin under the cluster scope (`twin_link`, 10.11: by default a same-activity link or nesting profiles, and nesting or a pair separation below 0.5) |
 | split | another top-three member leads the leader's D by at least 1.25 (the summary adds when one channel favours the leader) |
 | thin | the largest D among the three is at most 1.5 |
 | not separated | the leader is ahead but below the naming bar |
@@ -1707,18 +1707,55 @@ but did not load. A fingerprint mismatch would otherwise fall back to the RRF or
 ### 10.11 Documented clusters, confidence labels and software questions (2026-10-02)
 
 Three additions to the top three, each pre-registered and checked on the fresh fold seeds 43 and
-47 (21.3.15). The first two are on by default; the third ships off as a pilot.
+47 (21.3.15). Confidence labels are on by default and software questions ship off as a pilot.
+Cluster naming passed with its first rule. It was then narrowed to same-activity links and stays
+off until the narrowed rule passes its own check on the unused seeds 59 and 61 (21.3.15).
 
 **Documented-overlap clusters** (`apt_classifier/overlap_cluster.py`, stage
-`known_cluster_hypothesis`, `ATTRIBUTION_CLUSTER_NAMING=true`). Some ATT&CK groups describe the
-same activity under two names: Carbanak and FIN7, FIN6 and Cobalt Group. The evidence cannot
-separate them, so the single-name gate holds back even when the pair as a whole is clearly ahead.
-The cluster step names the pair, for example "FIN7 / Carbanak (documented overlap)":
+`known_cluster_hypothesis`, `ATTRIBUTION_CLUSTER_NAMING`, `ATTRIBUTION_CLUSTER_SCOPE=documented`).
+Some ATT&CK groups describe the same activity under two names: Carbanak and FIN7, APT38 and
+Lazarus Group. The evidence cannot separate them, so the single-name gate holds back even when the
+pair as a whole is clearly ahead. The cluster step names the pair, for example "FIN7 / Carbanak
+(documented overlap)":
 
-- **Twin.** A gate-window member that ATT&CK relates to the leader (`attack/related.py`: a
-  description reference, or non-tool software used by at most three groups) and that either
-  nests (profile containment >= 0.8) or does not separate from the leader (|pair separation| <
-  0.5). The twin with the largest gate-window mass wins; pairs only.
+- **Twin.** A gate-window member that ATT&CK links to the leader as the same activity, and that
+  either nests (profile containment >= 0.8) or does not separate from the leader (|pair
+  separation| < 0.5). "Same activity" (`twin_link`, scope `documented`) has two routes. In the
+  first, ATT&CK's own descriptions document the pair as the same or overlapping activity, as
+  recorded in the reviewed table `attack/same_activity.py`. In the second, the profiles nest, the
+  review has no verdict against the pair (distinct, unclear or false match), and no unreviewed
+  description link could call them distinct.
+- **Not twins.** Two groups that only share one rarely used malware family are different actors
+  and are never named together: Sandworm Team and APT38 both used KillDisk, Wizard Spider and
+  TA505 both used TrickBot. A plain mention is not enough either, because many descriptions name
+  another group to say it is different. Examples: Ember Bear and Saint Bear are "distinct
+  clusters", APT28 and Sandworm Team are different GRU units, and ShinyHunters and Scattered
+  Spider are members of one broader collective. Such pairs still appear in the Top-three view
+  ("shares rare malware", "ATT&CK-linked") and in an "ATT&CK-linked groups" note on the
+  Assessment page, but never as one cluster.
+- **Selection.** The twin with the largest gate-window mass among the qualifying members wins;
+  pairs only.
+- **The reviewed table (ATT&CK 19.2, 2026-10-02).** 87 group pairs are related: 37 through a
+  description reference and 50 only through shared rare malware. Five independent
+  classification passes read the sentences behind the 37 description links and the alias lists,
+  and a judge decided the 3 pairs they split on. 33 of the 37 were unanimous. The labels:
+  - 13 same activity, which are the only ones that count: FIN7 / Carbanak, Carbanak / Cobalt
+    Group, Deep Panda / APT19, Molerats / WIRTE, Lotus Blossom / Thrip, Lazarus Group with APT37,
+    APT38, Kimsuky, Andariel and AppleJeus, Winnti Group / APT41, menuPass / MirrorFace, Mustang
+    Panda / LuminousMoth;
+  - 18 distinct;
+  - 5 unclear;
+  - 1 false match: "Bitter" inside the name Operation Bitter Biscuit.
+
+  Any verdict against a pair also blocks the nesting route. For example, APT30 / Naikon nest
+  fully but "do not appear to be exact matches". A false match is no ATT&CK link at all, and it
+  is not shown as one.
+
+  The table fails closed. A description link on a newer ATT&CK version is neither the same
+  activity nor a nesting twin until it is reviewed (`unreviewed_description_pairs`). A listed
+  pair counts only while ATT&CK still links it.
+- **Other scopes.** Scope `full` is the first, pre-registered rule (any relation, shared malware
+  included), and `nested` allows nesting pairs only.
 - **Evidence.** The gate-window discrimination is recomputed with the pair merged into one unit
   (`unit_totals`), so evidence that only the two members share now counts as exclusive.
   Hierarchy factors take the larger member, behaviour the better member per observation, and
@@ -1735,11 +1772,15 @@ The cluster step names the pair, for example "FIN7 / Carbanak (documented overla
   `named_risk_single` is the single-name risk; `named_cluster_recovered` counts clusters whose
   leader alone was wrong.
 - **Display.** The decision records `named_cluster` and the cluster's separation, mass,
-  probability, reason and runner-up. Report, API, Streamlit and React show the pair with a
-  "documented overlap" label.
+  probability, reason ("ATT&CK link: ...") and runner-up. The candidate also records its link kind:
+  `same_activity`, `nesting`, `description` (a mention that is not the same activity) or
+  `shared_software`. Under the default scope only the first two can be named. Report, API,
+  Streamlit and React show the pair
+  with a "documented overlap" label. The Top-three view calls a pair "documented overlap · one
+  cluster" under the same rule and scope as the gate.
 
-The step needs the learned combiner and is off in maturity mode. `ATTRIBUTION_CLUSTER_SCOPE=nested`
-limits it to nesting pairs. Settings live outside the combiner fingerprint, so no refit is needed.
+The step needs the learned combiner and is off in maturity mode. The settings live outside the
+combiner fingerprint, so no refit is needed.
 
 **Calibrated confidence labels** (`apt_classifier/confidence_labels.py`,
 `CONFIDENCE_LABELS_ENABLED=true`). Display only: they never change the stage, the ranking or an
@@ -3751,12 +3792,13 @@ documented clusters, a choice the product owner has made explicitly.
 
 **Results (2026-10-02).** Every track was measured once on seeds 43 and 47 with 153 known folds
 and 25 removed actors each, on the same combiner artifact (pipeline fingerprint
-`fb4404a2819581fefb7b14b5`). Source fingerprints match the committed code. A and B are adopted;
-C ships off as a pilot; D1 and D2 are not adopted.
+`fb4404a2819581fefb7b14b5`). Source fingerprints match the committed code. B is adopted.
+A passed but was then narrowed by the product owner (amendment A′ below), and it stays off until
+A′ passes. C ships off as a pilot. D1 and D2 are not adopted.
 
 | track | verdict | what the fresh seeds showed |
 |---|---|---|
-| A clusters | adopted (default on) | 4 correct cluster names, 0 wrong, 0 removed actors; single names identical |
+| A clusters | passed; narrowed (A′), off until re-confirmed | 4 correct cluster names, 0 wrong, 0 removed actors; single names identical |
 | B confidence labels | adopted (default on) | "strong" wrong 8 of 192 (4.2%), calibration error 0.041, "one of these" 14 of 14 |
 | C software questions | pilot, default off | many correct names when answers are reliable; about 2.4 extra wrong names per seed at 5% wrong "found" |
 | D1 twin admission | not adopted | seed 43 top-1 137 -> 134, seed 47 top-3 144 -> 142 |
@@ -3839,8 +3881,8 @@ These fail:
 - **C6:** the fixed-window offline replay undercounts the pipeline's gains by 6 to 9 names at
   q = 1. That is a limit of the replay method, not of the feature: the pipeline re-runs retrieval
   and the window after an answer, and the replay cannot.
-- **C8** (C1 and C5 with clusters on): C1 holds on seed 43 and C5 fails as with clusters off (2.47
-  at q = 0.3). Seed 47 is added below when its run completes.
+- **C8** (C1 and C5 with clusters on, full scope): C1 holds on both seeds. C5 fails as it does
+  with clusters off: 2.47 and 2.35 at q = 0.3.
 
 The feature therefore ships off. A supervised pilot needs the product owner to accept the C5 risk
 or to require a second confirmation for "found".
@@ -3868,6 +3910,78 @@ The 53% strict top-3 on anonymized real reports is therefore not fixable by wide
 without losing folds. In most misses the true group is outside the first 20 candidates. The gain
 that does reach the analyst is the cluster count, which 21.3.14 measured at a strict 0.527 against
 a cluster-aware 0.655.
+
+**Report-only runs with the full scope (2026-10-02).** These used seed 7 and both CTI-HAL
+variants, the same combiner and the code at 793e640. Every row equals the published clusters-off
+artifact except the rows that became a cluster:
+
+| set | top-1 | strict / cluster-aware top-3 | single names | cluster names (truth inside) | removed actors named |
+|---|---|---|---|---|---|
+| seed 7 folds | 127/153 | 142 / 142 | 32 (32) | 3 (3) | 0/25 |
+| CTI-HAL anonymized | 25/55 | 29 / 36 | 10 (10) | 5 (5) | n/a |
+| CTI-HAL as reported | 31/55 | 37 / 41 | 13 (13) | 10 (10) | n/a |
+
+The seed-7 clusters were APT38 / Lazarus Group, GOLD SOUTHFIELD / FIN7 and ShinyHunters /
+Scattered Spider. All five anonymized CTI-HAL clusters were pairs linked only through one rare
+malware family:
+
+- FIN6 / Wizard Spider twice (Ryuk);
+- Cobalt Group / FIN6 (More_eggs);
+- Sandworm Team / APT38 (KillDisk);
+- Wizard Spider / TA505 (TrickBot).
+
+As reported, 6 of the 10 were FIN7 / Carbanak. Two of those were correct single FIN7 names before
+(the nested-twin rule). The other 4 were the shared-malware pairs above.
+
+**Amendment A′: same-activity links only (product-owner decision, 2026-10-02).** Every cluster above
+contains the true group, but a pair such as "Sandworm Team / APT38" reads as one actor, and the two
+are different actors that both used one wiper. The product owner decided that a cluster is named
+only for a same-activity link. This amendment is written down before the unused fold seeds 59 and
+61 are opened.
+
+- **Rule.** The twin must satisfy the first rule (an ATT&CK relation, and nesting or |pair
+  separation| < 0.5). It must also qualify through one of two routes:
+  - the reviewed table documents the pair as the same or overlapping activity (13 pairs on ATT&CK
+    19.2, 10.11);
+  - the profiles nest (containment >= 0.8), the review has no verdict against the pair (distinct,
+    unclear or false match), and no unreviewed description link exists for it.
+
+  Neither a shared rare malware family nor a description mention is enough on its own.
+- **How the rule was fixed.** A first draft counted any description mention. The review workflow
+  of the draft found that many mentions say the groups are different (Ember Bear / Saint Bear
+  "distinct clusters", Magic Hound / APT42 "distinct entities"), and one is a false match (Tonto
+  Team / BITTER). The 37 description links were therefore classified from ATT&CK's own sentences
+  before any fresh seed was opened. The classification read only the knowledge base, never a
+  benchmark row.
+- **Unchanged.** The bars (cluster separation 0.5, mass 3.5 or 3.0 nested, combined combiner
+  probability 0.8), the guard, the nested-twin hold and the scoring stay as they were.
+- **Selection.** The heaviest qualifying member under the narrowed rule wins, so a different,
+  lighter twin than before can be chosen.
+- **Settings.** `ATTRIBUTION_CLUSTER_SCOPE=documented` is the default; `full` keeps the first rule.
+  `ATTRIBUTION_CLUSTER_NAMING` defaults off until A′ passes.
+- **Already seen.** The narrowing was chosen after seeds 43/47, seed 7 and CTI-HAL were read, so
+  those sets are reported, not tests. From the recorded rows, the narrowed rule keeps at most:
+  - seeds 43/47: 1 of 4 clusters (LuminousMoth / Mustang Panda);
+  - seed 7: 1 of 3 (APT38 / Lazarus Group);
+  - CTI-HAL anonymized: 0 of 5;
+  - CTI-HAL as reported: 6 of 10 (FIN7 / Carbanak).
+
+  These are upper bounds where a lighter twin could replace a dropped one.
+- **Confirmation on seeds 59 and 61.** Each seed has 153 known folds and 25 removed actors. Each
+  gets an off run (default, cluster naming off) and an on run (`--set
+  attribution_cluster_naming=true`), all on the same combiner artifact. Bars, pooled:
+  - A′1: zero wrong cluster names and zero removed actors named through a cluster. A failure keeps
+    cluster naming off, with no retuning.
+  - A′2: the single names are identical in both arms apart from correct nested upgrades and nested
+    holds.
+  - A′3: every named cluster's link is `same_activity` or `nesting`, never `shared_software` or a
+    plain `description` mention.
+  - A′4: the on run equals `scripts/cluster_replay.py` over the off run on every row.
+  - Reported without a bar: the number of correct cluster names, which may be 0 because the rule
+    was narrowed for meaning, not for count; removed actors that clear two of the three cluster
+    bars.
+- **If A′1, A′2, A′3 and A′4 pass,** cluster naming defaults on with the documented scope. Seed 7
+  and both CTI-HAL variants are then run once more, report-only.
 
 **Open questions for the product owner.**
 

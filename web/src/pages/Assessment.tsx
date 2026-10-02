@@ -26,6 +26,9 @@ function AssessmentView({ caseId, data }: { caseId: string; data: CasePayload })
   const gateMode = decision?.thresholds.gate_mode ?? 'maturity'
   const usesMaturity = gateMode === 'maturity' || gateMode === 'both'
   const usesSeparation = gateMode === 'separation' || gateMode === 'both'
+  // only a link that may be read as one cluster under the gate's scope (docs 10.11)
+  const sameActivity = decision?.related_groups.filter((g) => g.link === 'same_activity') ?? []
+  const otherLinks = decision?.related_groups.filter((g) => g.link !== 'same_activity') ?? []
 
   return (
     <div className="space-y-6">
@@ -87,7 +90,7 @@ function AssessmentView({ caseId, data }: { caseId: string; data: CasePayload })
                     <>
                       <div className="mt-0.5 text-2xl font-semibold tracking-tight">{decision.named_cluster.label}</div>
                       <div className="mt-1 text-xs text-muted">
-                        ATT&CK documents {decision.named_cluster.reason}. The pair separates from{' '}
+                        ATT&CK link: {decision.named_cluster.reason}. The pair separates from{' '}
                         {decision.named_cluster.runner_up_name ?? 'the rest of the shortlist'} (cluster separation{' '}
                         {fmt(decision.named_cluster.separation, 2)}, mass {fmt(decision.named_cluster.discriminative, 2)}
                         {decision.named_cluster.probability !== null
@@ -121,16 +124,34 @@ function AssessmentView({ caseId, data }: { caseId: string; data: CasePayload })
               </div>
               <p className="mt-4 text-sm leading-relaxed text-muted">{decision.rationale}</p>
               <div className="mt-4 space-y-2">
-                {decision.related_groups.length ? (
+                {sameActivity.length ? (
                   <Callout tone="warning" icon={<Link2 className="size-4" />} title="Documented overlap">
-                    ATT&CK itself links the leader to{' '}
-                    {decision.related_groups.map((g, i) => (
+                    ATT&CK documents the leader and{' '}
+                    {sameActivity.map((g, i) => (
+                      <span key={g.group_id}>
+                        {i ? '; ' : ''}
+                        <span className="text-text">{g.name}</span> ({g.reason})
+                      </span>
+                    ))}{' '}
+                    as the same or overlapping activity.{' '}
+                    {decision.stage === 'known_group_hypothesis'
+                      ? 'Here the evidence separates the leader from them, so the leader is named alone.'
+                      : decision.stage === 'known_cluster_hypothesis'
+                        ? 'The named cluster above reports them together.'
+                        : 'When the evidence cannot separate them, report the cluster rather than one name.'}
+                  </Callout>
+                ) : null}
+                {otherLinks.length ? (
+                  <Callout tone="info" icon={<Link2 className="size-4" />} title="ATT&CK-linked groups">
+                    ATT&CK links the leader to{' '}
+                    {otherLinks.map((g, i) => (
                       <span key={g.group_id}>
                         {i ? '; ' : ''}
                         <span className="text-text">{g.name}</span> ({g.reason})
                       </span>
                     ))}
-                    . This evidence usually cannot separate them; report the cluster, not one name.
+                    , but does not document them as the same actor. Keep them apart: look for evidence only one of
+                    them documents.
                   </Callout>
                 ) : null}
                 {decision.decisive_software ? (

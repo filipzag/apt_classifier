@@ -74,9 +74,11 @@ When no named group meets the evidence bar (stages below *known group hypothesis
 view says so explicitly and labels the leader as the closest documented group, not an attribution;
 on the attribution benchmarks every named known group was correct (32 of 32 on the ATT&CK folds; 10 of 10
 on the CTI-HAL real reports with the group names removed from the text, 15 of 15 with them left in) and
-all 25 actors removed from ATT&CK were correctly left unnamed. When the leader has documented overlap with another
-group (ATT&CK cross-references or rarely shared tooling, for example Carbanak and FIN7), the view says
-so, because the evidence usually cannot separate them.
+all 25 actors removed from ATT&CK were correctly left unnamed. When ATT&CK documents the leader and another
+group as the same or overlapping activity (a reviewed table of its own description text, for example
+Carbanak and FIN7, or nesting profiles), the view says so, because the evidence usually cannot separate them.
+Groups ATT&CK only links through rarely shared malware, or names in order to call them distinct, are shown as
+"ATT&CK-linked" and are kept apart (docs 10.11).
 
 The LLM zero-shot opinion was removed from the ensemble on 2026-09-30 to keep ranking deterministic and cheaper; it had changed the analyst-facing rank in one of ten measured reports. CyberRE-LLM output has its own bounded family and re-orders only the ranking the analyst sees: the stage decision (and so the naming gate) and the independent reviewer read a fusion computed without it (docs 9.11, 9.12, 16.2).
 

@@ -171,6 +171,7 @@ PILOT_SETTINGS = (
     "attribution_hypothesis_separation",
     "attribution_hypothesis_min_discriminative",
     "attribution_cluster_naming",
+    "attribution_cluster_scope",
     "attribution_combiner_enabled",
     "max_questions",
 )
@@ -342,7 +343,7 @@ class AttributionEngine:
             cluster_min_discriminative=float(
                 getattr(self.settings, "attribution_cluster_min_discriminative", 3.5)
             ),
-            cluster_scope=str(getattr(self.settings, "attribution_cluster_scope", "full")),
+            cluster_scope=str(getattr(self.settings, "attribution_cluster_scope", "documented")),
         )
 
     def map_techniques(
@@ -1218,8 +1219,13 @@ class AttributionEngine:
                 tool_weight_cap=float(getattr(self.settings, "software_tool_weight_cap", 1.5)),
                 behavior_threshold=float(self.settings.behavior_similarity_threshold),
                 soft_techniques=getattr(context, "contrast_techniques", None) or None,
+                scope=str(getattr(self.settings, "attribution_cluster_scope", "documented")),
             )
             context.combiner["cluster"] = candidate.to_dict() if candidate is not None else None
+            # the scope the twin was selected under, for the surfaces that explain the links
+            context.combiner["cluster_scope"] = str(
+                getattr(self.settings, "attribution_cluster_scope", "documented")
+            )
             context.interview_software_guard = self._found_guard(context, candidate)
             return fusion
         context.combiner = None

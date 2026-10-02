@@ -6,6 +6,15 @@ leader of the naming gate's window has such a *twin* in the window, the pair can
 cluster ("FIN7 / Carbanak (documented overlap)") if, merged into one unit, it clears the same
 evidence bars against the rest of the window (docs 10.11, 21.3.15).
 
+The link must document the same activity (``ATTRIBUTION_CLUSTER_SCOPE=documented``, the default
+since 2026-10-02). Either ATT&CK's descriptions document the pair as the same or overlapping
+activity (the reviewed table in ``attack/same_activity.py``), or the profiles nest and the review
+did not find ATT&CK calling the two distinct. A mere mention is not enough: many descriptions
+name another group to say it is a different actor. Two groups that only share one rarely used
+malware family (Sandworm Team and APT38 both used KillDisk) are different actors too. The
+Top-three view still shows those links, but they never make a twin. Scope ``full`` is the first,
+pre-registered rule (any documented relation); ``nested`` allows nesting pairs only.
+
 The merged unit is scored like ``separation.discriminate`` scores a group, with the pair counted
 once: an item is the unit's when any member documents it (hierarchy and negative factors: the
 best member; behaviour: the best member's similarity per observation), and exclusivity is counted
@@ -22,7 +31,13 @@ from dataclasses import dataclass
 from types import SimpleNamespace
 from typing import Any
 
-from apt_classifier.attack.related import related_to
+from apt_classifier.attack.related import description_links, related_to
+from apt_classifier.attack.same_activity import (
+    is_false_match,
+    review_status,
+    review_verdict,
+    same_activity_statement,
+)
 from apt_classifier.classifiers.base import (
     hierarchy_matches_for,
     kb_mapping,
@@ -39,6 +54,15 @@ OVERLAP_CONTAINMENT = 0.8
 OVERLAP_SEPARATION = 0.5
 MAX_MEMBERS = 2
 
+# how ATT&CK links two groups, strongest first
+LINK_SAME_ACTIVITY = "same_activity"  # descriptions document the same activity (reviewed table)
+LINK_NESTING = "nesting"  # related, profiles nest, and not reviewed as distinct
+LINK_DESCRIPTION = "description"  # a description names the other, but not as the same activity
+LINK_SHARED_SOFTWARE = "shared_software"  # related only through rarely used malware
+SAME_ACTIVITY_LINKS = (LINK_SAME_ACTIVITY, LINK_NESTING)
+CLUSTER_SCOPES = ("documented", "full", "nested")
+DEFAULT_CLUSTER_SCOPE = "documented"
+
 
 def pair_separation(own: float, other: float, floor: float) -> float:
     """Candidate-relative separation of one group over another, as the gate computes it."""
@@ -54,6 +78,142 @@ def containment(kb: Any, first: str, second: str) -> float:
     return len(a & b) / smaller if smaller else 0.0
 
 
+def link_kind(kb: Any, first: str, second: str) -> str | None:
+    """How ATT&CK links two groups (``LINK_*``), or None when it does not relate them.
+
+    Fail closed: the nesting route needs no reviewed verdict against the pair (distinct, unclear
+    or a false match), and a description link the review has not seen blocks it as well, since
+    the description may call the two distinct. A reviewed false match is no link at all."""
+    related = related_to(kb, first).get(second)
+    if not related:
+        return None
+    described = bool(description_links(kb).get(first, {}).get(second))
+    status = review_status(kb, first, second)
+    if status == "same_activity":
+        return LINK_SAME_ACTIVITY
+    false_match = is_false_match(first, second)
+    if described and false_match and not shares_rare_software(kb, first, second):
+        return None  # the only relation was the false description match
+    if status is None and not described and containment(kb, first, second) >= OVERLAP_CONTAINMENT:
+        return LINK_NESTING
+    if described and not false_match:
+        return LINK_DESCRIPTION
+    return LINK_SHARED_SOFTWARE
+
+
+def shares_rare_software(kb: Any, first: str, second: str) -> bool:
+    """Both groups document a non-tool software used by at most three groups (the software
+    half of attack/related.py, which keeps only one reason per pair)."""
+    from apt_classifier.attack.related import RARE_SOFTWARE_MAX_USERS
+
+    groups = getattr(kb, "groups", {}) or {}
+    software = getattr(kb, "software", {}) or {}
+    a = set(getattr(groups.get(first), "software_ids", ()) or ())
+    b = set(getattr(groups.get(second), "software_ids", ()) or ())
+    for software_id in a & b:
+        if str(getattr(software.get(software_id), "software_type", "") or "") == "tool":
+            continue
+        users = sum(1 for group in groups.values() if software_id in (group.software_ids or ()))
+        if 2 <= users <= RARE_SOFTWARE_MAX_USERS:
+            return True
+    return False
+
+
+def link_reason(kb: Any, first: str, second: str, kind: str | None = None) -> str | None:
+    """The ATT&CK link a pair's kind rests on, in words; None for an unrelated pair."""
+    kind = kind if kind is not None else link_kind(kb, first, second)
+    if kind is None:
+        return None
+    related = str(related_to(kb, first).get(second) or "")
+    if kind == LINK_SAME_ACTIVITY:
+        return str(same_activity_statement(kb, first, second))
+    if kind == LINK_NESTING:
+        nest = containment(kb, first, second)
+        return f"{related}; their documented technique profiles nest ({nest:.0%})"
+    if kind == LINK_DESCRIPTION:
+        text = str(description_links(kb).get(first, {}).get(second) or related)
+        verdict = review_verdict(first, second)
+        return f"{text} (reviewed: {verdict})" if verdict else f"{text} (not reviewed)"
+    return related
+
+
+def recorded_cluster_scope(state: Any, default: str = DEFAULT_CLUSTER_SCOPE) -> str:
+    """The cluster scope an analysis selected its twin under (recorded with the combiner state),
+    else ``default``."""
+    context = getattr(state, "context", state)
+    combiner = getattr(context, "combiner", None)
+    scope = combiner.get("cluster_scope") if isinstance(combiner, dict) else None
+    return str(scope) if scope in CLUSTER_SCOPES else default
+
+
+def scope_counts_as_one(kind: str | None, nested: bool, scope: str) -> bool:
+    """Whether a link of this kind may be read as one cluster under ``scope`` (the link part of
+    ``twin_link``; the window and separation parts are the gate's)."""
+    if kind is None:
+        return False
+    if scope == "nested":
+        return nested
+    if scope == "documented":
+        return kind in SAME_ACTIVITY_LINKS
+    return True
+
+
+def split_related(
+    kb: Any,
+    group_id: str,
+    related: dict[str, str],
+    *,
+    scope: str = DEFAULT_CLUSTER_SCOPE,
+    named_cluster: tuple[str, ...] | list[str] = (),
+) -> tuple[list[tuple[str, str]], list[tuple[str, str, str]]]:
+    """A leader's ATT&CK-related groups split into links that may be read as one cluster under
+    ``scope`` ``(id, reason)`` and the others ``(id, reason, kind)``. A named cluster's twin is
+    always in the first list; a reviewed false match is in neither."""
+    same: list[tuple[str, str]] = []
+    other: list[tuple[str, str, str]] = []
+    members = {str(gid) for gid in named_cluster}
+    for gid, reason in related.items():
+        try:
+            kind = link_kind(kb, group_id, gid)
+            text = link_reason(kb, group_id, gid, kind) if kind else None
+            nested = containment(kb, group_id, gid) >= OVERLAP_CONTAINMENT
+        except Exception:  # noqa: BLE001 - overlap hints never break a page or an export
+            kind, text, nested = LINK_SHARED_SOFTWARE, None, False
+        if gid in members or scope_counts_as_one(kind, nested, scope):
+            same.append((gid, text or reason))
+        elif kind is not None:
+            other.append((gid, text or reason, kind))
+    return same, other
+
+
+def twin_link(
+    kb: Any, first: str, second: str, *, separation: float, scope: str = DEFAULT_CLUSTER_SCOPE
+) -> dict[str, Any] | None:
+    """Why ``second`` is ``first``'s documented twin under ``scope``, or None.
+
+    Every scope needs an ATT&CK relation and nesting profiles or a pair separation below
+    ``OVERLAP_SEPARATION``. ``documented`` also needs the link to document the same activity
+    (``SAME_ACTIVITY_LINKS``); ``nested`` needs nesting profiles. The reason names the link the
+    kind rests on and does not depend on the separation."""
+    if scope not in CLUSTER_SCOPES:
+        raise ValueError(f"unknown cluster scope {scope!r}; expected one of {CLUSTER_SCOPES}")
+    kind = link_kind(kb, first, second)
+    if kind is None:
+        return None
+    nest = containment(kb, first, second)
+    nested = nest >= OVERLAP_CONTAINMENT
+    if not nested and abs(separation) >= OVERLAP_SEPARATION:
+        return None
+    if not scope_counts_as_one(kind, nested, scope):
+        return None
+    return {
+        "reason": str(link_reason(kb, first, second, kind)),
+        "link": kind,
+        "nested": nested,
+        "containment": nest,
+    }
+
+
 def _exclusivity(documenting: int, unit_count: int) -> float:
     if unit_count <= 1:
         return 1.0
@@ -66,6 +226,7 @@ class ClusterCandidate:
 
     members: tuple[str, ...]
     reason: str
+    link: str
     nested: bool
     containment: float
     pair_separation: float
@@ -78,6 +239,7 @@ class ClusterCandidate:
         return {
             "members": list(self.members),
             "reason": self.reason,
+            "link": self.link,
             "nested": self.nested,
             "containment": round(self.containment, 4),
             "pair_separation": round(self.pair_separation, 4),
@@ -233,35 +395,37 @@ def unit_totals(
     ]
 
 
-def select_twin(kb: Any, discrimination: Any, *, floor: float = 1.0) -> dict[str, Any] | None:
+def select_twin(
+    kb: Any,
+    discrimination: Any,
+    *,
+    floor: float = 1.0,
+    scope: str = DEFAULT_CLUSTER_SCOPE,
+) -> dict[str, Any] | None:
     """The leader's documented twin in the gate window, or None.
 
-    A twin is a window member ATT&CK relates to the leader (attack/related.py) whose profile
-    nests with the leader's or whose pair separation from it is below ``OVERLAP_SEPARATION``.
-    With several, the one with the largest window mass wins (ties: window order)."""
+    A twin is a window member that qualifies under ``scope`` (``twin_link``). With several, the
+    one with the largest window mass wins (ties: window order); a member the scope excludes is
+    skipped, so a narrower scope can pick a lighter twin than ``full`` would."""
+    if scope not in CLUSTER_SCOPES:
+        raise ValueError(f"unknown cluster scope {scope!r}; expected one of {CLUSTER_SCOPES}")
     scores = list(getattr(discrimination, "scores", ()) or ())
     if len(scores) < 2:
         return None
     leader = scores[0]
-    try:
-        related = related_to(kb, leader.group_id)
-    except Exception:  # noqa: BLE001 - overlap hints never break the decision
-        return None
     best: dict[str, Any] | None = None
     for item in scores[1:]:
-        reason = related.get(item.group_id)
-        if not reason:
-            continue
-        nest = containment(kb, leader.group_id, item.group_id)
         separation = pair_separation(float(leader.total), float(item.total), floor)
-        if nest < OVERLAP_CONTAINMENT and abs(separation) >= OVERLAP_SEPARATION:
+        try:
+            link = twin_link(kb, leader.group_id, item.group_id, separation=separation, scope=scope)
+        except Exception:  # noqa: BLE001 - overlap hints never break the decision
+            return None
+        if link is None:
             continue
         if best is None or float(item.total) > best["total"]:
             best = {
                 "group_id": item.group_id,
-                "reason": str(reason),
-                "nested": nest >= OVERLAP_CONTAINMENT,
-                "containment": nest,
+                **link,
                 "pair_separation": separation,
                 "total": float(item.total),
             }
@@ -278,9 +442,10 @@ def cluster_candidate(
     tool_weight_cap: float = COMMODITY_TOOL_WEIGHT_CAP,
     behavior_threshold: float = 0.55,
     soft_techniques: dict[str, float] | None = None,
+    scope: str = DEFAULT_CLUSTER_SCOPE,
 ) -> ClusterCandidate | None:
     """The leader + twin cluster scored against the rest of the gate window, or None."""
-    twin = select_twin(kb, discrimination, floor=floor)
+    twin = select_twin(kb, discrimination, floor=floor, scope=scope)
     if twin is None:
         return None
     ids = [item.group_id for item in discrimination.scores]
@@ -311,6 +476,7 @@ def cluster_candidate(
     return ClusterCandidate(
         members=members,
         reason=twin["reason"],
+        link=twin["link"],
         nested=twin["nested"],
         containment=twin["containment"],
         pair_separation=twin["pair_separation"],

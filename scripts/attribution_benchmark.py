@@ -69,6 +69,7 @@ from apt_classifier.evidence.iocs import match_software_aliases
 from apt_classifier.evidence.models import EvidenceLedger, EvidenceStatus, Observation, Provenance
 from apt_classifier.group_mlp import refit_without_groups
 from apt_classifier.llm import OpenRouterClient
+from apt_classifier.overlap_cluster import SAME_ACTIVITY_LINKS, link_kind
 from apt_classifier.profile_forest import fit_profile_forest
 from apt_classifier.session import AttributionEngine
 from apt_classifier.vectorstore import (
@@ -119,6 +120,10 @@ FINGERPRINTED_SOURCES = (
     REPO_ROOT / "apt_classifier" / "torch_forest.py",
     REPO_ROOT / "apt_classifier" / "classifiers" / "profile_forest.py",
     REPO_ROOT / "apt_classifier" / "group_mlp.py",
+    REPO_ROOT / "apt_classifier" / "overlap_cluster.py",
+    REPO_ROOT / "apt_classifier" / "attack" / "related.py",
+    REPO_ROOT / "apt_classifier" / "attack" / "same_activity.py",
+    REPO_ROOT / "apt_classifier" / "software_questions.py",
 )
 
 
@@ -988,6 +993,17 @@ def run_known(
                         gid != fold.group_id and gid in related.get(fold.group_id, {})
                         for gid in ranked[:3]
                     ),
+                    # the same, counting only links that document the same activity (docs 10.11)
+                    "leader_same_activity_as_truth": bool(
+                        ranked
+                        and ranked[0] != fold.group_id
+                        and link_kind(engine.kb, fold.group_id, ranked[0]) in SAME_ACTIVITY_LINKS
+                    ),
+                    "top3_same_activity_as_truth": any(
+                        gid != fold.group_id
+                        and link_kind(engine.kb, fold.group_id, gid) in SAME_ACTIVITY_LINKS
+                        for gid in ranked[:3]
+                    ),
                     "candidates": len(ranked),
                     "top3": ranked[:3],
                     "stage": decision.stage.value if decision else None,
@@ -1155,6 +1171,13 @@ def summarize(
         if known_rows
         else 0.0
     )
+    if known_rows and all("leader_same_activity_as_truth" in row for row in known_rows):
+        # cluster-aware with same-activity links only (cluster_top1 counts any ATT&CK relation,
+        # shared rare malware included)
+        metrics["same_activity_top1"] = fmean(
+            1.0 if row["rank"] == 1 or row.get("leader_same_activity_as_truth") else 0.0
+            for row in known_rows
+        )
     named_rows = [row for row in known_rows if row["stage"] == named]
     metrics["named_risk_cluster_aware"] = (
         fmean(
@@ -1252,6 +1275,13 @@ def summarize(
             metrics["cluster_top3"] = fmean(
                 1.0
                 if (row["rank"] and row["rank"] <= 3) or row.get("top3_related_to_truth")
+                else 0.0
+                for row in known_rows
+            )
+        if all("top3_same_activity_as_truth" in row for row in known_rows):
+            metrics["same_activity_top3"] = fmean(
+                1.0
+                if (row["rank"] and row["rank"] <= 3) or row.get("top3_same_activity_as_truth")
                 else 0.0
                 for row in known_rows
             )

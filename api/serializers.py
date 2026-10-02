@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from apt_classifier.overlap_cluster import recorded_cluster_scope
 from apt_classifier.platforms import HOST_PLATFORMS, ledger_platforms
 from apt_classifier.report import STAGE_INFO, group_name
 
@@ -158,6 +159,31 @@ def ranking(kb: Any, state: Any, limit: int = 20) -> list[dict[str, Any]]:
     return rows
 
 
+def _related_groups(kb: Any, item: Any, *, scope: str = "documented") -> list[dict[str, Any]]:
+    """The leader's ATT&CK-related groups with the link kind: "same_activity" for links that
+    may be read as one cluster under the scope (overlap_cluster.split_related), else the kind."""
+    from apt_classifier.overlap_cluster import split_related
+
+    related = dict(getattr(item, "related_leading_groups", {}) or {})
+    leader = getattr(item, "leading_group_id", None)
+    if not related or not leader:
+        return []
+    same, other = split_related(
+        kb,
+        str(leader),
+        related,
+        scope=scope,
+        named_cluster=tuple(getattr(item, "named_cluster", ()) or ()),
+    )
+    return [
+        {"group_id": gid, "name": _name(kb, gid), "reason": reason, "link": "same_activity"}
+        for gid, reason in same
+    ] + [
+        {"group_id": gid, "name": _name(kb, gid), "reason": reason, "link": kind}
+        for gid, reason, kind in other
+    ]
+
+
 def _named_cluster(kb: Any, item: Any) -> dict[str, Any] | None:
     members = tuple(getattr(item, "named_cluster", ()) or ())
     if item.stage.value != "known_cluster_hypothesis" or not members:
@@ -215,10 +241,13 @@ def decision(kb: Any, state: Any, thresholds: Any) -> dict[str, Any] | None:
             else None
         ),
         "runner_up_related": bool(getattr(item, "runner_up_related", False)),
-        "related_groups": [
-            {"group_id": gid, "name": _name(kb, gid), "reason": reason}
-            for gid, reason in (getattr(item, "related_leading_groups", {}) or {}).items()
-        ],
+        "related_groups": _related_groups(
+            kb,
+            item,
+            scope=recorded_cluster_scope(
+                state, str(getattr(thresholds, "cluster_scope", "documented") or "documented")
+            ),
+        ),
         "rationale": item.rationale,
         "cluster_id": item.cluster_id,
         "gate_mode": str(getattr(item, "gate_mode", "maturity")),

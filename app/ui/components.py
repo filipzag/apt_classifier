@@ -244,7 +244,9 @@ def stage_glossary() -> None:
             "specificity and corroboration into one 0-1 score. **Margin** is the gap between the "
             "first and second candidate. A group is *named* only when both clear the configured "
             "bar; the bar was set so that no wrong name was issued on the benchmarks. "
-            "**Documented overlap** means ATT&CK itself cross-references the two groups or "
-            "records tooling shared by very few groups, so this evidence usually cannot tell "
-            "them apart."
+            "**Documented overlap** means ATT&CK documents the two groups as the same or "
+            "overlapping activity (a reviewed table of its own description text) or their "
+            "profiles nest, so this evidence usually cannot tell them apart. Groups ATT&CK only "
+            "links through rarely shared malware, or names to call them distinct, are different "
+            "actors."
         )

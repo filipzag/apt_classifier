@@ -34,10 +34,12 @@ from apt_classifier.classifiers.strategic_context import (
 )
 from apt_classifier.origin import documented_origins, documented_threat_type
 from apt_classifier.overlap_cluster import (
-    OVERLAP_CONTAINMENT,
-    OVERLAP_SEPARATION,
+    DEFAULT_CLUSTER_SCOPE,
     cluster_label,
+    link_kind,
+    link_reason,
     pair_separation,
+    twin_link,
 )
 from apt_classifier.separation import distinguishing_techniques
 from apt_classifier.top3 import PREREGISTERED_MARGIN, PREREGISTERED_TOLERANCE, decide_promotion
@@ -86,8 +88,13 @@ def build_top3_view(
     separation_bar: float = 0.5,
     min_discriminative: float = 3.0,
     behavior_threshold: float = 0.55,
+    cluster_scope: str = DEFAULT_CLUSTER_SCOPE,
 ) -> dict[str, Any]:
-    """Head-to-head view of the decision's first three candidates and a plain-language state."""
+    """Head-to-head view of the decision's first three candidates and a plain-language state.
+
+    A pair is an "overlap cluster" under the same rule (and scope) the naming gate's cluster step
+    uses; a pair ATT&CK relates only through shared rare malware is shown with that link but is
+    not called one cluster under the default "documented" scope."""
     fusion = state.deterministic_fusion or state.fusion
     context = state.context
     decision = getattr(state, "attribution_decision", None)
@@ -156,10 +163,13 @@ def build_top3_view(
                         {
                             "group_id": other,
                             "name": _name(kb, other),
-                            "reason": reason,
+                            "reason": link_reason(kb, gid, other) or reason,
+                            "link": link_kind(kb, gid, other),
                             "rank": fused_rank.get(other),
                         }
                         for other, reason in related_to(kb, gid).items()
+                        # a reviewed false match is no ATT&CK link (attack/same_activity.py)
+                        if link_kind(kb, gid, other) is not None
                     ),
                     key=lambda item: (item["rank"] is None, item["rank"] or 0, item["group_id"]),
                 ),
@@ -223,11 +233,12 @@ def build_top3_view(
     for index, first in enumerate(ids):
         for second in ids[index + 1 :]:
             separation = pair_separation(mass(first), mass(second), floor)
-            reason = related_to(kb, first).get(second)
             profile_a = set(group_techniques.get(first, ()))
             profile_b = set(group_techniques.get(second, ()))
             smaller = min(len(profile_a), len(profile_b))
             containment = len(profile_a & profile_b) / smaller if smaller else 0.0
+            twin = twin_link(kb, first, second, separation=separation, scope=cluster_scope)
+            kind = link_kind(kb, first, second)
             pairs.append(
                 {
                     "a": first,
@@ -236,12 +247,11 @@ def build_top3_view(
                     "b_name": names[second],
                     "separation": round(separation, 4),
                     "favours": first if separation > 0 else second if separation < 0 else None,
-                    "related_reason": reason,
+                    # the link the kind rests on, whatever the separation
+                    "related_reason": link_reason(kb, first, second, kind) if kind else None,
+                    "link": kind,
                     "containment": round(containment, 3),
-                    "overlap_cluster": bool(reason)
-                    and (
-                        containment >= OVERLAP_CONTAINMENT or abs(separation) < OVERLAP_SEPARATION
-                    ),
+                    "overlap_cluster": twin is not None,
                     "a_only": one_sided(first, second),
                     "b_only": one_sided(second, first),
                 }

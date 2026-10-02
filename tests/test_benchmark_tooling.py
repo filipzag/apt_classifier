@@ -1275,3 +1275,39 @@ def test_removed_actor_rows_record_software_and_answer_with_the_actors_own_list(
     assert summary["criteria"]["C1"]["possible_removed_leaves"] == 1
     assert not summary["criteria"]["C1"]["pass"]
     assert summary["expected"]["q=1.0,fp=0.0"]["removed_named"] == pytest.approx(1.0)
+
+
+def test_cluster_replay_uses_the_scope_each_artifact_recorded(tmp_path, capsys):
+    from scripts.cluster_replay import main, recorded_scope
+
+    assert recorded_scope({}) == "full"  # artifacts from before the setting
+    assert recorded_scope(
+        {"fingerprint_inputs": {"thresholds": {"cluster_scope": "documented"}}}
+    ) == ("documented")
+    candidate = {
+        "members": ["G1", "G2"],
+        "reason": "shared rarely used software KillDisk (S0607)",
+        "link": "shared_software",
+        "nested": False,
+        "separation": 0.8,
+        "discriminative": 5.0,
+        "probability": 0.95,
+    }
+    row = {
+        "group_id": "G1",
+        "rank": 1,
+        "leading": "G1",
+        "stage": "known_group_shortlist",
+        "cluster_candidate": candidate,
+    }
+    artifact = tmp_path / "off.json"
+    artifact.write_text(json.dumps({"known": [row], "unknown": []}), encoding="utf-8")
+
+    def replayed(*extra):
+        assert main([str(artifact), "--json", *extra]) == 0
+        return json.loads(capsys.readouterr().out.strip().splitlines()[-1])
+
+    recorded = replayed()  # no recorded scope: the first rule, which names the pair
+    assert recorded["scope"] == "full" and len(recorded["cluster_correct"]) == 1
+    narrowed = replayed("--scope", "documented")
+    assert narrowed["scope"] == "documented" and narrowed["cluster_correct"] == []

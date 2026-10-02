@@ -939,6 +939,7 @@ class CaseService:
             separation_bar=float(getattr(thresholds, "hypothesis_separation", 0.5)),
             min_discriminative=float(getattr(thresholds, "hypothesis_min_discriminative", 3.0)),
             behavior_threshold=float(settings.behavior_similarity_threshold),
+            cluster_scope=str(getattr(thresholds, "cluster_scope", "documented")),
         )
         view["confidence"] = self.confidence(state)
         return view

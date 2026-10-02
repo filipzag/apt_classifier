@@ -1,5 +1,6 @@
 from functools import lru_cache
 from pathlib import Path
+from typing import Literal
 
 from pydantic import SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -251,13 +252,18 @@ class Settings(BaseSettings):
     attribution_combiner_blend: float = 0.5
     # Documented-overlap clusters (overlap_cluster.py, docs 10.11 / 21.3.15): name the gate
     # leader together with its ATT&CK-documented twin when the merged pair clears the separation
-    # bar, this mass (3.0 for a nesting pair) and a combined combiner probability. Adopted
-    # 2026-10-02 after the pre-registered confirmation on fresh seeds 43/47 (docs 21.3.15: 4
-    # correct cluster names, none wrong, single names unchanged). Scope "nested" = nesting only.
-    attribution_cluster_naming: bool = True
+    # bar, this mass (3.0 for a nesting pair) and a combined combiner probability. The full-scope
+    # rule passed its confirmation on fresh seeds 43/47 (docs 21.3.15); the product owner then
+    # narrowed it to the "documented" scope below, which stays off until its own confirmation on
+    # the unused seeds 59/61 passes.
+    attribution_cluster_naming: bool = False
     attribution_cluster_min_probability: float = 0.8
     attribution_cluster_min_discriminative: float = 3.5
-    attribution_cluster_scope: str = "full"
+    # Which ATT&CK links make a twin: "documented" (ATT&CK documents the pair as the same activity,
+    # reviewed in attack/same_activity.py, or the profiles nest; product-owner decision 2026-10-02:
+    # groups that only share rare malware or that ATT&CK calls distinct are different actors),
+    # "full" (the pre-registered rule: any relation, shared rare malware too), "nested".
+    attribution_cluster_scope: Literal["documented", "full", "nested"] = "documented"
     # Calibrated confidence labels on the Top-three view (apt_classifier/confidence_labels.py,
     # scripts/fit_confidence_labels.py): display only, never a gate, pinned to the combiner
     # artifact above. Adopted 2026-10-02 after the pre-registered check on fresh seeds 43/47

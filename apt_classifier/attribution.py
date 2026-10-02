@@ -138,11 +138,14 @@ class MaturityThresholds:
     hypothesis_specificity: float = 0.0
     # Documented-overlap clusters (overlap_cluster.py, docs 10.11): off unless enabled. A cluster
     # needs the separation bar, this mass (the single bar for a nested pair) and the members'
-    # combined combiner probability; "nested" restricts clusters to nesting profiles.
+    # combined combiner probability. The scope says which ATT&CK links make a twin: "documented"
+    # (ATT&CK documents the same activity, attack/same_activity.py, or the profiles nest), "full"
+    # (any ATT&CK relation, shared rare malware included) or "nested" (nesting profiles only);
+    # the engine selects the twin under it.
     cluster_naming: bool = False
     cluster_min_probability: float = 0.8
     cluster_min_discriminative: float = 3.5
-    cluster_scope: str = "full"
+    cluster_scope: str = "documented"
 
 
 SUPPORT_RANK_LIMIT = 10
@@ -536,6 +539,14 @@ def _cluster_step(
     nested = bool(candidate.get("nested"))
     if thresholds.cluster_scope == "nested" and not nested:
         return "", None
+    # the engine already selects the twin under the scope; this keeps a candidate recorded under
+    # a wider scope (or before the link field existed) from naming a pair ATT&CK does not
+    # document as the same activity
+    if thresholds.cluster_scope == "documented" and candidate.get("link") not in (
+        "same_activity",
+        "nesting",
+    ):
+        return "", None
     probability = candidate.get("probability")
     bar = (
         thresholds.hypothesis_min_discriminative
@@ -573,7 +584,7 @@ def _cluster_decision(
         cluster_reason=str(candidate.get("reason", "")),
         cluster_runner_up_id=runner,
         rationale=(
-            f"Documented-overlap cluster: {label}. ATT&CK documents {candidate.get('reason', '')}"
+            f"Documented-overlap cluster: {label}. ATT&CK link: {candidate.get('reason', '')}"
             f". Together the pair separates from {runner or 'the rest of the shortlist'} "
             f"(cluster separation {float(candidate.get('separation', 0.0)):.2f}, mass "
             f"{float(candidate.get('discriminative', 0.0)):.2f}, combined probability "

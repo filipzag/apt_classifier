@@ -28,7 +28,17 @@ from apt_classifier.attack_flow import build_attack_flow
 from apt_classifier.canvas import build_analyst_canvas, build_candidate_dossier
 from apt_classifier.config import Settings
 from apt_classifier.navigator import export_layers
+from apt_classifier.overlap_cluster import recorded_cluster_scope, split_related
 from apt_classifier.session import AnalysisState, AttributionEngine
+
+
+def _overlap_advice(stage: str) -> str:
+    """What a documented same-activity link means for this decision."""
+    if stage == "known_group_hypothesis":
+        return "Here the evidence separates the leader from them, so the leader is named alone."
+    if stage == "known_cluster_hypothesis":
+        return "The named cluster above reports them together."
+    return "When the evidence cannot separate them, report the cluster rather than one name."
 
 
 def _render_stage(engine: AttributionEngine, state: AnalysisState) -> None:
@@ -90,13 +100,29 @@ def _render_stage(engine: AttributionEngine, state: AnalysisState) -> None:
                 + (" (documented-related)" if getattr(decision, "runner_up_related", False) else "")
             )
         related = getattr(decision, "related_leading_groups", {}) or {}
-        if related:
+        same, other = split_related(
+            engine.kb,
+            decision.leading_group_id or "",
+            related,
+            scope=recorded_cluster_scope(
+                state, str(getattr(engine.attribution_thresholds, "cluster_scope", "documented"))
+            ),
+            named_cluster=tuple(getattr(decision, "named_cluster", ()) or ()),
+        )
+        if other:
+            st.info(
+                "**ATT&CK-linked groups.** ATT&CK links the leader to "
+                + "; ".join(f"{group_name(engine, gid)} ({reason})" for gid, reason, _ in other)
+                + ", but does not document them as the same actor. Keep them apart: look for "
+                "evidence only one of them documents.",
+                icon="🔗",
+            )
+        if same:
             st.warning(
-                "**Documented overlap.** ATT&CK itself links the leader to "
-                + "; ".join(
-                    f"{group_name(engine, gid)} ({reason})" for gid, reason in related.items()
-                )
-                + ". This evidence usually cannot separate them; report the cluster, not one name.",
+                "**Documented overlap.** ATT&CK documents the leader and "
+                + "; ".join(f"{group_name(engine, gid)} ({reason})" for gid, reason in same)
+                + " as the same or overlapping activity. "
+                + _overlap_advice(decision.stage.value),
                 icon="🔗",
             )
         decisive = getattr(state.context, "decisive_software", {}) or {}
