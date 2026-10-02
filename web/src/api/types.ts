@@ -507,6 +507,35 @@ export interface Top3Summary {
   summary: string
   leader?: { group_id: string; name: string }
   other?: { group_id: string; name: string } | null
+  /** calibrated confidence label (display only, never a decision); null when off */
+  confidence?: Top3Confidence | null
+}
+
+/** per-label counts of one evaluation set, from the calibration artifact */
+export interface Top3ConfidenceMeasured {
+  source: string
+  rows: number
+  strong: { n: number; right: number }
+  set: { n: number; right: number }
+  open: { n: number; truth_in_top3: number }
+}
+
+/** How often cases like this one were right on ATT&CK test folds (confidence_labels.py) */
+export interface Top3Confidence {
+  label: 'strong' | 'set' | 'open'
+  /** wording: named_lower = named by the gate, calibrated label lower; named_cluster = the gate's pair */
+  text_key: 'strong' | 'one_of_these' | 'open' | 'named_lower' | 'named_cluster'
+  /** calibrated probability that the shown answer holds (null when open) */
+  probability: number | null
+  p_leader: number | null
+  p_top2: number | null
+  p_top3: number | null
+  set_size: number
+  group_ids: string[]
+  members: { group_id: string; name: string }[]
+  thresholds: { strong: number; set: number }
+  measured: { folds: Top3ConfidenceMeasured | null; real_reports: Top3ConfidenceMeasured | null }
+  note: string
 }
 
 /** another top-three member holds clearly more exclusive evidence than the leader */

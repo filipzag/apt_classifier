@@ -167,7 +167,14 @@ def test_states_for_split_evidence_and_thin_evidence():
         kb, _state(kb, ["G0046", "G0008", "G0016"], stage="known_group_hypothesis")
     )
     assert named["state"] == "named"
-    assert set(top3_summary(named)) == {"state", "label", "summary", "leader", "other"}
+    assert set(top3_summary(named)) == {
+        "state",
+        "label",
+        "summary",
+        "leader",
+        "other",
+        "confidence",
+    }
 
 
 def test_view_never_changes_the_state_it_reads():

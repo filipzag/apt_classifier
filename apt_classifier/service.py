@@ -22,6 +22,7 @@ from uuid import uuid4
 from apt_classifier.attack.kb import AttackKnowledgeBase
 from apt_classifier.canvas import build_analyst_canvas, build_candidate_dossier
 from apt_classifier.cases import CaseRecord, CaseStore
+from apt_classifier.confidence_labels import confidence_label, load_confidence_labels
 from apt_classifier.config import Settings, get_settings
 from apt_classifier.diamond import build_diamond_model
 from apt_classifier.embeddings import SentenceTransformerEmbedder
@@ -154,6 +155,14 @@ class CaseService:
             client = OpenRouterClient(self.settings) if llm_available(self.settings) else None
             engine = AttributionEngine(self.settings, kb, store, client)  # type: ignore[arg-type]
         self.engine = engine
+        # Calibrated confidence labels for the Top-three view (display only): pinned to the
+        # combiner the engine loaded, so they read exactly the probabilities it records.
+        self.confidence_labels, self.confidence_labels_status = load_confidence_labels(
+            self.settings,
+            getattr(engine, "kb", None),
+            getattr(engine, "combiner", None),
+            getattr(getattr(engine, "settings", None), "attribution_combiner_path", None),
+        )
         self.store = CaseStore(cases_dir or (self.settings.data_dir / "cases"))
         self._states: dict[str, AnalysisState] = {}
         self._meta: dict[str, CaseMeta] = {}
@@ -205,6 +214,7 @@ class CaseService:
             if isinstance(status, str | dict | type(None))
             else str(status),
             "combiner": str(getattr(self.engine, "combiner_status", "unavailable")),
+            "confidence_labels": str(self.confidence_labels_status),
             "exemplars": str(getattr(self.engine, "exemplar_status", "unavailable")),
             "profile_forest": forest_status,
             "group_mlp": str(getattr(self.engine, "group_mlp_status", "unavailable")),
@@ -881,7 +891,7 @@ class CaseService:
         """Head-to-head of the decision's first three candidates (display only, docs 10.10)."""
         settings = self.engine.settings
         thresholds = self.engine.attribution_thresholds
-        return build_top3_view(
+        view = build_top3_view(
             self.engine.kb,
             state,
             floor=float(getattr(settings, "attribution_separation_floor", 1.0)),
@@ -889,6 +899,15 @@ class CaseService:
             min_discriminative=float(getattr(thresholds, "hypothesis_min_discriminative", 3.0)),
             behavior_threshold=float(settings.behavior_similarity_threshold),
         )
+        view["confidence"] = self.confidence(state)
+        return view
+
+    def confidence(self, state: Any) -> dict[str, Any] | None:
+        """Calibrated confidence label (display only, never a decision); None when off."""
+        try:
+            return confidence_label(self.confidence_labels, state, kb=self.engine.kb)
+        except Exception:  # noqa: BLE001 - a secondary chip must not break the view
+            return None
 
     def top3(self, case_id: str) -> dict[str, Any]:
         state, _ = self.get(case_id)

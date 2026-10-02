@@ -1,7 +1,15 @@
-import { BookOpen, GitCompareArrows, Link2, Scale, Sparkles } from 'lucide-react'
+import { BookOpen, Gauge, GitCompareArrows, Link2, Scale, Sparkles } from 'lucide-react'
 import type { ReactNode } from 'react'
 
-import type { Top3Candidate, Top3OneSided, Top3Pair, Top3State, Top3Summary, Top3View } from '../api/types'
+import type {
+  Top3Candidate,
+  Top3Confidence,
+  Top3OneSided,
+  Top3Pair,
+  Top3State,
+  Top3Summary,
+  Top3View,
+} from '../api/types'
 import { cn, fmt, pct } from '../lib/utils'
 import { Badge, Callout, Card, Label, SectionTitle, Tip } from './ui'
 
@@ -21,11 +29,85 @@ const TOP3_STATE_META: Record<
 export function Top3StateBadge({ summary, className }: { summary: Top3Summary; className?: string }) {
   const meta = TOP3_STATE_META[summary.state] ?? TOP3_STATE_META.not_separated
   return (
-    <Tip content={summary.summary}>
-      <span className={className}>
-        <Badge tone={meta.badge}>
-          {meta.icon}
-          Top three: {summary.label}
+    <span className={cn('inline-flex flex-wrap items-center gap-1.5', className)}>
+      <Tip content={summary.summary}>
+        <span>
+          <Badge tone={meta.badge}>
+            {meta.icon}
+            Top three: {summary.label}
+          </Badge>
+        </span>
+      </Tip>
+      {summary.confidence ? <ConfidenceChip confidence={summary.confidence} /> : null}
+    </span>
+  )
+}
+
+/** "178 of 182", or null when the artifact has no such evaluation. */
+function counted(right: number | undefined, n: number | undefined): string | null {
+  return right === undefined || n === undefined ? null : `${right} of ${n}`
+}
+
+function names(confidence: Top3Confidence): string {
+  return confidence.members.map((m) => m.name).join(', ')
+}
+
+/** The chip's sentence and its tooltip; measured counts come from the artifact, never typed here. */
+function confidenceText(confidence: Top3Confidence): { text: string; tip: string } {
+  const folds = confidence.measured.folds
+  const reports = confidence.measured.real_reports
+  // two decimals would round a calibrated 0.996 up to a certainty
+  const p = (confidence.probability ?? 0) >= 0.995 ? '> 0.99' : fmt(confidence.probability, 2)
+  const caveat = 'Calibrated on ATT&CK test folds; real reports run overconfident'
+  const sentences = (...parts: (string | null)[]) => parts.filter(Boolean).join(' ')
+  const among = `Calibrated P(truth among them) ${p}.`
+  let text: string
+  let tip: string
+  if (confidence.label === 'strong') {
+    const foldRight = counted(folds?.strong.right, folds?.strong.n)
+    const reportRight = counted(reports?.strong.right, reports?.strong.n)
+    text = `Strong single answer: ${confidence.members[0]?.name ?? '–'} — not a name.`
+    tip = sentences(
+      `Calibrated P(leader correct) ${p}.`,
+      foldRight ? `On ATT&CK test folds, leaders labelled this way were right ${foldRight}.` : null,
+      `${caveat}${reportRight ? ` (CTI-HAL: right ${reportRight})` : ''}.`,
+      'Only the naming gate names a group.',
+    )
+  } else if (confidence.label === 'set') {
+    const foldRight = counted(folds?.set.right, folds?.set.n)
+    text = `One of these ${confidence.set_size}: ${names(confidence)}.`
+    tip = sentences(
+      confidence.text_key === 'named_cluster'
+        ? 'The naming gate named this documented-overlap cluster as a whole, not one group in it.'
+        : null,
+      among,
+      foldRight ? `On ATT&CK test folds the truth was among the groups shown ${foldRight}.` : null,
+      `${caveat}.`,
+    )
+  } else {
+    const outside = reports ? counted(reports.open.n - reports.open.truth_in_top3, reports.open.n) : null
+    text = 'Open — no calibrated short answer; the truth may be outside this list.'
+    tip = sentences(
+      outside ? `On real reports labelled open, the truth was outside the top three in ${outside}.` : null,
+      `${caveat}.`,
+    )
+  }
+  if (confidence.text_key === 'named_lower') {
+    const lower = confidence.label === 'set' ? `one of these ${confidence.set_size}: ${names(confidence)}` : 'open'
+    text = `Named by the evidence gate; calibrated label lower (${lower}) — the name rests on exclusive evidence.`
+  }
+  return { text, tip }
+}
+
+/** Calibrated confidence chip (display only): neutral tone, never the "named" tone. */
+export function ConfidenceChip({ confidence, className }: { confidence: Top3Confidence; className?: string }) {
+  const { text, tip } = confidenceText(confidence)
+  return (
+    <Tip content={tip}>
+      <span className={cn('inline-flex max-w-full', className)}>
+        <Badge tone="neutral" className="whitespace-normal text-left">
+          <Gauge className="size-3 shrink-0" />
+          {text}
         </Badge>
       </span>
     </Tip>
@@ -328,6 +410,11 @@ export function TopThreePanel({ view }: { view: Top3View }) {
         {view.display_order_differs ? (
           <span className="mt-1 block text-xs text-faint">
             The ranking shown elsewhere includes the AI vote; this comparison uses the deterministic order the naming decision used.
+          </span>
+        ) : null}
+        {view.confidence ? (
+          <span className="mt-2 flex">
+            <ConfidenceChip confidence={view.confidence} />
           </span>
         ) : null}
       </Callout>

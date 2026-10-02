@@ -7,7 +7,7 @@ EVIDENCEFORGE_CLINIC_DIR ?= ../evidenceforge_clinic
 PUBLIC_BASELINE ?= data/audits/public_heldout_baseline.json
 PUBLIC_CURRENT ?= data/audits/public_heldout_current.json
 
-.PHONY: exemplars fit-forest fit-mlp fit-combiner api api-dev api-local api-auth-demo web-install web-dev web-build web-check run-next setup up down ingest run run-local test lint evidenceforge-eval evidenceforge-eval-all benchmark-public benchmark-curated verify-results check-regression fit-acceptance benchmark-attribution train-reranker generate-synthetic benchmark-cti-hal benchmark-cti-hal-production benchmark-attribution-production
+.PHONY: exemplars fit-forest fit-mlp fit-combiner fit-confidence-labels api api-dev api-local api-auth-demo web-install web-dev web-build web-check run-next setup up down ingest run run-local test lint evidenceforge-eval evidenceforge-eval-all benchmark-public benchmark-curated verify-results check-regression fit-acceptance benchmark-attribution train-reranker generate-synthetic benchmark-cti-hal benchmark-cti-hal-production benchmark-attribution-production
 
 setup:
 	python3 -m venv --system-site-packages .venv
@@ -72,6 +72,11 @@ check-regression:
 # unknown-actor lists, group-level CV; writes data/models/combiner/attribution_combiner.json.
 fit-combiner:
 	PYTHONPATH=. $(PYTHON) scripts/fit_attribution_combiner.py --seeds 11 23 37 --variants 5 --unknown-all --overwrite-production
+
+# Calibrated confidence labels (display only; offline, seconds): fitted on the design folds
+# (seeds 41/53), seed 7 and CTI-HAL scored as report-only numbers. Refit after fit-combiner.
+fit-confidence-labels:
+	PYTHONPATH=. $(PYTHON) scripts/fit_confidence_labels.py --evaluate data/audits/attribution_heldout_current.json data/audits/attribution_cti_hal_current.json data/audits/attribution_cti_hal_as_reported.json
 
 # Labelled real-report sentences (public train splits) used as technique-mapping evidence;
 # needs scripts/prepare_public_benchmarks.py output. Run before fit-acceptance.

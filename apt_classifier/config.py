@@ -235,6 +235,13 @@ class Settings(BaseSettings):
     )
     attribution_combiner_top_n: int = 20
     attribution_combiner_blend: float = 0.5
+    # Calibrated confidence labels on the Top-three view (apt_classifier/confidence_labels.py,
+    # scripts/fit_confidence_labels.py): display only, never a gate, pinned to the combiner
+    # artifact above. Off until the pre-registered check on the fresh seeds 43/47 passes.
+    confidence_labels_enabled: bool = False
+    confidence_labels_path: Path = (
+        PROJECT_ROOT / "data" / "models" / "calibration" / "confidence_labels.json"
+    )
     # Activity clustering (opt-in)
     activity_clusters_enabled: bool = False
     activity_clusters_db_path: Path = PROJECT_ROOT / "data" / "activity_clusters.db"
