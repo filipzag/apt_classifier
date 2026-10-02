@@ -251,9 +251,10 @@ class Settings(BaseSettings):
     attribution_combiner_blend: float = 0.5
     # Documented-overlap clusters (overlap_cluster.py, docs 10.11 / 21.3.15): name the gate
     # leader together with its ATT&CK-documented twin when the merged pair clears the separation
-    # bar, this mass (3.0 for a nesting pair) and a combined combiner probability. Off until the
-    # pre-registered confirmation on fresh fold seeds passes. Scope "nested" = nesting pairs only.
-    attribution_cluster_naming: bool = False
+    # bar, this mass (3.0 for a nesting pair) and a combined combiner probability. Adopted
+    # 2026-10-02 after the pre-registered confirmation on fresh seeds 43/47 (docs 21.3.15: 4
+    # correct cluster names, none wrong, single names unchanged). Scope "nested" = nesting only.
+    attribution_cluster_naming: bool = True
     attribution_cluster_min_probability: float = 0.8
     attribution_cluster_min_discriminative: float = 3.5
     attribution_cluster_scope: str = "full"
