@@ -363,6 +363,13 @@ export interface InterviewQuestion {
   probability_yes: number
   information_gain: number
   investigation_priority: number
+  /** "software": a fixed-wording question about one malware entry (found / not found / not checked) */
+  kind?: 'technique' | 'software'
+  software_id?: string | null
+  /** top-three place of the one candidate ATT&CK documents the malware for */
+  target_rank?: number | null
+  /** predicted change of the naming gate's separation if the malware is found */
+  delta_found?: number | null
 }
 
 export interface InterviewLead {
@@ -379,7 +386,14 @@ export interface InterviewState {
   complete: boolean
   stop_reason: string | null
   selection_error: string | null
-  answered: { question: string; technique_id: string | null; status: string; text: string | null }[]
+  answered: {
+    question: string
+    technique_id: string | null
+    status: string
+    text: string | null
+    kind?: 'technique' | 'software'
+    software_id?: string | null
+  }[]
   max_questions: number
   question: InterviewQuestion | null
   leads: InterviewLead[]
@@ -488,6 +502,18 @@ export interface DistinguishLead {
   first_step: string
 }
 
+export interface DistinguishSoftware {
+  software_id: string
+  name: string
+  group_id: string
+  group_name: string
+  target_rank: number
+  users: string[]
+  delta_found: number
+  delta_not_found: number
+  technique_count: number
+}
+
 export interface DistinguishResponse {
   top_k: number
   /** size of the naming gate's window (combiner top 5 plus RRF top 5), the default top_k */
@@ -514,6 +540,8 @@ export interface DistinguishResponse {
   techniques: DistinguishTechnique[]
   pending: DistinguishPending[]
   leads: DistinguishLead[]
+  /** malware only one top-three candidate documents: what the software questions ask about */
+  software?: DistinguishSoftware[]
 }
 
 export type Top3State =
@@ -636,6 +664,17 @@ export interface Top3View extends Top3Summary {
   /** channel weights the naming gate scored the exclusive evidence with */
   weights: Record<'technique' | 'behavior' | 'software' | 'soft' | 'negative', number> | null
   display_order_differs?: boolean
+  /** "not found" software interview answers and their effect on the leader's separation */
+  negative_software?: {
+    software_ids: string[]
+    applied: string[]
+    penalty: number
+    total_before: number
+    total: number
+    separation_before: number
+    separation: number
+    members: string[]
+  } | null
   combiner_note?: string
   thresholds: {
     separation: number

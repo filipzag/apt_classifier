@@ -122,6 +122,21 @@ class IntakePayload:
         return bool(self.free_text() or self.alerts.strip() or self.iocs.strip() or self.files)
 
 
+def _group_label(kb: Any, group_id: str) -> str:
+    group = getattr(kb, "groups", {}).get(group_id)
+    return str(getattr(group, "name", group_id)) if group else group_id
+
+
+def pilot_records(ledger: EvidenceLedger) -> list[dict[str, Any]]:
+    """The ``metadata["pilot"]`` records of a ledger's software answers, in answer order."""
+    return [
+        dict(answer.metadata["pilot"])
+        for answer in ledger.question_answers
+        if getattr(answer, "kind", "technique") == "software"
+        and isinstance(answer.metadata.get("pilot"), dict)
+    ]
+
+
 class CaseNotFound(KeyError):
     pass
 
@@ -501,6 +516,8 @@ class CaseService:
                         "technique_id": a.technique_id,
                         "status": a.status.value,
                         "text": a.answer_text,
+                        "kind": a.kind,
+                        "software_id": a.software_id,
                     }
                     for a in state.ledger.question_answers
                 ],
@@ -517,6 +534,10 @@ class CaseService:
                         "probability_yes": question.probability_yes,
                         "information_gain": question.information_gain,
                         "investigation_priority": question.investigation_priority,
+                        "kind": question.kind,
+                        "software_id": question.software_id,
+                        "target_rank": question.target_rank,
+                        "delta_found": question.delta_found,
                     }
                     if question is not None
                     else None
@@ -548,7 +569,10 @@ class CaseService:
             try:
                 parsed = EvidenceStatus(status)
             except ValueError:
-                raise ValueError("answer must be yes, no, unknown or not visible") from None
+                raise ValueError(
+                    "answer must be yes, no, unknown or not visible (software questions: found, "
+                    "not found or not checked)"
+                ) from None
         with self._lock(case_id), self._engine_lock:
             if state.current_question is None:
                 raise ValueError("there is no open question to answer")
@@ -634,6 +658,10 @@ class CaseService:
         question = state.current_question
         if question is None:
             raise ValueError("the interview has no open question to search for")
+        if getattr(question, "kind", "technique") == "software":
+            raise ValueError(
+                "Elasticsearch gathering is for technique leads, not software questions"
+            )
         hours = int(lookback_hours or self.engine.settings.elastic_mcp_lookback_hours)
         batch = ElasticMCPClient.from_settings(self.engine.settings).gather(
             question, lookback_hours=hours
@@ -833,6 +861,17 @@ class CaseService:
             )
         leads.sort(key=lambda item: -max(abs(item["delta_yes"]), abs(item["delta_no"])))
 
+        # software questions: the same rows the interview asks from (gate window, recorded order)
+        with self._lock(case_id), self._engine_lock:
+            software_leads = self.engine.software_leads(state) if fusion.entries else []
+        software = [
+            {
+                **lead.to_dict(),
+                "group_name": names.get(lead.group_id) or _group_label(kb, lead.group_id),
+            }
+            for lead in software_leads
+        ]
+
         by_group = base.by_group()
         return {
             "top_k": k,
@@ -886,6 +925,7 @@ class CaseService:
             ],
             "pending": pending[: max(1, limit)],
             "leads": leads[:8],
+            "software": software,
         }
 
     def top3_view(self, state: Any) -> dict[str, Any]:
@@ -957,3 +997,21 @@ class CaseService:
     def export(self, case_id: str, kind: str) -> tuple[str, str, str]:
         state, meta = self.get(case_id)
         return export_document(self.engine.kb, state, kind, case_name=meta.name)
+
+    # ----- software-question pilot log -----
+    def pilot_log(self, case_id: str) -> list[dict[str, Any]]:
+        """The pilot records of one case's software answers (docs 21.3.15 C)."""
+        state, _ = self.get(case_id)
+        return pilot_records(state.ledger)
+
+    def pilot_log_all(self) -> list[dict[str, Any]]:
+        """Every case's pilot records, read from the saved ledgers (no re-analysis)."""
+        records: list[dict[str, Any]] = []
+        for item in self.store.list():
+            try:
+                payload = self.store.load(item.case_id)
+            except (OSError, ValueError):
+                continue
+            records.extend(pilot_records(payload["ledger"]))
+        records.sort(key=lambda row: (str(row.get("answered_at") or ""), str(row["question_id"])))
+        return records

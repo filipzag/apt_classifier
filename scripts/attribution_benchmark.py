@@ -66,7 +66,7 @@ from apt_classifier.evaluation import (
     write_artifact,
 )
 from apt_classifier.evidence.iocs import match_software_aliases
-from apt_classifier.evidence.models import EvidenceLedger, Observation, Provenance
+from apt_classifier.evidence.models import EvidenceLedger, EvidenceStatus, Observation, Provenance
 from apt_classifier.group_mlp import refit_without_groups
 from apt_classifier.llm import OpenRouterClient
 from apt_classifier.profile_forest import fit_profile_forest
@@ -602,12 +602,297 @@ def _rank_of(fusion: Any, group_id: str) -> int | None:
     return ranked.index(group_id) + 1 if group_id in ranked else None
 
 
+# ----- software interview: enumerated simulation (docs 21.3.15 C) -----
+SOFTWARE_INTERVIEW_Q = (0.1, 0.3, 1.0)
+SOFTWARE_INTERVIEW_FP = (0.0, 0.05)
+_STAGE_CODES = {
+    "insufficient_evidence": "ins",
+    "unresolved_activity_cluster": "unr",
+    "known_group_shortlist": "sho",
+    "known_group_hypothesis": "hyp",
+    "known_cluster_hypothesis": "clu",
+}
+
+
+def _named_members(decision: Any) -> list[str]:
+    """The named set of a decision: the group, the cluster's members, or nothing."""
+    if decision is None:
+        return []
+    stage = decision.stage.value
+    if stage == AttributionStage.KNOWN_CLUSTER_HYPOTHESIS.value:
+        return [str(gid) for gid in decision.named_cluster]
+    if stage == AttributionStage.KNOWN_GROUP_HYPOTHESIS.value and decision.leading_group_id:
+        return [str(decision.leading_group_id)]
+    return []
+
+
+def enumerate_software_interview(
+    engine: Any, state: Any, truth_software: set[str]
+) -> dict[str, Any]:
+    """Every answer path of the software questions on an analysed case.
+
+    The questions are the engine's own (``AttributionEngine.software_question``: asked while the
+    case is not named, at most INTERVIEW_SOFTWARE_MAX_QUESTIONS). Each is answered "found" and, on
+    a second branch, "not found" through ``answer_question``, which re-scores the case exactly as
+    an analyst answer does; "not checked" records nothing, so it equals not asking and is no
+    branch (at most 2^3 leaves). Every node is kept (path, stage, named set, separation) so leaf
+    probabilities under any answer model are computed afterwards. ``truth_software`` is the true
+    group's full ATT&CK software list (the removed actor's own list for removed-actor rows); only
+    which asked items it contains is stored. The state is restored to its analysed form."""
+    answers = state.ledger.question_answers
+    root = len(answers)
+    baseline = _named_members(state.attribution_decision)
+    nodes: list[dict[str, Any]] = []
+    truth_asked: set[str] = set()
+
+    def visit(path: tuple[str, ...]) -> None:
+        decision = state.attribution_decision
+        question = engine.software_question(state)
+        nodes.append(
+            {
+                "path": "|".join(path),
+                "stage": _STAGE_CODES.get(decision.stage.value, decision.stage.value)
+                if decision is not None
+                else None,
+                "named": _named_members(decision),
+                "separation": round(float(decision.separation), 3)
+                if decision is not None
+                else None,
+                "leaf": question is None,
+            }
+        )
+        if question is None:
+            return
+        if question.software_id in truth_software:
+            truth_asked.add(str(question.software_id))
+        depth = len(answers)
+        for found in (True, False):
+            del answers[depth:]
+            state.current_question = question
+            engine.answer_question(
+                state, EvidenceStatus.POSITIVE if found else EvidenceStatus.NEGATIVE
+            )
+            step = f"{question.software_id}:{question.target_rank}:{'F' if found else 'N'}"
+            visit((*path, step))
+
+    try:
+        visit(())
+    finally:
+        del answers[root:]
+        state.current_question = None
+        if len(nodes) > 1:
+            engine.rescore(state)
+    return {
+        "baseline_named": baseline,
+        "truth_documents": sorted(truth_asked),
+        "nodes": nodes,
+    }
+
+
+def _path_steps(path: str) -> list[tuple[str, str]]:
+    """[(software id, "F" | "N"), ...] of an encoded node path."""
+    return [(step.split(":")[0], step.split(":")[-1]) for step in path.split("|")] if path else []
+
+
+def _path_probability(path: str, truth: set[str], q: float, fp: float) -> float:
+    """Answer model: "found" with probability q when the true group's ATT&CK entry lists the
+    malware, with probability fp (a wrong "found") otherwise; "not found" in every other case."""
+    probability = 1.0
+    for software_id, answer in _path_steps(path):
+        found = q if software_id in truth else fp
+        probability *= found if answer == "F" else 1.0 - found
+    return probability
+
+
+def _software_expectations(
+    known_rows: list[dict[str, Any]], unknown_rows: list[dict[str, Any]], q: float, fp: float
+) -> dict[str, float]:
+    keys = (
+        "questions",
+        "found_answers",
+        "named",
+        "correct",
+        "gained",
+        "wrong_added",
+        "lost",
+        "removed_questions",
+        "removed_found_answers",
+        "removed_named",
+        "removed_named_added",
+    )
+    totals = dict.fromkeys(keys, 0.0)
+    for arm, rows in (("known", known_rows), ("unknown", unknown_rows)):
+        for row in rows:
+            simulation = row.get("software_interview")
+            if not simulation:
+                continue
+            truth = set(simulation["truth_documents"])
+            base = set(simulation["baseline_named"])
+            base_correct = arm == "known" and row["group_id"] in base
+            base_wrong = arm == "known" and bool(base) and not base_correct
+            for node in simulation["nodes"]:
+                if not node["leaf"]:
+                    continue
+                probability = _path_probability(node["path"], truth, q, fp)
+                if probability <= 0:
+                    continue
+                steps = _path_steps(node["path"])
+                found = sum(1 for _, answer in steps if answer == "F")
+                named = set(node["named"])
+                if arm == "unknown":
+                    totals["removed_questions"] += probability * len(steps)
+                    totals["removed_found_answers"] += probability * found
+                    totals["removed_named"] += probability * bool(named)
+                    totals["removed_named_added"] += probability * (bool(named) and not base)
+                    continue
+                correct = row["group_id"] in named
+                wrong = bool(named) and not correct
+                totals["questions"] += probability * len(steps)
+                totals["found_answers"] += probability * found
+                totals["named"] += probability * bool(named)
+                totals["correct"] += probability * correct
+                totals["gained"] += probability * (correct and not base_correct)
+                totals["wrong_added"] += probability * (wrong and not base_wrong)
+                totals["lost"] += probability * (base_correct and not correct)
+    result = {key: round(value, 4) for key, value in totals.items()}
+    result["hit_rate"] = (
+        round(totals["found_answers"] / totals["questions"], 4) if totals["questions"] else None
+    )
+    return result
+
+
+def summarize_software_interview(
+    known_rows: list[dict[str, Any]],
+    unknown_rows: list[dict[str, Any]],
+    *,
+    cluster_naming: bool,
+) -> dict[str, Any]:
+    """Expected values of the enumerated software interview and the pre-registered criteria
+    C1-C8 (docs 21.3.15). "Gained", "wrong added" and "lost" compare each leaf with the row's own
+    baseline (no netting across rows); every expectation is exact (all leaves enumerated)."""
+    expected = {
+        f"q={q},fp={fp}": _software_expectations(known_rows, unknown_rows, q, fp)
+        for q in SOFTWARE_INTERVIEW_Q
+        for fp in SOFTWARE_INTERVIEW_FP
+    }
+    possible_wrong = 0  # leaves with positive probability at fp = 0 (any 0 < q < 1)
+    possible_removed = 0
+    lost_leaves = 0  # any leaf (fp > 0 makes every leaf possible)
+    all_not_found_changed = 0
+    all_not_found_named = 0
+    baseline_named = 0
+    monotonicity_violations = 0
+    rows_asked = questions = leaves = 0
+    for arm, rows in (("known", known_rows), ("unknown", unknown_rows)):
+        for row in rows:
+            simulation = row.get("software_interview")
+            if not simulation:
+                continue
+            truth = set(simulation["truth_documents"])
+            base = set(simulation["baseline_named"])
+            baseline_named += bool(base)
+            base_correct = arm == "known" and row["group_id"] in base
+            base_wrong = arm == "known" and bool(base) and not base_correct
+            by_path = {node["path"]: node for node in simulation["nodes"]}
+            rows_asked += not by_path.get("", {"leaf": True})["leaf"]
+            for node in simulation["nodes"]:
+                named = set(node["named"])
+                steps = _path_steps(node["path"])
+                if steps and steps[-1][1] == "N":
+                    parent = by_path.get("|".join(node["path"].split("|")[:-1]))
+                    parent_named = set(parent["named"]) if parent is not None else set()
+                    if named and named != parent_named:
+                        monotonicity_violations += 1
+                if not node["leaf"]:
+                    questions += 1
+                    continue
+                leaves += 1
+                if all(answer == "N" for _, answer in steps):
+                    all_not_found_changed += named != base
+                    all_not_found_named += bool(named)
+                feasible = all(answer == "N" or sid in truth for sid, answer in steps)
+                if arm == "known":
+                    correct = row["group_id"] in named
+                    if feasible and bool(named) and not correct and not base_wrong:
+                        possible_wrong += 1
+                    if base_correct and not correct:
+                        lost_leaves += 1
+                elif feasible and named and not base:
+                    possible_removed += 1
+    zero = {q: expected[f"q={q},fp=0.0"] for q in SOFTWARE_INTERVIEW_Q}
+    five = {q: expected[f"q={q},fp=0.05"] for q in SOFTWARE_INTERVIEW_Q}
+    c1 = {
+        "wrong_added": {str(q): zero[q]["wrong_added"] for q in SOFTWARE_INTERVIEW_Q},
+        "removed_named": {str(q): zero[q]["removed_named"] for q in SOFTWARE_INTERVIEW_Q},
+        "possible_wrong_leaves": possible_wrong,
+        "possible_removed_leaves": possible_removed,
+    }
+    c1["pass"] = possible_wrong == 0 and possible_removed == 0
+    c5 = {
+        str(q): round(five[q]["wrong_added"] + five[q]["removed_named_added"], 4)
+        for q in SOFTWARE_INTERVIEW_Q
+    }
+    criteria: dict[str, Any] = {
+        "C1": c1,
+        "C2": {
+            "gained_q0.3": zero[0.3]["gained"],
+            "gained_q1.0": zero[1.0]["gained"],
+            "pass": zero[0.3]["gained"] >= 8 and zero[1.0]["gained"] >= 30,
+        },
+        "C3": {
+            "lost_leaves": lost_leaves,
+            "lost": {key: value["lost"] for key, value in expected.items()},
+            "pass": lost_leaves == 0,
+        },
+        "C4": {
+            "baseline_named": baseline_named,
+            "all_not_found_named": all_not_found_named,
+            "rows_changed": all_not_found_changed,
+            "pass": all_not_found_changed == 0,
+        },
+        "C5": {
+            "wrong_plus_removed_fp0.05": c5,
+            "pass": all(value <= 1.0 for value in c5.values()),
+        },
+        "C6": {
+            "pass": None,
+            "note": "compare the expected names with scripts/software_interview_replay.py",
+        },
+        "C7": {"violations": monotonicity_violations, "pass": monotonicity_violations == 0},
+    }
+    criteria["C8"] = (
+        {
+            "C1": c1["pass"],
+            "C5": criteria["C5"]["pass"],
+            "pass": c1["pass"] and criteria["C5"]["pass"],
+        }
+        if cluster_naming
+        else {"pass": None, "note": "run with --set attribution_cluster_naming=true"}
+    )
+    return {
+        "mode": "enumerate",
+        "answer_model": {
+            "found_if_truth_documents": "q",
+            "found_otherwise": "fp (wrong found)",
+            "not_checked": "same as not asking (no branch)",
+            "q": list(SOFTWARE_INTERVIEW_Q),
+            "fp": list(SOFTWARE_INTERVIEW_FP),
+        },
+        "rows_asked": rows_asked,
+        "questions": questions,
+        "leaves": leaves,
+        "expected": expected,
+        "criteria": criteria,
+    }
+
+
 def run_known(
     engine: AttributionEngine,
     folds: list[Fold],
     *,
     hide_evidence: bool = True,
     client: OpenRouterClient | None = None,
+    software_interview: bool = False,
 ) -> tuple[list[dict[str, Any]], dict]:
     rows: list[dict[str, Any]] = []
     base_store = engine.store
@@ -713,6 +998,11 @@ def run_known(
                     **_top3_fields(state, ranked),
                 }
             )
+            if software_interview:
+                group = engine.kb.groups.get(fold.group_id)
+                rows[-1]["software_interview"] = enumerate_software_interview(
+                    engine, state, set(getattr(group, "software_ids", ()) or ())
+                )
             for key, value in proxy.dropped.items():
                 dropped_total[key] += value
     finally:
@@ -749,6 +1039,7 @@ def run_unknown(
     folds: list[Fold],
     *,
     client: OpenRouterClient | None = None,
+    software_interview: bool = False,
 ) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
     for fold in folds:
@@ -801,6 +1092,11 @@ def run_unknown(
                 **_top3_fields(state, [entry.group_id for entry in fusion.entries]),
             }
         )
+        if software_interview:
+            # the removed actor's own ATT&CK list answers; the engine sees the reduced base
+            rows[-1]["software_interview"] = enumerate_software_interview(
+                engine, state, set(kb.groups[fold.group_id].software_ids)
+            )
     return rows
 
 
@@ -1124,6 +1420,14 @@ def main(argv: list[str] | None = None) -> int:
         metavar="KEY=VALUE",
         help="override a Settings field for this run (e.g. --set technique_family_weight=2.0)",
     )
+    parser.add_argument(
+        "--simulate-software-interview",
+        choices=("enumerate",),
+        help="after each row, walk every found / not-found path of the software questions "
+        "through the real pipeline and report expected values for q in {0.1, 0.3, 1.0} and a "
+        "wrong-found rate in {0, 0.05} plus the criteria C1-C8 (docs 21.3.15); turns "
+        "INTERVIEW_SOFTWARE_QUESTIONS on unless --set says otherwise. Default: off",
+    )
     args = parser.parse_args(argv)
     if args.anonymize_actors and args.cti_hal is None:
         parser.error("--anonymize-actors needs --cti-hal; the ATT&CK folds are always anonymized")
@@ -1138,6 +1442,9 @@ def main(argv: list[str] | None = None) -> int:
         overrides = pipeline_overrides(args.pipeline, args.set)
     except ValueError as error:
         parser.error(str(error))
+    simulate = args.simulate_software_interview is not None
+    if simulate:
+        overrides.setdefault("interview_software_questions", True)
     settings = Settings(**overrides)
     production = args.pipeline == "production"
     client = OpenRouterClient(settings) if production else None
@@ -1184,7 +1491,11 @@ def main(argv: list[str] | None = None) -> int:
     started = time.time()
     try:
         known_rows, dropped = run_known(
-            engine, folds, hide_evidence=not real_reports, client=client
+            engine,
+            folds,
+            hide_evidence=not real_reports,
+            client=client,
+            software_interview=simulate,
         )
     except LLMUnavailableError as error:
         print(f"aborted: {error}", file=sys.stderr)
@@ -1202,7 +1513,9 @@ def main(argv: list[str] | None = None) -> int:
     )
     started = time.time()
     unknown_rows = (
-        run_unknown(settings, kb, store, unknown_folds, client=client) if unknown_folds else []
+        run_unknown(settings, kb, store, unknown_folds, client=client, software_interview=simulate)
+        if unknown_folds
+        else []
     )
     if client is not None:
         client.close()
@@ -1283,6 +1596,12 @@ def main(argv: list[str] | None = None) -> int:
         "known": known_rows,
         "unknown": unknown_rows,
     }
+    if simulate:
+        report["software_interview"] = summarize_software_interview(
+            known_rows,
+            unknown_rows,
+            cluster_naming=bool(getattr(settings, "attribution_cluster_naming", False)),
+        )
     inactive = _inactive_combiner_rows(known_rows + unknown_rows)
     if combiner_expected and inactive and not args.allow_inactive_combiner:
         print(
@@ -1324,6 +1643,25 @@ def main(argv: list[str] | None = None) -> int:
         if "llm" in metrics:
             print("  llm:", metrics["llm"])
         print("  leak-control dropped hits:", dropped)
+        if simulate:
+            simulation = report["software_interview"]
+            print(
+                f"  software interview: {simulation['rows_asked']} rows asked, "
+                f"{simulation['questions']} questions, {simulation['leaves']} leaves"
+            )
+            for key in ("q=0.1,fp=0.0", "q=0.3,fp=0.0", "q=1.0,fp=0.0", "q=0.3,fp=0.05"):
+                item = simulation["expected"][key]
+                print(
+                    f"    {key:14s} gained {item['gained']:.2f} wrong added "
+                    f"{item['wrong_added']:.2f} lost {item['lost']:.2f} removed named "
+                    f"{item['removed_named']:.2f} hit rate {item['hit_rate']}"
+                )
+            print(
+                "    criteria: "
+                + " ".join(
+                    f"{name}={value.get('pass')}" for name, value in simulation["criteria"].items()
+                )
+            )
         if actor_totals is not None:
             print(
                 f"  actor names anonymized: {actor_totals['reports_changed']}/"

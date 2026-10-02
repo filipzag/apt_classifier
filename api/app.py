@@ -20,7 +20,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from api import serializers
-from api.auth import current_user, install_auth
+from api.auth import current_user, install_auth, require_admin
 from apt_classifier.config import Settings, get_settings
 from apt_classifier.report import EXPORT_KINDS
 from apt_classifier.service import (
@@ -309,6 +309,23 @@ def create_app(
     def restart(case_id: str, svc: CaseService = Depends(get_service)) -> dict[str, Any]:
         svc.restart_interview(case_id)
         return svc.interview(case_id)
+
+    @app.get("/api/cases/{case_id}/interview/pilot-log")
+    def pilot_log(case_id: str, svc: CaseService = Depends(get_service)) -> list[dict[str, Any]]:
+        # software-question pilot records (docs 21.3.15 C): no owner, user, e-mail or note text
+        return svc.pilot_log(case_id)
+
+    @app.get("/api/pilot/software-questions.jsonl")
+    def pilot_log_all(
+        svc: CaseService = Depends(get_service), _: User = Depends(require_admin)
+    ) -> Response:
+        rows = svc.pilot_log_all()
+        content = "".join(json.dumps(row, sort_keys=True, default=str) + "\n" for row in rows)
+        return Response(
+            content,
+            media_type="application/x-ndjson",
+            headers={"Content-Disposition": 'attachment; filename="software-questions.jsonl"'},
+        )
 
     @app.post("/api/cases/{case_id}/elastic/search")
     def elastic_search(

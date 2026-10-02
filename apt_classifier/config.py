@@ -95,6 +95,20 @@ class Settings(BaseSettings):
         PROJECT_ROOT / "data" / "models" / "acceptance" / "acceptance_model_no_exemplars.json"
     )
     max_questions: int = 10
+    # Interview questions about malware only one top-three group uses (software_questions.py,
+    # docs 21.3.15 C): asked first while the case is not named, with fixed wording and the answers
+    # found / not found / not checked. A "found" counts like the software named in the text; a
+    # "not found" can only lower the leader's (or a named cluster's) separation, by this weight
+    # times the malware's rarity and exclusivity. Off until the pre-registered simulation passes.
+    interview_software_questions: bool = False
+    interview_software_per_group: int = 1
+    interview_software_max_questions: int = 3
+    interview_software_max_users: int = 1
+    interview_software_when_named: bool = False
+    interview_software_negative_weight: float = 0.3
+    # a name must not rest on a "found" alone: without the interview software the leader's (or
+    # the cluster's) separation in the gate window must be >= 0
+    interview_software_found_requires_lead: bool = True
     threat_intel_days: int = 30
     threat_intel_timeout: float = 20.0
     threat_intel_max_items_per_source: int = 100

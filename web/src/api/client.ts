@@ -55,6 +55,8 @@ async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
 
 const json = (body: unknown): RequestInit => ({ method: 'POST', body: JSON.stringify(body) })
 
+export type ExportKind = 'markdown' | 'json' | 'navigator' | 'attack-flow' | 'pilot-log'
+
 export const api = {
   me: () => request<Me>('/api/me'),
   authInfo: () => request<{ mode: 'off' | 'google'; provider: string | null; allowlist_configured: boolean }>('/api/auth'),
@@ -116,6 +118,6 @@ export const api = {
     ),
   elasticImport: (id: string, candidateIds: string[]) =>
     request<CasePayload>(`/api/cases/${id}/elastic/import`, json({ candidate_ids: candidateIds })),
-  exportUrl: (id: string, kind: 'markdown' | 'json' | 'navigator' | 'attack-flow') =>
+  exportUrl: (id: string, kind: ExportKind) =>
     `/api/cases/${id}/export/${kind}`,
 }

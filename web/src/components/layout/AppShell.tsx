@@ -26,7 +26,7 @@ import {
 import { useState } from 'react'
 import { Link, NavLink, Outlet, useMatch, useNavigate } from 'react-router-dom'
 
-import { api } from '../../api/client'
+import { api, type ExportKind } from '../../api/client'
 import { useCase, useDeleteCase, useLogout, useRename, useSystem } from '../../api/hooks'
 import { useMe } from '../AuthGate'
 import { Avatar } from '../../pages/Users'
@@ -415,11 +415,12 @@ function TopBar({
 }
 
 function ExportMenu({ caseId }: { caseId: string }) {
-  const items: { kind: 'markdown' | 'json' | 'navigator' | 'attack-flow'; label: string; hint: string }[] = [
+  const items: { kind: ExportKind; label: string; hint: string }[] = [
     { kind: 'markdown', label: 'Markdown report', hint: 'Analyst assessment' },
     { kind: 'json', label: 'JSON audit', hint: 'Ledger, ranking, decision, graphs' },
     { kind: 'navigator', label: 'ATT&CK Navigator layers', hint: 'Observed and candidate techniques' },
     { kind: 'attack-flow', label: 'Attack Flow (STIX 2.1)', hint: 'Sequenced technique bundle' },
+    { kind: 'pilot-log', label: 'Software-question pilot log', hint: 'JSON lines, one per software answer' },
   ]
   return (
     <DropdownMenu.Root>

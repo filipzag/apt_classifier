@@ -336,6 +336,13 @@ def build_top3_view(
         if discrimination is not None
         else None,
         "display_order_differs": [e.group_id for e in state.fusion.entries[:3]] != ids,
+        # "not found" software interview answers and what they did to the leader's separation
+        # (software_questions.py); None without such answers
+        "negative_software": (
+            (getattr(decision, "separation_factors", None) or {}).get("negative_software")
+            if decision is not None
+            else None
+        ),
         "combiner_note": (
             "Learned combiner probability (fitted on ATT&CK folds): how often a leader with these "
             "features was right there. Not a probability that the true group is one of these "

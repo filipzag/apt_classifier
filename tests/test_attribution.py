@@ -596,3 +596,400 @@ def test_a_single_name_with_a_nested_twin_becomes_the_cluster_or_is_held_back():
         kb, _two_candidates(), exclusive, thresholds=thresholds, combiner={"cluster": _candidate()}
     )
     assert single.stage is AttributionStage.KNOWN_GROUP_HYPOTHESIS
+
+
+# ----- software interview answers in the gate (software_questions.py, docs 21.3.15 C) -----
+
+
+def _software_gate_kb(group_count=4, seed=0):
+    """Groups G1..Gn, each with malware only it documents (S1xx) and pairs sharing some (S2xx)."""
+    import random
+
+    rng = random.Random(seed)
+    ids = [f"G{index}" for index in range(1, group_count + 1)]
+    group_software = {gid: {f"S1{index:02d}"} for index, gid in enumerate(ids, 1)}
+    for number in range(3):
+        for gid in rng.sample(ids, 2):
+            group_software[gid].add(f"S2{number:02d}")
+    software_groups: dict[str, set[str]] = {}
+    for gid, items in group_software.items():
+        for item in items:
+            software_groups.setdefault(item, set()).add(gid)
+    kb = _kb(
+        groups={gid: SimpleNamespace(id=gid, name=f"Group {gid}") for gid in ids},
+        techniques={"T1": SimpleNamespace(parent_id=None), "T2": SimpleNamespace(parent_id=None)},
+        group_techniques={gid: ["T1", "T2"] for gid in ids},
+    )
+    kb.group_software = group_software
+    kb.software_groups = software_groups
+    kb.software = {
+        item: SimpleNamespace(id=item, name=item, software_type="malware")
+        for item in software_groups
+    }
+    return kb, ids
+
+
+def _random_gate(rng, ids):
+    from apt_classifier.separation import CandidateDiscrimination, DiscriminationResult
+
+    window = rng.sample(ids, rng.randint(2, len(ids)))
+    totals = [rng.uniform(0.0, 7.0) for _ in window]
+    scores = tuple(
+        CandidateDiscrimination(gid, 0.1, total, 0.0, 0.0, 0.0, total)
+        for gid, total in zip(window, totals, strict=True)
+    )
+    runner = max(scores[1:], key=lambda item: item.total)
+    denominator = max(scores[0].total, runner.total, 1.0)
+    discrimination = DiscriminationResult(
+        scores=scores,
+        top_k=len(scores),
+        leader_id=window[0],
+        runner_up_id=runner.group_id,
+        separation=max(-1.0, min(1.0, (scores[0].total - runner.total) / denominator)),
+        floor=1.0,
+    )
+    fusion = _fusion(
+        [
+            _fusion_entry(gid, 90.0 - 5 * rank, rank=rank + 1, rank_std=1.0)
+            for rank, gid in enumerate(window)
+        ]
+    )
+    cluster = None
+    if rng.random() < 0.6:
+        cluster = _candidate(
+            members=[window[0], window[1]],
+            nested=rng.random() < 0.3,
+            separation=rng.uniform(0.3, 1.0),
+            discriminative=rng.uniform(2.0, 9.0),
+            probability=rng.uniform(0.7, 1.0),
+        )
+    return fusion, discrimination, cluster
+
+
+def _named(decision):
+    if decision.stage is AttributionStage.KNOWN_CLUSTER_HYPOTHESIS:
+        return set(decision.named_cluster)
+    if decision.stage is AttributionStage.KNOWN_GROUP_HYPOTHESIS:
+        return {decision.leading_group_id}
+    return set()
+
+
+def test_not_found_answers_never_add_or_change_a_name_property():
+    """Random gate windows, random cluster candidates and random "not found" sets: the
+    separation and the leader's mass only go down, failed conditions only accumulate, a
+    shortlist never becomes a name, and a name is either kept or dropped, never changed."""
+    import random
+    from collections import Counter
+
+    from apt_classifier.attribution import _hypothesis_gate_failures
+    from apt_classifier.software_questions import leader_only_negative
+
+    def kinds(items):
+        return {item.split(" ")[0] for item in items}
+
+    context = _context(techniques={"T1": 1.0, "T2": 1.0})
+    demotions: Counter = Counter()
+    named_bases = 0
+    for seed in range(12):
+        rng = random.Random(seed)
+        kb, ids = _software_gate_kb(group_count=rng.randint(3, 6), seed=seed)
+        all_software = sorted(kb.software_groups)
+        for _ in range(60):
+            fusion, discrimination, cluster = _random_gate(rng, ids)
+            thresholds = _cluster_thresholds(
+                cluster_naming=rng.random() < 0.7,
+                hypothesis_min_discriminative=3.0,
+                cluster_min_discriminative=3.5,
+            )
+            combiner = {"leader_probability": 0.5, "cluster": cluster}
+            weight = rng.choice([0.3, 1.0, 3.0])
+            base = assess_attribution(
+                kb,
+                fusion,
+                context,
+                thresholds=thresholds,
+                discrimination=discrimination,
+                combiner=combiner,
+            )
+            chosen = set(rng.sample(all_software, rng.randint(1, 4)))
+            for extra in (set(), set(rng.sample(all_software, 2))):
+                answers = chosen | extra
+                after = assess_attribution(
+                    kb,
+                    fusion,
+                    context,
+                    thresholds=thresholds,
+                    discrimination=discrimination,
+                    combiner=combiner,
+                    negative_software=answers,
+                    negative_software_weight=weight,
+                )
+                effect = leader_only_negative(discrimination, kb, answers, weight)
+                assert effect.total <= discrimination.leader_total
+                assert effect.separation <= discrimination.separation + 1e-12
+                assert after.separation <= base.separation + 1e-9
+                assert _named(after) in (_named(base), set()), (base.rationale, after.rationale)
+                if base.stage is AttributionStage.KNOWN_GROUP_SHORTLIST:
+                    assert after.stage is AttributionStage.KNOWN_GROUP_SHORTLIST
+                # every naming-bar condition that failed before still fails after
+                penalized = SimpleNamespace(
+                    separation=effect.separation,
+                    leader_total=effect.total,
+                    leader_specificity=discrimination.leader_specificity,
+                )
+                assert kinds(_hypothesis_gate_failures(thresholds, 1.0, 1.0, discrimination)) <= (
+                    kinds(_hypothesis_gate_failures(thresholds, 1.0, 1.0, penalized))
+                )
+                if after.stage is not base.stage:
+                    assert after.stage is AttributionStage.KNOWN_GROUP_SHORTLIST
+                    assert "not-found interview answers" in after.rationale
+                    demotions[base.stage] += 1
+                named_bases += bool(_named(base))
+                # more "not found" answers never do less
+                more = assess_attribution(
+                    kb,
+                    fusion,
+                    context,
+                    thresholds=thresholds,
+                    discrimination=discrimination,
+                    combiner=combiner,
+                    negative_software=answers | set(all_software[:3]),
+                    negative_software_weight=weight,
+                )
+                assert _named(more) in (_named(after), set())
+                assert more.separation <= after.separation + 1e-9
+    # the property was exercised on both kinds of names
+    assert named_bases > 100
+    assert demotions[AttributionStage.KNOWN_GROUP_HYPOTHESIS] > 5
+    assert demotions[AttributionStage.KNOWN_CLUSTER_HYPOTHESIS] > 5
+
+
+def _gate_with_software(leader_total=4.0, runner_total=0.5):
+    from apt_classifier.separation import CandidateDiscrimination, DiscriminationResult
+
+    kb, _ = _software_gate_kb(group_count=3, seed=1)
+    scores = (
+        CandidateDiscrimination("G1", 0.1, leader_total, 0.0, 0.0, 0.0, leader_total),
+        CandidateDiscrimination("G2", 0.1, runner_total, 0.0, 0.0, 0.0, runner_total),
+        CandidateDiscrimination("G3", 0.1, 0.2, 0.0, 0.0, 0.0, 0.2),
+    )
+    discrimination = DiscriminationResult(
+        scores=scores,
+        top_k=3,
+        leader_id="G1",
+        runner_up_id="G2",
+        separation=(leader_total - runner_total) / max(leader_total, runner_total, 1.0),
+        floor=1.0,
+    )
+    fusion = _fusion(
+        [
+            _fusion_entry("G1", 80.0, rank_std=1.0),
+            _fusion_entry("G2", 60.0, rank=2, rank_std=1.0),
+            _fusion_entry("G3", 50.0, rank=3, rank_std=1.0),
+        ]
+    )
+    return kb, fusion, discrimination
+
+
+def test_not_found_for_the_leaders_malware_moves_the_name_to_the_shortlist():
+    kb, fusion, discrimination = _gate_with_software(leader_total=3.2)
+    thresholds = _cluster_thresholds(cluster_naming=False, hypothesis_min_discriminative=3.0)
+    context = _context(techniques={"T1": 1.0, "T2": 1.0})
+    named = assess_attribution(
+        kb, fusion, context, thresholds=thresholds, discrimination=discrimination
+    )
+    assert named.stage is AttributionStage.KNOWN_GROUP_HYPOTHESIS
+    # a rival's malware: nothing changes
+    rival = assess_attribution(
+        kb,
+        fusion,
+        context,
+        thresholds=thresholds,
+        discrimination=discrimination,
+        negative_software={"S102"},
+    )
+    assert rival.stage is AttributionStage.KNOWN_GROUP_HYPOTHESIS
+    assert rival.separation == named.separation
+    assert rival.separation_factors["negative_software"]["applied"] == []
+    own = assess_attribution(
+        kb,
+        fusion,
+        context,
+        thresholds=thresholds,
+        discrimination=discrimination,
+        negative_software={"S101"},
+    )
+    assert own.stage is AttributionStage.KNOWN_GROUP_SHORTLIST
+    factors = own.separation_factors["negative_software"]
+    assert factors["applied"] == ["S101"] and factors["penalty"] == 0.3
+    assert factors["separation_before"] == round(discrimination.separation, 4)
+    assert "discriminative evidence 2.90 < 3.00 after the not-found" in own.rationale
+
+
+def test_found_guard_blocks_a_name_that_rests_on_interview_answers_alone():
+    kb, fusion, discrimination = _gate_with_software()
+    thresholds = _cluster_thresholds(cluster_naming=False)
+    context = _context(techniques={"T1": 1.0, "T2": 1.0})
+    guard = {"found": ["S101"], "separation_without": -0.2, "named_without": False}
+    blocked = assess_attribution(
+        kb,
+        fusion,
+        context,
+        thresholds=thresholds,
+        discrimination=discrimination,
+        software_guard={**guard, "requires_lead": True},
+    )
+    assert blocked.stage is AttributionStage.KNOWN_GROUP_SHORTLIST
+    assert "would rest on interview answers alone" in blocked.rationale
+    # with the guard off, or a lead of its own without the found software, the name stands
+    for kept in (
+        {**guard, "requires_lead": False},
+        {**guard, "requires_lead": True, "separation_without": 0.1},
+    ):
+        decision = assess_attribution(
+            kb,
+            fusion,
+            context,
+            thresholds=thresholds,
+            discrimination=discrimination,
+            software_guard=kept,
+        )
+        assert decision.stage is AttributionStage.KNOWN_GROUP_HYPOTHESIS
+
+
+def test_a_found_only_enables_a_name_of_a_group_that_documents_it():
+    kb, fusion, discrimination = _gate_with_software()
+    thresholds = _cluster_thresholds(cluster_naming=False)
+    context = _context(techniques={"T1": 1.0, "T2": 1.0})
+    base = {"requires_lead": True, "separation_without": 0.3}
+    # found for G2's malware, G1 named: refused while the case would be unnamed without it
+    other = assess_attribution(
+        kb,
+        fusion,
+        context,
+        thresholds=thresholds,
+        discrimination=discrimination,
+        software_guard={**base, "found": ["S102"], "named_without": False},
+    )
+    assert other.stage is AttributionStage.KNOWN_GROUP_SHORTLIST
+    assert "documents none of the found malware" in other.rationale
+    own = assess_attribution(
+        kb,
+        fusion,
+        context,
+        thresholds=thresholds,
+        discrimination=discrimination,
+        software_guard={**base, "found": ["S102", "S101"], "named_without": False},
+    )
+    assert own.stage is AttributionStage.KNOWN_GROUP_HYPOTHESIS
+    # named without the interview software anyway: the found did not enable the name
+    anyway = assess_attribution(
+        kb,
+        fusion,
+        context,
+        thresholds=thresholds,
+        discrimination=discrimination,
+        software_guard={**base, "found": ["S102"], "named_without": True},
+    )
+    assert anyway.stage is AttributionStage.KNOWN_GROUP_HYPOTHESIS
+
+
+def test_software_answers_and_documented_clusters_compose_in_a_fixed_order():
+    kb, fusion, discrimination = _gate_with_software(leader_total=2.0, runner_total=1.6)
+    context = _context(techniques={"T1": 1.0, "T2": 1.0})
+    thresholds = _cluster_thresholds(
+        hypothesis_min_discriminative=1.0, cluster_min_discriminative=3.5
+    )
+    cluster = _candidate(members=["G1", "G2"], separation=0.9, discriminative=3.7)
+    combiner = {"leader_probability": 0.5, "cluster": cluster}
+    named = assess_attribution(
+        kb,
+        fusion,
+        context,
+        thresholds=thresholds,
+        discrimination=discrimination,
+        combiner=combiner,
+    )
+    assert named.stage is AttributionStage.KNOWN_CLUSTER_HYPOTHESIS
+    # a not found for the twin's own malware lowers the merged pair: shortlist, never a single
+    for answers in ({"S102"}, {"S101"}):
+        demoted = assess_attribution(
+            kb,
+            fusion,
+            context,
+            thresholds=thresholds,
+            discrimination=discrimination,
+            combiner=combiner,
+            negative_software=answers,
+        )
+        assert demoted.stage is AttributionStage.KNOWN_GROUP_SHORTLIST, answers
+        assert "the cluster's discriminative evidence" in demoted.rationale
+    # malware no member documents: the cluster stands
+    kept = assess_attribution(
+        kb,
+        fusion,
+        context,
+        thresholds=thresholds,
+        discrimination=discrimination,
+        combiner=combiner,
+        negative_software={"S103"},
+    )
+    assert kept.stage is AttributionStage.KNOWN_CLUSTER_HYPOTHESIS
+    # a single name demoted by a not found is never re-sent to the cluster step
+    single_kb, single_fusion, single = _gate_with_software(leader_total=3.2, runner_total=0.5)
+    exclusive = assess_attribution(
+        single_kb,
+        single_fusion,
+        context,
+        thresholds=_cluster_thresholds(hypothesis_min_discriminative=3.0),
+        discrimination=single,
+        combiner={"cluster": _candidate(members=["G1", "G2"])},
+    )
+    assert exclusive.stage is AttributionStage.KNOWN_GROUP_HYPOTHESIS
+    held = assess_attribution(
+        single_kb,
+        single_fusion,
+        context,
+        thresholds=_cluster_thresholds(hypothesis_min_discriminative=3.0),
+        discrimination=single,
+        combiner={"cluster": _candidate(members=["G1", "G2"])},
+        negative_software={"S101"},
+    )
+    assert held.stage is AttributionStage.KNOWN_GROUP_SHORTLIST and held.named_cluster == ()
+    # the found guard covers clusters: without the found software the pair must still lead
+    guard = {"found": ["S101"], "requires_lead": True, "named_without": False}
+    for value, stage in (
+        (-0.1, AttributionStage.KNOWN_GROUP_SHORTLIST),
+        (0.2, AttributionStage.KNOWN_CLUSTER_HYPOTHESIS),
+    ):
+        decision = assess_attribution(
+            kb,
+            fusion,
+            context,
+            thresholds=thresholds,
+            discrimination=discrimination,
+            combiner=combiner,
+            software_guard={
+                **guard,
+                "separation_without": 0.0,
+                "cluster_separation_without": value,
+            },
+        )
+        assert decision.stage is stage, value
+    # a found that only a non-member documents never names the cluster
+    decision = assess_attribution(
+        kb,
+        fusion,
+        context,
+        thresholds=thresholds,
+        discrimination=discrimination,
+        combiner=combiner,
+        software_guard={
+            **guard,
+            "found": ["S103"],
+            "separation_without": 0.0,
+            "cluster_separation_without": 0.5,
+        },
+    )
+    assert decision.stage is AttributionStage.KNOWN_GROUP_SHORTLIST
+    assert "documents none of the found malware" in decision.rationale

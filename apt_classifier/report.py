@@ -147,7 +147,7 @@ def assessment_markdown(kb: Any, state: Any, *, case_name: str = "") -> str:
     if answers:
         lines += ["", "## Interview answers"]
         lines += [
-            f"- {answer.question} — **{answer.status.value}**"
+            f"- {answer.question} — **{_answer_label(answer)}**"
             + (f" ({answer.answer_text})" if answer.answer_text else "")
             for answer in answers
         ]
@@ -204,6 +204,27 @@ def assessment_markdown(kb: Any, state: Any, *, case_name: str = "") -> str:
     return "\n".join(lines)
 
 
+_SOFTWARE_ANSWER_LABELS = {"positive": "found", "negative": "not found", "unknown": "not checked"}
+
+
+def _answer_label(answer: Any) -> str:
+    status = answer.status.value
+    if getattr(answer, "kind", "technique") == "software":
+        return _SOFTWARE_ANSWER_LABELS.get(status, status)
+    return status
+
+
+def pilot_log_jsonl(state: Any) -> str:
+    """One JSON line per software-question answer (the pilot record, docs 21.3.15 C)."""
+    rows = [
+        answer.metadata["pilot"]
+        for answer in getattr(state.ledger, "question_answers", []) or []
+        if getattr(answer, "kind", "technique") == "software"
+        and isinstance(answer.metadata.get("pilot"), dict)
+    ]
+    return "".join(json.dumps(row, sort_keys=True, default=str) + "\n" for row in rows)
+
+
 def navigator_layers(kb: Any, state: Any) -> Any:
     return export_layers(
         kb,
@@ -241,7 +262,7 @@ def audit_payload(kb: Any, state: Any, *, case_name: str = "") -> dict[str, Any]
     }
 
 
-EXPORT_KINDS = ("markdown", "json", "navigator", "attack-flow")
+EXPORT_KINDS = ("markdown", "json", "navigator", "attack-flow", "pilot-log")
 
 
 def export_document(kb: Any, state: Any, kind: str, *, case_name: str = "") -> tuple[str, str, str]:
@@ -266,4 +287,6 @@ def export_document(kb: Any, state: Any, kind: str, *, case_name: str = "") -> t
             "application/json",
             f"{stem}-attack-flow.json",
         )
+    if kind == "pilot-log":
+        return pilot_log_jsonl(state), "application/x-ndjson", f"{stem}-pilot-log.jsonl"
     raise ValueError(f"unknown export kind {kind!r}; expected one of {', '.join(EXPORT_KINDS)}")
