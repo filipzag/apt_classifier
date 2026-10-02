@@ -1704,6 +1704,98 @@ discrimination weights. A run refuses to start or to write when the learned comb
 but did not load. A fingerprint mismatch would otherwise fall back to the RRF order silently
 (fold top-1 0.83 -> about 0.60); `--allow-inactive-combiner` measures that fallback on purpose.
 
+### 10.11 Documented clusters, confidence labels and software questions (2026-10-02)
+
+Three additions to the top three, each pre-registered and checked on the fresh fold seeds 43 and
+47 (21.3.15). The first two are on by default; the third ships off as a pilot.
+
+**Documented-overlap clusters** (`apt_classifier/overlap_cluster.py`, stage
+`known_cluster_hypothesis`, `ATTRIBUTION_CLUSTER_NAMING=true`). Some ATT&CK groups describe the
+same activity under two names: Carbanak and FIN7, FIN6 and Cobalt Group. The evidence cannot
+separate them, so the single-name gate holds back even when the pair as a whole is clearly ahead.
+The cluster step names the pair, for example "FIN7 / Carbanak (documented overlap)":
+
+- **Twin.** A gate-window member that ATT&CK relates to the leader (`attack/related.py`: a
+  description reference, or non-tool software used by at most three groups) and that either
+  nests (profile containment >= 0.8) or does not separate from the leader (|pair separation| <
+  0.5). The twin with the largest gate-window mass wins; pairs only.
+- **Evidence.** The gate-window discrimination is recomputed with the pair merged into one unit
+  (`unit_totals`), so evidence that only the two members share now counts as exclusive.
+  Hierarchy factors take the larger member, behaviour the better member per observation, and
+  software counts when either member documents it. Singleton units reproduce the gate's own
+  totals to within 0.0003.
+- **Naming.** It runs only when the single name failed, or when a single name has a nested twin
+  in the window. The leader must pass the lower stage checks and the leader-consistency guard
+  must not have fired. Three bars apply: cluster separation >= 0.5, cluster mass >= 3.5 (>= 3.0
+  for a nested pair), and the members' combiner probabilities summing to >= 0.8. A single name
+  whose nested twin is in the window becomes the cluster when it clears, and is held at shortlist
+  otherwise.
+- **Scoring.** A benchmark counts a cluster name as correct when the truth is one of its
+  members and as wrong otherwise (`AttributionPrediction.named_members`).
+  `named_risk_single` is the single-name risk; `named_cluster_recovered` counts clusters whose
+  leader alone was wrong.
+- **Display.** The decision records `named_cluster` and the cluster's separation, mass,
+  probability, reason and runner-up. Report, API, Streamlit and React show the pair with a
+  "documented overlap" label.
+
+The step needs the learned combiner and is off in maturity mode. `ATTRIBUTION_CLUSTER_SCOPE=nested`
+limits it to nesting pairs. Settings live outside the combiner fingerprint, so no refit is needed.
+
+**Calibrated confidence labels** (`apt_classifier/confidence_labels.py`,
+`CONFIDENCE_LABELS_ENABLED=true`). Display only: they never change the stage, the ranking or an
+export, and the engine never imports the module. Three logistic regressions read what the
+decision already records:
+
+- inputs: the combiner probabilities of places 1-3, its "none of these" probability, the gate
+  separation, the number of accepted techniques and whether named software supports the leader;
+- outputs: P(leader right), P(truth in the top two) and P(truth in the top three).
+
+The Top-three view shows one of three labels:
+
+- "strong single answer" when P(leader right) >= 0.88;
+- "one of these 2" or "one of these 3" when the smallest set reaching 0.865 has two or three
+  members;
+- "open" otherwise, and always at insufficient evidence.
+
+A named cluster is labelled as a two-group set, never "strong single answer". A name from the
+gate always takes the headline.
+
+The model is fitted on the design seeds 41 and 53 (`make fit-confidence-labels`), with removed
+actors counted as wrong leaders and the thresholds picked on out-of-fold predictions with
+one-sided Clopper-Pearson bounds. The artifact is pinned to the ATT&CK version and the exact
+combiner artifact; when either differs the labels are hidden. Refit after `make fit-combiner`.
+On real reports the labels run overconfident: on anonymized CTI-HAL 21 of 24 "strong" leaders
+were right, against 184 of 192 on the fresh folds. The view says so ("Calibrated on ATT&CK test
+folds; real reports run overconfident").
+
+**Software questions (pilot, off by default)** (`apt_classifier/software_questions.py`,
+`INTERVIEW_SOFTWARE_QUESTIONS=false`). While a case is not named, the interview first asks about
+malware that ATT&CK documents for exactly one of the decision's top three. Its users must all sit
+inside the gate window, and by default it has only one user (`INTERVIEW_SOFTWARE_MAX_USERS=1`).
+The question reads: "Did you find <malware> (<S-id>) or its known artefacts?". The wording never
+names a group, and malware named like a group is skipped. Limits: at most 3 questions per case and
+one per group, ranked by how much a "found" would change the separation.
+
+The analyst answers:
+
+- **Found** adds the software as evidence.
+- **Not found** can only lower the leader's separation (by 0.3 x rarity x exclusivity).
+- **Not checked** records nothing.
+
+Two rules keep a name from resting on the interview alone. First, the leader's or cluster's
+separation without the interview software must be >= 0. Second, the "not found" filter runs last
+in the gate and can only move a hypothesis or cluster back to shortlist.
+
+Each answer stores a pilot record (`metadata["pilot"]`: before/after stage and separation and the
+settings in force; no owner, user, e-mail, address or note text). The record is readable per case
+(`GET /api/cases/{id}/interview/pilot-log`) and as an admin-only aggregate
+(`GET /api/pilot/software-questions.jsonl`).
+
+In the pre-registered simulation the questions add many correct names when analysts answer
+reliably. They also add about 2.4 wrong or removed-actor names per fold seed when 5% of "found"
+answers are wrong, more than the bar of 1.0 (21.3.15 C). Turning them on is a product-owner
+decision for a supervised pilot.
+
 ## 11. Origin and intrusion-type assessment
 
 `apt_classifier/origin.py` performs a separate post-fusion assessment.
@@ -2078,6 +2170,10 @@ When the analyst selects Interview after analysis:
 11. The process continues until the stopping rule is reached.
 
 There is no normal per-question “Generate next question” click.
+
+With `INTERVIEW_SOFTWARE_QUESTIONS=true` (off by default, a pilot), up to three software questions
+come first while the case is not named. Each asks about malware that only one of the top three
+documents, with found / not found / not checked answers (10.11).
 
 ### 15.5 Answer semantics
 
@@ -3653,7 +3749,131 @@ to +3 of 55. Five Carbanak reports cannot be ranked above FIN7 on technique evid
 lose the Carbanak malware to anonymization. Most of the visible gain will come from counting
 documented clusters, a choice the product owner has made explicitly.
 
-**Results.** To be added below as each track completes.
+**Results (2026-10-02).** Every track was measured once on seeds 43 and 47 with 153 known folds
+and 25 removed actors each, on the same combiner artifact (pipeline fingerprint
+`fb4404a2819581fefb7b14b5`). Source fingerprints match the committed code. A and B are adopted;
+C ships off as a pilot; D1 and D2 are not adopted.
+
+| track | verdict | what the fresh seeds showed |
+|---|---|---|
+| A clusters | adopted (default on) | 4 correct cluster names, 0 wrong, 0 removed actors; single names identical |
+| B confidence labels | adopted (default on) | "strong" wrong 8 of 192 (4.2%), calibration error 0.041, "one of these" 14 of 14 |
+| C software questions | pilot, default off | many correct names when answers are reliable; about 2.4 extra wrong names per seed at 5% wrong "found" |
+| D1 twin admission | not adopted | seed 43 top-1 137 -> 134, seed 47 top-3 144 -> 142 |
+| D2 window 40 | not adopted | cross-validated randomised top-1 0.630, bar 0.682 |
+
+**A. Clusters: all bars pass.**
+
+| seed | top-1 | top-3 | single names (correct) | cluster names (correct) | removed actors named |
+|---|---|---|---|---|---|
+| 43 off | 137/153 | 145 | 39 (39) | 0 | 1/25 |
+| 43 on | 137/153 | 145 | 39 (39) | 2 (2) | 1/25 |
+| 47 off | 126/153 | 144 | 36 (36) | 0 | 0/25 |
+| 47 on | 126/153 | 144 | 36 (36) | 2 (2) | 0/25 |
+
+- A1: no wrong cluster names and no removed actor named through a cluster.
+- A2: the single names are identical in both arms.
+- A3: four correct cluster names, against a bar of 2:
+  - seed 43, Aquatic Panda / APT41, truth APT41, separation 0.736. This one recovers a case
+    whose single leader was wrong.
+  - seed 43, GOLD SOUTHFIELD / FIN7, truth GOLD SOUTHFIELD, separation 0.727.
+  - seed 47, LuminousMoth / Mustang Panda, truth LuminousMoth, separation 0.727.
+  - seed 47, ShinyHunters / Scattered Spider, truth ShinyHunters, separation 0.512.
+- A4: the on-runs equal the offline replay (`scripts/cluster_replay.py`) on every row.
+- A5: no removed actor cleared two of the three cluster bars, so the full scope ships.
+
+The removed actor named on seed 43 (OilRig, named as FIN6, separation 0.591) is named with
+clusters off too. It is a single name from the existing gate, not from this track; the same kind
+of error appeared on design seed 41 (Storm-0501 named as Threat Group-3390). It is listed under
+open questions below.
+
+**B. Confidence labels: all bars pass.** The frozen artifact was evaluated on seeds 43 and 47
+(known plus removed actors, 356 rows, `confidence_labels_confirm.json`):
+
+| set | strong (right) | one of these (right) | open | leader calibration error |
+|---|---|---|---|---|
+| seed 43 | 99 (96) | 10 (10) | 69 | 0.050 |
+| seed 47 | 93 (88) | 4 (4) | 81 | 0.063 |
+| pooled | 192 (184) | 14 (14) | 150 | 0.041 |
+
+The bars:
+
+- B1: "strong" wrong 4.2% pooled (upper 95% bound 7.4%), 3.0% and 5.4% per seed, against 5% and
+  8%.
+- B2: calibration error 0.041, against 0.06.
+- B3: "one of these" covers 14 of 14, against 80%.
+- B4: decisions, rankings and exports are identical with the labels on and off
+  (`tests/test_confidence_labels.py`).
+
+Half of the 8 "strong" errors are removed actors.
+
+On real reports the labels run overconfident, so the view says so:
+
+| set | strong (right) | leader calibration error |
+|---|---|---|
+| CTI-HAL anonymized | 24 (21) | 0.19 |
+| CTI-HAL as reported | 30 (23) | 0.24 |
+
+**C. Software questions: pilot only, off by default.** The answers to every question were
+enumerated through the real pipeline: found with probability q when the truth documents the
+malware, and a wrong "found" at rate fp otherwise. Expected names per seed:
+
+| seed | baseline names | q = 0.3, fp = 0 | q = 1.0, fp = 0 | wrong or removed added at fp = 0.05 (q = 0.3) |
+|---|---|---|---|---|
+| 43 | 40 | 54.3 (+15.3) | 90 (+51) | 2.37 |
+| 47 | 36 | 47.4 (+11.4) | 74 (+38) | 2.35 |
+
+These bars pass:
+
+- C1: no wrong name and no removed actor named when every "found" is true.
+- C2: gains of 15.3/51 and 11.4/38, against bars of 8 and 30.
+- C3: no correct name lost.
+- C4: all "not found" changes no name.
+- C7: no "not found" adds or changes a name.
+
+These fail:
+
+- **C5** (at most 1.0 extra wrong or removed-actor name per seed at a 5% wrong-"found" rate): 2.37
+  and 2.35 per seed. One false "found" on malware that only one group uses is enough to name
+  that group.
+- **C6:** the fixed-window offline replay undercounts the pipeline's gains by 6 to 9 names at
+  q = 1. That is a limit of the replay method, not of the feature: the pipeline re-runs retrieval
+  and the window after an answer, and the replay cannot.
+- **C8** (C1 and C5 with clusters on): C1 holds on seed 43 and C5 fails as with clusters off (2.47
+  at q = 0.3). Seed 47 is added below when its run completes.
+
+The feature therefore ships off. A supervised pilot needs the product owner to accept the C5 risk
+or to require a second confirmation for "found".
+
+**D. Window recall: neither variant adopted.**
+
+- **D2, a 40-candidate combiner window.** Refitted on seeds 11/23/37. Randomised top-1 was 0.630
+  over all lists, and at most 0.656 on the lists common to both windows, against a bar of 0.682.
+  The fold benchmarks were not run, as the protocol allows once the cross-validation bar fails.
+- **D1, strict-twin admission** (branch `twin-admission`, combiner schema 3, refitted on
+  11/23/37):
+
+  | seed | top-1 | top-3 | names |
+  |---|---|---|---|
+  | 43 off | 137 | 145 | 39 |
+  | 43 on | 134 | 145 | 38 |
+  | 47 off | 126 | 144 | 36 |
+  | 47 on | 127 | 142 | 36 |
+
+  Seed 43 top-1 and seed 47 top-3 fall by more than the bar of 1. There were no wrong names and no
+  removed actor's twin was named. Only an unrelated fix from the branch was taken: the
+  related-group memo now keys on the user limit (38653e4).
+
+The 53% strict top-3 on anonymized real reports is therefore not fixable by widening the window
+without losing folds. In most misses the true group is outside the first 20 candidates. The gain
+that does reach the analyst is the cluster count, which 21.3.14 measured at a strict 0.527 against
+a cluster-aware 0.655.
+
+**Open questions for the product owner.**
+
+- The C5 risk for a software-question pilot.
+- The removed-actor single names on seeds 41 and 43 from the existing gate.
+- Whether the gate's safety margin should be revisited (decision 2 of the research programme).
 
 ## 22. Failure modes and troubleshooting
 
