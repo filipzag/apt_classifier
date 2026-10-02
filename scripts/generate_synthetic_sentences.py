@@ -24,7 +24,7 @@ from typing import Any
 
 from apt_classifier.attack.kb import AttackKnowledgeBase
 from apt_classifier.config import Settings
-from apt_classifier.llm import OpenRouterClient
+from apt_classifier.llm import OpenRouterClient, supports_seed
 from apt_classifier.vectorstore import (
     _actor_name_pattern,
     _procedure_sentences,
@@ -232,7 +232,7 @@ def main(argv: list[str] | None = None) -> int:
                     schema=SCHEMA,
                     schema_name="synthetic_sentences",
                     max_tokens=1200,
-                    seed=11 if model.startswith("openai/") else None,
+                    seed=11 if supports_seed(model) else None,
                 )
                 parsed = response.parsed if isinstance(response.parsed, dict) else {}
                 return technique_id, list(parsed.get("sentences", [])), response.usage

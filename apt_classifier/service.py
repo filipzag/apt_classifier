@@ -34,7 +34,8 @@ from apt_classifier.evidence.models import (
     TechniqueReviewAction,
     TechniqueReviewDecision,
 )
-from apt_classifier.llm import OpenRouterClient
+from apt_classifier.llm import OpenRouterClient, extraction_uses_llm, is_local_model
+from apt_classifier.llm import llm_available as _llm_available
 from apt_classifier.platforms import ledger_platforms, normalize_platforms, set_ledger_platforms
 from apt_classifier.questions import parse_interview_answer
 from apt_classifier.report import export_document
@@ -130,11 +131,8 @@ class ServiceUnavailable(RuntimeError):
 
 
 def llm_available(settings: Settings) -> bool:
-    try:
-        settings.require_api_key()
-    except RuntimeError:
-        return False
-    return True
+    """An OpenRouter key, or LOCAL_LLM_ENABLED with a reachable Ollama server."""
+    return _llm_available(settings)
 
 
 class CaseService:
@@ -210,10 +208,45 @@ class CaseService:
             "group_mlp": str(getattr(self.engine, "group_mlp_status", "unavailable")),
             "index": index,
             "llm_spend_usd": round(float(getattr(usage, "cost_usd", 0.0) or 0.0), 4),
+            **self._llm_routing(),
             "cases": len(self.store.list()),
             "elastic_mcp": bool(getattr(settings, "elastic_mcp_url", None)),
             "classifier_weights": self.engine.default_weights(),
         }
+
+    def _llm_routing(self) -> dict[str, Any]:
+        """Which model answers each LLM task (OpenRouter, the local server, or nothing)."""
+        client = getattr(self.engine, "llm", None)
+        settings = self.engine.settings
+        tasks = {
+            "extraction": settings.extract_model,
+            "verifier": settings.technique_verifier_model,
+            "cyberre": settings.cyberre_model,
+            "review": settings.review_model,
+        }
+        resolve = getattr(client, "resolve_model", None)
+        models: dict[str, str | None] = {}
+        for task, model in tasks.items():
+            if client is None:
+                models[task] = None
+                continue
+            try:
+                models[task] = resolve(model) if callable(resolve) else model
+            except RuntimeError:
+                models[task] = None
+        if not extraction_uses_llm(client, settings):
+            models["extraction"] = None  # prose is split into sentences
+        used = {model for model in models.values() if model}
+        local = {model for model in used if is_local_model(model)}
+        if not used:
+            provider = "none"
+        elif not local:
+            provider = "openrouter"
+        elif local == used:
+            provider = "local"
+        else:
+            provider = "hybrid"
+        return {"llm_provider": provider, "llm_models": models}
 
     def sample_text(self) -> str:
         return SAMPLE_PATH.read_text(encoding="utf-8") if SAMPLE_PATH.is_file() else ""
@@ -237,7 +270,7 @@ class CaseService:
     def _build_ledger(self, payload: IntakePayload, diagnostics: dict[str, Any]) -> EvidenceLedger:
         context = payload.context()
         files = list(payload.files) or None
-        if self.local_mode:
+        if not extraction_uses_llm(self.engine.llm, self.engine.settings):
             ledger = extract_evidence(
                 None,
                 iocs=payload.iocs or None,
@@ -559,7 +592,8 @@ class CaseService:
     def _require_llm(self, what: str) -> None:
         if self.local_mode:
             raise ServiceUnavailable(
-                f"{what} needs an OpenRouter key; the service runs in local mode"
+                f"{what} needs an LLM (an OpenRouter key or LOCAL_LLM_ENABLED with Ollama); "
+                "the service runs in local mode"
             )
 
     def run_review(self, case_id: str) -> AnalysisState:

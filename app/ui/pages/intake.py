@@ -15,6 +15,7 @@ from app.ui.local_extract import local_observations
 from apt_classifier.config import Settings
 from apt_classifier.evidence.extract import extract_evidence
 from apt_classifier.evidence.models import EvidenceLedger, StrategicContext
+from apt_classifier.llm import extraction_uses_llm
 from apt_classifier.session import AttributionEngine
 
 SAMPLE_PATH = Path(__file__).resolve().parents[3] / "data" / "samples" / "case_observation.txt"
@@ -57,8 +58,9 @@ def _build_ledger(
     context: StrategicContext,
     diagnostics: dict[str, Any],
 ) -> EvidenceLedger:
-    if runtime.local_only(settings):
-        # No LLM: structured files and IOCs are parsed locally by the extractor; prose is
+    if runtime.local_only(settings) or not extraction_uses_llm(engine.llm, settings):
+        # No LLM for prose (none configured, or only the local fallback model, which loses
+        # actions): structured files and IOCs are parsed locally by the extractor; prose is
         # split into sentences here so nothing is silently dropped.
         ledger = extract_evidence(
             None,

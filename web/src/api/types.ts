@@ -33,6 +33,10 @@ export interface SystemInfo {
     error?: string
   }
   llm_spend_usd: number
+  /** who answers the LLM tasks: OpenRouter, the local Ollama model, both, or nothing */
+  llm_provider?: 'openrouter' | 'local' | 'hybrid' | 'none'
+  /** model that answers each task (`local/…` runs on Ollama); null when unavailable */
+  llm_models?: Record<'extraction' | 'verifier' | 'cyberre' | 'review', string | null>
   cases: number
   elastic_mcp: boolean
   classifier_weights: Record<string, number>

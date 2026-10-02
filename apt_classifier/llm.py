@@ -12,10 +12,84 @@ MODEL_PRICING = {
     "openai/gpt-5.6-sol": (2.0, 10.0),
     "anthropic/claude-sonnet-5": (2.0, 10.0),
 }
+# Model ids with this prefix run on the local Ollama server (``local/qwen3.5:4b``); every
+# other id goes to OpenRouter. The per-task model settings are the only switch.
+LOCAL_PREFIX = "local/"
+# Qwen3.5's recommended sampling (model card), non-thinking for the structured tasks and
+# thinking for the high-effort ones, but without its chat presence_penalty (1.5): extraction
+# copies report text verbatim and JSON repeats its keys, both of which a repeat penalty
+# pushes against. A fixed seed keeps benchmark runs repeatable.
+_LOCAL_SAMPLING = {"temperature": 0.7, "top_p": 0.8, "top_k": 20}
+_LOCAL_THINKING_SAMPLING = {"temperature": 1.0, "top_p": 0.95, "top_k": 20}
 
 
 class OpenRouterError(RuntimeError):
     pass
+
+
+# Raised for both providers; the old name stays because callers and tests catch it.
+LLMError = OpenRouterError
+
+
+def is_local_model(model: str) -> bool:
+    return model.startswith(LOCAL_PREFIX)
+
+
+def supports_seed(model: str) -> bool:
+    """Providers that honour ``seed``: OpenAI models via OpenRouter and the local server."""
+    return model.startswith("openai/") or "gpt" in model.casefold() or is_local_model(model)
+
+
+def _setting(settings: Any, name: str, default: Any) -> Any:
+    value = getattr(settings, name, None)
+    return default if value is None else value
+
+
+def _optional_api_key(settings: Any) -> str | None:
+    try:
+        return settings.require_api_key()
+    except RuntimeError:
+        return None
+
+
+def local_llm_enabled(settings: Any) -> bool:
+    return bool(_setting(settings, "local_llm_enabled", False))
+
+
+def local_llm_models(settings: Any, timeout: float = 2.0) -> list[str] | None:
+    """Models pulled on the local Ollama server, or None when it is disabled or unreachable."""
+    if not local_llm_enabled(settings):
+        return None
+    url = str(_setting(settings, "local_llm_url", "http://localhost:11434")).rstrip("/")
+    try:
+        response = httpx.get(f"{url}/api/tags", timeout=timeout)
+        response.raise_for_status()
+        return [str(row.get("name", "")) for row in response.json().get("models", [])]
+    except (httpx.HTTPError, ValueError, AttributeError):
+        return None
+
+
+def llm_available(settings: Any) -> bool:
+    """True when some LLM can answer: an OpenRouter key, or a reachable local server."""
+    return _optional_api_key(settings) is not None or local_llm_models(settings) is not None
+
+
+def extraction_uses_llm(client: Any, settings: Any) -> bool:
+    """Whether prose is normalised by an LLM rather than split into sentences.
+
+    Only when OpenRouter answers the extract model or it is an explicit ``local/`` model, never
+    through the local fallback: the 4B rewriting whole reports lowered CTI-HAL technique F1
+    from 0.431 to 0.370 (it drops actions), and rewriting sentence by sentence was a wash over
+    all 55 reports (0.459 -> 0.472, 22 better, 20 worse; docs 16.4a).
+    """
+    if client is None:
+        return False
+    direct = getattr(client, "answers_directly", None)
+    return True if direct is None else bool(direct(str(getattr(settings, "extract_model", ""))))
+
+
+def build_llm_client(settings: Any) -> "OpenRouterClient | None":
+    return OpenRouterClient(settings) if llm_available(settings) else None
 
 
 @dataclass(frozen=True)
@@ -35,11 +109,40 @@ class LLMResponse:
 
 
 class OpenRouterClient:
+    """Chat client for OpenRouter and, for ``local/`` model ids, a local Ollama server.
+
+    Without an OpenRouter key every remote model id is answered by
+    ``local_llm_fallback_model`` (hybrid mode: the review stays on OpenRouter when a key
+    exists and runs locally otherwise).
+    """
+
     def __init__(self, settings: Settings, timeout: float = 180.0) -> None:
         self.settings = settings
-        self.api_key = settings.require_api_key()
+        self.local_enabled = local_llm_enabled(settings)
+        self.api_key = _optional_api_key(settings)
+        if self.api_key is None and not self.local_enabled:
+            self.api_key = settings.require_api_key()  # raises the usual configuration error
+        self.local_url = str(_setting(settings, "local_llm_url", "http://localhost:11434")).rstrip(
+            "/"
+        )
+        self.local_timeout = float(_setting(settings, "local_llm_timeout", 300.0))
         self._client = httpx.Client(timeout=timeout)
         self.total_usage = LLMUsage()
+
+    def answers_directly(self, model: str) -> bool:
+        """True when ``model`` itself answers (OpenRouter with a key, or a ``local/`` id)."""
+        return is_local_model(model) or self.api_key is not None
+
+    def resolve_model(self, model: str) -> str:
+        """The model that will actually answer a request for ``model``."""
+        if is_local_model(model) or self.api_key is not None:
+            return model
+        fallback = str(_setting(self.settings, "local_llm_fallback_model", ""))
+        if self.local_enabled and is_local_model(fallback):
+            return fallback
+        raise OpenRouterError(
+            f"{model} needs an OpenRouter key; set OPENROUTER_API_KEY or a local/ model"
+        )
 
     def close(self) -> None:
         self._client.close()
@@ -55,6 +158,20 @@ class OpenRouterClient:
         max_tokens: int = 4096,
         seed: int | None = None,
     ) -> LLMResponse:
+        model = self.resolve_model(model)
+        if is_local_model(model):
+            if not self.local_enabled:
+                raise OpenRouterError(f"{model} needs LOCAL_LLM_ENABLED=true and a running Ollama")
+            return self._complete_local(
+                messages,
+                model=model,
+                effort=effort,
+                schema=schema,
+                max_tokens=max_tokens,
+                seed=seed,
+            )
+        if self.api_key is None:
+            raise OpenRouterError(f"{model} needs an OpenRouter key")
         body: dict[str, Any] = {
             "model": model,
             "messages": messages,
@@ -108,6 +225,99 @@ class OpenRouterClient:
             return LLMResponse(content, parsed, usage, model, payload)
         raise OpenRouterError("OpenRouter structured response retry failed")
 
+    def _complete_local(
+        self,
+        messages: list[dict[str, str]],
+        *,
+        model: str,
+        effort: str,
+        schema: dict[str, Any] | None,
+        max_tokens: int,
+        seed: int | None,
+    ) -> LLMResponse:
+        # Ollama's native API, not its OpenAI-compatible /v1: only the native one takes
+        # num_ctx per request, and the default context silently truncates whole reports.
+        think_efforts = {
+            part.strip()
+            for part in str(_setting(self.settings, "local_llm_think_efforts", "")).split(",")
+            if part.strip()
+        }
+        think = effort in think_efforts
+        num_predict = max_tokens
+        if think:
+            num_predict += int(_setting(self.settings, "local_llm_think_tokens", 8192))
+        options: dict[str, Any] = dict(_LOCAL_THINKING_SAMPLING if think else _LOCAL_SAMPLING)
+        options.update(
+            num_ctx=int(_setting(self.settings, "local_llm_num_ctx", 32768)),
+            num_predict=num_predict,
+            seed=0 if seed is None else seed,
+        )
+        if _setting(self.settings, "local_llm_gpu_only", True):
+            # every layer on the GPU: Ollama then fails to load (CUDA out of memory) rather
+            # than silently running part of the model on the CPU
+            options["num_gpu"] = 999
+            options["num_thread"] = int(_setting(self.settings, "local_llm_num_thread", 2))
+        body: dict[str, Any] = {
+            "model": model.removeprefix(LOCAL_PREFIX),
+            "messages": messages,
+            "stream": False,
+            "think": think,
+            "keep_alive": str(_setting(self.settings, "local_llm_keep_alive", "5m")),
+            "options": options,
+        }
+        if schema is not None:
+            body["format"] = schema
+        attempts = 2 if schema is not None else 1
+        last_finish_reason = "unknown"
+        last_content = ""
+        for attempt in range(attempts):
+            request_body = body
+            if attempt:
+                request_body = dict(body, messages=_retry_messages(messages))
+                request_body["options"] = dict(options, num_predict=round(num_predict * 1.5))
+            try:
+                response = self._send_with_retry(
+                    request_body,
+                    {"Content-Type": "application/json"},
+                    url=f"{self.local_url}/api/chat",
+                    timeout=self.local_timeout,
+                    provider="Local LLM",
+                )
+            except OpenRouterError as exc:
+                if _out_of_gpu_memory(str(exc)):
+                    raise OpenRouterError(
+                        f"Local LLM {model} does not fit in the free GPU memory and GPU-only mode "
+                        "keeps it off the CPU. Free GPU memory, lower LOCAL_LLM_NUM_CTX or use a "
+                        "smaller model (local/qwen3.5:4b)."
+                    ) from exc
+                raise
+            try:
+                payload = response.json()
+            except (json.JSONDecodeError, ValueError) as exc:
+                raise OpenRouterError("Local LLM returned a non-JSON API response") from exc
+            message = payload.get("message")
+            if not isinstance(message, dict):
+                raise OpenRouterError("Local LLM returned a malformed chat response")
+            content = _message_content(message)
+            usage = LLMUsage(
+                int(payload.get("prompt_eval_count") or 0), int(payload.get("eval_count") or 0)
+            )
+            self._record_usage(usage)
+            if schema is None:
+                return LLMResponse(content, None, usage, model, payload)
+            try:
+                parsed = _parse_json_text(content)
+                _validate_structured_value(parsed, schema)
+            except (json.JSONDecodeError, TypeError, ValueError):
+                last_finish_reason = str(payload.get("done_reason") or "unknown")
+                last_content = content
+                continue
+            return LLMResponse(content, parsed, usage, model, payload)
+        raise OpenRouterError(
+            f"Local LLM {model} returned invalid structured JSON after {attempts} attempts "
+            f"(done_reason={last_finish_reason}, content_chars={len(last_content)})"
+        )
+
     def _record_usage(self, usage: LLMUsage) -> None:
         self.total_usage = LLMUsage(
             self.total_usage.prompt_tokens + usage.prompt_tokens,
@@ -115,19 +325,32 @@ class OpenRouterClient:
             self.total_usage.cost_usd + usage.cost_usd,
         )
 
-    def _send_with_retry(self, body: dict[str, Any], headers: dict[str, str]) -> httpx.Response:
+    def _send_with_retry(
+        self,
+        body: dict[str, Any],
+        headers: dict[str, str],
+        *,
+        url: str = OPENROUTER_URL,
+        timeout: float | None = None,
+        provider: str = "OpenRouter",
+    ) -> httpx.Response:
         last_error: Exception | None = None
+        extra = {} if timeout is None else {"timeout": timeout}
         for attempt in range(3):
             try:
-                response = self._client.post(OPENROUTER_URL, headers=headers, json=body)
+                response = self._client.post(url, headers=headers, json=body, **extra)
                 if response.status_code not in {408, 409, 429} and response.status_code < 500:
                     response.raise_for_status()
                     return response
                 last_error = OpenRouterError(
-                    f"OpenRouter returned HTTP {response.status_code}: {response.text[:500]}"
+                    f"{provider} returned HTTP {response.status_code}: {response.text[:500]}"
                 )
-            except (httpx.HTTPError, OpenRouterError) as exc:
+                if _out_of_gpu_memory(response.text):
+                    break  # a model that does not fit will not fit a second later either
+            except OpenRouterError as exc:
                 last_error = exc
+            except httpx.HTTPError as exc:
+                last_error = OpenRouterError(f"{provider} request failed ({url}): {exc}")
             if attempt < 2:
                 time.sleep(2**attempt)
         raise OpenRouterError(str(last_error))
@@ -147,10 +370,20 @@ class OpenRouterClient:
         return LLMUsage(prompt_tokens, completion_tokens, cost)
 
 
+def _out_of_gpu_memory(text: str) -> bool:
+    lowered = text.casefold()
+    return "out of memory" in lowered or "cudamalloc failed" in lowered
+
+
 def _structured_retry_body(body: dict[str, Any], max_tokens: int) -> dict[str, Any]:
     retry = dict(body)
     retry["max_completion_tokens"] = max(max_tokens + 2048, round(max_tokens * 1.5))
-    messages = [dict(message) for message in body.get("messages", [])]
+    retry["messages"] = _retry_messages(body.get("messages", []))
+    return retry
+
+
+def _retry_messages(original: list[dict[str, str]]) -> list[dict[str, str]]:
+    messages = [dict(message) for message in original]
     instruction = (
         "Return exactly one complete JSON value matching the response schema. Do not use Markdown "
         "fences or explanatory text. Ensure the JSON is closed before ending the response."
@@ -160,8 +393,7 @@ def _structured_retry_body(body: dict[str, Any], max_tokens: int) -> dict[str, A
         messages.insert(0, {"role": "system", "content": instruction})
     else:
         system["content"] = f"{system.get('content', '')}\n\n{instruction}"
-    retry["messages"] = messages
-    return retry
+    return messages
 
 
 def _response_message(payload: dict[str, Any]) -> tuple[dict[str, Any], str]:

@@ -5,7 +5,7 @@ from math import log2
 from typing import Any
 
 from apt_classifier.evidence.models import EvidenceStatus
-from apt_classifier.llm import OpenRouterClient
+from apt_classifier.llm import OpenRouterClient, supports_seed
 from apt_classifier.platforms import PlatformScope
 
 INTERVIEW_REVISION = 3
@@ -326,7 +326,7 @@ def select_question_with_llm(
         schema=schema,
         schema_name="follow_up_question",
         max_tokens=1000,
-        seed=41 if model.startswith("openai/") else None,
+        seed=41 if supports_seed(model) else None,
     )
     parsed = response.parsed if isinstance(response.parsed, dict) else {}
     selected_id = str(parsed.get("technique_id", ""))

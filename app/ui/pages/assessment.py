@@ -365,7 +365,7 @@ def _render_review(engine: AttributionEngine, settings: Settings, state: Analysi
         "opinion. It never changes the deterministic ranking. It costs several model calls."
     )
     if runtime.local_only(settings):
-        st.info("Unavailable in local mode (no OpenRouter key).")
+        st.info("Unavailable in local mode (no OpenRouter key and no local LLM).")
     else:
         columns = st.columns(2)
         if columns[0].button("Run independent review", type="primary", use_container_width=True):

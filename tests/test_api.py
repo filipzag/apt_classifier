@@ -124,16 +124,19 @@ def local_client(tmp_path_factory: pytest.TempPathFactory) -> TestClient:
     from apt_classifier.config import get_settings
     from apt_classifier.service import CaseService
 
-    previous = os.environ.get("OPENROUTER_API_KEY")
-    os.environ["OPENROUTER_API_KEY"] = ""  # blank overrides .env: local mode
+    # blank key and local LLM off override .env: local mode
+    overrides = {"OPENROUTER_API_KEY": "", "LOCAL_LLM_ENABLED": "false"}
+    previous = {name: os.environ.get(name) for name in overrides}
+    os.environ.update(overrides)
     get_settings.cache_clear()
     try:
         service = CaseService(cases_dir=tmp_path_factory.mktemp("cases"))
     finally:
-        if previous is None:
-            os.environ.pop("OPENROUTER_API_KEY", None)
-        else:
-            os.environ["OPENROUTER_API_KEY"] = previous
+        for name, value in previous.items():
+            if value is None:
+                os.environ.pop(name, None)
+            else:
+                os.environ[name] = value
         get_settings.cache_clear()
     assert service.local_mode
     return TestClient(create_app(service, serve_web=False), raise_server_exceptions=False)

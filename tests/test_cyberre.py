@@ -446,3 +446,15 @@ def test_cyberre_classifier_abstains_without_scan_results(synthetic_kb):
     result = CyberREClassifier().classify(context)
     assert not result.applicable
     assert result.entries == ()
+
+
+def test_local_models_get_the_reason_first_verifier_prompt():
+    from apt_classifier.cyberre import VERIFY_SCHEMA, _verifier_prompt
+
+    system, schema = _verifier_prompt("local/qwen3.5:4b")
+    fields = list(schema["properties"]["decisions"]["items"]["properties"])
+    assert fields.index("required_behavior") < fields.index("verdict")
+    assert fields.index("support_span") < fields.index("verdict")
+    assert "false positives" in system
+    # the OpenRouter path keeps the measured production prompt
+    assert _verifier_prompt("openai/gpt-5.6-sol")[1] is VERIFY_SCHEMA

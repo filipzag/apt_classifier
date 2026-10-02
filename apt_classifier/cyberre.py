@@ -8,7 +8,7 @@ from apt_classifier.evidence.models import (
     TechniqueVerification,
     TechniqueVerificationVerdict,
 )
-from apt_classifier.llm import LLMUsage, OpenRouterClient
+from apt_classifier.llm import LLMUsage, OpenRouterClient, is_local_model, supports_seed
 
 CYBERRE_CLASSIFIER_NAME = "cyberre_llm"
 
@@ -67,6 +67,78 @@ VERIFY_SCHEMA: dict[str, Any] = {
     },
     "required": ["decisions"],
 }
+
+
+_VERIFY_SYSTEM = (
+    "Verify each supplied MITRE ATT&CK candidate independently against the "
+    "normalized observation and source excerpt. Use only supplied evidence and "
+    "technique definitions. Multiple candidates may be supported. Mark supported "
+    "only for directly stated behavior and copy an exact supporting span. Mark "
+    "unsupported when contradicted or unrelated, and uncertain when detail is "
+    "insufficient. Do not add candidates, infer intent, or use actor identity."
+)
+
+
+# Local models (docs 16.4a): a 4B model given the prompt above marked almost every candidate
+# supported (branch-office: 19 supported, 0 correct). This variant names the usual false
+# positive and puts the reasoning fields before the verdict, so the verdict follows from the
+# evidence instead of being justified afterwards (the JSON grammar fills fields in order).
+# Developed on the branch-office and manufacturing EvidenceForge bundles only.
+_VERIFY_SYSTEM_LOCAL = (
+    "You check MITRE ATT&CK technique candidates that a search engine proposed for ONE "
+    "observation. Most candidates are search false positives: they share a word, a tool, a "
+    "file, a platform or a general category with the observation but describe a different "
+    "action. Judge every candidate on its own, in this order:\n"
+    "1. required_behavior: in a few words, the specific action the technique definition "
+    "requires.\n"
+    "2. support_span: copy the exact words of the observation or source excerpt that state "
+    "that action, or an empty string if no words do.\n"
+    "3. verdict: 'supported' only when support_span states that specific action; "
+    "'unsupported' when the observation describes a different action; 'uncertain' when it "
+    "might fit but a key detail is missing.\n"
+    "4. reason: one short sentence.\n"
+    "A shared tool name, file, port, platform or a generic verb such as run, execute, "
+    "connect or create is not support on its own. Use only the supplied text and "
+    "definitions; do not infer intent or use actor identity."
+)
+VERIFY_SCHEMA_LOCAL: dict[str, Any] = {
+    "type": "object",
+    "additionalProperties": False,
+    "properties": {
+        "decisions": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "additionalProperties": False,
+                "properties": {
+                    "technique_id": {"type": "string"},
+                    "required_behavior": {"type": "string"},
+                    "support_span": {"type": "string"},
+                    "verdict": {
+                        "type": "string",
+                        "enum": ["supported", "unsupported", "uncertain"],
+                    },
+                    "reason": {"type": "string"},
+                },
+                "required": [
+                    "technique_id",
+                    "required_behavior",
+                    "support_span",
+                    "verdict",
+                    "reason",
+                ],
+            },
+        }
+    },
+    "required": ["decisions"],
+}
+
+
+def _verifier_prompt(model: str) -> tuple[str, dict[str, Any]]:
+    """System prompt and response schema of the technique verifier for ``model``."""
+    if is_local_model(model):
+        return _VERIFY_SYSTEM_LOCAL, VERIFY_SCHEMA_LOCAL
+    return _VERIFY_SYSTEM, VERIFY_SCHEMA
 
 
 @dataclass(frozen=True)
@@ -195,27 +267,18 @@ def verify_technique_candidates(
         f"CANDIDATE TECHNIQUES:\n{json.dumps(candidate_payload, sort_keys=True)}"
     )
     try:
+        system, schema = _verifier_prompt(model)
         response = client.complete(
             [
-                {
-                    "role": "system",
-                    "content": (
-                        "Verify each supplied MITRE ATT&CK candidate independently against the "
-                        "normalized observation and source excerpt. Use only supplied evidence and "
-                        "technique definitions. Multiple candidates may be supported. Mark supported "
-                        "only for directly stated behavior and copy an exact supporting span. Mark "
-                        "unsupported when contradicted or unrelated, and uncertain when detail is "
-                        "insufficient. Do not add candidates, infer intent, or use actor identity."
-                    ),
-                },
+                {"role": "system", "content": system},
                 {"role": "user", "content": prompt},
             ],
             model=model,
             effort=effort,
-            schema=VERIFY_SCHEMA,
+            schema=schema,
             schema_name="technique_candidate_verification",
             max_tokens=max(1200, min(8000, 350 * len(selected))),
-            seed=47 if model.startswith("openai/") else None,
+            seed=47 if supports_seed(model) else None,
         )
     except Exception as exc:
         updated = tuple(
@@ -288,7 +351,7 @@ def verify_technique_candidates(
                         model=model,
                     ),
                     "state": state,
-                    "state_reason": f"OpenRouter verifier: {verdict.value}",
+                    "state_reason": f"LLM verifier: {verdict.value}",
                 }
             )
         )
@@ -366,7 +429,7 @@ def run_cyberre_scan(
             schema=FILTER_SCHEMA,
             schema_name="cyberre_technique_filter",
             max_tokens=500,
-            seed=41 if model.startswith("openai/") else None,
+            seed=41 if supports_seed(model) else None,
         )
         usage = _add_usage(usage, response.usage)
         parsed = response.parsed if isinstance(response.parsed, dict) else {}
@@ -484,7 +547,7 @@ def _rank_filtered_techniques(
         schema=RANK_SCHEMA,
         schema_name="cyberre_technique_ranking",
         max_tokens=max(1000, min(8000, 250 * len(candidates))),
-        seed=43 if model.startswith("openai/") else None,
+        seed=43 if supports_seed(model) else None,
     )
     parsed = response.parsed if isinstance(response.parsed, dict) else {}
     allowed = {item.technique_id: item for item in candidates}

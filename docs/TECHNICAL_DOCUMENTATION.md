@@ -2260,6 +2260,66 @@ Technique matches and actor-specific behavior references are retained in compact
 
 For Anthropic schema-constrained calls, configured `max/xhigh` effort is mapped to medium structured-output reasoning so hidden reasoning cannot consume the entire visible JSON budget.
 
+### 16.4a Local LLM (Ollama), hybrid routing
+
+Added 2026-10-02; opt-in, the defaults stay on OpenRouter until the local model has passed
+the mapping and naming gates. `OpenRouterClient` routes by model id: ids prefixed `local/`
+(for example `EXTRACT_MODEL=local/qwen3.5:9b`) go to the Ollama server at `LOCAL_LLM_URL` when
+`LOCAL_LLM_ENABLED=true`; every other id goes to OpenRouter. Without an OpenRouter key, a remote
+id (in practice the review's `anthropic/claude-sonnet-5`) is answered by
+`LOCAL_LLM_FALLBACK_MODEL`, so the hybrid set-up keeps the review on Claude when a key exists and
+runs it locally otherwise. The system endpoint reports `llm_provider`
+(`openrouter`/`local`/`hybrid`/`none`) and the model answering each task (`llm_models`).
+
+- **Model choice (research 2026-10-02):** Qwen3.5 (Apache-2.0, March 2026; vendor IFEval 91.5 for
+  the 9B, 89.8 for the 4B). Its hybrid attention (Gated DeltaNet:full = 3:1) keeps the KV cache for
+  whole reports small. The default `LOCAL_LLM_FALLBACK_MODEL` is the **4B** (3.9 GiB at a 32k
+  context), the only size that fits the 8 GB RTX 4060 Laptop next to the app's own GPU models and
+  a benchmark. The 9B (Ollama build 6.1 GiB with its vision projector) loads only when nothing else
+  holds GPU memory. Mixture-of-experts models (Qwen3.6-35B-A3B, Gemma 4 26B-A4B) need 17-22 GB.
+- **GPU only (`LOCAL_LLM_GPU_ONLY=true`):** every request sends `num_gpu=999`, so Ollama either puts
+  every layer on the GPU or refuses to load (measured: a CUDA out-of-memory error, no CPU spill);
+  the client reports this once, without retries, as "does not fit in the free GPU memory".
+  Without it Ollama silently ran 45% of the 9B on the CPU (one verifier call 13 minutes) and slowed
+  the whole machine. `LOCAL_LLM_NUM_THREAD=2` bounds the CPU threads, `LOCAL_LLM_KEEP_ALIVE=5m`
+  frees the GPU memory soon after the last call, and `LOCAL_LLM_TIMEOUT=300` ends a stuck call.
+- **Context size:** `LOCAL_LLM_NUM_CTX=32768` (whole reports). The cache grows with it, so in
+  GPU-only mode a model that does not load can often be made to fit by lowering it.
+- **Laptop power cap:** the laptop's power and thermal management can lower the GPU limit from
+  55 W to 15 W and hold it in P8 (210 MHz) even under load; the 4B then generates 0.4 tokens/s
+  instead of 50. `make llm-check` prints the GPU state and warns when the limit is below half its
+  default.
+- **Native API:** the client calls Ollama's `/api/chat`, not its OpenAI-compatible `/v1`, because
+  only the native API sets `num_ctx` per request; Ollama's default context silently truncates a
+  whole report. `format` carries the JSON schema (grammar-constrained decoding), the same parser
+  and single retry as OpenRouter apply, and the cost is recorded as 0.
+- **Sampling:** Qwen's recommended values (non-thinking 0.7/0.8/20, thinking 1.0/0.95/20) without
+  its chat `presence_penalty`, because extraction copies report text verbatim. Thinking is on only
+  for the efforts in `LOCAL_LLM_THINK_EFFORTS` (`high,xhigh,max`, i.e. the review), with
+  `LOCAL_LLM_THINK_TOKENS` added to the output budget. Seeds are always sent (0 when the caller
+  passes none), so benchmark runs repeat.
+- **Technique verifier, measured 2026-10-02 (4B, thinking off):** with the production prompt the
+  4B agreed with almost everything (branch-office: 19 supported, 0 correct; clinic micro-F1 below
+  no verifier in every mode). Local models therefore get their own prompt
+  (`cyberre._verifier_prompt`): it names the usual false positive (a shared word, tool or
+  category) and puts `required_behavior` and `support_span` before `verdict` in the schema, so
+  the verdict follows from the evidence. Developed on the branch-office and manufacturing bundles
+  (F1 up or equal in all six mode comparisons; one-candidate-per-call and thinking were slower
+  and not better; thinking took 2.5-4 min per call), then confirmed once on the held-out clinic
+  bundle, micro-F1 no verifier -> 4B -> GPT-5.6: narrative 0.357 -> 0.378 -> 0.526, windows
+  0.600 -> 0.571 -> 0.571, ecar 0.545 -> 0.571 -> 0.615. Most remaining false accepts are
+  interpreter techniques (T1059.x) for commands whose labelled purpose is something else.
+- **Prose extraction, measured 2026-10-02 (CTI-HAL statements joined into prose, deterministic
+  mapping, no verifier):** the 4B rewriting whole reports with the production prompt lowered
+  technique F1 from 0.431 to 0.370 on 14 reports because it leaves actions out. Rewriting the
+  sentence split one sentence at a time (each sentence kept, at most rewritten) gained on those
+  14 reports (0.431 -> 0.503) but not on the other 41 (0.470 -> 0.460); over all 55 it is a wash
+  (0.459 -> 0.472, 22 reports better, 20 worse). Prose is therefore never sent to the local
+  fallback model (`extraction_uses_llm`): without a key it is split into sentences unless
+  `EXTRACT_MODEL` names a `local/` model explicitly.
+- **Availability:** with no key, the app leaves local mode only when Ollama answers `/api/tags`
+  at start-up; `make api-local` / `make run-local` force no-LLM mode with `LOCAL_LLM_ENABLED=false`.
+
 ### 16.5 Review limitations
 
 The review can critique evidence and ranking but cannot add reliable evidence. A reviewer’s confidence is not an attribution probability. The deterministic RRF ranking remains authoritative; reconciliation stores any alternative ordering under `advisory_ranking` and records differences under `rank_changes` without applying them. The report retains the counter-case, limitations, disconfirmation tests, and fame-bias measurements.
