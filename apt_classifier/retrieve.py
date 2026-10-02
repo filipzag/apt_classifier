@@ -1,12 +1,17 @@
 import math
 import re
 from collections import Counter
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import asdict, dataclass, field, replace
 from types import SimpleNamespace
 from typing import Any
 
-from apt_classifier.acceptance import candidate_features
+from apt_classifier.acceptance import (
+    DEFAULT_DENSE_COLLECTION,
+    candidate_features,
+    contract_mismatches,
+    retrieval_contract,
+)
 from apt_classifier.attack.parse import split_sentences, strip_attack_citations
 from apt_classifier.classifiers.base import ClassifierContext
 from apt_classifier.evidence.iocs import match_software_aliases
@@ -24,9 +29,19 @@ from apt_classifier.exemplars import (
     DEFAULT_DUPLICATE_SIMILARITY as EXEMPLAR_DUPLICATE_SIMILARITY,
 )
 from apt_classifier.exemplars import DEFAULT_K as EXEMPLAR_K
+from apt_classifier.exemplars import (
+    DEFAULT_SEGMENT_VOTES as EXEMPLAR_SEGMENT_VOTES,
+)
 from apt_classifier.exemplars import DEFAULT_TAU as EXEMPLAR_TAU
+from apt_classifier.exemplars import DEFAULT_VOTE_NORM as EXEMPLAR_VOTE_NORM
 from apt_classifier.exemplars import EVIDENCE_SOURCE as EXEMPLAR_SOURCE
-from apt_classifier.exemplars import ExemplarVotes, exemplar_query_text
+from apt_classifier.exemplars import (
+    SEGMENT_VOTE_MODES,
+    ExemplarVotes,
+    exemplar_kwargs,
+    exemplar_query_text,
+    pool_votes,
+)
 from apt_classifier.exemplars import parent_map as exemplar_parent_map
 from apt_classifier.platforms import PlatformScope, ledger_platforms, observation_scope
 from apt_classifier.technique_signals import find_signals
@@ -260,6 +275,8 @@ class LexicalTechniqueIndex:
     average_length: float
     postings: dict[str, tuple[tuple[int, int], ...]] = field(default_factory=dict, repr=False)
     norms: tuple[float, ...] = field(default=(), repr=False)
+    # the sentence fields indexed (from_kb); part of the acceptance model's retrieval contract
+    fields: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         if self.documents and (not self.postings or len(self.norms) != len(self.documents)):
@@ -322,7 +339,7 @@ class LexicalTechniqueIndex:
             if documents
             else 1.0
         )
-        return cls(tuple(documents), dict(frequencies), average)
+        return cls(tuple(documents), dict(frequencies), average, fields=tuple(fields))
 
     def query(self, text: str, *, n_results: int) -> list[VectorHit]:
         query_tokens = _lexical_tokens(text)
@@ -429,6 +446,94 @@ class RetrievalResult:
 # and very unconfident to demote.
 RERANKER_PROMOTE_THRESHOLD = 0.8
 RERANKER_DEMOTE_THRESHOLD = 0.2
+# dense hits within this similarity of an observation's best hit become candidates
+DENSE_RELATIVE_MARGIN = 0.12
+
+
+def default_lexical_fields(*, include_synthetic: bool, include_detection: bool) -> tuple[str, ...]:
+    """The fields ``retrieve_techniques`` indexes when it builds its own lexical index."""
+    base = tuple(
+        field for field in LEXICAL_DEFAULT_FIELDS if include_synthetic or field != "synthetic"
+    )
+    return (*base, "detection") if include_detection else base
+
+
+def lexical_fields(settings: Any) -> tuple[str, ...]:
+    """The fields of the serving lexical index (``AttributionEngine``, the benchmarks and the
+    acceptance fit build theirs with this): ATT&CK names, descriptions and procedure sentences,
+    plus the synthetic sentences when ``technique_include_synthetic`` is set. Detection text is
+    never indexed lexically, whatever ``technique_include_detection`` says for dense retrieval."""
+    include_synthetic = bool(getattr(settings, "technique_include_synthetic", False))
+    return tuple(
+        field for field in LEXICAL_DEFAULT_FIELDS if include_synthetic or field != "synthetic"
+    )
+
+
+def retrieval_kwargs(settings: Any, *, exemplar_index: Any, lexical_index: Any) -> dict[str, Any]:
+    """The settings-driven keyword arguments of ``retrieve_techniques``.
+
+    ``AttributionEngine.map_techniques``, ``scripts/benchmark_mapping.py``,
+    ``scripts/fit_acceptance_model.py`` and the tuning harness all retrieve with these, so the
+    acceptance model is fitted on exactly the candidates it later judges. Call sites add what is
+    theirs alone (store, reranker, acceptance model, ``finalize``, ``cues_enabled``, a mode
+    override). The fallbacks for settings objects that lack a field are those the serving call
+    always used."""
+    return {
+        "threshold": getattr(settings, "similarity_threshold", 0.45),
+        "top_k": getattr(settings, "retrieval_top_k", 30),
+        "behavior_threshold": getattr(settings, "behavior_similarity_threshold", 0.55),
+        "behavior_top_k": getattr(settings, "behavior_retrieval_top_k", 20),
+        "retrieval_mode": getattr(settings, "technique_retrieval_mode", "hybrid"),
+        "candidate_pool": getattr(settings, "technique_candidate_pool", 12),
+        "include_detection": getattr(settings, "technique_include_detection", False),
+        "parent_policy": getattr(settings, "technique_parent_policy", "ancestor_compatible"),
+        "lexical_index": lexical_index,
+        "acceptance_threshold": getattr(settings, "technique_acceptance_threshold", 0.75),
+        "relative_margin": getattr(settings, "technique_relative_margin", 0.08),
+        "rank_by_acceptance": bool(getattr(settings, "technique_rank_by_acceptance", False)),
+        "corroboration_accept_observations": int(
+            getattr(settings, "technique_corroboration_accept_observations", 0)
+        ),
+        "corroboration_accept_min_probability": float(
+            getattr(settings, "technique_corroboration_accept_min_probability", 0.2)
+        ),
+        "rrf_k": int(getattr(settings, "technique_rrf_k", 60)),
+        "corroboration_bonus": float(getattr(settings, "technique_corroboration_bonus", 0.0)),
+        "segment_acceptance": bool(getattr(settings, "technique_segment_acceptance", False)),
+        "hierarchy_parent_mode": str(getattr(settings, "technique_hierarchy_parent_mode", "off")),
+        "include_synthetic": bool(getattr(settings, "technique_include_synthetic", False)),
+        "platform_from_text": bool(getattr(settings, "technique_platform_from_text", False)),
+        "dense_relative_margin": float(
+            getattr(settings, "technique_dense_relative_margin", DENSE_RELATIVE_MARGIN)
+        ),
+        "dense_overfetch": int(getattr(settings, "technique_dense_overfetch", 0) or 0),
+        **exemplar_kwargs(settings, exemplar_index),
+    }
+
+
+def _dense_collection(store: Any) -> str:
+    """The ATT&CK technique collection a store reads (a configured copy, or the default)."""
+    name = getattr(store, "technique_collection_name", None) if store is not None else None
+    return name if isinstance(name, str) and name else DEFAULT_DENSE_COLLECTION
+
+
+def retrieval_contract_for(
+    settings: Any, exemplar_index: Any, *, store: Any = None
+) -> dict[str, Any]:
+    """The retrieval contract a run with these settings meets, for
+    :func:`apt_classifier.acceptance.load_acceptance_model` (``contract=``): the arguments of
+    :func:`retrieval_kwargs`, the serving lexical fields and the store's technique collection."""
+    collection = (
+        _dense_collection(store)
+        if store is not None
+        else str(getattr(settings, "technique_collection_name", "") or DEFAULT_DENSE_COLLECTION)
+    )
+    return retrieval_contract(
+        retrieval_kwargs(settings, exemplar_index=exemplar_index, lexical_index=None),
+        exemplar_index,
+        lexical_fields=lexical_fields(settings),
+        dense_collection=collection,
+    )
 
 
 def retrieve_techniques(
@@ -465,6 +570,10 @@ def retrieve_techniques(
     exemplar_duplicate_similarity: float = EXEMPLAR_DUPLICATE_SIMILARITY,
     exemplar_new_candidates: int = 0,
     platform_from_text: bool = False,
+    dense_relative_margin: float = DENSE_RELATIVE_MARGIN,
+    dense_overfetch: int = 0,
+    exemplar_vote_norm: str = EXEMPLAR_VOTE_NORM,
+    exemplar_segment_votes: str = EXEMPLAR_SEGMENT_VOTES,
 ) -> RetrievalResult:
     """Retrieve ATT&CK technique candidates for the positive observations in a ledger.
 
@@ -474,11 +583,22 @@ def retrieve_techniques(
     documented only for other operating systems are dropped from that observation's hits and
     candidates, so compatible techniques take their place in the pool.
 
-    ``exemplar_index`` (:class:`apt_classifier.exemplars.ExemplarIndex`) adds what the nearest
-    labelled real-report sentences say about each candidate as ``exemplar`` evidence (the
-    acceptance model reads it) and appends up to ``exemplar_new_candidates`` techniques that
-    only the exemplars suggest. An acceptance model fitted with exemplars is not used when the
-    same index is unavailable (diagnostics say why).
+    ``exemplar_index`` (:class:`apt_classifier.exemplars.ExemplarIndex`, or the Chroma-served
+    :class:`apt_classifier.exemplar_store.ChromaExemplarStore`, which gives identical votes)
+    adds what the nearest labelled real-report sentences say about each candidate as
+    ``exemplar`` evidence (the acceptance model reads it) and appends up to
+    ``exemplar_new_candidates`` techniques that only the exemplars suggest. An acceptance model
+    fitted with exemplars is not used when the same index is unavailable (diagnostics say why).
+
+    ``exemplar_vote_norm`` shares a neighbour's weight among its labels (``label_split``) and
+    ``exemplar_segment_votes`` (``max`` / ``mean``) also queries the exemplars per sentence of a
+    segmented observation, pooling the votes per technique (:func:`apt_classifier.exemplars.
+    pool_votes`); exemplar-only candidates then come from the pooled ranking. The defaults are
+    the shipped behaviour.
+
+    ``dense_relative_margin`` is how far below an observation's best dense hit a technique's
+    hit may lie and still become a candidate; ``dense_overfetch`` is the number of sentence
+    hits fetched per query (0: ``max(3 * top_k, 4 * candidate_pool)``).
 
     ``cues_enabled=False`` disables the regex cue tables (``_EXPLICIT_TECHNIQUE_CUES``
     and ``technique_signals.SIGNALS``) so benchmarks can report retrieval quality
@@ -486,7 +606,11 @@ def retrieve_techniques(
 
     ``acceptance_model`` is an optional calibrated per-candidate scorer
     (:class:`apt_classifier.acceptance.AcceptanceModel`); when supplied it replaces the
-    rule-based one-primary acceptance in :func:`finalize_retrieval_candidates`.
+    rule-based one-primary acceptance in :func:`finalize_retrieval_candidates`. A model that
+    carries a retrieval contract (every artifact does; one fitted before contracts is held only
+    to the knobs new with them, :func:`apt_classifier.acceptance.legacy_contract`) is not used
+    when these arguments depart from it, with the reason in
+    ``diagnostics["acceptance_model_disabled"]``.
 
     Observations longer than ``LONG_OBSERVATION_WORDS`` words are split into sentences for
     retrieval and the per-sentence hits are merged per technique, so multi-technique
@@ -496,6 +620,8 @@ def retrieve_techniques(
         raise ValueError("unsupported technique retrieval mode")
     if parent_policy not in {"ancestor_compatible", "exact_only", "legacy_expand"}:
         raise ValueError("unsupported parent policy")
+    if exemplar_segment_votes not in SEGMENT_VOTE_MODES:
+        raise ValueError(f"unsupported exemplar segment votes {exemplar_segment_votes!r}")
     observations = [
         observation
         for observation in ledger.observations
@@ -520,20 +646,21 @@ def retrieve_techniques(
     # Over-fetch dense sentence vectors so that duplicate sentences from the
     # same technique do not crowd out unique techniques. The results are
     # aggregated by technique in _best_technique_hits before candidate scoring.
-    dense_overfetch = max(top_k * 3, candidate_pool * 4)
+    dense_depth = (
+        int(dense_overfetch) if int(dense_overfetch) > 0 else max(top_k * 3, candidate_pool * 4)
+    )
     flat_dense = (
-        _query_technique_vectors(store, flat_segments, n_results=dense_overfetch, fields=fields)
+        _query_technique_vectors(store, flat_segments, n_results=dense_depth, fields=fields)
         if dense_enabled
         else [[] for _ in flat_segments]
     )
     dense_hits = _regroup(flat_dense, segments)
     if lexical_enabled and lexical_index is None:
-        lexical_fields = tuple(
-            field for field in LEXICAL_DEFAULT_FIELDS if include_synthetic or field != "synthetic"
-        )
         lexical_index = LexicalTechniqueIndex.from_kb(
             kb,
-            fields=(*lexical_fields, "detection") if include_detection else lexical_fields,
+            fields=default_lexical_fields(
+                include_synthetic=include_synthetic, include_detection=include_detection
+            ),
         )
     flat_lexical = (
         [
@@ -544,7 +671,7 @@ def retrieve_techniques(
         else [[] for _ in flat_segments]
     )
     lexical_hits = _regroup(flat_lexical, segments)
-    exemplar_votes, exemplar_status = _exemplar_votes(
+    exemplar_votes, exemplar_status, exemplar_stats = _exemplar_votes(
         observations,
         store,
         kb,
@@ -552,6 +679,9 @@ def retrieve_techniques(
         k=exemplar_k,
         tau=exemplar_tau,
         duplicate_similarity=exemplar_duplicate_similarity,
+        vote_norm=exemplar_vote_norm,
+        segment_votes=exemplar_segment_votes,
+        segments=segments,
     )
     acceptance_disabled: str | None = None
     if acceptance_model is not None and getattr(acceptance_model, "requires_exemplars", False):
@@ -563,6 +693,48 @@ def retrieve_techniques(
                 "acceptance model needs exemplar index "
                 f"{getattr(acceptance_model, 'exemplar_fingerprint', None)}, runtime has "
                 f"{runtime or exemplar_status}"
+            )
+            acceptance_model = None
+    contract = getattr(acceptance_model, "contract", None) if acceptance_model is not None else None
+    if isinstance(contract, Mapping):
+        # the knobs the model's features were fitted under (fail closed on any difference)
+        runtime_contract = retrieval_contract(
+            {
+                "threshold": threshold,
+                "top_k": top_k,
+                "candidate_pool": candidate_pool,
+                "retrieval_mode": retrieval_mode,
+                "parent_policy": parent_policy,
+                "include_detection": include_detection,
+                "include_synthetic": include_synthetic,
+                "platform_from_text": platform_from_text,
+                "segment_acceptance": segment_acceptance,
+                "hierarchy_parent_mode": hierarchy_parent_mode,
+                "rrf_k": rrf_k,
+                "dense_relative_margin": dense_relative_margin,
+                "dense_overfetch": dense_overfetch,
+                "exemplar_k": exemplar_k,
+                "exemplar_tau": exemplar_tau,
+                "exemplar_duplicate_similarity": exemplar_duplicate_similarity,
+                "exemplar_new_candidates": exemplar_new_candidates,
+                "exemplar_vote_norm": exemplar_vote_norm,
+                "exemplar_segment_votes": exemplar_segment_votes,
+            },
+            exemplar_index if exemplar_status == "active" else None,
+            lexical_fields=getattr(lexical_index, "fields", None)
+            or default_lexical_fields(
+                include_synthetic=include_synthetic, include_detection=include_detection
+            ),
+            dense_collection=_dense_collection(store),
+        )
+        problems = contract_mismatches(
+            contract,
+            runtime_contract,
+            exemplars=bool(getattr(acceptance_model, "requires_exemplars", False)),
+        )
+        if problems:
+            acceptance_disabled = "acceptance model retrieval contract not met: " + "; ".join(
+                problems
             )
             acceptance_model = None
     exemplar_added = 0
@@ -588,7 +760,11 @@ def retrieve_techniques(
                 _merge_best(
                     selected_dense,
                     _best_technique_hits(
-                        raw_dense, threshold, platform_scope, max_candidates=max(top_k, 1)
+                        raw_dense,
+                        threshold,
+                        platform_scope,
+                        relative_margin=dense_relative_margin,
+                        max_candidates=max(top_k, 1),
                     ),
                 )
             selected_lexical: dict[str, VectorHit] = {}
@@ -628,6 +804,7 @@ def retrieve_techniques(
                 candidate_pool=candidate_pool,
                 cues_enabled=cues_enabled,
                 rrf_k=rrf_k,
+                dense_relative_margin=dense_relative_margin,
             )
         if cues_enabled:
             observation_candidates = _merge_explicit_candidates(
@@ -717,6 +894,33 @@ def retrieve_techniques(
             "reranker_load_error": getattr(reranker, "load_error", None),
             "exemplars": exemplar_status,
             "exemplar_candidates_added": exemplar_added,
+            # where the library came from and how its Chroma candidate search did (counters
+            # stay 0 for the npz backend and for exact search)
+            "exemplar_backend": getattr(exemplar_index, "backend", None)
+            if exemplar_index is not None
+            else None,
+            "exemplar_search": getattr(exemplar_index, "search", None)
+            if exemplar_index is not None
+            else None,
+            "exemplar_recall_misses": int(exemplar_stats.get("recall_misses", 0)),
+            "exemplar_search_fallbacks": int(exemplar_stats.get("search_fallbacks", 0)),
+            # non-default tuning knobs only, so default diagnostics stay as they were
+            **(
+                {"exemplar_segment_votes": exemplar_segment_votes}
+                if exemplar_segment_votes != EXEMPLAR_SEGMENT_VOTES
+                else {}
+            ),
+            **(
+                {"exemplar_vote_norm": exemplar_vote_norm}
+                if exemplar_vote_norm != EXEMPLAR_VOTE_NORM
+                else {}
+            ),
+            **(
+                {"dense_relative_margin": dense_relative_margin}
+                if dense_relative_margin != DENSE_RELATIVE_MARGIN
+                else {}
+            ),
+            **({"dense_overfetch": dense_depth} if int(dense_overfetch) > 0 else {}),
             "target_platforms": case_platforms,
             "platform_from_text": platform_from_text,
             "platform_scopes": platform_scopes,
@@ -759,27 +963,62 @@ def _exemplar_votes(
     k: int,
     tau: float,
     duplicate_similarity: float,
-) -> tuple[list[ExemplarVotes | None], str]:
-    """Exemplar votes per observation (``None`` entries when the index is unavailable)."""
+    vote_norm: str = EXEMPLAR_VOTE_NORM,
+    segment_votes: str = EXEMPLAR_SEGMENT_VOTES,
+    segments: list[list[str]] | None = None,
+) -> tuple[list[ExemplarVotes | None], str, dict[str, int]]:
+    """Exemplar votes per observation (``None`` entries when the index is unavailable), the
+    status, and the library's query counters (a Chroma store's recall misses and fallbacks).
+
+    The whole-text query is the shipped one (one embedding call, one ``query_vectors`` call;
+    ``vote_norm`` is passed only when it is not the default). With ``segment_votes`` the
+    sentences of segmented observations are queried in a second pair of calls and pooled with
+    the whole-text votes, so the whole-text votes themselves are unchanged."""
     empty: list[ExemplarVotes | None] = [None] * len(observations)
     if exemplar_index is None:
-        return empty, "off"
+        return empty, "off", {}
     if not observations:
-        return empty, "active"
+        return empty, "active", {}
     embedder = getattr(store, "embedder", None)
     if embedder is None or not callable(getattr(embedder, "embed", None)):
-        return empty, "no embedder on the store"
+        return empty, "no embedder on the store", {}
     vectors = embedder.embed(
         [exemplar_query_text(str(observation.text)) for observation in observations]
     )
-    votes = exemplar_index.query_vectors(
-        vectors,
-        parent_of=exemplar_parent_map(kb),
-        k=k,
-        tau=tau,
-        duplicate_similarity=duplicate_similarity,
-    )
-    return list(votes), "active"
+    query: dict[str, Any] = {
+        "parent_of": exemplar_parent_map(kb),
+        "k": k,
+        "tau": tau,
+        "duplicate_similarity": duplicate_similarity,
+    }
+    if vote_norm != EXEMPLAR_VOTE_NORM:
+        query["vote_norm"] = vote_norm
+    votes: list[ExemplarVotes | None] = list(exemplar_index.query_vectors(vectors, **query))
+    stats = _query_stats(exemplar_index)
+    pending = [
+        (position, text)
+        for position, group in enumerate(segments or [])
+        if segment_votes != EXEMPLAR_SEGMENT_VOTES and len(group) > 1
+        for text in group
+    ]
+    if pending:
+        segment_vectors = embedder.embed([exemplar_query_text(str(text)) for _, text in pending])
+        per_segment = list(exemplar_index.query_vectors(segment_vectors, **query))
+        for key, value in _query_stats(exemplar_index).items():
+            stats[key] = int(stats.get(key, 0)) + int(value)
+        pooled: dict[int, list[ExemplarVotes]] = {}
+        for (position, _), segment_vote in zip(pending, per_segment, strict=True):
+            pooled.setdefault(position, []).append(segment_vote)
+        for position, extra in pooled.items():
+            whole = votes[position]
+            if whole is not None:
+                votes[position] = pool_votes([whole, *extra], segment_votes)
+    return votes, "active", stats
+
+
+def _query_stats(exemplar_index: Any) -> dict[str, int]:
+    stats = getattr(exemplar_index, "last_query_stats", None)
+    return dict(stats) if isinstance(stats, dict) else {}
 
 
 def _exemplar_evidence(
@@ -944,6 +1183,7 @@ def _build_segmented_candidates(
     candidate_pool: int,
     cues_enabled: bool,
     rrf_k: int,
+    dense_relative_margin: float = DENSE_RELATIVE_MARGIN,
 ) -> list[TechniqueCandidate]:
     merged: dict[str, TechniqueCandidate] = {}
     support: dict[str, int] = {}
@@ -952,7 +1192,11 @@ def _build_segmented_candidates(
     ):
         view = _segment_view(observation, text)
         dense = _best_technique_hits(
-            raw_dense, threshold, platform_scope, max_candidates=max(top_k, 1)
+            raw_dense,
+            threshold,
+            platform_scope,
+            relative_margin=dense_relative_margin,
+            max_candidates=max(top_k, 1),
         )
         lexical = _best_lexical_hits(
             raw_lexical, kb, platform_scope=platform_scope, max_candidates=max(top_k, 1)
@@ -1399,6 +1643,64 @@ def _distinct_word_count(text: str) -> int:
     return len({match.group(0).casefold() for match in _WORD_RE.finditer(text)})
 
 
+def context_gate_flags(view_text: str) -> dict[str, bool]:
+    """The guards of the text a group of candidates is judged on (the observation, or its
+    sentence with segment acceptance): ``benign`` context and ``sparse`` text (fewer than
+    ``MIN_SIMILARITY_ONLY_WORDS`` distinct words) forbid similarity-only acceptance."""
+    return {
+        "benign": _BENIGN_INDICATORS.search(view_text) is not None,
+        "sparse": _distinct_word_count(view_text) < MIN_SIMILARITY_ONLY_WORDS,
+    }
+
+
+def candidate_gate_flags(
+    candidate: TechniqueCandidate,
+    view_text: str,
+    *,
+    threshold: float,
+    context: Mapping[str, bool] | None = None,
+) -> dict[str, bool]:
+    """The runtime guards ``_assign_states_for_group`` applies to one candidate.
+
+    ``benign`` / ``sparse`` (:func:`context_gate_flags` of ``view_text``, or ``context`` when
+    the caller computed it once for the group), ``hierarchy_parent`` (a derived parent, never
+    accepted) and ``cue_supported`` (a structured signal or explicit cue corroborated by a dense
+    hit at ``threshold`` or a lexical rank of at most 3: accepted whatever the model says).
+    The acceptance fit and the tuning harness score thresholds with these, and the benchmarks
+    store them per candidate row, so offline decisions follow the runtime gate."""
+    flags = dict(context) if context is not None else context_gate_flags(view_text)
+    dense = candidate.evidence_for("dense")
+    lexical = candidate.evidence_for("lexical")
+    dense_score = float(dense.score or 0.0) if dense is not None else 0.0
+    lexical_support = lexical is not None and (lexical.rank or 999) <= 3
+    cue = (
+        candidate.evidence_for("structured_signal") is not None
+        or candidate.evidence_for("explicit_cue") is not None
+    )
+    return {
+        "benign": bool(flags["benign"]),
+        "sparse": bool(flags["sparse"]),
+        "hierarchy_parent": candidate.evidence_for("hierarchy_parent") is not None,
+        "cue_supported": cue and (dense_score >= threshold or lexical_support),
+    }
+
+
+def runtime_gate_masks(flags: Sequence[Mapping[str, bool]]) -> tuple[list[bool], list[bool]]:
+    """``(blocked, forced)`` per candidate row for
+    :func:`apt_classifier.acceptance.choose_threshold_runtime`, from
+    :func:`candidate_gate_flags` plus ``parent_suppressed`` (:func:`suppressed_parent_flags`).
+
+    A hierarchy parent and a parent left out of the accepted set are never accepted; a benign or
+    sparse context blocks only the probability path; a cue-supported row is accepted otherwise."""
+    blocked: list[bool] = []
+    forced: list[bool] = []
+    for row in flags:
+        never = bool(row.get("hierarchy_parent")) or bool(row.get("parent_suppressed"))
+        blocked.append(never or bool(row.get("benign")) or bool(row.get("sparse")))
+        forced.append(not never and bool(row.get("cue_supported")))
+    return blocked, forced
+
+
 def _passes_similarity_gate(
     candidate: TechniqueCandidate,
     *,
@@ -1666,12 +1968,16 @@ def _assign_states_for_group(
     )
     reranker_validated = bool(reranker is not None and getattr(reranker, "validated", False))
     observation_text = str(getattr(observation, "text", ""))
-    benign_context = _BENIGN_INDICATORS.search(observation_text) is not None
-    sparse_context = _distinct_word_count(observation_text) < MIN_SIMILARITY_ONLY_WORDS
+    context = context_gate_flags(observation_text)
+    benign_context = context["benign"]
+    sparse_context = context["sparse"]
     output: list[TechniqueCandidate] = []
     for candidate in candidates:
         verification = candidate.verification
-        if candidate.evidence_for("hierarchy_parent") is not None:
+        flags = candidate_gate_flags(
+            candidate, observation_text, threshold=threshold, context=context
+        )
+        if flags["hierarchy_parent"]:
             output.append(
                 candidate.model_copy(
                     update={
@@ -1703,13 +2009,7 @@ def _assign_states_for_group(
             continue
         dense = candidate.evidence_for("dense")
         lexical = candidate.evidence_for("lexical")
-        signal = candidate.evidence_for("structured_signal")
-        explicit = candidate.evidence_for("explicit_cue")
-        dense_score = float(dense.score or 0.0) if dense is not None else 0.0
-        lexical_support = lexical is not None and (lexical.rank or 999) <= 3
-        cue_supported = (signal is not None or explicit is not None) and (
-            dense_score >= threshold or lexical_support
-        )
+        cue_supported = flags["cue_supported"]
         # Signals and explicit cues propose a mapping but can never accept it
         # alone: each needs dense or lexical corroboration.  A benign-context
         # observation never hides candidates, but similarity alone is not
@@ -2033,28 +2333,14 @@ def _materialize_candidates(
     # Include both AUTO_ACCEPTED and NEEDS_REVIEW candidates so that cue-only
     # proposals remain visible to the analyst and to benchmarks. The state is
     # preserved in metadata["mapping_state"] so reviewers can filter on it.
-    visible = [
-        candidate
-        for candidate in candidates
-        if candidate.state
-        in (TechniqueCandidateState.AUTO_ACCEPTED, TechniqueCandidateState.NEEDS_REVIEW)
-    ]
-    child_parents_by_observation: dict[str, set[str]] = {}
-    for candidate in visible:
-        if candidate.parent_technique_id:
-            child_parents_by_observation.setdefault(candidate.observation_id, set()).add(
-                candidate.parent_technique_id
-            )
+    visible = _visible_candidates(candidates)
+    child_parents_by_observation = _child_parents(visible)
     matches: list[TechniqueMatch] = []
     score_evidence: dict[str, list[float]] = {}
     observation_ids: dict[str, set[str]] = {}
     for candidate in visible:
-        if (
-            candidate.technique_id
-            in child_parents_by_observation.get(candidate.observation_id, set())
-            and candidate.evidence_for("hierarchy_parent") is None
-            and candidate.evidence_for("dense") is None
-            and candidate.evidence_for("lexical") is None
+        if _suppressed_parent(
+            candidate, child_parents_by_observation.get(candidate.observation_id, set())
         ):
             continue
         score = _candidate_strength(candidate)
@@ -2125,6 +2411,45 @@ def _materialize_candidates(
         for technique_id, scores in score_evidence.items()
     }
     return matches, observed, observation_ids
+
+
+def _visible_candidates(candidates: Sequence[TechniqueCandidate]) -> list[TechniqueCandidate]:
+    return [
+        candidate
+        for candidate in candidates
+        if candidate.state
+        in (TechniqueCandidateState.AUTO_ACCEPTED, TechniqueCandidateState.NEEDS_REVIEW)
+    ]
+
+
+def _child_parents(visible: Sequence[TechniqueCandidate]) -> dict[str, set[str]]:
+    """Per observation, the parents of its visible sub-technique candidates."""
+    output: dict[str, set[str]] = {}
+    for candidate in visible:
+        if candidate.parent_technique_id:
+            output.setdefault(candidate.observation_id, set()).add(candidate.parent_technique_id)
+    return output
+
+
+def _suppressed_parent(candidate: TechniqueCandidate, child_parents: set[str]) -> bool:
+    """A parent of a visible child of the same observation with no hierarchy, dense or lexical
+    evidence of its own (a cue- or exemplar-only parent): never materialized."""
+    return (
+        candidate.technique_id in child_parents
+        and candidate.evidence_for("hierarchy_parent") is None
+        and candidate.evidence_for("dense") is None
+        and candidate.evidence_for("lexical") is None
+    )
+
+
+def suppressed_parent_flags(candidates: Sequence[TechniqueCandidate]) -> list[bool]:
+    """Per candidate, whether ``_materialize_candidates`` leaves it out of the matches (and so
+    out of the accepted techniques) even when it is accepted; see :func:`runtime_gate_masks`."""
+    child_parents = _child_parents(_visible_candidates(candidates))
+    return [
+        _suppressed_parent(candidate, child_parents.get(candidate.observation_id, set()))
+        for candidate in candidates
+    ]
 
 
 def _candidate_strength(candidate: TechniqueCandidate) -> float:
@@ -2566,7 +2891,7 @@ def _best_technique_hits(
     hits: list[VectorHit],
     threshold: float,
     platform_scope: PlatformScope | None = None,
-    relative_margin: float = 0.12,
+    relative_margin: float = DENSE_RELATIVE_MARGIN,
     max_candidates: int = 6,
 ) -> dict[str, VectorHit]:
     eligible = [

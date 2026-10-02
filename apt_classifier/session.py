@@ -37,7 +37,7 @@ from apt_classifier.evidence.models import (
     TechniqueVerification,
     TechniqueVerificationVerdict,
 )
-from apt_classifier.exemplars import exemplar_kwargs, load_exemplar_index
+from apt_classifier.exemplars import load_exemplar_index
 from apt_classifier.fusion import FusionResult, reciprocal_rank_fusion
 from apt_classifier.group_mlp import (
     GROUP_MLP_NAME,
@@ -61,13 +61,15 @@ from apt_classifier.questions import (
 )
 from apt_classifier.reranker import LocalReranker, RerankerConfig
 from apt_classifier.retrieve import (
-    LEXICAL_DEFAULT_FIELDS,
     LexicalTechniqueIndex,
     RetrievalResult,
     apply_candidate_decisions,
     build_classifier_context,
     finalize_retrieval_candidates,
+    lexical_fields,
     refresh_context_answers,
+    retrieval_contract_for,
+    retrieval_kwargs,
     retrieve_techniques,
 )
 from apt_classifier.review.pipeline import ReviewOutcome, run_review_pipeline
@@ -227,14 +229,8 @@ class AttributionEngine:
         self.kb = knowledge_base
         self.store = vector_store
         self.llm = llm
-        include_synthetic = bool(getattr(self.settings, "technique_include_synthetic", False))
         self.lexical_index = LexicalTechniqueIndex.from_kb(
-            knowledge_base,
-            fields=tuple(
-                field
-                for field in LEXICAL_DEFAULT_FIELDS
-                if include_synthetic or field != "synthetic"
-            ),
+            knowledge_base, fields=lexical_fields(self.settings)
         )
         self.reranker = LocalReranker(
             RerankerConfig(
@@ -268,9 +264,17 @@ class AttributionEngine:
         if self.group_mlp is not None:
             self.classifiers = (*self.classifiers, GroupMLPClassifier(self.group_mlp))
         self.telemetry_profile: Any = None
-        self.exemplar_index, self.exemplar_status = load_exemplar_index(self.settings)
+        # the store's Chroma client serves a Chroma exemplar backend (never a client of its own)
+        self.exemplar_index, self.exemplar_status = load_exemplar_index(
+            self.settings, client=getattr(vector_store, "client", None)
+        )
+        # refused (fallback, else the rule-based gate) unless these settings meet the retrieval
+        # contract the model was fitted under (acceptance.legacy_contract for older artifacts)
         self.acceptance_model, self.acceptance_model_status = load_acceptance_model(
-            self.settings, knowledge_base, self.exemplar_index
+            self.settings,
+            knowledge_base,
+            self.exemplar_index,
+            contract=retrieval_contract_for(self.settings, self.exemplar_index, store=vector_store),
         )
         self.combiner_fingerprint = pipeline_fingerprint(
             rrf_k=int(self.settings.rrf_k),
@@ -332,40 +336,18 @@ class AttributionEngine:
             )
         if mode == "local" and verify:
             raise ValueError("local mapping mode cannot enable OpenRouter verification")
+        # the settings-driven arguments are shared with the benchmarks and the acceptance fit
+        # (retrieval_kwargs), so the model judges the candidates it was fitted on
         retrieval = retrieve_techniques(
             ledger,
             self.store,
             self.kb,
-            threshold=self.settings.similarity_threshold,
-            top_k=self.settings.retrieval_top_k,
-            behavior_threshold=self.settings.behavior_similarity_threshold,
-            behavior_top_k=self.settings.behavior_retrieval_top_k,
-            retrieval_mode=getattr(self.settings, "technique_retrieval_mode", "hybrid"),
-            candidate_pool=getattr(self.settings, "technique_candidate_pool", 12),
-            include_detection=getattr(self.settings, "technique_include_detection", False),
-            parent_policy=getattr(self.settings, "technique_parent_policy", "ancestor_compatible"),
-            lexical_index=self.lexical_index,
-            acceptance_threshold=getattr(self.settings, "technique_acceptance_threshold", 0.75),
-            relative_margin=getattr(self.settings, "technique_relative_margin", 0.08),
+            **retrieval_kwargs(
+                self.settings, exemplar_index=self.exemplar_index, lexical_index=self.lexical_index
+            ),
             reranker=self.reranker if self.reranker.available else None,
             finalize=False,
             acceptance_model=self.acceptance_model,
-            rank_by_acceptance=bool(getattr(self.settings, "technique_rank_by_acceptance", False)),
-            corroboration_accept_observations=int(
-                getattr(self.settings, "technique_corroboration_accept_observations", 0)
-            ),
-            corroboration_accept_min_probability=float(
-                getattr(self.settings, "technique_corroboration_accept_min_probability", 0.2)
-            ),
-            rrf_k=int(getattr(self.settings, "technique_rrf_k", 60)),
-            corroboration_bonus=float(getattr(self.settings, "technique_corroboration_bonus", 0.0)),
-            segment_acceptance=bool(getattr(self.settings, "technique_segment_acceptance", False)),
-            hierarchy_parent_mode=str(
-                getattr(self.settings, "technique_hierarchy_parent_mode", "off")
-            ),
-            include_synthetic=bool(getattr(self.settings, "technique_include_synthetic", False)),
-            platform_from_text=bool(getattr(self.settings, "technique_platform_from_text", False)),
-            **exemplar_kwargs(self.settings, self.exemplar_index),
         )
         verifications: dict[str, TechniqueCandidateVerificationResult] = {}
         # Local gating runs first so that the verifier's ``ambiguous`` scope means what it

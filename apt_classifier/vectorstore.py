@@ -1,7 +1,8 @@
+import hashlib
 import json
 import re
-from collections.abc import Iterable
-from dataclasses import dataclass
+from collections.abc import Iterable, Mapping, Sequence
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -51,6 +52,150 @@ class VectorHit:
 # result rows per ChromaDB query call; the server's limit is about 32k (measured 2026-10-01)
 _MAX_QUERY_RESULT_ROWS = 16_000
 _ARTICLE_BEFORE_ADVERSARY_RE = re.compile(r"\b(?:an?|the)\s+(the adversary)", re.IGNORECASE)
+# a stand-in for an ATT&CK collection (scripts/sync_attack_collection_copy.py); schema 2 also
+# records a hash of a fixed sample of the source's records, re-read at load
+COLLECTION_COPY_SCHEMA_VERSION = 2
+# records of the source hashed at copy time and compared at load (cheap: one get by ids)
+COPY_CONTENT_SAMPLE = 64
+
+
+def batched_query(
+    collection: Any,
+    embeddings: Sequence[Any],
+    *,
+    n_results: int,
+    where: dict[str, Any] | None = None,
+    include: Sequence[str] = ("documents", "metadatas", "distances"),
+) -> list[dict[str, Any]]:
+    """The raw results of ``collection.query`` over ``embeddings``, one call per batch.
+
+    ChromaDB's SQLite backend refuses one query whose result rows (queries x n_results) pass
+    about 32k ("too many SQL variables"): a long pasted report crashed retrieval. Each query is
+    independent, so the batches return exactly the single call's hits, in query order."""
+    batch = max(1, _MAX_QUERY_RESULT_ROWS // max(1, int(n_results)))
+    return [
+        collection.query(
+            query_embeddings=embeddings[start : start + batch],
+            n_results=n_results,
+            where=where,
+            include=list(include),
+        )
+        for start in range(0, len(embeddings), batch)
+    ]
+
+
+def canonical_json(value: Any) -> str:
+    """Key-sorted compact JSON: the form record and metadata hashes are taken over."""
+    return json.dumps(value, sort_keys=True, ensure_ascii=False, separators=(",", ":"))
+
+
+def records_hash(
+    ids: Sequence[str],
+    documents: Sequence[str | None],
+    metadatas: Sequence[Mapping[str, Any] | None],
+) -> str:
+    """SHA-256 over (id, document, canonical metadata) per record, in the given order."""
+    digest = hashlib.sha256()
+    for item_id, document, metadata in zip(ids, documents, metadatas, strict=True):
+        digest.update(canonical_json([str(item_id), document, dict(metadata or {})]).encode())
+        digest.update(b"\n")
+    return digest.hexdigest()
+
+
+def spread_sample_ids(ids: Iterable[str], size: int) -> list[str]:
+    """A fixed sample of ``size`` ids spread evenly over the sorted ids (the same ids for the
+    same id set, so two readings hash the same records)."""
+    ordered = sorted(str(item) for item in ids)
+    if not ordered or size <= 0:
+        return []
+    count = min(int(size), len(ordered))
+    return sorted({ordered[(position * len(ordered)) // count] for position in range(count)})
+
+
+def sample_records_sha256(collection: Any, ids: Sequence[str]) -> str:
+    """SHA-256 over (id, document, canonical metadata, float32 embedding) of ``ids`` as the
+    collection holds them now, in sorted id order (a missing record hashes as missing)."""
+    wanted = sorted(str(item) for item in ids)
+    page = (
+        collection.get(ids=wanted, include=["embeddings", "documents", "metadatas"])
+        if wanted
+        else {}
+    )
+    returned = [str(item) for item in (page.get("ids") or [])]
+    embeddings = page.get("embeddings")
+    documents = page.get("documents") or [None] * len(returned)
+    metadatas = page.get("metadatas") or [None] * len(returned)
+    records = {
+        item_id: (
+            embeddings[position] if embeddings is not None else None,
+            documents[position],
+            metadatas[position],
+        )
+        for position, item_id in enumerate(returned)
+    }
+    digest = hashlib.sha256()
+    for item_id in wanted:
+        record = records.get(item_id)
+        if record is None:
+            digest.update(canonical_json([item_id, "<missing>"]).encode())
+        else:
+            vector, document, metadata = record
+            digest.update(canonical_json([item_id, document, dict(metadata or {})]).encode())
+            if vector is not None:
+                digest.update(np.ascontiguousarray(np.asarray(vector, dtype=np.float32)).tobytes())
+        digest.update(b"\n")
+    return digest.hexdigest()
+
+
+def hnsw_configuration(collection: Any) -> dict[str, Any]:
+    """The HNSW settings a collection reports (``configuration_json["hnsw"]``), ``{}`` if none."""
+    configuration = getattr(collection, "configuration_json", None) or {}
+    hnsw = configuration.get("hnsw") if isinstance(configuration, Mapping) else None
+    return dict(hnsw) if isinstance(hnsw, Mapping) else {}
+
+
+def collection_copy_status(copy: Any, source: Any) -> tuple[bool, str]:
+    """Whether ``copy`` still mirrors ``source``: same source name, id, metadata, count and
+    sampled content.
+
+    The copy records its source when it is made; a re-ingest (new id or count), a metadata
+    change, or a compatible in-place re-ingest that rewrote the sampled records (new text, or
+    the same text re-embedded) makes it stale. A rewrite that spares every sampled record is
+    not seen (the full hashes, ``copy_records_hash`` and ``copy_embeddings_sha256``, need the
+    whole source; ``scripts/sync_attack_collection_copy.py --verify-only`` compares them)."""
+    metadata = dict(copy.metadata or {})
+    if "copy_of" not in metadata:
+        return False, "not a collection copy (no copy_of metadata)"
+    if int(metadata.get("copy_schema_version", 0) or 0) != COLLECTION_COPY_SCHEMA_VERSION:
+        return False, f"copy schema {metadata.get('copy_schema_version')!r} is not supported"
+    if metadata.get("copy_of") != str(source.name):
+        return False, f"copied from {metadata.get('copy_of')!r}, not {source.name!r}"
+    if metadata.get("copy_of_id") != str(source.id):
+        return False, f"source {source.name} was recreated since the copy was made"
+    if metadata.get("copy_source_metadata_json") != canonical_json(dict(source.metadata or {})):
+        return False, f"source {source.name} metadata changed since the copy was made"
+    source_count = int(source.count())
+    if int(metadata.get("copy_source_count", -1)) != source_count:
+        return False, (
+            f"source {source.name} has {source_count} records, the copy was made from "
+            f"{metadata.get('copy_source_count')}"
+        )
+    if int(copy.count()) != source_count:
+        return False, f"copy has {copy.count()} records, its source {source_count}"
+    try:
+        sample = json.loads(str(metadata.get("copy_sample_ids_json") or ""))
+    except json.JSONDecodeError:
+        sample = None
+    if not isinstance(sample, list) or not metadata.get("copy_sample_sha256"):
+        return False, "copy records no content sample of its source"
+    if sample_records_sha256(source, [str(item) for item in sample]) != metadata.get(
+        "copy_sample_sha256"
+    ):
+        return False, (
+            f"source {source.name} content changed since the copy was made (records rewritten "
+            "or re-embedded in place)"
+        )
+    return True, "ok"
 
 
 def _actor_name_pattern(actor_names: tuple[str, ...]) -> re.Pattern[str] | None:
@@ -294,6 +439,8 @@ class ChromaVectorStore:
     embedder: Embedder
     client: Any = None
     batch_size: int = 128
+    # verified read-only copies (TECHNIQUE_COLLECTION_NAME / GROUP_COLLECTION_NAME), by name
+    _copies: dict[str, Any] = field(default_factory=dict, init=False, repr=False)
 
     def __post_init__(self) -> None:
         if self.batch_size < 1:
@@ -355,7 +502,45 @@ class ChromaVectorStore:
         return all(metadata.get(key) == value for key, value in expected.items())
 
     @property
+    def technique_collection_name(self) -> str:
+        return str(
+            getattr(self.settings, "technique_collection_name", TECHNIQUE_COLLECTION)
+            or TECHNIQUE_COLLECTION
+        )
+
+    @property
+    def group_collection_name(self) -> str:
+        return str(
+            getattr(self.settings, "group_collection_name", GROUP_COLLECTION) or GROUP_COLLECTION
+        )
+
+    def _collection_copy(self, name: str, source_name: str) -> Any:
+        """A configured copy, opened with ``get_collection`` only (never created or changed)
+        and refused unless it still mirrors its source; verified once per store."""
+        cached = self._copies.get(name)
+        if cached is not None:
+            return cached
+        try:
+            collection = self.client.get_collection(name=name, embedding_function=None)
+            source = self.client.get_collection(name=source_name, embedding_function=None)
+        except Exception as error:
+            raise RuntimeError(
+                f"collection copy {name} or its source is unavailable: {error}"
+            ) from error
+        ok, reason = collection_copy_status(collection, source)
+        if not ok:
+            raise RuntimeError(
+                f"collection {name} cannot stand in for {source_name}: {reason}; rebuild it with "
+                "scripts/sync_attack_collection_copy.py or unset the collection name setting"
+            )
+        self._copies[name] = collection
+        return collection
+
+    @property
     def technique_collection(self) -> Any:
+        name = self.technique_collection_name
+        if name != TECHNIQUE_COLLECTION:
+            return self._collection_copy(name, TECHNIQUE_COLLECTION)
         return self._collection(
             TECHNIQUE_COLLECTION,
             "technique_sentences",
@@ -364,6 +549,9 @@ class ChromaVectorStore:
 
     @property
     def group_collection(self) -> Any:
+        name = self.group_collection_name
+        if name != GROUP_COLLECTION:
+            return self._collection_copy(name, GROUP_COLLECTION)
         return self._collection(GROUP_COLLECTION, "group_profiles")
 
     def reset(self) -> None:
@@ -436,6 +624,15 @@ class ChromaVectorStore:
     def upsert(
         self, knowledge_base: AttackKnowledgeBase, *, reset: bool = False
     ) -> VectorStoreCounts:
+        if (self.technique_collection_name, self.group_collection_name) != (
+            TECHNIQUE_COLLECTION,
+            GROUP_COLLECTION,
+        ):
+            # a configured copy is read-only; ingestion writes only the default collections
+            raise RuntimeError(
+                "ingestion writes only attack_techniques and attack_groups; unset "
+                "TECHNIQUE_COLLECTION_NAME / GROUP_COLLECTION_NAME (copies are read-only)"
+            )
         # Procedure documents alter the technique corpus.  Never leave a
         # mixture of old and new schema documents in place: an incompatible
         # collection is rebuilt as a unit during ingestion.
@@ -553,18 +750,8 @@ class ChromaVectorStore:
         if count == 0:
             return [[] for _ in embeddings]
         limit = min(max(n_results, 1), count)
-        # ChromaDB's SQLite backend refuses one query whose result rows (queries x n_results)
-        # pass about 32k ("too many SQL variables"): a long pasted report crashed retrieval.
-        # Each query is independent, so batches return exactly the single call's hits.
-        batch = max(1, _MAX_QUERY_RESULT_ROWS // limit)
         output: list[list[VectorHit]] = []
-        for start in range(0, len(embeddings), batch):
-            result = collection.query(
-                query_embeddings=embeddings[start : start + batch],
-                n_results=limit,
-                where=where,
-                include=["documents", "metadatas", "distances"],
-            )
+        for result in batched_query(collection, embeddings, n_results=limit, where=where):
             for query_index, ids in enumerate(result.get("ids") or []):
                 documents = (result.get("documents") or [[]])[query_index] or []
                 metadatas = (result.get("metadatas") or [[]])[query_index] or []

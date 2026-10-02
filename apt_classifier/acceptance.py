@@ -16,6 +16,15 @@ This module is deliberately small and dependency-free:
   at a precision-constrained operating point. It is persisted as JSON with the ATT&CK
   version, a feature-schema version and dev metrics, and loads fail-closed: a mismatch
   disables the model and the rule-based gate stays in force.
+- :func:`retrieval_contract` records every retrieval setting the features depend on (pool,
+  margins, depth, fields, platform scoping, the exemplar library and its vote settings). The
+  fit stores it in the artifact; the loader and ``retrieve_techniques`` refuse a model whose
+  contract the runtime does not meet (:func:`contract_mismatches`), so a changed knob can never
+  silently feed a model features it was not fitted on. Artifacts from before the contract are
+  held only to the knobs that are new with it (:data:`CONTRACT_1_KEYS`, :func:`legacy_contract`),
+  so every configuration that ran them before still does.
+- :func:`choose_threshold_runtime` picks the threshold on the accepted sets the runtime gate
+  would produce (guards, cue-supported candidates, hierarchy parents), not on ``p`` alone.
 """
 
 from __future__ import annotations
@@ -30,6 +39,7 @@ from typing import Any
 
 import numpy as np
 
+from apt_classifier.exemplars import DEFAULT_SEGMENT_VOTES, DEFAULT_VOTE_NORM
 from apt_classifier.exemplars import EVIDENCE_SOURCE as EXEMPLAR_EVIDENCE_SOURCE
 from apt_classifier.exemplars import FEATURE_NAMES as EXEMPLAR_FEATURE_NAMES
 from apt_classifier.exemplars import features_from_evidence as exemplar_features_from_evidence
@@ -76,6 +86,228 @@ FEATURE_NAMES: tuple[str, ...] = (
     *PRIOR_FEATURE_NAMES,
     *EXEMPLAR_FEATURE_NAMES,
 )
+
+
+# ----- retrieval contract -----
+# Contract 1 (2026-10-02). Keys are compared exactly; the exemplar keys only for a model fitted
+# with exemplars (a no-exemplar model is compared on the others, so it can stand in whenever the
+# exemplar side differs). A key a stored contract lacks is compared against its legacy value,
+# i.e. the behaviour before the key existed. Version 0 is an artifact from before contracts
+# (:func:`legacy_contract`): only :data:`CONTRACT_1_KEYS` are compared.
+RETRIEVAL_CONTRACT_VERSION = 1
+LEGACY_CONTRACT_VERSION = 0
+DEFAULT_DENSE_COLLECTION = "attack_techniques"
+EXEMPLAR_CONTRACT_KEYS: tuple[str, ...] = (
+    "exemplar_fingerprint",
+    "exemplar_k",
+    "exemplar_tau",
+    "exemplar_duplicate_similarity",
+    "exemplar_new_candidates",
+    "exemplar_vote_norm",
+    "exemplar_segment_votes",
+    "exemplar_search_class",
+)
+RETRIEVAL_CONTRACT_KEYS: tuple[str, ...] = (
+    "similarity_threshold",
+    "top_k",
+    "candidate_pool",
+    "retrieval_mode",
+    "parent_policy",
+    "include_detection",
+    "include_synthetic",
+    "lexical_fields",
+    "platform_from_text",
+    "segment_acceptance",
+    "hierarchy_parent_mode",
+    "rrf_k",
+    "dense_relative_margin",
+    "dense_overfetch",
+    "dense_collection",
+    *EXEMPLAR_CONTRACT_KEYS,
+)
+_FLOAT_KEYS = frozenset(
+    {
+        "similarity_threshold",
+        "dense_relative_margin",
+        "exemplar_tau",
+        "exemplar_duplicate_similarity",
+    }
+)
+_INT_KEYS = frozenset(
+    {"top_k", "candidate_pool", "rrf_k", "dense_overfetch", "exemplar_k", "exemplar_new_candidates"}
+)
+_BOOL_KEYS = frozenset(
+    {
+        "include_detection",
+        "include_synthetic",
+        "platform_from_text",
+        "segment_acceptance",
+    }
+)
+# The knobs that did not exist before contract 1. A model artifact without a stored contract
+# can only have been fitted with their one legacy value, so it is held to that value; every knob
+# that existed before (the presets, the Streamlit retrieval sliders, ``--modes``, the documented
+# ablations such as TECHNIQUE_PLATFORM_FROM_TEXT and TECHNIQUE_INCLUDE_SYNTHETIC, the exemplar
+# k/tau settings) ran such a model before contracts and keeps doing so unchanged.
+CONTRACT_1_KEYS: tuple[str, ...] = (
+    "dense_relative_margin",
+    "dense_overfetch",
+    "dense_collection",
+    "exemplar_vote_norm",
+    "exemplar_segment_votes",
+    "exemplar_search_class",
+)
+
+# The serving values from before contracts: the value of a key that a stored contract lacks
+# (contract_mismatches), and for CONTRACT_1_KEYS the one value a model artifact without a stored
+# contract (fitted before 2026-10-02) can have been fitted with. For the older knobs these are the
+# serving defaults only, not what such a model was fitted with: ``scripts/fit_acceptance_model.py``
+# then ran retrieval with the ATT&CK synthetic sentences included (dense and lexical,
+# ``include_synthetic`` defaulted to on there while serving has it off) and without
+# platform-from-text scoping (the shipped model was created 2026-09-30, the scoping landed
+# 2026-10-01). Such a model is not held to those knobs (:func:`legacy_contract`); a refit aligns
+# fit and serving and stores its own contract.
+LEGACY_CONTRACT: dict[str, Any] = {
+    "contract_version": RETRIEVAL_CONTRACT_VERSION,
+    "similarity_threshold": 0.45,
+    "top_k": 30,
+    "candidate_pool": 12,
+    "retrieval_mode": "hybrid",
+    "parent_policy": "ancestor_compatible",
+    "include_detection": False,
+    "include_synthetic": False,
+    "lexical_fields": ["description", "name", "procedure"],
+    "platform_from_text": True,
+    "segment_acceptance": False,
+    "hierarchy_parent_mode": "off",
+    "rrf_k": 60,
+    "dense_relative_margin": 0.12,
+    "dense_overfetch": 0,
+    "dense_collection": DEFAULT_DENSE_COLLECTION,
+    "exemplar_fingerprint": None,
+    "exemplar_k": 64,
+    "exemplar_tau": 0.05,
+    "exemplar_duplicate_similarity": 0.95,
+    "exemplar_new_candidates": 3,
+    "exemplar_vote_norm": DEFAULT_VOTE_NORM,
+    "exemplar_segment_votes": DEFAULT_SEGMENT_VOTES,
+    "exemplar_search_class": "exact",
+}
+
+
+def _contract_value(key: str, value: Any) -> Any:
+    """One contract value in its canonical type (JSON round trips turn tuples into lists)."""
+    if value is None:
+        return None
+    if key in _FLOAT_KEYS:
+        return float(value)
+    if key in _INT_KEYS:
+        return int(value)
+    if key in _BOOL_KEYS:
+        return bool(value)
+    if key == "lexical_fields":
+        return sorted(str(item) for item in value)
+    return str(value)
+
+
+def retrieval_contract(
+    kwargs: Mapping[str, Any],
+    source: Any = None,
+    *,
+    lexical_fields: Sequence[str] | None = None,
+    dense_collection: str | None = None,
+) -> dict[str, Any]:
+    """The retrieval settings the acceptance features depend on.
+
+    ``kwargs`` are the keyword arguments ``retrieve_techniques`` runs with
+    (:func:`apt_classifier.retrieve.retrieval_kwargs`), ``source`` the exemplar library whose
+    votes the candidates carry (``None`` when exemplars are off or unavailable). The lexical
+    fields are those of ``lexical_fields``, else of ``kwargs["lexical_index"]``, else the
+    fields ``retrieve_techniques`` builds its own index with."""
+    if lexical_fields is None:
+        lexical_fields = getattr(kwargs.get("lexical_index"), "fields", None) or None
+    if lexical_fields is None:
+        from apt_classifier.retrieve import default_lexical_fields
+
+        lexical_fields = default_lexical_fields(
+            include_synthetic=bool(kwargs["include_synthetic"]),
+            include_detection=bool(kwargs["include_detection"]),
+        )
+    fingerprint = getattr(source, "fingerprint", None) if source is not None else None
+    search_class = getattr(source, "search_class", "exact") if source is not None else None
+    values = {
+        "similarity_threshold": kwargs["threshold"],
+        "top_k": kwargs["top_k"],
+        "candidate_pool": kwargs["candidate_pool"],
+        "retrieval_mode": kwargs["retrieval_mode"],
+        "parent_policy": kwargs["parent_policy"],
+        "include_detection": kwargs["include_detection"],
+        "include_synthetic": kwargs["include_synthetic"],
+        "lexical_fields": lexical_fields,
+        "platform_from_text": kwargs["platform_from_text"],
+        "segment_acceptance": kwargs["segment_acceptance"],
+        "hierarchy_parent_mode": kwargs["hierarchy_parent_mode"],
+        "rrf_k": kwargs["rrf_k"],
+        "dense_relative_margin": kwargs["dense_relative_margin"],
+        "dense_overfetch": kwargs["dense_overfetch"],
+        "dense_collection": dense_collection or DEFAULT_DENSE_COLLECTION,
+        "exemplar_fingerprint": str(fingerprint) if fingerprint else None,
+        "exemplar_k": kwargs["exemplar_k"],
+        "exemplar_tau": kwargs["exemplar_tau"],
+        "exemplar_duplicate_similarity": kwargs["exemplar_duplicate_similarity"],
+        "exemplar_new_candidates": kwargs["exemplar_new_candidates"],
+        "exemplar_vote_norm": kwargs.get("exemplar_vote_norm", DEFAULT_VOTE_NORM),
+        "exemplar_segment_votes": kwargs.get("exemplar_segment_votes", DEFAULT_SEGMENT_VOTES),
+        "exemplar_search_class": search_class,
+    }
+    return {
+        "contract_version": RETRIEVAL_CONTRACT_VERSION,
+        **{key: _contract_value(key, values[key]) for key in RETRIEVAL_CONTRACT_KEYS},
+    }
+
+
+def legacy_contract(metadata: Mapping[str, Any] | None) -> dict[str, Any]:
+    """What a model artifact without a stored contract is held to (contract version 0): the
+    knobs new with contract 1 at their one legacy value, and its own exemplar fingerprint (which
+    ``compatible_with`` and ``retrieve_techniques`` check as they did before contracts). The
+    older knobs are left out on purpose: such a model ran under any of their values before."""
+    contract: dict[str, Any] = {"contract_version": LEGACY_CONTRACT_VERSION}
+    contract.update({key: LEGACY_CONTRACT[key] for key in CONTRACT_1_KEYS})
+    fingerprint = dict(metadata or {}).get("exemplar_fingerprint")
+    contract["exemplar_fingerprint"] = str(fingerprint) if fingerprint else None
+    return contract
+
+
+def contract_mismatches(
+    fitted: Mapping[str, Any], runtime: Mapping[str, Any], *, exemplars: bool
+) -> list[str]:
+    """How ``runtime`` departs from the contract a model was fitted under (empty when it meets
+    it). ``exemplars=False`` (a model fitted without exemplars) skips the exemplar keys; a
+    version-0 contract (:func:`legacy_contract`) is compared on :data:`CONTRACT_1_KEYS` only."""
+    try:
+        # strict: a missing or malformed version must never read as the looser version 0
+        version = int(fitted.get("contract_version", RETRIEVAL_CONTRACT_VERSION))
+    except (TypeError, ValueError):
+        return ["contract version is unreadable"]
+    if version > RETRIEVAL_CONTRACT_VERSION:
+        return [
+            f"contract version {version} is newer than this code ({RETRIEVAL_CONTRACT_VERSION})"
+        ]
+    keys = CONTRACT_1_KEYS if version == LEGACY_CONTRACT_VERSION else RETRIEVAL_CONTRACT_KEYS
+    problems: list[str] = []
+    for key in keys:
+        if not exemplars and key in EXEMPLAR_CONTRACT_KEYS:
+            continue
+        try:
+            expected = _contract_value(key, fitted.get(key, LEGACY_CONTRACT.get(key)))
+            actual = _contract_value(key, runtime.get(key, LEGACY_CONTRACT.get(key)))
+        except (TypeError, ValueError):
+            # a malformed value never matches (fail closed instead of raising at load)
+            problems.append(f"{key} has an unreadable value")
+            continue
+        if expected != actual:
+            problems.append(f"{key} {actual!r} (fitted with {expected!r})")
+    return problems
 
 
 def compute_technique_priors(kb: Any, label_counts: Mapping[str, int]) -> dict[str, list[float]]:
@@ -211,6 +443,11 @@ class AcceptanceModel:
     feature_schema_version: int = FEATURE_SCHEMA_VERSION
     metadata: dict[str, Any] = field(default_factory=dict)
     technique_priors: dict[str, list[float]] = field(default_factory=dict)
+    # the retrieval contract the model is held to (retrieval_contract); None for a model fitted
+    # in memory without one (unconstrained). contract_origin is "artifact" when the file stored
+    # it and "legacy" when it predates contracts (legacy_contract, not written back on save).
+    contract: dict[str, Any] | None = None
+    contract_origin: str | None = None
 
     def prior_features(self, technique_id: str) -> dict[str, float]:
         return prior_features(self.technique_priors, technique_id)
@@ -233,8 +470,14 @@ class AcceptanceModel:
         return self.exemplar_fingerprint is not None
 
     def compatible_with(
-        self, attack_version: str | None, exemplar_fingerprint: str | None = None
+        self,
+        attack_version: str | None,
+        exemplar_fingerprint: str | None = None,
+        contract: Mapping[str, Any] | None = None,
     ) -> tuple[bool, str]:
+        """Whether the model may run here. ``contract`` is the runtime's retrieval contract
+        (:func:`retrieval_contract`); without it, or for a model without one, only the schema,
+        the ATT&CK version and the exemplar fingerprint are checked."""
         if self.feature_schema_version != FEATURE_SCHEMA_VERSION:
             return False, (
                 f"feature schema {self.feature_schema_version} != {FEATURE_SCHEMA_VERSION}"
@@ -247,10 +490,16 @@ class AcceptanceModel:
                 f"{self.exemplar_fingerprint}, runtime has "
                 f"{exemplar_fingerprint or 'none'} (run make exemplars, or refit)"
             )
+        if contract is not None and self.contract is not None:
+            problems = contract_mismatches(
+                self.contract, contract, exemplars=self.requires_exemplars
+            )
+            if problems:
+                return False, "retrieval contract not met: " + "; ".join(problems)
         return True, "ok"
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        payload: dict[str, Any] = {
             "kind": "technique_acceptance_logistic",
             "created_at": datetime.now(UTC).isoformat(),
             "feature_schema_version": self.feature_schema_version,
@@ -267,6 +516,9 @@ class AcceptanceModel:
                 for key, values in sorted(self.technique_priors.items())
             },
         }
+        if self.contract is not None and self.contract_origin != "legacy":
+            payload["retrieval_contract"] = dict(self.contract)
+        return payload
 
     def save(self, path: str | Path) -> Path:
         destination = Path(path)
@@ -281,6 +533,18 @@ class AcceptanceModel:
         names = tuple(payload.get("feature_names", ()))
         if names != FEATURE_NAMES:
             raise ValueError("feature names do not match the current schema")
+        metadata = dict(payload.get("metadata") or {})
+        stored = payload.get("retrieval_contract")
+        if stored is not None and not isinstance(stored, Mapping):
+            raise ValueError("retrieval_contract is not an object")
+        if stored is not None:
+            try:
+                stored_version = int(stored.get("contract_version", RETRIEVAL_CONTRACT_VERSION))
+            except (TypeError, ValueError):
+                stored_version = None  # refused as unreadable by contract_mismatches
+            if stored_version == LEGACY_CONTRACT_VERSION:
+                # version 0 means "no stored contract" and is compared loosely; never from a file
+                raise ValueError("a stored retrieval_contract cannot have version 0")
         return cls(
             weights=np.asarray(payload["weights"], dtype=float),
             intercept=float(payload["intercept"]),
@@ -289,11 +553,13 @@ class AcceptanceModel:
             threshold=float(payload["threshold"]),
             attack_version=str(payload.get("attack_version", "")),
             feature_schema_version=int(payload.get("feature_schema_version", 0)),
-            metadata=dict(payload.get("metadata") or {}),
+            metadata=metadata,
             technique_priors={
                 str(key): [float(v) for v in values]
                 for key, values in (payload.get("technique_priors") or {}).items()
             },
+            contract=dict(stored) if stored is not None else legacy_contract(metadata),
+            contract_origin="artifact" if stored is not None else "legacy",
         )
 
     @classmethod
@@ -314,6 +580,7 @@ class AcceptanceModel:
         threshold: float = 0.5,
         metadata: dict[str, Any] | None = None,
         technique_priors: Mapping[str, Sequence[float]] | None = None,
+        contract: Mapping[str, Any] | None = None,
     ) -> AcceptanceModel:
         X = np.vstack([feature_vector(row) for row in rows])
         y = np.asarray(labels, dtype=float)
@@ -332,6 +599,8 @@ class AcceptanceModel:
             technique_priors={
                 k: [float(v) for v in vals] for k, vals in (technique_priors or {}).items()
             },
+            contract=dict(contract) if contract is not None else None,
+            contract_origin="artifact" if contract is not None else None,
         )
 
 
@@ -380,37 +649,155 @@ def choose_threshold(
     return chosen
 
 
+def choose_threshold_runtime(
+    probabilities: Sequence[float],
+    labels: Sequence[int],
+    case_ids: Sequence[str],
+    expected_counts: Mapping[str, int],
+    *,
+    blocked: Sequence[bool],
+    forced: Sequence[bool],
+    technique_ids: Sequence[str],
+    min_precision: float = 0.5,
+    grid: Iterable[float] | None = None,
+) -> dict[str, Any]:
+    """:func:`choose_threshold` scored on the accepted sets the runtime gate produces.
+
+    Per candidate row, ``forced`` rows are accepted at any threshold (cue-supported) and
+    ``blocked`` rows never on probability alone (benign or sparse context, a hierarchy parent,
+    or a parent ``_materialize_candidates`` leaves out); the rest are accepted when
+    ``p >= t``. A forced row must not also be blocked by a hierarchy or materialization rule:
+    the caller folds those into ``forced`` (``apt_classifier.retrieve.runtime_gate_masks``).
+    Accepted techniques are counted once per case (``technique_ids``), as the case's accepted
+    set is; recall counts every expected label, including those never retrieved. This emulates
+    the local gate with ``hierarchy_parent_mode="off"``, no reranker and single-observation
+    cases (the fit data), where corroboration across observations cannot apply."""
+    probs = np.asarray(probabilities, dtype=float)
+    truth = np.asarray(labels, dtype=int)
+    blocked_mask = np.asarray(blocked, dtype=bool)
+    forced_mask = np.asarray(forced, dtype=bool)
+    if not (
+        len(probs)
+        == len(truth)
+        == len(case_ids)
+        == len(blocked_mask)
+        == len(forced_mask)
+        == len(technique_ids)
+    ):
+        raise ValueError("rows, labels, cases, guards and technique ids are misaligned")
+    pair_index: dict[tuple[str, str], int] = {}
+    pairs = np.asarray(
+        [
+            pair_index.setdefault((str(case), str(technique)), len(pair_index))
+            for case, technique in zip(case_ids, technique_ids, strict=True)
+        ],
+        dtype=np.int64,
+    )
+    pair_truth = np.zeros(len(pair_index), dtype=bool)
+    if len(pairs):
+        np.logical_or.at(pair_truth, pairs, truth == 1)
+    total_expected = sum(int(value) for value in expected_counts.values())
+    eligible = ~blocked_mask
+    candidates = sorted(set(grid if grid is not None else np.round(np.arange(0.05, 0.96, 0.01), 2)))
+    best: dict[str, Any] | None = None
+    fallback: dict[str, Any] | None = None
+    for threshold in candidates:
+        accepted_rows = forced_mask | (eligible & (probs >= threshold))
+        accepted = np.zeros(len(pair_index), dtype=bool)
+        accepted[pairs[accepted_rows]] = True
+        tp = int((accepted & pair_truth).sum())
+        fp = int((accepted & ~pair_truth).sum())
+        precision = tp / (tp + fp) if tp + fp else 0.0
+        recall = tp / total_expected if total_expected else 0.0
+        f1 = 2 * precision * recall / (precision + recall) if precision + recall else 0.0
+        entry = {
+            "threshold": float(threshold),
+            "precision": precision,
+            "recall": recall,
+            "micro_f1": f1,
+            "accepted": int(accepted.sum()),
+        }
+        if fallback is None or f1 > fallback["micro_f1"]:
+            fallback = entry
+        if precision >= min_precision and (best is None or f1 > best["micro_f1"]):
+            best = entry
+    chosen = (
+        best or fallback or {"threshold": 0.5, "precision": 0.0, "recall": 0.0, "micro_f1": 0.0}
+    )
+    chosen["precision_floor_met"] = best is not None
+    chosen["rule"] = "runtime"
+    chosen["forced_rows"] = int(forced_mask.sum())
+    chosen["blocked_rows"] = int(blocked_mask.sum())
+    return chosen
+
+
 def load_acceptance_model(
-    settings: Any, kb: Any, exemplar_index: Any = None
+    settings: Any,
+    kb: Any,
+    exemplar_index: Any = None,
+    *,
+    contract: Mapping[str, Any] | None = None,
 ) -> tuple[AcceptanceModel | None, str]:
     """Load the configured acceptance model fail-closed.
 
     Returns ``(model, status)``; ``model`` is ``None`` with a reason whenever the feature
     is disabled, the artifact is missing, malformed, built for another ATT&CK version, or
-    fitted with an exemplar index that the runtime does not have (``exemplar_index``).
+    fitted with an exemplar index that the runtime does not have (``exemplar_index``), or, when
+    ``contract`` (the runtime's :func:`retrieval_contract`, from
+    :func:`apt_classifier.retrieve.retrieval_contract_for`) is given, fitted under another one.
 
     When the primary artifact cannot run, ``acceptance_model_fallback_path`` is tried: a model
     fitted the same way without exemplar features (``make fit-acceptance`` writes both). It is
     used only if it needs no exemplar index, so turning exemplars off, or losing the index,
-    restores the previous calibrated gate instead of the rule-based one.
+    restores the previous calibrated gate instead of the rule-based one. Its contract is
+    compared without the exemplar keys, so it also stands in when only an exemplar setting
+    differs from the primary's contract. A fallback without a stored contract that would stand
+    in for a primary that stores one (a refit) must also meet the serving defaults it ran under
+    (:data:`LEGACY_CONTRACT`, non-exemplar keys): the refit's tuned settings never reach a model
+    fitted before them. Without a stored contract on either side nothing changes.
     """
     if not bool(getattr(settings, "acceptance_model_enabled", False)):
         return None, "disabled"
     path = getattr(settings, "acceptance_model_path", None)
     if not path:
         return None, "no path configured"
-    model, status = _load_compatible(path, kb, exemplar_index)
+    model, status = _load_compatible(path, kb, exemplar_index, contract)
     if model is not None:
         return model, status
     fallback = getattr(settings, "acceptance_model_fallback_path", None)
     if fallback and Path(fallback) != Path(path):
-        alternative, _ = _load_compatible(fallback, kb, None)
+        alternative, _ = _load_compatible(fallback, kb, None, contract)
         if alternative is not None and not alternative.requires_exemplars:
+            problems = _legacy_stand_in_problems(path, alternative, contract)
+            if problems:
+                return None, f"{status}; fallback refused: " + "; ".join(problems)
             return alternative, f"fallback without exemplars ({status})"
     return None, status
 
 
-def _load_compatible(path: Any, kb: Any, exemplar_index: Any) -> tuple[AcceptanceModel | None, str]:
+def _legacy_stand_in_problems(
+    primary_path: Any, alternative: AcceptanceModel, contract: Mapping[str, Any] | None
+) -> list[str]:
+    """Why a contract-less fallback may not stand in for a primary that stores a contract
+    (empty when it may: no runtime contract, a fallback with its own contract, or a primary
+    without one or unreadable, i.e. the behaviour before contracts)."""
+    if contract is None or alternative.contract_origin != "legacy":
+        return []
+    try:
+        primary = AcceptanceModel.load(primary_path)
+    except (ValueError, KeyError, TypeError, json.JSONDecodeError):
+        return []
+    if primary is None or primary.contract_origin != "artifact":
+        return []
+    return [
+        f"{problem} for a fallback without a stored contract"
+        for problem in contract_mismatches(LEGACY_CONTRACT, contract, exemplars=False)
+    ]
+
+
+def _load_compatible(
+    path: Any, kb: Any, exemplar_index: Any, contract: Mapping[str, Any] | None = None
+) -> tuple[AcceptanceModel | None, str]:
     try:
         model = AcceptanceModel.load(path)
     except (ValueError, KeyError, TypeError, json.JSONDecodeError) as error:
@@ -420,6 +807,7 @@ def _load_compatible(path: Any, kb: Any, exemplar_index: Any) -> tuple[Acceptanc
     ok, reason = model.compatible_with(
         str(getattr(kb, "version", "") or ""),
         getattr(exemplar_index, "fingerprint", None) if exemplar_index is not None else None,
+        contract,
     )
     if not ok:
         return None, f"incompatible artifact: {reason}"

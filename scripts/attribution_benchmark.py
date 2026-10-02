@@ -100,6 +100,16 @@ from scripts.report_anonymizer import (  # noqa: E402
 from scripts.report_anonymizer import (  # noqa: E402
     evidence_name_pattern as _evidence_name_pattern,
 )
+from scripts.run_tooling import (  # noqa: E402
+    acceptance_fingerprint_inputs,
+    acceptance_identity,
+    add_exemplar_backend_arguments,
+    exemplar_backend_problem,
+    exemplar_identity,
+    exemplar_setting_overrides,
+    exemplar_signature,
+    technique_micro_metrics,
+)
 
 FINGERPRINTED_SOURCES = (
     REPO_ROOT / "apt_classifier" / "fusion.py",
@@ -118,6 +128,11 @@ FINGERPRINTED_SOURCES = (
     REPO_ROOT / "apt_classifier" / "torch_forest.py",
     REPO_ROOT / "apt_classifier" / "classifiers" / "profile_forest.py",
     REPO_ROOT / "apt_classifier" / "group_mlp.py",
+    # technique mapping inputs: the exemplar votes, the acceptance model and the dense index
+    REPO_ROOT / "apt_classifier" / "exemplars.py",
+    REPO_ROOT / "apt_classifier" / "exemplar_store.py",
+    REPO_ROOT / "apt_classifier" / "acceptance.py",
+    REPO_ROOT / "apt_classifier" / "vectorstore.py",
 )
 
 
@@ -936,6 +951,7 @@ def summarize(
     if len(recalls) != len(known_rows):
         # reports without gold technique labels have no recall (Elastic posts without links)
         metrics["technique_recall_reports"] = len(recalls)
+    metrics.update(technique_micro_metrics(known_rows))
     if ranks:
         hits = sum(1 for rank in ranks if rank == 1)
         metrics["top1_count"] = hits
@@ -1048,6 +1064,24 @@ def _inactive_combiner_rows(rows: list[dict[str, Any]]) -> list[str]:
         for row in rows
         if row.get("combiner_status") not in (None, "active")
     ]
+
+
+def _exemplar_fingerprint_inputs(settings: Any, index: Any) -> dict[str, Any] | None:
+    """The exemplar index and query settings the mapping ran with (as benchmark_mapping)."""
+    if index is None:
+        return None
+    return {
+        "fingerprint": index.fingerprint,
+        "count": len(index),
+        "k": int(getattr(settings, "technique_exemplar_k", 64)),
+        "tau": float(getattr(settings, "technique_exemplar_tau", 0.05)),
+        "duplicate_similarity": float(
+            getattr(settings, "technique_exemplar_duplicate_similarity", 0.95)
+        ),
+        "new_candidates": int(getattr(settings, "technique_exemplar_new_candidates", 0)),
+        # backend, search and collection (a Chroma copy is a different input)
+        "store": exemplar_signature(index),
+    }
 
 
 def _file_sha256(path: Path) -> str:
@@ -1275,6 +1309,7 @@ def main(argv: list[str] | None = None) -> int:
         metavar="KEY=VALUE",
         help="override a Settings field for this run (e.g. --set technique_family_weight=2.0)",
     )
+    add_exemplar_backend_arguments(parser)
     args = parser.parse_args(argv)
     level = args.anonymize or ("names" if args.anonymize_actors else None)
     if level is not None and args.cti_hal is None:
@@ -1303,6 +1338,7 @@ def main(argv: list[str] | None = None) -> int:
         overrides = pipeline_overrides(args.pipeline, args.set)
     except ValueError as error:
         parser.error(str(error))
+    overrides.update(exemplar_setting_overrides(args))
     settings = Settings(**overrides)
     production = args.pipeline == "production"
     client = OpenRouterClient(settings) if production else None
@@ -1360,6 +1396,10 @@ def main(argv: list[str] | None = None) -> int:
     if not folds:
         parser.error("no eligible groups")
     engine = AttributionEngine(settings, kb, store, client)  # type: ignore[arg-type]
+    problem = exemplar_backend_problem(engine.exemplar_index, args.require_exemplar_backend)
+    if problem:
+        print(f"refusing to run: {problem} ({engine.exemplar_status})", file=sys.stderr)
+        return 2
     combiner_expected = bool(getattr(settings, "attribution_combiner_enabled", False))
     if (
         combiner_expected
@@ -1422,6 +1462,9 @@ def main(argv: list[str] | None = None) -> int:
         if any("llm" in row for row in open_rows):
             # the run's spend includes the open-set reports
             metrics["llm"] = summarize(known_rows, unknown_rows + open_rows)["llm"]
+    acceptance = acceptance_identity(
+        engine.settings, engine.acceptance_model, engine.acceptance_model_status
+    )
     fingerprint_inputs = {
         "attack_version": kb.version,
         "embedding_model": settings.embedding_model,
@@ -1431,6 +1474,9 @@ def main(argv: list[str] | None = None) -> int:
         "rrf_k": settings.rrf_k,
         "thresholds": engine.attribution_thresholds.__dict__,
         "acceptance_model": engine.acceptance_model_status,
+        # the acceptance artifact actually loaded and the exemplar index it ran with
+        "acceptance_artifact": acceptance_fingerprint_inputs(acceptance),
+        "exemplar_index": _exemplar_fingerprint_inputs(engine.settings, engine.exemplar_index),
         "combiner": engine.combiner_status,
         "profile_forest": {
             "status": engine.profile_forest_status,
@@ -1515,6 +1561,12 @@ def main(argv: list[str] | None = None) -> int:
         },
         "pipeline_fingerprint": pipeline_fingerprint(fingerprint_inputs),
         "fingerprint_inputs": fingerprint_inputs,
+        "exemplar_status": engine.exemplar_status,
+        "acceptance_model_status": engine.acceptance_model_status,
+        "acceptance_model": acceptance,
+        "exemplars": exemplar_identity(
+            engine.settings, engine.exemplar_index, engine.exemplar_status
+        ),
         "leak_control": {
             "dropped_hits": dropped,
             **({"actor_name_replacement": actor_totals} if actor_totals is not None else {}),
@@ -1589,6 +1641,11 @@ def main(argv: list[str] | None = None) -> int:
                 f"{actor_totals['software_matches_removed']} {actor_totals['software_ids_removed']}"
             )
         print(f"wrote {destination}")
+    problem = exemplar_backend_problem(engine.exemplar_index, args.require_exemplar_backend)
+    if problem:
+        # written (the exemplar header carries the counters) but the run fails the requirement
+        print(problem, file=sys.stderr)
+        return 2
     return 0
 
 

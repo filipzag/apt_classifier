@@ -708,3 +708,48 @@ def test_group_mlp_at_weight_zero_leaves_the_pipeline_unchanged(tmp_path):
         FakeLLM(),
     )
     assert missing.group_mlp is None and "not found" in missing.group_mlp_status
+
+
+def test_auto_exemplar_backend_without_a_store_client_uses_the_npz_offline(tmp_path):
+    """A store without a Chroma client (every test fake) never reaches the network: ``auto``
+    falls back to the npz library with a visible reason, strict ``chroma`` loads none."""
+    from apt_classifier.exemplars import ExemplarIndex
+
+    class Embedder:
+        def embed(self, texts, batch_size=None):
+            return [[1.0, float("powershell" in text.lower()), 0.5] for text in texts]
+
+    settings = Settings()
+    index = ExemplarIndex.build(
+        [
+            ("powershell ran a script", ["T1059.001"], "tram"),
+            ("lsass was read", ["T1003.001"], "tram"),
+        ],
+        Embedder(),
+        embedding_model=settings.embedding_model,
+        embedding_revision=settings.embedding_model_revision,
+        attack_version="test",
+    )
+    path = index.save(tmp_path / "exemplars.npz")
+    store = FakeStore()
+    assert not hasattr(store, "client")
+    engine = AttributionEngine(
+        _settings(technique_exemplar_backend="auto", technique_exemplar_index_path=path),
+        _kb(),
+        store,
+        FakeLLM(),
+    )
+    assert engine.exemplar_index is not None and engine.exemplar_index.backend == "npz"
+    assert engine.exemplar_index.fingerprint == index.fingerprint
+    assert engine.exemplar_status.startswith("active (npz fallback: no Chroma client")
+    strict = AttributionEngine(
+        _settings(technique_exemplar_backend="chroma", technique_exemplar_index_path=path),
+        _kb(),
+        store,
+        FakeLLM(),
+    )
+    assert strict.exemplar_index is None
+    assert strict.exemplar_status.startswith("chroma exemplar store unavailable")
+    # the analysis still runs (the acceptance model falls back without exemplars)
+    state = strict.analyze(_ledger("PowerShell executed an encoded command."))
+    assert "T1059.001" in state.context.observed_techniques

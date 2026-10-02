@@ -9,6 +9,10 @@ candidate" option. Group-level K-fold cross-validation reports out-of-fold ranki
 against the reciprocal-rank-fusion order of the same lists before the final refit.
 
     PYTHONPATH=. .venv/bin/python scripts/fit_attribution_combiner.py --seeds 11 23 37 --variants 5 --unknown-all
+
+Outputs (``--output``, ``--report`` and a ``--lists-cache`` that will be written) replace an
+existing file only with ``--overwrite``, and are written outside the repository (a worktree's
+``data/models`` symlink) only with ``--allow-shared-output``.
 """
 
 from __future__ import annotations
@@ -46,6 +50,14 @@ from apt_classifier.group_mlp import precompute_draws, refit_without_groups  # n
 from apt_classifier.separation import discriminate, technique_document_counts  # noqa: E402
 from apt_classifier.session import AttributionEngine  # noqa: E402
 from apt_classifier.vectorstore import ChromaVectorStore  # noqa: E402
+from scripts.run_tooling import (  # noqa: E402
+    add_exemplar_backend_arguments,
+    add_output_guard_arguments,
+    enforce_output_guard,
+    exemplar_backend_problem,
+    exemplar_setting_overrides,
+    exemplar_signature,
+)
 
 
 def _benchmark_module() -> Any:
@@ -592,7 +604,17 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument("--set", action="append", default=[], metavar="KEY=VALUE")
     parser.add_argument("--quiet", action="store_true")
+    add_output_guard_arguments(parser)
+    add_exemplar_backend_arguments(parser)
     args = parser.parse_args(argv)
+    # a reused cache is only read; every other output is written at the end of an hour-long run
+    writes_cache = not (args.reuse_cache and args.lists_cache.is_file())
+    enforce_output_guard(
+        parser,
+        args,
+        [args.output, args.report, args.lists_cache if writes_cache else None],
+        repo_root=REPO_ROOT,
+    )
 
     def log(message: str) -> None:
         if not args.quiet:
@@ -602,11 +624,15 @@ def main(argv: list[str] | None = None) -> int:
     overrides = bench.pipeline_overrides("local", args.set)
     # features must come from the plain RRF order: no discriminative blend, no combiner
     overrides.update({"attribution_rerank_blend": 0.0, "attribution_combiner_enabled": False})
+    overrides.update(exemplar_setting_overrides(args))
     settings = Settings(**overrides)
     kb = AttackKnowledgeBase.load(settings.kb_path)
     embedder = SentenceTransformerEmbedder.from_settings(settings)
     store = ChromaVectorStore(settings, embedder)
     engine = AttributionEngine(settings, kb, store, None)  # type: ignore[arg-type]
+    problem = exemplar_backend_problem(engine.exemplar_index, args.require_exemplar_backend)
+    if problem:
+        parser.error(f"{problem} ({engine.exemplar_status})")
     fold_args = {
         "coverage": args.coverage,
         "min_behaviors": args.min_behaviors,
@@ -686,8 +712,15 @@ def main(argv: list[str] | None = None) -> int:
             "cross_validation": cv,
             "records": len(records),
             "feature_count": len(FEATURE_NAMES),
+            # the exemplar library the lists' technique mapping ran with
+            "exemplar_status": engine.exemplar_status,
+            "exemplar_store": exemplar_signature(engine.exemplar_index),
         },
     )
+    problem = exemplar_backend_problem(engine.exemplar_index, args.require_exemplar_backend)
+    if problem:
+        print(f"refusing to write {args.output}: {problem}", file=sys.stderr)
+        return 2
     path = model.save(args.output)
     args.report.parent.mkdir(parents=True, exist_ok=True)
     args.report.write_text(

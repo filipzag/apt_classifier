@@ -22,6 +22,8 @@ export interface SystemInfo {
   combiner: string
   /** labelled-sentence exemplar index; when not active the acceptance model is off too */
   exemplars?: string
+  /** where the exemplar library is served from: "npz", "chroma (exact)", "chroma (hnsw)" or "off" */
+  exemplar_backend?: string
   /** random-forest group and source-country models, e.g. "active (cuda)" */
   profile_forest?: string
   group_mlp?: string

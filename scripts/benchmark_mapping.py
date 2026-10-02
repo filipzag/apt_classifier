@@ -17,6 +17,10 @@ Held-out policy
 The pipeline fingerprint covers the ATT&CK version, embedding model, retrieval settings
 and the source of the gating/cue modules, so code changes are visible even when settings
 are unchanged. The case set has its own hash.
+
+Candidate rows carry the calibrated acceptance probability (unrounded), the exemplar features
+and the runtime guards (benign, sparse, cue-supported), so ``scripts/compare_runs.py`` can
+re-threshold a stored run offline and check it against the run's own accepted sets.
 """
 
 from __future__ import annotations
@@ -46,17 +50,32 @@ from apt_classifier.evaluation import (
     write_artifact,
 )
 from apt_classifier.evidence.models import EvidenceLedger, Observation, Provenance
-from apt_classifier.exemplars import exemplar_kwargs, load_exemplar_index
+from apt_classifier.exemplars import EVIDENCE_SOURCE as EXEMPLAR_EVIDENCE_SOURCE
+from apt_classifier.exemplars import FEATURE_NAMES as EXEMPLAR_FEATURE_NAMES
+from apt_classifier.exemplars import load_exemplar_index
 from apt_classifier.reranker import LocalReranker, RerankerConfig
 from apt_classifier.retrieve import (
-    LEXICAL_DEFAULT_FIELDS,
+    ACCEPTANCE_EVIDENCE_SOURCE,
     LexicalTechniqueIndex,
+    acceptance_views,
+    candidate_gate_flags,
+    lexical_fields,
+    retrieval_contract_for,
+    retrieval_kwargs,
     retrieve_techniques,
 )
 from apt_classifier.vectorstore import (
     ChromaVectorStore,
     normalize_procedure_text,
     procedure_sentence_texts,
+)
+from scripts.run_tooling import (
+    acceptance_identity,
+    add_exemplar_backend_arguments,
+    exemplar_backend_problem,
+    exemplar_identity,
+    exemplar_setting_overrides,
+    exemplar_signature,
 )
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -70,6 +89,7 @@ FINGERPRINTED_SOURCES = (
     REPO_ROOT / "apt_classifier" / "vectorstore.py",
     REPO_ROOT / "apt_classifier" / "acceptance.py",
     REPO_ROOT / "apt_classifier" / "exemplars.py",
+    REPO_ROOT / "apt_classifier" / "exemplar_store.py",
     REPO_ROOT / "apt_classifier" / "platforms.py",
 )
 SUMMARY_METRICS = (
@@ -158,10 +178,25 @@ def case_set_hash(cases: list[TechniqueEvaluationCase]) -> str:
     return digest.hexdigest()
 
 
-def candidate_row(candidate: Any) -> dict[str, Any]:
+def _exemplar_columns(evidence: Any) -> dict[str, Any]:
+    """The exemplar features as the acceptance model saw them; ``None`` without exemplar
+    evidence (index off), so a missing index is not mistaken for a zero vote."""
+    metadata = dict(getattr(evidence, "metadata", {}) or {}) if evidence is not None else {}
+    values = metadata.get("features") if isinstance(metadata.get("features"), dict) else None
+    columns: dict[str, Any] = {
+        name: (round(float(values[name]), 6) if values and name in values else None)
+        for name in EXEMPLAR_FEATURE_NAMES
+        if name != "exemplar_only"
+    }
+    columns["exemplar_only"] = bool(metadata.get("exemplar_only", False))
+    return columns
+
+
+def candidate_row(candidate: Any, flags: dict[str, bool] | None = None) -> dict[str, Any]:
     dense = candidate.evidence_for("dense")
     lexical = candidate.evidence_for("lexical")
     reranker = candidate.evidence_for("reranker")
+    acceptance = candidate.evidence_for(ACCEPTANCE_EVIDENCE_SOURCE)
     return {
         "technique_id": candidate.technique_id,
         "fused_rank": candidate.fused_rank,
@@ -181,6 +216,15 @@ def candidate_row(candidate: Any) -> dict[str, Any]:
         "structured_signal": candidate.evidence_for("structured_signal") is not None,
         "explicit_cue": candidate.evidence_for("explicit_cue") is not None,
         "hierarchy_parent": candidate.evidence_for("hierarchy_parent") is not None,
+        "parent_technique_id": getattr(candidate, "parent_technique_id", None),
+        # unrounded, so re-thresholding at the run's own threshold reproduces its decisions
+        "acceptance_probability": (
+            float(acceptance.score)
+            if acceptance is not None and acceptance.score is not None
+            else None
+        ),
+        **_exemplar_columns(candidate.evidence_for(EXEMPLAR_EVIDENCE_SOURCE)),
+        **(flags or {"benign": None, "sparse": None, "cue_supported": None}),
     }
 
 
@@ -215,6 +259,9 @@ def run(
     started = time.time()
     predictions: list[TechniquePrediction] = []
     rows: list[dict[str, Any]] = []
+    # why retrieve_techniques refused the model in a case (its retrieval contract, or the
+    # exemplar index it needs), with the case count: those cases ran the rule-based gate
+    disabled_reasons: dict[str, int] = {}
     for case in cases:
         ledger = EvidenceLedger(
             observations=[
@@ -224,35 +271,37 @@ def run(
                 )
             ]
         )
+        # the serving arguments (retrieval_kwargs), with this run's mode, cues and model
         result = retrieve_techniques(
             ledger,
             store,
             kb,
-            threshold=settings.similarity_threshold,
-            top_k=settings.retrieval_top_k,
-            retrieval_mode=mode,
-            candidate_pool=settings.technique_candidate_pool,
-            parent_policy=settings.technique_parent_policy,
-            lexical_index=lexical_index,
-            acceptance_threshold=settings.technique_acceptance_threshold,
-            relative_margin=settings.technique_relative_margin,
-            cues_enabled=cues_enabled,
-            acceptance_model=acceptance_model,
-            reranker=reranker,
-            segment_acceptance=bool(getattr(settings, "technique_segment_acceptance", False)),
-            hierarchy_parent_mode=str(getattr(settings, "technique_hierarchy_parent_mode", "off")),
-            include_synthetic=bool(getattr(settings, "technique_include_synthetic", False)),
-            rank_by_acceptance=bool(getattr(settings, "technique_rank_by_acceptance", False)),
-            corroboration_accept_observations=int(
-                getattr(settings, "technique_corroboration_accept_observations", 0)
-            ),
-            corroboration_accept_min_probability=float(
-                getattr(settings, "technique_corroboration_accept_min_probability", 0.2)
-            ),
-            platform_from_text=bool(getattr(settings, "technique_platform_from_text", False)),
-            **exemplar_kwargs(settings, exemplar_index),
+            **{
+                **retrieval_kwargs(
+                    settings, exemplar_index=exemplar_index, lexical_index=lexical_index
+                ),
+                "retrieval_mode": mode,
+                "cues_enabled": cues_enabled,
+                "acceptance_model": acceptance_model,
+                "reranker": reranker,
+            },
         )
+        disabled = result.diagnostics.get("acceptance_model_disabled")
+        if acceptance_model is not None and disabled:
+            disabled_reasons[str(disabled)] = disabled_reasons.get(str(disabled), 0) + 1
         candidates = sorted(result.candidates, key=lambda item: item.fused_rank)
+        # the guards per judged view (the whole case, or its sentence with segment acceptance)
+        flags = {
+            id(original): candidate_gate_flags(
+                original, str(view.text), threshold=settings.similarity_threshold
+            )
+            for view, _, group in acceptance_views(
+                ledger.observations[0],
+                list(result.candidates),
+                segment_acceptance=bool(getattr(settings, "technique_segment_acceptance", False)),
+            )
+            for original in group
+        }
         ranked = tuple(dict.fromkeys(candidate.technique_id for candidate in candidates))
         accepted = tuple(result.observed_techniques)
         predictions.append(TechniquePrediction.from_ranked(case.case_id, ranked, accepted=accepted))
@@ -267,7 +316,10 @@ def run(
                 "accepted_technique_ids": sorted(accepted),
                 "expected_in_pool": bool(expected & set(ranked)),
                 "expected_accepted": bool(expected & set(accepted)),
-                "candidates": [candidate_row(item) for item in candidates[:max_candidate_rows]],
+                "candidates": [
+                    candidate_row(item, flags.get(id(item)))
+                    for item in candidates[:max_candidate_rows]
+                ],
             }
         )
     by_dataset: dict[str, list[TechniqueEvaluationCase]] = {}
@@ -290,6 +342,11 @@ def run(
     pooled_intervals = bootstrap_technique_metrics(
         cases, predictions, kb=kb, samples=bootstrap_samples, seed=bootstrap_seed
     )
+    disabled_cases = sum(disabled_reasons.values())
+    # a model refused in every case did not run: the pipeline is the rule-based one
+    model_scored = acceptance_model is not None and (
+        disabled_cases == 0 or disabled_cases < len(cases)
+    )
     fingerprint_payload = {
         "attack_version": kb.version,
         "embedding_model": settings.embedding_model,
@@ -300,8 +357,9 @@ def run(
             {
                 "threshold": acceptance_model.threshold,
                 "pipeline_fingerprint": acceptance_model.metadata.get("pipeline_fingerprint"),
+                **({"disabled_cases": disabled_cases} if disabled_cases else {}),
             }
-            if acceptance_model is not None
+            if model_scored
             else None
         ),
         "reranker": (
@@ -324,6 +382,10 @@ def run(
                     getattr(settings, "technique_exemplar_duplicate_similarity", 0.95)
                 ),
                 "new_candidates": int(getattr(settings, "technique_exemplar_new_candidates", 0)),
+                "vote_norm": str(getattr(settings, "technique_exemplar_vote_norm", "none")),
+                "segment_votes": str(getattr(settings, "technique_exemplar_segment_votes", "off")),
+                # backend, search and collection (a Chroma copy is a different input)
+                "store": exemplar_signature(exemplar_index),
             }
             if exemplar_index is not None
             else None
@@ -333,7 +395,18 @@ def run(
     return {
         "mode": mode,
         "cues_enabled": cues_enabled,
-        "acceptance_model_active": acceptance_model is not None,
+        # True only when the model scored every case (not refused per call in any)
+        "acceptance_model_active": acceptance_model is not None and not disabled_cases,
+        **(
+            {
+                "acceptance_model_disabled": {
+                    "cases": disabled_cases,
+                    "reasons": dict(sorted(disabled_reasons.items())),
+                }
+            }
+            if disabled_cases
+            else {}
+        ),
         "reranker_active": reranker is not None,
         "pipeline_fingerprint": pipeline_fingerprint(fingerprint_payload),
         "fingerprint_inputs": fingerprint_payload,
@@ -388,6 +461,11 @@ def retrieval_settings(settings: Settings) -> dict[str, Any]:
         "hierarchy_parent_mode": getattr(settings, "technique_hierarchy_parent_mode", "off"),
         "rank_by_acceptance": getattr(settings, "technique_rank_by_acceptance", False),
         "platform_from_text": getattr(settings, "technique_platform_from_text", False),
+        "include_detection": getattr(settings, "technique_include_detection", False),
+        "rrf_k": getattr(settings, "technique_rrf_k", 60),
+        "dense_relative_margin": getattr(settings, "technique_dense_relative_margin", 0.12),
+        "dense_overfetch": getattr(settings, "technique_dense_overfetch", 0),
+        "technique_collection": getattr(settings, "technique_collection_name", "attack_techniques"),
     }
 
 
@@ -433,9 +511,10 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--max-candidate-rows", type=int, default=12)
     parser.add_argument("--output", type=Path)
     parser.add_argument("--quiet", action="store_true")
+    add_exemplar_backend_arguments(parser)
     args = parser.parse_args(argv)
 
-    settings = Settings()
+    settings = Settings(**exemplar_setting_overrides(args))
     kb = AttackKnowledgeBase.load(settings.kb_path)
     indexed_texts = procedure_sentence_texts(kb)
     cases, case_diagnostics = load_cases(
@@ -451,21 +530,26 @@ def main(argv: list[str] | None = None) -> int:
         parser.error("no cases loaded")
     embedder = SentenceTransformerEmbedder.from_settings(settings)
     store = ChromaVectorStore(settings, embedder)
-    include_synthetic = bool(getattr(settings, "technique_include_synthetic", False))
-    lexical_index = LexicalTechniqueIndex.from_kb(
-        kb,
-        fields=tuple(
-            field for field in LEXICAL_DEFAULT_FIELDS if include_synthetic or field != "synthetic"
-        ),
-    )
+    lexical_index = LexicalTechniqueIndex.from_kb(kb, fields=lexical_fields(settings))
     cue_settings = (
         (True, False) if args.ablate_cues else ((False,) if args.disable_cues else (True,))
     )
-    exemplar_index, exemplar_status = load_exemplar_index(settings)
+    exemplar_index, exemplar_status = load_exemplar_index(settings, client=store.client)
+    problem = exemplar_backend_problem(exemplar_index, args.require_exemplar_backend)
+    if problem:
+        parser.error(f"{problem} ({exemplar_status})")
     model, model_status = (
         (None, "disabled by --no-acceptance-model")
         if args.no_acceptance_model
-        else load_acceptance_model(settings, kb, exemplar_index)
+        # refused unless the settings meet the model's retrieval contract; a --modes value
+        # the contract does not allow disables it per run inside retrieve_techniques, and that
+        # run's block records it (acceptance_model_active false, acceptance_model_disabled)
+        else load_acceptance_model(
+            settings,
+            kb,
+            exemplar_index,
+            contract=retrieval_contract_for(settings, exemplar_index, store=store),
+        )
     )
     model_settings = (model, None) if args.ablate_acceptance_model and model else (model,)
     reranker = build_reranker(settings, kb)
@@ -501,6 +585,14 @@ def main(argv: list[str] | None = None) -> int:
                         bootstrap_seed=args.seed,
                         max_candidate_rows=args.max_candidate_rows,
                     )
+                    refused = results[key].get("acceptance_model_disabled")
+                    if refused:
+                        print(
+                            f"{key}: acceptance model refused in {refused['cases']} of "
+                            f"{len(cases)} cases (rule-based gate): "
+                            + "; ".join(refused["reasons"]),
+                            file=sys.stderr,
+                        )
                     if not args.quiet:
                         print(f"\n=== {key} ({results[key]['runtime_seconds']}s) ===")
                         for dataset, block in results[key]["datasets"].items():
@@ -515,9 +607,14 @@ def main(argv: list[str] | None = None) -> int:
         "case_count": len(cases),
         "case_set_hash": case_set_hash(cases),
         "case_diagnostics": case_diagnostics,
+        # with case_diagnostics.seed, what an offline re-threshold needs to redo the intervals
+        "bootstrap_samples": args.bootstrap_samples,
         "attack_version": kb.version,
         "acceptance_model_status": model_status,
         "exemplar_status": exemplar_status,
+        # the artifacts actually loaded (path, threshold, file hash, required exemplar index)
+        "acceptance_model": acceptance_identity(settings, model, model_status),
+        "exemplars": exemplar_identity(settings, exemplar_index, exemplar_status),
         "results": results,
     }
     if args.output:
@@ -526,6 +623,11 @@ def main(argv: list[str] | None = None) -> int:
             print(f"\nwrote {destination}")
     elif args.quiet:
         print(json.dumps(report, indent=2, sort_keys=True))
+    problem = exemplar_backend_problem(exemplar_index, args.require_exemplar_backend)
+    if problem:
+        # the artifact is written (its exemplar header carries the counters) but the run fails
+        print(problem, file=sys.stderr)
+        return 2
     return 0
 
 

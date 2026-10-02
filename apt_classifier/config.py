@@ -111,6 +111,12 @@ class Settings(BaseSettings):
     # Technique-level dense/lexical RRF constant; kept separate because the acceptance
     # model's features are fitted against it.
     technique_rrf_k: int = 60
+    # Dense technique hits within this similarity of an observation's best hit become candidates
+    # (_best_technique_hits), and the number of sentence hits fetched per query (0 keeps
+    # max(3 x retrieval_top_k, 4 x technique_candidate_pool), 90 at the defaults). Both feed the
+    # acceptance features; its retrieval contract refuses values the model was not fitted with.
+    technique_dense_relative_margin: float = 0.12
+    technique_dense_overfetch: int = 0
     software_idf_enabled: bool = True
     # Cap on the rarity weight of ATT&CK *tool* entries (legitimate utilities); malware keeps
     # its full rarity weight. See classifiers/software.py.
@@ -254,6 +260,35 @@ class Settings(BaseSettings):
     # an exemplar at or above this cosine to the query is treated as a copy and never votes
     technique_exemplar_duplicate_similarity: float = 0.95
     technique_exemplar_new_candidates: int = 3
+    # How a neighbour's weight is shared among its labels: "none" (each label gets the full
+    # weight, the shipped behaviour) or "label_split" (divided by the neighbour's label count).
+    technique_exemplar_vote_norm: str = "none"
+    # "off" queries the exemplars once per observation (the shipped behaviour). "max" / "mean"
+    # also query each sentence of a long (segmented) observation and pool the votes per
+    # technique over the whole text and its sentences. Tuning knobs (docs 21.3.15): the
+    # acceptance model refuses to run on values it was not fitted with.
+    technique_exemplar_segment_votes: str = "off"
+    # Where the library is read from: "npz" (the artifact above), "chroma" (a verified copy in
+    # the collection below, written once by scripts/sync_exemplars_to_chroma.py; unusable ->
+    # no exemplars) or "auto" (the collection, else the npz with a visible reason). Results are
+    # bit-identical on every backend (apt_classifier/exemplar_store.py).
+    technique_exemplar_backend: str = "npz"
+    # empty: technique_exemplars-<npz fingerprint>-s1-m<M>-efc<ef_construction>
+    technique_exemplar_collection: str = ""
+    # "exact" searches the verified local copy; "hnsw" also asks Chroma for the candidates and
+    # counts a recall miss whenever they lack part of the exact window (the votes stay exact)
+    technique_exemplar_search: str = "exact"
+    technique_exemplar_hnsw_m: int = 32
+    technique_exemplar_hnsw_ef_construction: int = 400
+    # the collection must be searched with at least this ef (checked at load)
+    technique_exemplar_hnsw_ef_search: int = 8192
+    # Chroma results per query as a multiple of the exact window (2k+16)
+    technique_exemplar_overfetch: float = 2.0
+    # ATT&CK collections. A name other than the default is a read-only copy made by
+    # scripts/sync_attack_collection_copy.py; it is opened with get_collection and refused unless
+    # its recorded source (metadata, id and count) still matches the default collection.
+    technique_collection_name: str = "attack_techniques"
+    group_collection_name: str = "attack_groups"
 
     # ----- users and sign-in (web app) -----
     # "auto" = Google sign-in when GOOGLE_CLIENT_ID is set, otherwise a single local analyst.

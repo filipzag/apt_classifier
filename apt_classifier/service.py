@@ -137,6 +137,15 @@ def llm_available(settings: Settings) -> bool:
     return True
 
 
+def _exemplar_backend(index: Any) -> str:
+    """Where the exemplar library is served from: "npz", "chroma (exact)", "chroma (hnsw)" or
+    "off" when none is loaded."""
+    if index is None:
+        return "off"
+    backend = str(getattr(index, "backend", "npz") or "npz")
+    return f"{backend} ({getattr(index, 'search', 'exact')})" if backend == "chroma" else backend
+
+
 class CaseService:
     def __init__(
         self,
@@ -206,6 +215,7 @@ class CaseService:
             else str(status),
             "combiner": str(getattr(self.engine, "combiner_status", "unavailable")),
             "exemplars": str(getattr(self.engine, "exemplar_status", "unavailable")),
+            "exemplar_backend": _exemplar_backend(getattr(self.engine, "exemplar_index", None)),
             "profile_forest": forest_status,
             "group_mlp": str(getattr(self.engine, "group_mlp_status", "unavailable")),
             "index": index,

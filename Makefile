@@ -7,7 +7,7 @@ EVIDENCEFORGE_CLINIC_DIR ?= ../evidenceforge_clinic
 PUBLIC_BASELINE ?= data/audits/public_heldout_baseline.json
 PUBLIC_CURRENT ?= data/audits/public_heldout_current.json
 
-.PHONY: exemplars fit-forest fit-mlp fit-combiner api api-dev api-local api-auth-demo web-install web-dev web-build web-check run-next setup up down ingest run run-local test lint evidenceforge-eval evidenceforge-eval-all benchmark-public benchmark-curated verify-results check-regression fit-acceptance benchmark-attribution train-reranker generate-synthetic benchmark-cti-hal benchmark-cti-hal-production benchmark-attribution-production prepare-elastic benchmark-elastic benchmark-elastic-production
+.PHONY: exemplars exemplars-chroma exemplars-chroma-verify exemplar-equivalence fit-forest fit-mlp fit-combiner api api-dev api-local api-auth-demo web-install web-dev web-build web-check run-next setup up down ingest run run-local test lint evidenceforge-eval evidenceforge-eval-all benchmark-public benchmark-curated verify-results check-regression fit-acceptance benchmark-attribution train-reranker generate-synthetic benchmark-cti-hal benchmark-cti-hal-production benchmark-attribution-production prepare-elastic benchmark-elastic benchmark-elastic-production
 
 setup:
 	python3 -m venv --system-site-packages .venv
@@ -71,12 +71,32 @@ check-regression:
 # Learned attribution combiner: ATT&CK folds only (training seeds), randomised evidence regimes,
 # unknown-actor lists, group-level CV; writes data/models/combiner/attribution_combiner.json.
 fit-combiner:
-	PYTHONPATH=. $(PYTHON) scripts/fit_attribution_combiner.py --seeds 11 23 37 --variants 5 --unknown-all
+	PYTHONPATH=. $(PYTHON) scripts/fit_attribution_combiner.py --seeds 11 23 37 --variants 5 --unknown-all --overwrite
 
 # Labelled real-report sentences (public train splits) used as technique-mapping evidence;
-# needs scripts/prepare_public_benchmarks.py output. Run before fit-acceptance.
+# needs scripts/prepare_public_benchmarks.py output. Run before fit-acceptance. Re-embedding gives
+# a new fingerprint: the acceptance model must be refit (make fit-acceptance) and the Chroma copy
+# resynced (make exemplars-chroma writes a new collection named after the new fingerprint).
 exemplars:
-	PYTHONPATH=. $(PYTHON) scripts/build_exemplar_index.py
+	PYTHONPATH=. $(PYTHON) scripts/build_exemplar_index.py --overwrite
+
+# Copy the npz library once into a new Chroma collection (technique_exemplars-<fingerprint>-...),
+# the only Chroma write of the exemplar migration (ask before running it on the shared server);
+# an existing collection is verified, never changed. Serve it with TECHNIQUE_EXEMPLAR_BACKEND.
+exemplars-chroma:
+	PYTHONPATH=. $(PYTHON) scripts/sync_exemplars_to_chroma.py --overwrite
+
+exemplars-chroma-verify:
+	PYTHONPATH=. $(PYTHON) scripts/sync_exemplars_to_chroma.py --verify-only --report data/audits/exemplar_chroma_verify.json --overwrite
+
+# npz against the Chroma copy, levels L1-L4 (read-only; one GPU job to embed the query texts).
+exemplar-equivalence:
+	PYTHONPATH=. $(PYTHON) scripts/exemplar_backend_equivalence.py \
+		--sets self public:dev public:test cti_hal evidenceforge:branch-office evidenceforge:manufacturing \
+		--evidenceforge-bundle branch-office $(EVIDENCEFORGE_DIR) $(EVIDENCEFORGE_SCENARIO) \
+		--evidenceforge-bundle manufacturing $(EVIDENCEFORGE_MFG_DIR) data/evidenceforge/heldout-manufacturing/scenario.yaml \
+		--vector-cache data/audits/exemplar_equivalence_vectors.npz \
+		--output data/audits/exemplar_backend_equivalence.json --overwrite
 
 # Shipped configuration: public dev split, no per-technique priors (priors were measured and
 # rejected, docs 21.3), exemplar features from `make exemplars`.
@@ -90,8 +110,8 @@ fit-mlp:
 	PYTHONPATH=. $(PYTHON) scripts/fit_group_mlp.py --save --quiet
 
 fit-acceptance:
-	PYTHONPATH=. $(PYTHON) scripts/fit_acceptance_model.py --priors-split none
-	PYTHONPATH=. $(PYTHON) scripts/fit_acceptance_model.py --priors-split none --no-exemplars --output data/models/acceptance/acceptance_model_no_exemplars.json
+	PYTHONPATH=. $(PYTHON) scripts/fit_acceptance_model.py --priors-split none --overwrite
+	PYTHONPATH=. $(PYTHON) scripts/fit_acceptance_model.py --priors-split none --no-exemplars --output data/models/acceptance/acceptance_model_no_exemplars.json --overwrite
 
 # Train the local cross-encoder reranker on the public train splits (dev splits calibrate the
 # promote/demote thresholds). Mined negatives are cached so a retry skips the mining pass.
