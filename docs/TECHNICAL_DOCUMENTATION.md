@@ -1708,8 +1708,9 @@ but did not load. A fingerprint mismatch would otherwise fall back to the RRF or
 
 Three additions to the top three, each pre-registered and checked on the fresh fold seeds 43 and
 47 (21.3.15). Confidence labels are on by default and software questions ship off as a pilot.
-Cluster naming passed with its first rule. It was then narrowed to same-activity links and stays
-off until the narrowed rule passes its own check on the unused seeds 59 and 61 (21.3.15).
+Cluster naming passed with its first rule. It was then narrowed to same-activity links, and the
+narrowed rule passed its own pre-registered check on the unused seeds 59 and 61. It is on by
+default since 2026-10-02 (21.3.15 A′).
 
 **Documented-overlap clusters** (`apt_classifier/overlap_cluster.py`, stage
 `known_cluster_hypothesis`, `ATTRIBUTION_CLUSTER_NAMING`, `ATTRIBUTION_CLUSTER_SCOPE=documented`).
@@ -3982,6 +3983,63 @@ only for a same-activity link. This amendment is written down before the unused 
     bars.
 - **If A′1, A′2, A′3 and A′4 pass,** cluster naming defaults on with the documented scope. Seed 7
   and both CTI-HAL variants are then run once more, report-only.
+
+**A′ results (2026-10-02, seeds 59 and 61, code fe511df, one combiner artifact): all four bars pass.**
+
+| seed | top-1 | single names (correct) | cluster names (correct) | removed actors named through a cluster |
+|---|---|---|---|---|
+| 59 off | 132/153 | 34 (34) | 0 | 0/25 |
+| 59 on | 132/153 | 34 (34) | 1 (1) | 0/25 |
+| 61 off | 125/153 | 33 (33) | 0 | 0/25 |
+| 61 on | 125/153 | 33 (33) | 0 | 0/25 |
+
+- A′1: no wrong cluster name and no removed actor named through a cluster.
+- A′2: single names identical in both arms (34/34 and 33/33).
+- A′3: the one cluster, LuminousMoth / Mustang Panda (truth LuminousMoth), is a `same_activity`
+  link. Only 3 of 178 seed-59 rows had a cluster candidate at all.
+- A′4: the on runs equal `scripts/cluster_replay.py` over the off runs on every row.
+- No removed actor cleared two of the three cluster bars.
+- Every row ran with the combiner active, and off and on share one source fingerprint.
+
+Cluster naming is now on by default with the documented scope. The value is small and honest: a
+few correct pair names where the single gate holds back.
+
+**Report-only reruns with the adopted defaults (code 2da2c4e).** These are the published
+artifacts now. Every row equals the clusters-off artifact except the rows listed:
+
+| set | top-1 | strict / related-aware / same-activity-aware top-3 | single names | cluster names (truth inside) |
+|---|---|---|---|---|
+| seed 7 folds | 127/153 | 142 / 142 / 142 | 32 (32) | 1 (1): APT38 / Lazarus Group |
+| CTI-HAL anonymized | 25/55 | 29 / 36 / 32 | 10 (10) | 0 |
+| CTI-HAL as reported | 31/55 | 37 / 41 / 38 | 13 (13) | 6 (6): FIN7 / Carbanak |
+
+As reported, three Carbanak reports where FIN7 led now name FIN7 / Carbanak. Two correct single
+FIN7 names became FIN7 / Carbanak through the nested-twin rule: Carbanak's profile lies inside
+FIN7's, and ATT&CK documents the link. No removed actor is named on seed 7.
+
+The related-aware top-3 counts any ATT&CK relation, shared rare malware included, as 21.3.14 did.
+The same-activity-aware top-3 counts only the links the cluster rule accepts, and it is the honest
+measure of "the right actor or its documented alias is in the top three": 32/55 (0.582) on the
+anonymized headline, against a strict 29/55 (0.527).
+
+**The single-name gate names removed actors on some seeds (not part of this work).** Every fold
+seed run in this programme used clusters off for its single names. Across seven seeds, the
+existing gate named 4 of 175 removed actors as a known group:
+
+| seed | removed actors named | named as | separation |
+|---|---|---|---|
+| 7 | 0/25 | | |
+| 41 | 1/25 | Storm-0501 as Threat Group-3390 | 0.600 |
+| 43 | 1/25 | OilRig as FIN6 | 0.591 |
+| 47 | 0/25 | | |
+| 53 | 0/25 | | |
+| 59 | 2/25 | Blue Mockingbird as APT41; Gamaredon Group as TA2541 | 0.511; 0.508 |
+| 61 | 0/25 | | |
+
+All four sit just above the 0.5 separation bar. The published "0/25 removed actors named" is
+seed 7 alone; across seeds the rate is about 2% (4/175, Clopper-Pearson 95% 0.6-5.7%). Raising
+the bar is a gate decision for the product owner. It needs a pre-registered check on seeds that
+have not been used, because the four examples were found on these.
 
 **Open questions for the product owner.**
 
