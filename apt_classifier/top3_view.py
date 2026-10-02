@@ -346,5 +346,8 @@ def build_top3_view(
 
 
 def top3_summary(view: dict[str, Any]) -> dict[str, Any]:
-    """The light part of the view carried in every case payload (Assessment badge)."""
-    return {key: view.get(key) for key in ("state", "label", "summary", "leader", "other")}
+    """The light part of the view carried in every case payload (Assessment badge), with the
+    calibrated confidence label the service adds (confidence_labels.py; None when off)."""
+    return {
+        key: view.get(key) for key in ("state", "label", "summary", "leader", "other", "confidence")
+    }
