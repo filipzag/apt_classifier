@@ -162,6 +162,15 @@ class SelectedQuestion:
     investigation_priority: float = 0.0
     hypothesis: str = ""
     investigation_steps: tuple[str, ...] = ()
+    # software questions (software_questions.py): the malware asked about, the top-three place of
+    # the one candidate documented for it, the predicted separation change if found, and when the
+    # question was selected (UTC); technique_id is "" for them
+    kind: str = "technique"
+    software_id: str | None = None
+    target_rank: int | None = None
+    target_group_id: str | None = None
+    delta_found: float | None = None
+    asked_at: str | None = None
 
 
 def entropy(probabilities: dict[str, float]) -> float:
@@ -376,6 +385,13 @@ def parse_interview_answer(value: str) -> EvidenceStatus | None:
     normalized = re.sub(r"\s+", " ", re.sub(r"[^a-z0-9']+", " ", value.casefold())).strip()
     if not normalized:
         return None
+    # the software-question answers first, so "not found" can never read as found or as no
+    if normalized in {"not found", "nothing found"} or normalized.startswith("not found "):
+        return EvidenceStatus.NEGATIVE
+    if normalized in {"not checked", "unchecked", "did not check", "didn't check"}:
+        return EvidenceStatus.UNKNOWN
+    if normalized == "found" or normalized.startswith("found "):
+        return EvidenceStatus.POSITIVE
     if normalized.startswith(("not visible", "no visibility", "cannot see", "can't see")):
         return EvidenceStatus.NOT_VISIBLE
     if normalized in {"unknown", "unsure", "i don't know", "dont know", "not sure"}:

@@ -32,6 +32,20 @@ const ANSWER_LABEL: Record<string, string> = {
   not_visible: 'Not visible in available telemetry',
 }
 
+// software questions: three canonical answers (never "not visible"); the API maps them to
+// positive / negative / unknown
+const SOFTWARE_ANSWERS = [
+  { status: 'found', label: 'Found', icon: CheckCircle2, tone: 'emerald' },
+  { status: 'not_found', label: 'Not found', icon: XCircle, tone: 'rose' },
+  { status: 'not_checked', label: 'Not checked', icon: HelpCircle, tone: 'neutral' },
+] as const
+
+const SOFTWARE_ANSWER_LABEL: Record<string, string> = {
+  positive: 'Found',
+  negative: 'Not found',
+  unknown: 'Not checked',
+}
+
 export function InterviewPage() {
   const id = useCaseId()
   return <CaseFrame>{(data) => <InterviewView caseId={id} data={data} />}</CaseFrame>
@@ -51,7 +65,7 @@ function InterviewView({ caseId, data }: { caseId: string; data: CasePayload }) 
       <PageHeader
         step="Step 4 · Interview"
         title="Separate the shortlist"
-        lead="Each question is the unconfirmed ATT&CK behaviour with the highest expected information gain across the current candidates, phrased as a neutral collection lead. Answers are recorded as evidence and the ranking is recomputed."
+        lead="Each question is the unconfirmed ATT&CK behaviour with the highest expected information gain across the current candidates, phrased as a neutral collection lead. When software questions are enabled, the first ones ask about malware ATT&CK documents for only one of the top three candidates. Answers are recorded as evidence and the ranking is recomputed."
         action={
           <div className="flex gap-2">
             <Button
@@ -108,7 +122,7 @@ function InterviewView({ caseId, data }: { caseId: string; data: CasePayload }) 
                   </motion.div>
                 ) : state.question ? (
                   <motion.div
-                    key={state.question.technique_id + state.answered.length}
+                    key={(state.question.software_id ?? state.question.technique_id) + state.answered.length}
                     initial={{ opacity: 0, y: 8 }}
                     animate={{ opacity: 1, y: 0 }}
                     exit={{ opacity: 0, y: -6 }}
@@ -121,7 +135,14 @@ function InterviewView({ caseId, data }: { caseId: string; data: CasePayload }) 
                         <div className="min-w-0 flex-1">
                           <div className="flex flex-wrap items-center gap-2">
                             <Badge tone="accent">Question {state.answered.length + 1} of {state.max_questions}</Badge>
-                            <span className="mono text-[11px] text-faint">{state.question.technique_id}</span>
+                            {state.question.kind === 'software' ? (
+                              <>
+                                <Badge tone="neutral">Malware</Badge>
+                                <span className="mono text-[11px] text-faint">{state.question.software_id}</span>
+                              </>
+                            ) : (
+                              <span className="mono text-[11px] text-faint">{state.question.technique_id}</span>
+                            )}
                           </div>
                           <p className="mt-2 text-base font-semibold leading-snug">{state.question.question}</p>
                           <p className="mt-2 text-xs leading-relaxed text-muted">{state.question.hypothesis}</p>
@@ -138,13 +159,23 @@ function InterviewView({ caseId, data }: { caseId: string; data: CasePayload }) 
                               ))}
                             </ul>
                           </details>
-                          <div className="mt-3 grid grid-cols-3 gap-2 text-[11px] text-muted">
-                            <Stat label="Profile support" value={`${pct(state.question.profile_support)} (${state.question.supporting_group_count}/${state.question.candidate_group_count})`} />
-                            <Stat label="Information gain" value={`${fmt(state.question.information_gain, 3)} bits`} />
-                            <Stat label="P(yes)" value={pct(state.question.probability_yes)} />
-                          </div>
-                          <div className="mt-4 grid gap-2 sm:grid-cols-2">
-                            {ANSWERS.map((option) => (
+                          {state.question.kind === 'software' ? (
+                            <div className="mt-3 grid grid-cols-2 gap-2 text-[11px] text-muted">
+                              <Stat label="Candidate place" value={`top-three place ${state.question.target_rank ?? '?'}`} />
+                              <Stat
+                                label="Separation if found"
+                                value={`${(state.question.delta_found ?? 0) > 0 ? '+' : ''}${fmt(state.question.delta_found ?? 0, 2)}`}
+                              />
+                            </div>
+                          ) : (
+                            <div className="mt-3 grid grid-cols-3 gap-2 text-[11px] text-muted">
+                              <Stat label="Profile support" value={`${pct(state.question.profile_support)} (${state.question.supporting_group_count}/${state.question.candidate_group_count})`} />
+                              <Stat label="Information gain" value={`${fmt(state.question.information_gain, 3)} bits`} />
+                              <Stat label="P(yes)" value={pct(state.question.probability_yes)} />
+                            </div>
+                          )}
+                          <div className={cn('mt-4 grid gap-2', state.question.kind === 'software' ? 'sm:grid-cols-3' : 'sm:grid-cols-2')}>
+                            {(state.question.kind === 'software' ? SOFTWARE_ANSWERS : ANSWERS).map((option) => (
                               <Button
                                 key={option.status}
                                 variant="secondary"
@@ -168,7 +199,7 @@ function InterviewView({ caseId, data }: { caseId: string; data: CasePayload }) 
                               onChange={(e) => setNote(e.target.value)}
                               placeholder="Optional note: where it was seen, event ids, caveats…"
                               onKeyDown={(e) => {
-                                if (e.key === 'Enter' && note.trim()) {
+                                if (e.key === 'Enter' && note.trim() && state.question?.kind !== 'software') {
                                   const parsed = note.trim().toLowerCase()
                                   const status = parsed.startsWith('y') ? 'positive' : parsed.startsWith('no') ? 'negative' : parsed.startsWith('not') ? 'not_visible' : parsed.startsWith('un') ? 'unknown' : null
                                   if (status) answer.mutate({ status, text: note }, { onSuccess: () => setNote('') })
@@ -273,7 +304,9 @@ function Transcript({ state }: { state: InterviewState }) {
             </span>
             <div className="max-w-3xl rounded-xl rounded-tl-sm border border-border bg-surface px-4 py-2.5 text-sm">
               {item.question}
-              {item.technique_id ? <div className="mono mt-1 text-[11px] text-faint">{item.technique_id}</div> : null}
+              {item.technique_id || item.software_id ? (
+                <div className="mono mt-1 text-[11px] text-faint">{item.technique_id || item.software_id}</div>
+              ) : null}
             </div>
           </div>
           <div className="flex items-start justify-end gap-3">
@@ -286,7 +319,9 @@ function Transcript({ state }: { state: InterviewState }) {
                 item.status === 'unknown' && 'border-border bg-surface-2',
               )}
             >
-              <span className="font-semibold">{ANSWER_LABEL[item.status] ?? item.status}</span>
+              <span className="font-semibold">
+                {(item.kind === 'software' ? SOFTWARE_ANSWER_LABEL : ANSWER_LABEL)[item.status] ?? item.status}
+              </span>
               {item.text ? <div className="mt-0.5 text-xs text-muted">{item.text}</div> : null}
             </div>
             <span className="grid size-7 shrink-0 place-items-center rounded-lg bg-surface-3 text-muted">

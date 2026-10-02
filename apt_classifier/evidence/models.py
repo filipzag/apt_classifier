@@ -5,7 +5,7 @@ import json
 import math
 import re
 from enum import StrEnum
-from typing import Any, Self
+from typing import Any, Literal, Self
 
 from pydantic import AliasChoices, BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -464,6 +464,10 @@ class QuestionAnswer(EvidenceModel):
     answer_text: str | None = None
     provenance: Provenance = Field(default_factory=lambda: Provenance(source="question"))
     metadata: dict[str, Any] = Field(default_factory=dict)
+    # "software": a question about one malware entry (software_questions.py); technique_id stays
+    # None, so the technique answer paths ignore it
+    kind: Literal["technique", "software"] = "technique"
+    software_id: str | None = None
 
     @field_validator("question", mode="before")
     @classmethod
@@ -472,6 +476,14 @@ class QuestionAnswer(EvidenceModel):
         if not result:
             raise ValueError("question cannot be empty")
         return result
+
+    @field_validator("software_id", mode="before")
+    @classmethod
+    def normalize_software_id(cls, value: Any) -> str | None:
+        if value is None:
+            return None
+        result = _compact(str(value)).upper()
+        return result or None
 
     @field_validator("status", mode="before")
     @classmethod
@@ -500,7 +512,7 @@ class QuestionAnswer(EvidenceModel):
             object.__setattr__(
                 self,
                 "question_id",
-                _identifier("question", self.technique_id or "", self.question),
+                _identifier("question", self.technique_id or self.software_id or "", self.question),
             )
         return self
 

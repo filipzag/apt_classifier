@@ -708,3 +708,192 @@ def test_group_mlp_at_weight_zero_leaves_the_pipeline_unchanged(tmp_path):
         FakeLLM(),
     )
     assert missing.group_mlp is None and "not found" in missing.group_mlp_status
+
+
+# ----- software interview answers (software_questions.py, docs 21.3.15 C) -----
+
+
+def _software_engine(tmp_path=None, *, combiner: bool = False, **overrides):
+    from tests.test_software_questions import software_engine, software_kb, software_settings
+
+    if not combiner:
+        return software_engine(**overrides)
+    plain = software_engine(**overrides)
+    path = _rrf_rel_combiner(plain, 8.0).save(tmp_path / "combiner.json")
+    engine = AttributionEngine(
+        software_settings(
+            attribution_combiner_enabled=True, attribution_combiner_path=path, **overrides
+        ),
+        software_kb(),
+        FakeStore(),
+        None,
+    )
+    assert engine.combiner is not None
+    return engine
+
+
+def _software_answer(software_id, status, question="Did you find it?"):
+    return QuestionAnswer(
+        question=question, kind="software", software_id=software_id, status=status
+    )
+
+
+def _snapshot(state):
+    discrimination = state.context.discrimination
+    return (
+        [(e.group_id, e.score, e.rank) for e in state.fusion.entries],
+        dict((state.context.combiner or {}).get("probabilities") or {}),
+        discrimination.to_dict() if discrimination is not None else None,
+        set(state.context.negative_techniques),
+        set(state.context.software_ids),
+    )
+
+
+@pytest.mark.parametrize("with_combiner", [False, True], ids=["rrf", "combiner"])
+def test_a_not_found_answer_leaves_scoring_untouched(tmp_path, with_combiner):
+    """A "not found" reaches only the naming gate: fusion, combiner probabilities, the gate's
+    discrimination and the technique negatives are exactly as before."""
+    from tests.test_software_questions import LSASS, POWERSHELL
+
+    engine = _software_engine(tmp_path, combiner=with_combiner)
+    state = engine.analyze(_ledger(POWERSHELL, LSASS))
+    before = _snapshot(state)
+    state.ledger.add_question_answer(_software_answer("S0103", EvidenceStatus.NEGATIVE))
+    engine.rescore(state)
+    assert _snapshot(state) == before
+    assert state.context.negative_software_ids == {"S0103"}
+    # "not checked" records nothing at all
+    state.ledger.add_question_answer(_software_answer("S0101", EvidenceStatus.UNKNOWN))
+    engine.rescore(state)
+    assert _snapshot(state) == before and state.context.negative_software_ids == {"S0103"}
+
+
+def test_a_found_answer_counts_like_software_named_in_the_text_and_restart_clears_it():
+    from tests.test_software_questions import LSASS, POWERSHELL
+
+    engine = _software_engine()
+    state = engine.analyze(_ledger(POWERSHELL, LSASS))
+    assert state.context.document_software_ids == set() and state.context.software_ids == set()
+    question = engine.next_question(state)
+    assert question is not None and question.kind == "software"
+    engine.answer_question(state, "found")
+    answer = state.ledger.question_answers[-1]
+    assert answer.kind == "software" and answer.software_id == question.software_id
+    assert answer.technique_id is None
+    assert answer.provenance.source == "analyst_interview"
+    assert state.context.software_ids == {question.software_id}
+    assert state.context.interview_found_software == {question.software_id}
+    assert state.context.decisive_software["software_ids"] == [question.software_id]
+    # the next software question never repeats it
+    follow_up = engine.next_question(state)
+    assert follow_up is None or follow_up.software_id != question.software_id
+    state.current_question = follow_up
+    if follow_up is not None and follow_up.kind == "software":
+        engine.answer_question(state, "not found")
+        assert state.context.negative_software_ids == {follow_up.software_id}
+    engine.restart_interview(state)
+    assert state.context.software_ids == set() and state.context.negative_software_ids == set()
+    assert state.context.interview_found_software == set()
+    # a software question rejects "not visible"
+    question = engine.next_question(state)
+    with pytest.raises(ValueError, match="found, not found or not checked"):
+        engine.answer_question(state, EvidenceStatus.NOT_VISIBLE)
+    assert question is not None and not state.ledger.question_answers
+
+
+def test_software_questions_follow_the_settings_and_stop_when_named():
+    from tests.test_software_questions import LSASS, POWERSHELL
+
+    off = _software_engine(interview_software_questions=False)
+    state = off.analyze(_ledger(POWERSHELL, LSASS))
+    assert off.software_question(state) is None
+    question = off.next_question(state)
+    assert question is not None and question.kind == "technique"
+    engine = _software_engine(interview_software_max_questions=1)
+    state = engine.analyze(_ledger(POWERSHELL, LSASS))
+    engine.next_question(state)
+    engine.answer_question(state, "not checked")
+    assert engine.software_question(state) is None  # cap reached
+    # a case already named (the text names Charlie's own malware) is not asked
+    named = _software_engine()
+    state = named.analyze(_ledger(f"{POWERSHELL} The Greenfin implant was loaded.", LSASS))
+    assert state.attribution_decision.stage.value == "known_group_hypothesis"
+    assert named.software_question(state) is None
+    asking = _software_engine(interview_software_when_named=True)
+    state = asking.analyze(_ledger(f"{POWERSHELL} The Greenfin implant was loaded.", LSASS))
+    assert asking.software_question(state) is not None
+
+
+def test_a_saved_case_with_software_answers_reloads_to_the_identical_decision():
+    from apt_classifier.evidence.models import EvidenceLedger
+    from tests.test_software_questions import LSASS, POWERSHELL
+
+    engine = _software_engine()
+    text = f"{POWERSHELL} The Greenfin implant was loaded."
+    state = engine.analyze(_ledger(text, LSASS))
+    assert state.attribution_decision.stage.value == "known_group_hypothesis"
+    # "not found" for Charlie's two other malware entries blocks the name ...
+    for software_id in ("S0104", "S0108"):
+        state.ledger.add_question_answer(
+            _software_answer(software_id, EvidenceStatus.NEGATIVE, f"Did you find {software_id}?")
+        )
+    engine.rescore(state)
+    blocked = state.attribution_decision
+    assert blocked.stage.value == "known_group_shortlist"
+    assert blocked.separation_factors["negative_software"]["applied"] == ["S0104", "S0108"]
+    # ... and stays blocked when the case is reopened from disk
+    reopened = engine.analyze(EvidenceLedger.from_dict(state.ledger.to_dict()))
+    assert reopened.attribution_decision.to_dict() == blocked.to_dict()
+    assert reopened.context.negative_software_ids == {"S0104", "S0108"}
+    # a "found" survives the reload too, guard included
+    other = engine.analyze(_ledger(POWERSHELL, LSASS))
+    engine.next_question(other)
+    engine.answer_question(other, "found")
+    reloaded = engine.analyze(EvidenceLedger.from_dict(other.ledger.to_dict()))
+    assert reloaded.attribution_decision.to_dict() == other.attribution_decision.to_dict()
+    assert reloaded.context.software_ids == other.context.software_ids
+    assert reloaded.context.interview_software_guard == other.context.interview_software_guard
+
+
+def test_a_found_for_one_group_never_names_another():
+    """Alpha's malware found while Charlie leads: Alpha takes the lead but its separation without
+    the answer is negative, so nothing is named; Charlie is never named on Alpha's malware."""
+    from tests.test_software_questions import LSASS, POWERSHELL
+
+    engine = _software_engine()
+    state = engine.analyze(_ledger(POWERSHELL, LSASS))
+    for software_id in ("S0101", "S0102"):
+        trial = engine.analyze(_ledger(POWERSHELL, LSASS))
+        trial.ledger.add_question_answer(_software_answer(software_id, EvidenceStatus.POSITIVE))
+        engine.rescore(trial)
+        decision = trial.attribution_decision
+        owner = engine.kb.software[software_id].group_ids[0]
+        if decision.stage.value == "known_group_hypothesis":
+            assert decision.leading_group_id == owner
+        guard = trial.context.interview_software_guard
+        assert guard["found"] == [software_id] and guard["document_software_ids"] == []
+    assert state.attribution_decision.stage.value != "known_group_hypothesis"
+
+
+def test_old_ledgers_load_and_question_ids_do_not_change():
+    import hashlib
+
+    from apt_classifier.evidence.models import EvidenceLedger
+
+    legacy = {
+        "observations": [],
+        "question_answers": [
+            {"question": "Was LSASS read?", "technique_id": "T1003.001", "status": "negative"}
+        ],
+    }
+    ledger = EvidenceLedger.from_dict(legacy)
+    answer = ledger.question_answers[0]
+    material = "\x1f".join(("t1003.001", "was lsass read?"))
+    expected = f"question-{hashlib.sha256(material.encode()).hexdigest()[:16]}"
+    assert answer.question_id == expected and answer.kind == "technique"
+    assert answer.software_id is None
+    software = _software_answer("s0101", EvidenceStatus.POSITIVE, question="Did you find X?")
+    assert software.software_id == "S0101" and software.question_id.startswith("question-")
+    assert software.question_id != QuestionAnswer(question="Did you find X?").question_id
+    roundtrip = EvidenceLedger.from_dict({**legacy, "question_answers": [software.to_dict()]})
+    assert roundtrip.question_answers[0] == software
