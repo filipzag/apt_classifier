@@ -2432,6 +2432,13 @@ their production pipeline is run with a key. The system endpoint reports `llm_pr
 (`openrouter`/`local`/`hybrid`/`none`), the model answering each task (`llm_models`) and
 `prose_normalisation` (`extract`/`sentences`/`split`).
 
+- **Setting it up:** a current Ollama (0.16 cannot load Qwen3.5; 0.35 works), `make llm-pull`
+  (`qwen3.5:4b`), `make llm-check`, then restart the app, which checks for the model at start-up.
+  A server on another address (for example a user-level install without sudo on port 11435) is
+  set with `LOCAL_LLM_URL`. With an OpenRouter key, `EXTRACT_MODEL=local/qwen3.5:4b` moves the
+  prose normaliser and interview phrasing to the local model and
+  `TECHNIQUE_VERIFIER_MODEL=local/qwen3.5:4b` the verifier. Step by step: README, "Optional local
+  LLM (Ollama)".
 - **Model choice (research 2026-10-02):** Qwen3.5 (Apache-2.0, March 2026; vendor IFEval 91.5 for
   the 9B, 89.8 for the 4B). Its hybrid attention (Gated DeltaNet:full = 3:1) keeps the KV cache for
   whole reports small. The default `LOCAL_LLM_FALLBACK_MODEL` is the **4B** (3.9 GiB at a 32k
