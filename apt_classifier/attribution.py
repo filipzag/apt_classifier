@@ -151,6 +151,12 @@ class MaturityThresholds:
 SUPPORT_RANK_LIMIT = 10
 
 
+# Members that re-read evidence other families already score: they rank, but never count as an
+# independent evidence family for the naming gate. The free-text model (text_group.py) scores
+# the same case narrative the technique, software and behaviour classifiers read.
+NOT_INDEPENDENT_EVIDENCE = frozenset({"text_group"})
+
+
 def _evidence_family_count(
     fusion: FusionResult,
     classifier_families: dict[str, str] | None = None,
@@ -169,6 +175,8 @@ def _evidence_family_count(
     families: set[str] = set()
     for classifier_name, rank in top.classifier_ranks.items():
         if rank is None or int(rank) > support_rank_limit:
+            continue
+        if classifier_name in NOT_INDEPENDENT_EVIDENCE:
             continue
         family = (classifier_families or {}).get(classifier_name, classifier_name)
         families.add(family)

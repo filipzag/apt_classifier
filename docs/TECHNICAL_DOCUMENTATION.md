@@ -1092,7 +1092,7 @@ Presets are applied using Pydantic's `model_copy(update=...)` on the `Settings` 
 
 ## 9. Classifiers
 
-The registry currently creates ten deterministic classifiers, the opt-in CyberRE-LLM classifier (it votes only after an analyst runs CyberRE) and the two random-forest members of 9.13. The PyTorch group network (`group_mlp`, 9.13) is added only when `GROUP_MLP_WEIGHT` > 0 (default 0). The LLM zero-shot opinion was removed from the ensemble on 2026-09-30 (9.11):
+The registry currently creates ten deterministic classifiers, the opt-in CyberRE-LLM classifier (it votes only after an analyst runs CyberRE) and the two random-forest members of 9.13. The PyTorch group network (`group_mlp`, 9.13) is added only when `GROUP_MLP_WEIGHT` > 0 (default 0), and the free-text model (`text_group`, 9.13) only when `TEXT_GROUP_WEIGHT` > 0 (default 0). The LLM zero-shot opinion was removed from the ensemble on 2026-09-30 (9.11):
 
 ```text
 bernoulli_naive_bayes
@@ -1271,6 +1271,25 @@ combiner (`attribution_combiner_group_mlp.json`), before the anonymizer fix of 2
 CTI-HAL top-1 went from 0.455 to 0.473 and as reported stayed at 0.564, but on the ATT&CK folds
 top-1 fell from 0.830 to 0.817 with one wrong name (Silence named as Kimsuky). It fails the naming
 gate and is not adopted.
+
+**Free-text model (2026-10-03).** `apt_classifier/text_group.py` reads the case narrative (the joined
+positive observations) instead of the mapped techniques. Each ATT&CK group gets one TF-IDF word
+1-2-gram document built from ATT&CK text only: its procedure examples, its description sentences, the
+procedure examples of every malware/tool it uses and of its attributed campaigns (the last two from the
+raw STIX bundle). Group names become "the adversary" (also before a hyphen) and campaign names "the
+operation"; both are stop words. A case is scored by cosine to every document, z-scored, plus 0.5 x the
+log prominence prior, and reported as a softmax over the groups that share a term. `make fit-text-group`
+writes `data/models/text_group/text_group.json.gz` (the records and parameters, fingerprinted with the
+ATT&CK version); the TF-IDF is refitted at load (about 1 s). It was chosen in a separate study
+(`scripts/text_group_study/`, 21.3.16) over five ATTACK-BERT embedding models, which blur the exact
+malware names and phrases this model keeps. The `text_group` member votes in the `learned_profile` family
+only when `TEXT_GROUP_WEIGHT` > 0, and it is listed in `attribution.NOT_INDEPENDENT_EVIDENCE`: it ranks,
+but never counts toward the naming gate's independent evidence families, because it re-reads the text the
+technique, software and behaviour members already score. At weight > 0 the combiner fingerprint also binds
+the text model and `text_group.py`. The benchmarks refuse to run when it fails to load, hide each known
+fold's held-out sentences from it (`TextGroupModel.without`: the group's procedure examples for the
+held-out techniques, and any record crediting the group or no group whose text or sentence matches a
+held-out sentence, refitted exactly) and refit it without the removed actor.
 
 ---
 
@@ -4066,6 +4085,40 @@ have not been used, because the four examples were found on these.
 - The C5 risk for a software-question pilot.
 - The removed-actor single names on seeds 41 and 43 from the existing gate.
 - Whether the gate's safety margin should be revisited (decision 2 of the research programme).
+
+#### 21.3.16 Free-text group model: study and gate trial (2026-10-02/03)
+
+**Study.** Training text was ATT&CK only (17,396 anonymised records); model selection used the 23
+single-group ATT&CK campaigns (near-copies of their sentences removed from training); CTI-HAL (names) and
+Elastic (strict) were scored once. Six families were tuned (sentence kNN, sentence classifier, pooled
+MLP, attention MIL, prototypes on ATTACK-BERT embeddings; TF-IDF words). The TF-IDF group document won on
+the campaigns and on the test sets. Standalone on CTI-HAL it reached top-1 0.491 / MRR 0.584 (pipeline
+0.455 / 0.512, not significant); combined with the group network (9.13) MRR 0.628. Audits found no name
+leak, but 12 of its 27 CTI-HAL hits rest on ATT&CK wording that cites the same vendor reports CTI-HAL
+quotes; malware-name lookups drive 9. `scripts/text_group_study/README.md` has the protocol and numbers.
+
+**Gate trial** (pre-registered, `data/audits/text_group_gate_trial_2026-10-03/`): weight 1.0 with a
+combiner refitted on seeds 11/23/37 (`data/models/combiner/attribution_combiner_text_group.json`)
+against weight 0 with the shipped combiner, from one frozen code copy; the baselines reproduced the
+published artifacts (folds 153/153 rows; CTI-HAL metrics).
+
+| Set | Before | After | Wrong names |
+| --- | --- | --- | --- |
+| ATT&CK folds seed 7: top-1 / top-5 / MRR / named | 0.830 / 0.961 / 0.880 / 32 | 0.824 / 0.935 / 0.880 / 29 | 0 -> 0; removed actors 0/25 -> 0/25 |
+| CTI-HAL anonymized: top-1 / top-3 / top-5 / MRR | 0.455 / 0.527 / 0.600 / 0.512 | 0.491 / 0.618 / 0.655 / 0.572 | 0 -> 0 (10 named) |
+| CTI-HAL as reported: top-1 / top-3 / top-5 / MRR | 0.564 / 0.673 / 0.727 / 0.636 | 0.564 / 0.745 / 0.764 / 0.666 | 0 -> 0 (13 named) |
+| Elastic strict (diagnostic): top-1 / top-3 / MRR | 4/8 / 0.500 / 0.537 | 4/8 / 0.625 / 0.553 | 0 -> 0; open set 0/22 named |
+| Elastic tradecraft (diagnostic): top-1 / MRR | 1/8 / 0.209 | 2/8 / 0.346 | 0 -> 0 |
+
+The technique-mapping gate is unchanged by construction (retrieval never reads the setting). The fold
+rule "top-1 not below baseline" fails by one case, so the default stays 0. Checks: the fold change is
+noise (5 gained / 6 lost, exact p = 1.0; top-5 1/5, p = 0.22) and survives closing the BM25 leak of the
+fold benchmark (the lexical index is not hidden by `FoldStore`; with it hidden both arms drop, trial
+0.817 vs 0.824). All six losses are thinly documented groups: the fully blinded text model votes for a
+rival while the technique-list members still see the held-out techniques in the group lists. On CTI-HAL
+the MRR gain is 24 better / 2 worse (p = 1e-5; group sign-flip one-sided p = 0.031, the minimum for six
+groups); about 28% of it depends on same-source ATT&CK records, 42% partly. The Elastic gains (4/0 strict,
+7/0 tradecraft) do not: ATT&CK cites none of the eight posts.
 
 ## 22. Failure modes and troubleshooting
 

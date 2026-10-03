@@ -72,6 +72,7 @@ from apt_classifier.llm import OpenRouterClient
 from apt_classifier.overlap_cluster import SAME_ACTIVITY_LINKS, link_kind
 from apt_classifier.profile_forest import fit_profile_forest
 from apt_classifier.session import AttributionEngine
+from apt_classifier.text_group import text_group_votes
 from apt_classifier.vectorstore import (
     ChromaVectorStore,
     VectorHit,
@@ -120,6 +121,7 @@ FINGERPRINTED_SOURCES = (
     REPO_ROOT / "apt_classifier" / "torch_forest.py",
     REPO_ROOT / "apt_classifier" / "classifiers" / "profile_forest.py",
     REPO_ROOT / "apt_classifier" / "group_mlp.py",
+    REPO_ROOT / "apt_classifier" / "text_group.py",
     REPO_ROOT / "apt_classifier" / "overlap_cluster.py",
     REPO_ROOT / "apt_classifier" / "attack" / "related.py",
     REPO_ROOT / "apt_classifier" / "attack" / "same_activity.py",
@@ -901,10 +903,22 @@ def run_known(
 ) -> tuple[list[dict[str, Any]], dict]:
     rows: list[dict[str, Any]] = []
     base_store = engine.store
+    base_text = getattr(engine, "text_group", None)
+    base_text_status = getattr(engine, "text_group_status", None)
     related = related_groups(engine.kb)
     dropped_total = {"technique": 0, "behavior": 0, "profile": 0}
     try:
         for fold in folds:
+            if base_text is not None and hide_evidence:
+                # the text model's group documents hide the fold like the store does
+                engine.set_text_group(
+                    base_text.without(
+                        engine.kb,
+                        group_id=fold.group_id,
+                        techniques=fold.held_out_techniques,
+                        texts=fold.held_out_texts,
+                    )
+                )
             proxy = FoldStore(
                 base_store,
                 group_id=fold.group_id,
@@ -1023,6 +1037,8 @@ def run_known(
                 dropped_total[key] += value
     finally:
         engine.store = base_store
+        if base_text is not None:
+            engine.set_text_group(base_text, base_text_status)
     return rows, dropped_total
 
 
@@ -1085,6 +1101,14 @@ def run_unknown(
             # exact refit on the reduced knowledge base (fresh draws), never a masked output
             engine.set_group_mlp(refit_without_groups(engine.group_mlp, reduced))
             group_mlp = "refit without the actor"
+        text_group = "off"
+        if getattr(engine, "text_group", None) is not None:
+            engine.set_text_group(
+                engine.text_group.without(
+                    reduced, group_id=fold.group_id, texts=fold.held_out_texts, remove_group=True
+                )
+            )
+            text_group = "refit without the actor"
         cost_before = client.total_usage.cost_usd if client is not None else 0.0
         state = engine.analyze(_ledger(fold))
         fusion = state.fusion
@@ -1095,6 +1119,7 @@ def run_unknown(
                 "observations": len(fold.observations),
                 "profile_forest": forest,
                 "group_mlp": group_mlp,
+                "text_group": text_group,
                 "llm": _llm_accounting(state, client, cost_before),
                 **_separation_fields(state, None, decision),
                 **_combiner_fields(state, None),
@@ -1505,6 +1530,13 @@ def main(argv: list[str] | None = None) -> int:
     if not folds:
         parser.error("no eligible groups")
     engine = AttributionEngine(settings, kb, store, client)  # type: ignore[arg-type]
+    if text_group_votes(settings) and engine.text_group is None:
+        print(
+            f"refusing to run: TEXT_GROUP_WEIGHT > 0 but the text model is "
+            f"{engine.text_group_status!r} (build it with make fit-text-group)",
+            file=sys.stderr,
+        )
+        return 3
     combiner_expected = bool(getattr(settings, "attribution_combiner_enabled", False))
     if (
         combiner_expected
@@ -1569,6 +1601,18 @@ def main(argv: list[str] | None = None) -> int:
         },
         # the channel weights the gate window was scored with (offline replays read them)
         "discrimination_weights": dict(vars(engine.discrimination_weights)),
+        # only when the text model votes, so a default run keeps its fingerprint inputs
+        **(
+            {
+                "text_group": {
+                    "status": engine.text_group_status,
+                    "fingerprint": getattr(engine.text_group, "fingerprint", None),
+                    "runtime": getattr(engine.text_group, "runtime", None),
+                }
+            }
+            if text_group_votes(settings)
+            else {}
+        ),
         # only when the network votes, so a default run keeps its fingerprint inputs
         **(
             {

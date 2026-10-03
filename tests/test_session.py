@@ -897,3 +897,36 @@ def test_old_ledgers_load_and_question_ids_do_not_change():
     assert software.question_id != QuestionAnswer(question="Did you find X?").question_id
     roundtrip = EvidenceLedger.from_dict({**legacy, "question_answers": [software.to_dict()]})
     assert roundtrip.question_answers[0] == software
+
+
+def test_text_group_at_weight_zero_leaves_the_pipeline_unchanged(tmp_path):
+    """Off (the default) the free-text model is not loaded and adds no weight key, so the fusion
+    and the combiner fingerprint are unchanged; with a weight it votes in learned_profile."""
+    from apt_classifier.text_group import TEXT_GROUP_NAME, fit_text_group
+
+    kb = _kb()
+    kb.groups["G2"].technique_behaviors = {
+        "T1003.001": ["Bravo dumped LSASS memory with Mimikatz."]
+    }
+    model = fit_text_group(kb, None, {"min_df": 1})
+    path = model.save(tmp_path / "text.json.gz")
+    off = AttributionEngine(_settings(text_group_path=path), kb, FakeStore(), FakeLLM())
+    plain = AttributionEngine(
+        _settings(text_group_enabled=False, text_group_path=path), kb, FakeStore(), FakeLLM()
+    )
+    assert off.text_group is None and off.text_group_status == "disabled (weight 0)"
+    assert TEXT_GROUP_NAME not in off.default_weights()
+    assert off.combiner_fingerprint == plain.combiner_fingerprint
+    assert all(c.name != TEXT_GROUP_NAME for c in off.classifiers)
+
+    on = AttributionEngine(
+        _settings(text_group_path=path, text_group_weight=1.0), kb, FakeStore(), FakeLLM()
+    )
+    assert on.text_group is not None and on.text_group_status == "active"
+    assert on.default_weights()[TEXT_GROUP_NAME] == 1.0
+    assert _CLASSIFIER_FAMILIES[TEXT_GROUP_NAME] == "learned_profile"
+    assert on.combiner_fingerprint != plain.combiner_fingerprint
+    state = on.analyze(_ledger("Mimikatz dumped LSASS memory"))
+    assert any(r.classifier == TEXT_GROUP_NAME for r in state.classifier_results)
+    on.set_text_group(None)
+    assert on.text_group_status == "disabled"
