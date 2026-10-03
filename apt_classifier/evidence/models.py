@@ -344,6 +344,9 @@ class TechniqueVerification(EvidenceModel):
     reason: str | None = None
     support_span: str | None = None
     model: str | None = None
+    # P(supported) among the allowed verdicts, from a local model's token probabilities
+    # (docs 16.4a); None for OpenRouter answers, which carry no probabilities.
+    confidence: float | None = Field(default=None, ge=0.0, le=1.0)
     prompt_tokens: int = Field(default=0, ge=0)
     completion_tokens: int = Field(default=0, ge=0)
     cost_usd: float = Field(default=0.0, ge=0.0)

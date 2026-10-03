@@ -667,6 +667,9 @@ class AttributionEngine:
                 ),
                 effort=getattr(self.settings, "technique_verifier_effort", "low"),
                 scope=scope,
+                min_confidence=float(
+                    getattr(self.settings, "local_llm_verifier_min_confidence", 0.0) or 0.0
+                ),
             )
             results[observation_id] = result
             for candidate in result.candidates:
