@@ -385,10 +385,10 @@ All settings are environment variables documented in `.env.example`. Important v
   docs 7.3 and 21.3.6)
 - `SOURCE_COUNTRY_WEIGHT=1.0`, `PROFILE_FOREST_WEIGHT=0.0` (source-country vote on, group forest silent; `make fit-forest`
   trains both on the GPU when available, `PROFILE_FOREST_DEVICE=cpu` otherwise). To turn the country vote off set
-  `SOURCE_COUNTRY_WEIGHT=0.0` and `ATTRIBUTION_COMBINER_PATH=data/models/combiner/attribution_combiner_no_country.json`
+  `SOURCE_COUNTRY_WEIGHT=0.0` and `ATTRIBUTION_COMBINER_PATH=data/models/combiner/attribution_combiner_no_country_nb_count.json`
   (docs 9.13 and 21.3.11)
 - `GROUP_MLP_WEIGHT=0.0` (PyTorch group network, `make fit-mlp`; not loaded at 0. At 1.0 it needs
-  `ATTRIBUTION_COMBINER_PATH=data/models/combiner/attribution_combiner_group_mlp.json` and named one wrong group
+  `ATTRIBUTION_COMBINER_PATH=data/models/combiner/attribution_combiner_group_mlp_nb_count.json` and named one wrong group
   on the ATT&CK folds on 2026-10-01)
 - `TECHNIQUE_EXEMPLARS_ENABLED=true` (labelled public report sentences as acceptance evidence, `make exemplars`
   then `make fit-acceptance`; CTI-HAL median accepted-technique recall per report 0.31 -> 0.42; `false` restores

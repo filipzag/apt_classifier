@@ -1251,10 +1251,10 @@ to analysts: on its own it is weaker than the origin aggregated from the ranked 
 
 The group forest votes at weight 0. The source-country vote is on by default since 2026-10-01
 (`SOURCE_COUNTRY_WEIGHT=1.0`), together with the combiner refitted with it as a feature (feature
-schema 2, `data/models/combiner/attribution_combiner.json`). To turn it off, set
+schema 2, `data/models/combiner/attribution_combiner_nb_count.json`). To turn it off, set
 `SOURCE_COUNTRY_WEIGHT=0` with
-`ATTRIBUTION_COMBINER_PATH=data/models/combiner/attribution_combiner_no_country.json`, the previous
-schema-1 combiner. In the attribution benchmark's unknown-actor arm, the voting forest is refitted on the knowledge base without the removed actor,
+`ATTRIBUTION_COMBINER_PATH=data/models/combiner/attribution_combiner_no_country_nb_count.json`, the
+previous schema-1 combiner. In the attribution benchmark's unknown-actor arm, the voting forest is refitted on the knowledge base without the removed actor,
 because masking the actor's output would still leak its profile into the other votes. The combiner
 fit's unknown lists do the same.
 
@@ -1267,7 +1267,8 @@ campaigns as five averaged networks (MRR 0.71 against 0.69) and takes about 20 s
 member joins the `learned_profile` family only when `GROUP_MLP_WEIGHT` > 0. At the default 0 it is
 not loaded, so the fusion and the combiner fingerprint are unchanged. In the unknown-actor arm the
 benchmark refits it without the removed actor. Measured on 2026-10-01 at weight 1.0 with its own
-combiner (`attribution_combiner_group_mlp.json`), before the anonymizer fix of 21.3.14: anonymized
+combiner (`attribution_combiner_group_mlp.json`, relabelled as
+`attribution_combiner_group_mlp_nb_count.json` on 2026-10-03), before the anonymizer fix of 21.3.14: anonymized
 CTI-HAL top-1 went from 0.455 to 0.473 and as reported stayed at 0.564, but on the ATT&CK folds
 top-1 fell from 0.830 to 0.817 with one wrong name (Silence named as Kimsuky). It fails the naming
 gate and is not adopted.
@@ -1573,8 +1574,9 @@ the real reports against 60% and 51% for the fused ranking, so the combiner is t
 Feature schema 2 (2026-09-30) adds the random-forest `source_country` vote (9.13) to the
 per-classifier features, and the fit's unknown-actor lists refit the country forest without the
 removed actor. An artifact lists the features it was fitted on and is scored on those columns, so
-the schema-2 default artifact (`attribution_combiner.json`, fitted with the country vote at 1.0)
-and the schema-1 opt-out artifact (`attribution_combiner_no_country.json`) both load; a
+the schema-2 default artifact (`attribution_combiner_nb_count.json`, fitted with the country vote
+at 1.0) and the schema-1 opt-out artifact (`attribution_combiner_no_country_nb_count.json`) both
+load; a
 newer schema, unknown feature names or mismatched vectors are still refused.
 
 - **Model.** A conditional logit (listwise softmax) over the top-N fused candidates (N = 20):
@@ -3313,7 +3315,7 @@ longer re-ranking (real 0.789 → 0.719) because it scores the gate's rank-1 can
 
 #### 21.3.9 Learned attribution combiner (2026-09-30)
 
-Artifact `data/models/combiner/attribution_combiner.json` (fit on seeds 11/23/37, 2,609 known
+Artifact `data/models/combiner/attribution_combiner_nb_count.json` (fit on seeds 11/23/37, 2,609 known
 lists of which 458 clean and 2,151 randomised, 153 unknown-actor lists; L2 0.3 chosen on the
 mixed out-of-fold MRR). Group-level five-fold cross-validation, out of fold, against the RRF order
 of the same lists:
@@ -3354,6 +3356,18 @@ out-of-fold mixed top-1 0.727 vs RRF 0.404 on its own lists, but on the seed-7 f
 better, 4 worse), 36 and 15 names all correct. Making the training regime harsher did not close the
 transfer gap; the gap sits in technique recall on real text, which the labelled-sentence
 exemplars (21.3.10) then targeted.
+
+**Relabel for the counted Naive Bayes negative term (2026-10-03).** The pipeline fingerprint
+hashes every classifier source file, so counting the Naive Bayes negative term (9.1) moved it.
+Training lists never carry negative answers, so the combiner's inputs did not change. A refit
+from the cached lists (`--reuse-cache`) reproduced bitwise-identical weights, and with it the
+seed-7 ATT&CK folds (153 known and 25 removed-actor rows) and both CTI-HAL runs (55 + 55 reports)
+matched the pre-fix runs row for row. The default, no-country and group-network artifacts are
+therefore relabelled copies (`*_nb_count.json`, with a `metadata.fingerprint_refreshed` entry)
+written next to the originals. The originals keep loading on checkouts without the change, which
+share `data/models`. The Top-three confidence labels (on `frontend-next`) pin the combiner's
+fingerprint and file hash, so after a merge they need `make fit-confidence-labels` on attribution
+artifacts rerun with the relabelled combiner.
 
 #### 21.3.10 Labelled-sentence exemplars: technique recall on real text (2026-09-30)
 

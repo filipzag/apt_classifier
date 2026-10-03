@@ -584,7 +584,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--output",
         type=Path,
-        default=REPO_ROOT / "data" / "models" / "combiner" / "attribution_combiner.json",
+        default=REPO_ROOT / "data" / "models" / "combiner" / "attribution_combiner_nb_count.json",
     )
     parser.add_argument(
         "--report",

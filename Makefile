@@ -69,7 +69,7 @@ check-regression:
 
 # Fit the calibrated technique-acceptance model on the public dev splits (never test).
 # Learned attribution combiner: ATT&CK folds only (training seeds), randomised evidence regimes,
-# unknown-actor lists, group-level CV; writes data/models/combiner/attribution_combiner.json.
+# unknown-actor lists, group-level CV; writes data/models/combiner/attribution_combiner_nb_count.json.
 fit-combiner:
 	PYTHONPATH=. $(PYTHON) scripts/fit_attribution_combiner.py --seeds 11 23 37 --variants 5 --unknown-all --overwrite
 
