@@ -1,3 +1,5 @@
+from math import fsum
+
 from apt_classifier.classifiers.base import (
     ClassifierContext,
     ClassifierResult,
@@ -34,12 +36,13 @@ class CampaignClassifier:
                 for tid, match in matches.items()
                 if match.group_technique_id in techniques
             }
-            numerator = sum(
+            # fsum: exactly rounded, so the score does not depend on set or dict iteration order
+            numerator = fsum(
                 min(observed[tid], idf_for(context, match.group_technique_id)) * match.factor
                 for tid, match in campaign_known_matches.items()
             )
             union = set(observed) | techniques
-            denominator = sum(
+            denominator = fsum(
                 max(
                     observed.get(tid, 0.0),
                     idf_for(context, tid) if tid in techniques else 0.0,

@@ -576,7 +576,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--lists-cache",
         type=Path,
-        default=REPO_ROOT / "data" / "models" / "combiner" / "training_lists.jsonl.gz",
+        default=REPO_ROOT / "data" / "models" / "combiner" / "training_lists_fsum.jsonl.gz",
     )
     parser.add_argument(
         "--reuse-cache", action="store_true", help="skip generation and fit from the cache"
@@ -584,7 +584,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--output",
         type=Path,
-        default=REPO_ROOT / "data" / "models" / "combiner" / "attribution_combiner_nb_count.json",
+        default=REPO_ROOT / "data" / "models" / "combiner" / "attribution_combiner_fsum.json",
     )
     parser.add_argument(
         "--report",

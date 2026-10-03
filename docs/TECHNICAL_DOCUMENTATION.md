@@ -1251,10 +1251,9 @@ to analysts: on its own it is weaker than the origin aggregated from the ranked 
 
 The group forest votes at weight 0. The source-country vote is on by default since 2026-10-01
 (`SOURCE_COUNTRY_WEIGHT=1.0`), together with the combiner refitted with it as a feature (feature
-schema 2, `data/models/combiner/attribution_combiner_nb_count.json`). To turn it off, set
-`SOURCE_COUNTRY_WEIGHT=0` with
-`ATTRIBUTION_COMBINER_PATH=data/models/combiner/attribution_combiner_no_country_nb_count.json`, the
-previous schema-1 combiner. In the attribution benchmark's unknown-actor arm, the voting forest is refitted on the knowledge base without the removed actor,
+schema 2, `data/models/combiner/attribution_combiner_fsum.json`). To turn it off, set
+`SOURCE_COUNTRY_WEIGHT=0` with a combiner fitted without the country vote (see the 2026-10-03 refit
+in 21.3.9). In the attribution benchmark's unknown-actor arm, the voting forest is refitted on the knowledge base without the removed actor,
 because masking the actor's output would still leak its profile into the other votes. The combiner
 fit's unknown lists do the same.
 
@@ -1267,8 +1266,8 @@ campaigns as five averaged networks (MRR 0.71 against 0.69) and takes about 20 s
 member joins the `learned_profile` family only when `GROUP_MLP_WEIGHT` > 0. At the default 0 it is
 not loaded, so the fusion and the combiner fingerprint are unchanged. In the unknown-actor arm the
 benchmark refits it without the removed actor. Measured on 2026-10-01 at weight 1.0 with its own
-combiner (`attribution_combiner_group_mlp.json`, relabelled as
-`attribution_combiner_group_mlp_nb_count.json` on 2026-10-03), before the anonymizer fix of 21.3.14: anonymized
+combiner (`attribution_combiner_group_mlp.json`, on earlier classifier code), before the anonymizer
+fix of 21.3.14: anonymized
 CTI-HAL top-1 went from 0.455 to 0.473 and as reported stayed at 0.564, but on the ATT&CK folds
 top-1 fell from 0.830 to 0.817 with one wrong name (Silence named as Kimsuky). It fails the naming
 gate and is not adopted.
@@ -1574,9 +1573,8 @@ the real reports against 60% and 51% for the fused ranking, so the combiner is t
 Feature schema 2 (2026-09-30) adds the random-forest `source_country` vote (9.13) to the
 per-classifier features, and the fit's unknown-actor lists refit the country forest without the
 removed actor. An artifact lists the features it was fitted on and is scored on those columns, so
-the schema-2 default artifact (`attribution_combiner_nb_count.json`, fitted with the country vote
-at 1.0) and the schema-1 opt-out artifact (`attribution_combiner_no_country_nb_count.json`) both
-load; a
+a schema-2 artifact (fitted with the country vote at 1.0) and a schema-1 artifact (the original
+no-country combiner) both load; a
 newer schema, unknown feature names or mismatched vectors are still refused.
 
 - **Model.** A conditional logit (listwise softmax) over the top-N fused candidates (N = 20):
@@ -3315,7 +3313,7 @@ longer re-ranking (real 0.789 → 0.719) because it scores the gate's rank-1 can
 
 #### 21.3.9 Learned attribution combiner (2026-09-30)
 
-Artifact `data/models/combiner/attribution_combiner_nb_count.json` (fit on seeds 11/23/37, 2,609 known
+Original artifact `data/models/combiner/attribution_combiner.json` (fit on seeds 11/23/37, 2,609 known
 lists of which 458 clean and 2,151 randomised, 153 unknown-actor lists; L2 0.3 chosen on the
 mixed out-of-fold MRR). Group-level five-fold cross-validation, out of fold, against the RRF order
 of the same lists:
@@ -3368,6 +3366,34 @@ written next to the originals. The originals keep loading on checkouts without t
 share `data/models`. The Top-three confidence labels (on `frontend-next`) pin the combiner's
 fingerprint and file hash, so after a merge they need `make fit-confidence-labels` on attribution
 artifacts rerun with the relabelled combiner.
+
+**Refit for exactly rounded classifier sums (2026-10-03).** Every order-dependent float sum in the
+classifiers (Naive Bayes, IDF cosine, Jaccard, campaign, software, CyberRE) is now `math.fsum`,
+so no score depends on set iteration order or on the Python version's `sum()`, and the ATT&CK
+parent-child map is built once per
+technique table (a scoring pass 0.41 s -> 0.15 s, outputs bit-identical). Naive Bayes scores move
+by a few units in the last place, so the combiner was refitted (`make fit-combiner`, seeds
+11/23/37, today's pipeline), not relabelled: `attribution_combiner_fsum.json` with its lists in
+`training_lists_fsum.jsonl.gz`, both next to the earlier files. The code change alone is
+outcome-neutral: with the previous weights stamped for the new code, the seed-7 ATT&CK folds and
+both CTI-HAL runs had 0 rank changes. The refit's differences therefore come from retraining on
+today's lists, which have drifted since 2026-09-30 (only 757 of 2,594 shared lists keep their
+shortlist order; RRF mixed top-1 on them 0.425 -> 0.420).
+
+| Set | Before (2026-09-30 weights) | Refit |
+|---|---|---|
+| ATT&CK folds, seed 7 | top-1 0.830, top-5 0.961, MRR 0.880, 32 named, all correct, 0/25 removed named | top-1 0.817 (-2 folds), top-5 0.961, MRR 0.871, 32 named, all correct, 0/25 removed named |
+| CTI-HAL anonymized | top-1 0.455, top-5 0.600, MRR 0.512, 10 named, all correct | top-1 0.473 (+1 report), top-5 0.600, MRR 0.521, 10 named, all correct |
+| CTI-HAL as reported | top-1 0.564, top-5 0.727, MRR 0.636, 15 named, all correct | unchanged |
+| Elastic strict (open set) | top-1 4/8, 1 named, open set 0 named | unchanged |
+| Cross-validation, mixed | top-1 0.722, MRR 0.812 (2,565 lists, L2 0.3) | top-1 0.711, MRR 0.804 (2,536 lists, L2 3.0) |
+
+Cross-validation top-1 is 0.0014 short of the "within 0.01" bar used for combiner refits; on
+today's lists the 2026-09-30 weights score top-1 0.730 and the refit 0.731, so the gap is the
+list set, not the fit. Adopted by the product owner on 2026-10-03 with that caveat. The
+no-country and group-network combiners were fitted for the earlier classifier code and do not
+load on this code until they are refitted the same way (`--set source_country_weight=0` or
+`--set group_mlp_weight=1.0`).
 
 #### 21.3.10 Labelled-sentence exemplars: technique recall on real text (2026-09-30)
 

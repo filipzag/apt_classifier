@@ -105,7 +105,8 @@ class SoftwareClassifier:
         software_groups = kb_mapping(context.kb, "software_groups")
         group_software = kb_mapping(context.kb, "group_software")
         weights = self._weights(context)
-        total = sum(weights.values())
+        # fsum: exactly rounded, so neither sum depends on set or dict iteration order
+        total = math.fsum(weights.values())
         scores: dict[str, float] = {}
         signals: dict[str, tuple[str, ...]] = {}
         for group_id in group_ids(context):
@@ -117,7 +118,7 @@ class SoftwareClassifier:
                     if group_id in set(software_groups.get(software_id, ()))
                 }
             if linked and total > 0:
-                scores[group_id] = sum(weights[software_id] for software_id in linked) / total
+                scores[group_id] = math.fsum(weights[software_id] for software_id in linked) / total
                 signals[group_id] = tuple(sorted(linked))
         return build_result(
             self.name,

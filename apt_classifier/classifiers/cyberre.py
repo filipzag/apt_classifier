@@ -1,3 +1,5 @@
+from math import fsum
+
 from apt_classifier.classifiers.base import (
     ClassifierContext,
     ClassifierEvidence,
@@ -37,7 +39,7 @@ class CyberREClassifier:
                 )
                 for technique_id in overlap
             )
-            scores[group_id] = sum(item.weight for item in group_contributions)
+            scores[group_id] = fsum(item.weight for item in group_contributions)
             contributions[group_id] = group_contributions
             signals[group_id] = tuple(
                 f"cyberre:{technique_id}:rank:{round(1.0 / inferred[technique_id])}"

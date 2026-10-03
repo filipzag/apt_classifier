@@ -1,4 +1,4 @@
-from math import sqrt
+from math import fsum, sqrt
 
 from apt_classifier.classifiers.base import (
     ClassifierContext,
@@ -29,8 +29,9 @@ class IDFOverlapClassifier:
 
     def classify(self, context: ClassifierContext) -> ClassifierResult:
         evidence_techniques = ranking_techniques(context)
+        # fsum throughout: exactly rounded, so no score depends on set or dict iteration order
         observed_norm = sqrt(
-            sum(
+            fsum(
                 (confidence * idf_for(context, tid)) ** 2
                 for tid, confidence in evidence_techniques.items()
             )
@@ -39,14 +40,14 @@ class IDFOverlapClassifier:
         evidence = {}
         for group_id in group_ids(context):
             known = group_techniques(context, group_id)
-            group_norm = sqrt(sum(idf_for(context, tid) ** 2 for tid in known)) ** self.length_norm
+            group_norm = sqrt(fsum(idf_for(context, tid) ** 2 for tid in known)) ** self.length_norm
             matches = hierarchy_matches(context, group_id)
             weights = {
                 tid: evidence_techniques[tid] * idf_for(context, tid) ** 2 * match.factor
                 for tid, match in matches.items()
             }
             denominator = observed_norm * group_norm
-            score = sum(weights.values()) / denominator if denominator else 0.0
+            score = fsum(weights.values()) / denominator if denominator else 0.0
             if score <= 0.0:
                 continue
             scores[group_id] = score

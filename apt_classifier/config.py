@@ -141,8 +141,8 @@ class Settings(BaseSettings):
     profile_forest_family_weight: float = 1.0
     # Default since 2026-10-01 by the product owner's decision (docs 21.3.11): real reports improve
     # (anonymized top-1 0.436 -> 0.455, 8 -> 10 names) at the cost of one ATT&CK fold (0.837 -> 0.830).
-    # It needs the combiner fitted with it (data/models/combiner/attribution_combiner_nb_count.json);
-    # to turn it off use 0.0 with attribution_combiner_no_country_nb_count.json. The group forest
+    # It needs the combiner fitted with it (data/models/combiner/attribution_combiner_fsum.json);
+    # to turn it off use 0.0 with a combiner fitted without it (docs 21.3.9). The group forest
     # stays at 0: it hurts
     # real reports at every weight tried.
     source_country_weight: float = 1.0
@@ -151,7 +151,7 @@ class Settings(BaseSettings):
     # named software -> group. It joins the ensemble, in the learned_profile family, only with a
     # positive weight; at 0 it is not loaded and the fusion and combiner fingerprint are unchanged.
     # Measured 2026-10-01 at 1.0 with its own combiner (data/models/combiner/
-    # attribution_combiner_group_mlp_nb_count.json): CTI-HAL anonymized top-1 0.455 -> 0.473, as reported
+    # attribution_combiner_group_mlp.json, on earlier classifier code): CTI-HAL anonymized top-1 0.455 -> 0.473, as reported
     # 0.564 -> 0.564, no wrong names; but on the ATT&CK folds top-1 0.830 -> 0.817 and one wrong
     # name (Silence named as Kimsuky), so it fails the naming gate and stays at 0.
     group_mlp_enabled: bool = True
@@ -235,12 +235,13 @@ class Settings(BaseSettings):
     # model over per-classifier ranks, discrimination channels and evidence-regime features,
     # blended half-and-half with the RRF order; the naming gate then scores the leader against
     # the union of both shortlists. Adopted 2026-09-30 (docs 21.3.9): folds top-1 0.601 -> 0.830,
-    # CTI-HAL 0.509 -> 0.527, every named group correct on both sets. Loads fail-closed.
+    # CTI-HAL 0.509 -> 0.527, every named group correct on both sets. Refitted 2026-10-03 on the
+    # hardened classifiers (folds 0.817, CTI-HAL anonymized 0.473). Loads fail-closed.
     attribution_combiner_enabled: bool = True
-    # attribution_combiner.json relabelled for the counted Naive Bayes negative term (2026-10-03,
-    # docs 21.3.9): same weights, new fingerprint; code without that change loads the original
+    # refit 2026-10-03 for the exactly rounded classifier sums (docs 21.3.9); the earlier artifacts
+    # stay next to it for checkouts with the previous classifier code
     attribution_combiner_path: Path = (
-        PROJECT_ROOT / "data" / "models" / "combiner" / "attribution_combiner_nb_count.json"
+        PROJECT_ROOT / "data" / "models" / "combiner" / "attribution_combiner_fsum.json"
     )
     attribution_combiner_top_n: int = 20
     attribution_combiner_blend: float = 0.5

@@ -1,3 +1,4 @@
+import threading
 from dataclasses import dataclass, field, replace
 from math import log
 from typing import Any, Protocol
@@ -120,6 +121,46 @@ def group_techniques(context: ClassifierContext, group_id: str) -> set[str]:
     return set(kb_mapping(context.kb, "group_techniques").get(group_id, ()))
 
 
+_CHILDREN_CACHE: dict[int, tuple[dict[str, Any], int, str, dict[str, frozenset[str]]]] = {}
+_CHILDREN_CACHE_SIZE = 8
+_CHILDREN_CACHE_LOCK = threading.Lock()
+
+
+def children_by_parent(kb: Any) -> dict[str, frozenset[str]]:
+    """Sub-technique ids per parent technique id, built once per technique table instead of on
+    every call (it was most of the classifiers' run time). An entry is reused only for the same
+    table object with the size and ATT&CK version it was built from. A new ATT&CK release is
+    always a new table: make ingest writes a new knowledge base, which the API loads at start
+    and a new Streamlit session loads when the file has changed. Loaded tables are never edited
+    in place; code that edits one after scoring must build a new table or change kb.version."""
+    techniques = kb_mapping(kb, "techniques")
+    if not techniques:
+        return {}
+    key = id(techniques)
+    version = str(getattr(kb, "version", "") or "")
+    size = len(techniques)
+    with _CHILDREN_CACHE_LOCK:
+        cached = _CHILDREN_CACHE.get(key)
+        if (
+            cached is not None
+            and cached[0] is techniques
+            and cached[1] == size
+            and cached[2] == version
+        ):
+            return cached[3]
+    children: dict[str, set[str]] = {}
+    for technique_id, technique in techniques.items():
+        parent_id = _record_value(technique, "parent_id", None)
+        if parent_id:
+            children.setdefault(str(parent_id), set()).add(technique_id)
+    mapping = {parent_id: frozenset(ids) for parent_id, ids in children.items()}
+    with _CHILDREN_CACHE_LOCK:
+        if key not in _CHILDREN_CACHE and len(_CHILDREN_CACHE) >= _CHILDREN_CACHE_SIZE:
+            _CHILDREN_CACHE.pop(next(iter(_CHILDREN_CACHE)))
+        _CHILDREN_CACHE[key] = (techniques, size, version, mapping)
+    return mapping
+
+
 def hierarchy_matches_for(
     context: ClassifierContext,
     group_id: str | None,
@@ -137,11 +178,7 @@ def hierarchy_matches_for(
         else group_techniques(context, group_id or "")
     )
     techniques = kb_mapping(context.kb, "techniques")
-    children_by_parent: dict[str, set[str]] = {}
-    for technique_id, technique in techniques.items():
-        parent_id = _record_value(technique, "parent_id", None)
-        if parent_id:
-            children_by_parent.setdefault(str(parent_id), set()).add(technique_id)
+    children = children_by_parent(context.kb)
     output: dict[str, HierarchyMatch] = {}
     for technique_id in observed:
         if technique_id in known:
@@ -164,7 +201,7 @@ def hierarchy_matches_for(
                 0.95,
             )
             continue
-        documented_children = sorted(children_by_parent.get(technique_id, set()) & known)
+        documented_children = sorted(children.get(technique_id, frozenset()) & known)
         if documented_children:
             output[technique_id] = HierarchyMatch(
                 technique_id,
@@ -189,10 +226,8 @@ def negative_hierarchy_factor(
         return 1.0
     if context.parent_policy == "exact_only":
         return 0.0
-    techniques = kb_mapping(context.kb, "techniques")
-    for known_id in known:
-        if str(_record_value(techniques.get(known_id), "parent_id", "")) == technique_id:
-            return 0.85
+    if children_by_parent(context.kb).get(technique_id, frozenset()) & known:
+        return 0.85
     return 0.0
 
 

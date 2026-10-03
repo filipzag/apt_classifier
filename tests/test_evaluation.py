@@ -181,9 +181,7 @@ def test_hierarchy_matching_is_maximum_on_every_small_case():
 
 def test_parent_aware_metrics_do_not_depend_on_the_hash_seed():
     """Set iteration order of strings follows PYTHONHASHSEED; the metric must not."""
-    import os
-    import subprocess
-    import sys
+    from tests.child_python import run_child
 
     script = (
         "from types import SimpleNamespace as N\n"
@@ -195,16 +193,7 @@ def test_parent_aware_metrics_do_not_depend_on_the_hash_seed():
         " [P.from_ranked('c', ('T1566.001', 'T1566.002'))], kb=kb)\n"
         "print(m['parent_aware_f1'])\n"
     )
-    values = set()
-    for seed in ("0", "1", "2", "3", "4", "5"):
-        completed = subprocess.run(
-            [sys.executable, "-c", script],
-            check=True,
-            capture_output=True,
-            text=True,
-            env={**os.environ, "PYTHONHASHSEED": seed},
-        )
-        values.add(completed.stdout.strip())
+    values = {run_child(script, seed=seed).strip() for seed in ("0", "1", "2", "3", "4", "5")}
     assert values == {"1.0"}
 
 
