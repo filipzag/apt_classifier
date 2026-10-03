@@ -1311,3 +1311,127 @@ def test_cluster_replay_uses_the_scope_each_artifact_recorded(tmp_path, capsys):
     assert recorded["scope"] == "full" and len(recorded["cluster_correct"]) == 1
     narrowed = replayed("--scope", "documented")
     assert narrowed["scope"] == "documented" and narrowed["cluster_correct"] == []
+
+
+def test_fold_lexical_index_hides_held_out_sentences_exactly():
+    """The BM25 index holds the anonymized procedure sentences as documents: per fold it is
+    rebuilt without the held-out ones, equal to an index built without those sentences."""
+    import copy
+    from types import SimpleNamespace
+
+    from apt_classifier.attack.kb import AttackKnowledgeBase, Group, Technique
+    from apt_classifier.retrieve import LexicalTechniqueIndex
+    from apt_classifier.vectorstore import normalize_procedure_text
+    from scripts.attribution_benchmark import build_folds, fold_lexical_index, hide_lexical
+
+    kb = AttackKnowledgeBase(
+        version="t",
+        techniques={
+            f"T{i}": Technique(id=f"T{i}", name=f"Technique {i}", description=f"Generic {i}.")
+            for i in range(1, 7)
+        },
+        groups={
+            "G1": Group(
+                id="G1",
+                name="Alpha",
+                technique_ids=[f"T{i}" for i in range(1, 7)],
+                technique_behaviors={
+                    f"T{i}": [f"Alpha used the zebra{i} loader with quokka{i} beacons."]
+                    for i in range(1, 7)
+                },
+            )
+        },
+    )
+    kb.recompute_statistics()
+    fields = ("name", "description", "procedure")
+    index = LexicalTechniqueIndex.from_kb(kb, fields=fields)
+    (fold,) = build_folds(
+        kb, coverage=0.5, seed=1, min_behaviors=5, min_techniques=5, max_observations=12
+    )
+    leaky = [hit for text in fold.observations for hit in index.query(text, n_results=5)]
+    assert any(normalize_procedure_text(h.document) in fold.held_out_texts for h in leaky)
+
+    filtered, removed = fold_lexical_index(index, fold.held_out_texts)
+    assert removed == len(fold.observations)
+    # equal to an index built from a knowledge base without the held-out sentences
+    clean_kb = copy.deepcopy(kb)
+    for tid in fold.held_out_techniques:
+        del clean_kb.groups["G1"].technique_behaviors[tid]
+    clean = LexicalTechniqueIndex.from_kb(clean_kb, fields=fields)
+    for text in fold.observations:
+        got = [(h.document, round(h.similarity, 9)) for h in filtered.query(text, n_results=8)]
+        want = [(h.document, round(h.similarity, 9)) for h in clean.query(text, n_results=8)]
+        assert got == want
+        assert not any(normalize_procedure_text(d) in fold.held_out_texts for d, _ in got)
+
+    engine = SimpleNamespace(lexical_index=index)
+    assert hide_lexical(engine, fold.held_out_texts) == removed
+    assert (
+        engine.lexical_index is not index
+        and len(engine.lexical_index.documents) == len(index.documents) - removed
+    )
+    assert hide_lexical(SimpleNamespace(lexical_index=index), frozenset()) is None
+    assert fold_lexical_index(index, frozenset({"absent"})) == (index, 0)
+    # no index while retrieval is lexical/hybrid: retrieval would build an unfiltered one
+    with pytest.raises(RuntimeError, match="no lexical index"):
+        hide_lexical(SimpleNamespace(lexical_index=None), fold.held_out_texts)
+    dense = SimpleNamespace(
+        lexical_index=None, settings=SimpleNamespace(technique_retrieval_mode="dense")
+    )
+    assert hide_lexical(dense, fold.held_out_texts) is None
+
+
+def test_fold_lexical_index_removes_every_document_of_a_hidden_sentence():
+    """One held-out sentence can be several BM25 documents (a technique and its sub-technique,
+    or several groups): all of them go."""
+    from apt_classifier.retrieve import LexicalDocument, LexicalTechniqueIndex
+    from scripts.attribution_benchmark import fold_lexical_index
+
+    def doc(i, tid, text):
+        return LexicalDocument(
+            f"{tid}:procedure:{i:04d}", tid, "procedure", text, tuple(text.split())
+        )
+
+    documents = (
+        doc(0, "T1", "hidden zebra sentence"),
+        doc(1, "T1.001", "hidden zebra sentence"),
+        doc(2, "T2", "other quokka sentence"),
+    )
+    frequencies = {}
+    for d in documents:
+        for token in set(d.tokens):
+            frequencies[token] = frequencies.get(token, 0) + 1
+    index = LexicalTechniqueIndex(documents, frequencies, 3.0)
+    filtered, removed = fold_lexical_index(index, frozenset({"hidden zebra sentence"}))
+    assert removed == 2
+    assert [d.technique_id for d in filtered.documents] == ["T2"]
+    assert filtered.document_frequencies["sentence"] == 1
+    assert filtered.query("hidden zebra", n_results=5) == []
+
+
+def test_fold_leak_control_is_recorded_and_checked():
+    from scripts.collect_verification import compose, fold_leak_control_warning
+    from scripts.fit_attribution_combiner import lists_leak_control
+
+    assert lists_leak_control([{"leak_control": "dense+lexical"}] * 2) == "dense+lexical"
+    # a reused pre-fix cache has no marker and is not relabelled as clean
+    assert lists_leak_control([{"seed": 11}]) == "dense (unrecorded)"
+    assert lists_leak_control([{"leak_control": "dense+lexical"}, {}]).startswith("mixed:")
+
+    old = {"benchmark": "attribution_text_heldout", "parameters": {"seed": 7}}
+    new = {"benchmark": "attribution_text_heldout", "parameters": {"leak_control": "dense+lexical"}}
+    real = {"benchmark": "attribution_cti_hal_reports", "parameters": {"seed": 7}}
+    assert "BM25" in fold_leak_control_warning(old)
+    assert fold_leak_control_warning(new) is None
+    assert fold_leak_control_warning(real) is None and fold_leak_control_warning(None) is None
+    report = compose(
+        public=None,
+        curated=None,
+        evidenceforge={},
+        public_path=Path("p.json"),
+        curated_path=Path("c.json"),
+        gates=None,
+        attribution={**old, "metrics": {}},
+        attribution_path=Path("a.json"),
+    )
+    assert any("BM25" in w for w in report.get("warnings", []))

@@ -280,6 +280,21 @@ def cti_hal_headline_warning(payload: dict[str, Any] | None) -> str | None:
     )
 
 
+def fold_leak_control_warning(payload: dict[str, Any] | None) -> str | None:
+    """ATT&CK fold runs hide each fold's held-out sentences from the dense store and, since
+    2026-10-03, from the BM25 index (``parameters.leak_control == "dense+lexical"``); an
+    unmarked fold artifact predates that and its fold numbers are optimistic (docs 21.3.5)."""
+    if payload is None or payload.get("benchmark") != "attribution_text_heldout":
+        return None
+    if (payload.get("parameters") or {}).get("leak_control") == "dense+lexical":
+        return None
+    return (
+        "attribution_text_heldout was measured before held-out sentences were hidden from the "
+        "BM25 index (no parameters.leak_control); its fold numbers are optimistic, regenerate it "
+        "with `make benchmark-attribution` (docs 21.3.5)"
+    )
+
+
 def compose(
     *,
     public: dict[str, Any] | None,
@@ -363,9 +378,16 @@ def compose(
         else None,
         "superseded": "data/audits/superseded/README.md",
     }
-    warning = cti_hal_headline_warning(cti_hal_attribution)
-    if warning:
-        report["warnings"] = [warning]
+    warnings = [
+        warning
+        for warning in (
+            cti_hal_headline_warning(cti_hal_attribution),
+            fold_leak_control_warning(attribution),
+        )
+        if warning
+    ]
+    if warnings:
+        report["warnings"] = warnings
     return report
 
 

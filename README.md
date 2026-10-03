@@ -108,8 +108,9 @@ typed by hand.
   `docs/EVIDENCEFORGE_EVALUATION.md`.
 - `scripts/attribution_benchmark.py` (`make benchmark-attribution`; `--pipeline production` for the technique verifier, spends credit) — attribution gate: held-out,
   anonymized procedure sentences per group run through the real pipeline (text in, group out),
-  with a per-fold leak filter and an unknown-actor arm for open-set metrics. Self-consistency over
-  the ATT&CK answer key, NOT real-world attribution accuracy.
+  with a per-fold leak filter (dense store and, since 2026-10-03, the BM25 index; earlier fold
+  numbers are optimistic, docs 21.3.5) and an unknown-actor arm for open-set metrics.
+  Self-consistency over the ATT&CK answer key, NOT real-world attribution accuracy.
 - `scripts/ensemble_benchmark.py` — legacy technique-ID self-consistency diagnostic.
 - `scripts/prepare_cti_hal.py` + `make benchmark-cti-hal` — CTI-HAL (dessertlab): 968 human-annotated
   statements from 55 real reports on six named groups, used for statement-level mapping and the only
