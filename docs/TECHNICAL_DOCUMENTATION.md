@@ -3072,7 +3072,23 @@ group-balanced random subset of real reports (to fit a credit budget); the run a
 LLM call of the first fold fails and stops, keeping the measured folds and recording
 `truncated_at`, if the API goes away mid-run. A per-fold store proxy
 hides the group's own evidence (technique-index hits identical to a held-out sentence and
-the group's actor-behaviour documents for the held-out techniques). An *unknown-actor* arm
+the group's actor-behaviour documents for the held-out techniques), and since 2026-10-03 the
+BM25 lexical index is rebuilt per fold without the documents whose text is a held-out
+sentence (`fold_lexical_index`; document frequencies and average length recomputed). Before
+that, only the dense index was filtered and a held-out sentence was the top BM25 hit for
+1,268 of 1,272 seed-7 fold observations; fold artifacts, design/confirmation seeds and the
+combiner lists made before then carry that leak (`parameters.leak_control` is `dense+lexical`
+from then on, and the combiner records `lists_leak_control`). Not hidden: the fold group's
+one-word variants of a held sentence filed under other techniques (about 1.4% of queries have
+one in the BM25 top 3) and, with `TECHNIQUE_INCLUDE_SYNTHETIC` on, synthetic paraphrases of
+procedure examples. Measured on 2026-10-03 with the shipped combiner
+(`data/audits/bm25_fold_hiding_2026-10-03/`): seed 7 technique recall 0.723 -> 0.604, top-1 0.830 ->
+0.824, MRR 0.880 -> 0.867, named 32 -> 26 (0 wrong either way, 0/25 removed actors named); seed 41
+recall 0.740 -> 0.600, top-1 0.863 -> 0.824, named 37 -> 33. 153 (seed 7) and 190 (seed 41) correctly
+accepted techniques existed only through the leak. A combiner refitted on leak-closed lists did not
+beat the shipped one (seed 7 top-1 0.804, seed 41 0.817; CTI-HAL as reported 0.564 -> 0.545), so the
+shipped combiner stays; the refit is kept as `attribution_combiner_bm25_clean_rejected.json`. Fold
+numbers quoted elsewhere in this document before 2026-10-03 were measured with the leak. An *unknown-actor* arm
 removes sampled groups from the knowledge base and hides all their documents, so the
 correct answer is "no named group"; `unknown_recall`, `false_named_attribution_rate`,
 `named_coverage` and `named_risk` come from `evaluation.evaluate_attribution_predictions`.
@@ -3081,7 +3097,8 @@ stages, accepted techniques and the technique recall of the mapping step.
 
 Interpretation: group technique lists, technique-profile centroids and descriptions still
 contain the held-out techniques, so this is self-consistency over the ATT&CK answer key
-with the text leak removed, not field attribution accuracy. It and the CTI-HAL
+with the text leak removed (fully only since 2026-10-03, see above), not field attribution
+accuracy. It and the CTI-HAL
 real-report run (21.3.4b) measure the stage machinery; only this one has an unknown-actor arm.
 
 `scripts/ensemble_benchmark.py` is the older technique-ID version (perfect mapping

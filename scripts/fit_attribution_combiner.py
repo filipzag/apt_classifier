@@ -198,6 +198,14 @@ def perturb(
     return ctx
 
 
+def lists_leak_control(records: Iterable[dict[str, Any]]) -> str:
+    """The leak control the training lists were generated under, read from the records
+    themselves (a reused cache keeps its own): lists written before 2026-10-03 carry no marker
+    and hid fold evidence from the dense store only."""
+    markers = {str(r.get("leak_control") or "dense (unrecorded)") for r in records}
+    return markers.pop() if len(markers) == 1 else "mixed: " + ", ".join(sorted(markers))
+
+
 def generate_lists(
     engine: AttributionEngine,
     bench: Any,
@@ -213,6 +221,7 @@ def generate_lists(
     """Clean and randomised lists for every training seed; returns (lists, stats)."""
     kb = engine.kb
     base_store = engine.store
+    base_lexical = getattr(engine, "lexical_index", None)
     records: list[dict[str, Any]] = []
     stats: dict[str, Any] = {"seeds": {}, "pool_techniques": 0}
     pool: dict[str, list[float]] = {}
@@ -229,6 +238,8 @@ def generate_lists(
                     held_out_techniques=fold.held_out_techniques,
                     held_out_texts=fold.held_out_texts,
                 )
+                engine.lexical_index = base_lexical
+                bench.hide_lexical(engine, fold.held_out_texts)
                 state = engine.analyze(bench._ledger(fold))  # noqa: SLF001
                 clean_states.append((fold, state))
                 documented = _documented(kb, fold.group_id)
@@ -254,7 +265,13 @@ def generate_lists(
                     skipped += 1
                 else:
                     records.append(
-                        {"seed": seed, "group_id": fold.group_id, "variant": 0, **lst.to_dict()}
+                        {
+                            "seed": seed,
+                            "group_id": fold.group_id,
+                            "variant": 0,
+                            "leak_control": bench.LEAK_CONTROL,
+                            **lst.to_dict(),
+                        }
                     )
                     clean += 1
                 for variant in range(1, variants + 1):
@@ -271,6 +288,7 @@ def generate_lists(
                             "seed": seed,
                             "group_id": fold.group_id,
                             "variant": variant,
+                            "leak_control": bench.LEAK_CONTROL,
                             **lst.to_dict(),
                         }
                     )
@@ -285,6 +303,7 @@ def generate_lists(
             log(f"seed {seed}: {clean} clean + {randomised} randomised lists, {skipped} skipped")
     finally:
         engine.store = base_store
+        engine.lexical_index = base_lexical
     return records, stats
 
 
@@ -322,6 +341,7 @@ def generate_unknown_lists(
             hide_group_entirely=True,
         )
         engine = AttributionEngine(settings, reduced, proxy, None)  # type: ignore[arg-type]
+        bench.hide_lexical(engine, fold.held_out_texts)
         if bench._forest_votes(engine):  # noqa: SLF001
             # the shipped forest knows the removed actor; the null option must be learned from
             # a model that never saw it (same parameters and seed, GPU when available)
@@ -339,7 +359,15 @@ def generate_unknown_lists(
         lst = list_from_state(
             engine, state.classifier_results, fusion, state.context, top_n=top_n, truth=None
         )
-        records.append({"seed": seed, "group_id": fold.group_id, "variant": -1, **lst.to_dict()})
+        records.append(
+            {
+                "seed": seed,
+                "group_id": fold.group_id,
+                "variant": -1,
+                "leak_control": bench.LEAK_CONTROL,
+                **lst.to_dict(),
+            }
+        )
         if index % 25 == 0:
             log(f"  unknown {index}/{len(folds)} ({time.time() - started:.0f} s)")
     return records
@@ -718,6 +746,8 @@ def main(argv: list[str] | None = None) -> int:
         top_n=args.top_n,
         metadata={
             "seeds": list(args.seeds),
+            # training lists hide each fold from the dense store and the BM25 index
+            "lists_leak_control": lists_leak_control(records),
             "variants": args.variants,
             "fold_args": fold_args,
             "generation": stats,
