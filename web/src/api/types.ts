@@ -28,6 +28,8 @@ export interface SystemInfo {
   /** random-forest group and source-country models, e.g. "active (cuda)" */
   profile_forest?: string
   group_mlp?: string
+  /** free-text TF-IDF group model; "disabled (weight 0)" unless TEXT_GROUP_WEIGHT > 0 */
+  text_group?: string
   index: {
     ok: boolean
     technique_sentences?: number

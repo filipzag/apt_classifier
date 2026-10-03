@@ -7,7 +7,7 @@ EVIDENCEFORGE_CLINIC_DIR ?= ../evidenceforge_clinic
 PUBLIC_BASELINE ?= data/audits/public_heldout_baseline.json
 PUBLIC_CURRENT ?= data/audits/public_heldout_current.json
 
-.PHONY: llm-pull llm-check exemplars exemplars-chroma exemplars-chroma-verify exemplar-equivalence fit-forest fit-mlp fit-combiner fit-confidence-labels api api-dev api-local api-auth-demo web-install web-dev web-build web-check run-next setup up down ingest run run-local test lint evidenceforge-eval evidenceforge-eval-all benchmark-public benchmark-curated verify-results check-regression fit-acceptance benchmark-attribution train-reranker generate-synthetic benchmark-cti-hal benchmark-cti-hal-production benchmark-attribution-production prepare-elastic benchmark-elastic benchmark-elastic-production
+.PHONY: llm-pull llm-check exemplars exemplars-chroma exemplars-chroma-verify exemplar-equivalence fit-forest fit-mlp fit-text-group fit-combiner fit-confidence-labels api api-dev api-local api-auth-demo web-install web-dev web-build web-check run-next setup up down ingest run run-local test lint evidenceforge-eval evidenceforge-eval-all benchmark-public benchmark-curated verify-results check-regression fit-acceptance benchmark-attribution train-reranker generate-synthetic benchmark-cti-hal benchmark-cti-hal-production benchmark-attribution-production prepare-elastic benchmark-elastic benchmark-elastic-production
 
 setup:
 	python3 -m venv --system-site-packages .venv
@@ -120,6 +120,10 @@ fit-forest:
 # on ATT&CK campaigns (development) and the CTI-HAL reports (test): data/audits/group_mlp_eval.json.
 fit-mlp:
 	PYTHONPATH=. $(PYTHON) scripts/fit_group_mlp.py --save --quiet
+
+# Free-text group model (TF-IDF word document per ATT&CK group) from the KB + raw STIX bundle.
+fit-text-group:
+	PYTHONPATH=. $(PYTHON) scripts/fit_text_group.py
 
 fit-acceptance:
 	PYTHONPATH=. $(PYTHON) scripts/fit_acceptance_model.py --priors-split none --overwrite

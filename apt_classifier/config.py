@@ -200,6 +200,18 @@ class Settings(BaseSettings):
     group_mlp_path: Path = PROJECT_ROOT / "data" / "models" / "mlp" / "group_mlp.npz"
     group_mlp_device: str = "auto"
     group_mlp_weight: float = 0.0
+    # Free-text group model (apt_classifier/text_group.py, make fit-text-group): a TF-IDF word
+    # document per ATT&CK group scored against the case text. Like the group network it votes, in
+    # the learned_profile family, only with a positive weight; at 0 it is not loaded and the fusion
+    # and combiner fingerprint are unchanged. It never counts as an independent evidence family.
+    # Gate trial 2026-10-03 at 1.0 with its own combiner (data/models/combiner/
+    # attribution_combiner_text_group.json, docs 21.3.16): CTI-HAL anonymized top-1 0.455 -> 0.491,
+    # MRR 0.512 -> 0.572, as reported MRR 0.636 -> 0.666, Elastic strict 4 better / 0 worse, no
+    # wrong names anywhere; but ATT&CK folds top-1 0.830 -> 0.824 (5 gained / 6 lost), so the
+    # pre-registered no-regression rule fails by one case and it stays at 0 (the product owner decides).
+    text_group_enabled: bool = True
+    text_group_path: Path = PROJECT_ROOT / "data" / "models" / "text_group" / "text_group.json.gz"
+    text_group_weight: float = 0.0
     cyberre_model: str = "openai/gpt-5.6-sol"
     cyberre_effort: str = "low"
     cyberre_weight: float = 0.35

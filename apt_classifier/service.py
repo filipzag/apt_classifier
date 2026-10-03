@@ -242,6 +242,7 @@ class CaseService:
             "exemplar_backend": _exemplar_backend(getattr(self.engine, "exemplar_index", None)),
             "profile_forest": forest_status,
             "group_mlp": str(getattr(self.engine, "group_mlp_status", "unavailable")),
+            "text_group": str(getattr(self.engine, "text_group_status", "unavailable")),
             "index": index,
             "llm_spend_usd": round(float(getattr(usage, "cost_usd", 0.0) or 0.0), 4),
             **self._llm_routing(),

@@ -94,6 +94,13 @@ from apt_classifier.software_questions import (
     software_question_pool,
     software_selected_question,
 )
+from apt_classifier.text_group import (
+    TEXT_GROUP_NAME,
+    TextGroupClassifier,
+    load_text_group_for,
+    text_group_bound_fingerprint,
+    text_group_votes,
+)
 from apt_classifier.threat_intel import (
     ThreatIntelMatch,
     ThreatIntelSnapshot,
@@ -126,6 +133,8 @@ _CLASSIFIER_FAMILIES = {
     SOURCE_COUNTRY_NAME: "origin",
     # a learned profile model like the group forest: no new independent family for the gate
     GROUP_MLP_NAME: "learned_profile",
+    # free text scored against ATT&CK-derived group documents: also a learned profile
+    TEXT_GROUP_NAME: "learned_profile",
 }
 
 
@@ -299,6 +308,9 @@ class AttributionEngine:
         self.group_mlp, self.group_mlp_status = load_group_mlp_for(self.settings, knowledge_base)
         if self.group_mlp is not None:
             self.classifiers = (*self.classifiers, GroupMLPClassifier(self.group_mlp))
+        self.text_group, self.text_group_status = load_text_group_for(self.settings, knowledge_base)
+        if self.text_group is not None:
+            self.classifiers = (*self.classifiers, TextGroupClassifier(self.text_group))
         self.telemetry_profile: Any = None
         # the store's Chroma client serves a Chroma exemplar backend (never a client of its own)
         self.exemplar_index, self.exemplar_status = load_exemplar_index(
@@ -317,6 +329,11 @@ class AttributionEngine:
             weights=self.default_weights(),
             family_weights=self.family_weights(),
         )
+        if self.text_group is not None:
+            # a combiner fitted with the text model voting is bound to that model and code
+            self.combiner_fingerprint = text_group_bound_fingerprint(
+                self.combiner_fingerprint, self.text_group
+            )
         self.combiner, self.combiner_status = load_attribution_combiner(
             self.settings, knowledge_base, fingerprint=self.combiner_fingerprint
         )
@@ -1294,6 +1311,17 @@ class AttributionEngine:
             if getattr(classifier, "name", None) == GROUP_MLP_NAME:
                 classifier.model = model
 
+    def set_text_group(self, model: Any, status: str | None = None) -> None:
+        """Swap the free-text model; the benchmarks refit it without a fold's held-out
+        behaviour or a removed actor (and restore the loaded one with its status)."""
+        self.text_group = model
+        self.text_group_status = status or (
+            "active (injected)" if model is not None else "disabled"
+        )
+        for classifier in self.classifiers:
+            if getattr(classifier, "name", None) == TEXT_GROUP_NAME:
+                classifier.model = model
+
     def family_weights(self) -> dict[str, float]:
         """Per-family RRF budgets from settings (single definition for every fusion call)."""
         return {
@@ -1327,6 +1355,11 @@ class AttributionEngine:
             **(
                 {GROUP_MLP_NAME: float(self.settings.group_mlp_weight)}
                 if group_mlp_votes(self.settings)
+                else {}
+            ),
+            **(
+                {TEXT_GROUP_NAME: float(self.settings.text_group_weight)}
+                if text_group_votes(self.settings)
                 else {}
             ),
         }

@@ -1,4 +1,4 @@
-"""Pre-registered selection rule of the dev-only retrieval tuning harness (docs 21.3.16).
+"""Pre-registered selection rule of the dev-only retrieval tuning harness (docs 21.3.17).
 
 ``scripts/tune_retrieval.py`` evaluates variants; this module decides between them. Everything
 here works on evaluation summaries and per-case counts, so the rule is testable without any
