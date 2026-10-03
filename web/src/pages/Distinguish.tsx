@@ -191,6 +191,24 @@ function DistinguishView({ caseId, data }: { caseId: string; data: CasePayload }
               <SectionTitle hint="Interview leads replayed as a yes and as a no. Answering in the interview records the evidence and recomputes the ranking.">
                 Ask to sharpen
               </SectionTitle>
+              {result.software?.length ? (
+                <ul className="mb-3 space-y-2">
+                  {result.software.map((item) => (
+                    <li key={item.software_id} className="rounded-xl border border-border bg-surface-2/60 px-4 py-3">
+                      <div className="flex flex-wrap items-center gap-2">
+                        <DeltaChip value={item.delta_found} label="found" />
+                        <DeltaChip value={item.delta_not_found} label="not found" />
+                        <span className="font-medium">{item.name}</span>
+                        <span className="mono text-[11px] text-faint">{item.software_id}</span>
+                      </div>
+                      <div className="mt-1 text-[11px] text-muted">
+                        malware ATT&CK documents only for {item.group_name} (top-three place {item.target_rank}) ·{' '}
+                        {item.technique_count} documented techniques
+                      </div>
+                    </li>
+                  ))}
+                </ul>
+              ) : null}
               {result.leads.length ? (
                 <ul className="space-y-2">
                   {result.leads.map((lead) => (

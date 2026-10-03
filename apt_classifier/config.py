@@ -1,5 +1,6 @@
 from functools import lru_cache
 from pathlib import Path
+from typing import Literal
 
 from pydantic import SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -15,6 +16,32 @@ class Settings(BaseSettings):
     )
 
     openrouter_api_key: SecretStr | None = None
+    # Local LLM (Ollama, docs 16.4a). Model ids prefixed ``local/`` in the per-task settings
+    # below run on it; without an OpenRouter key every other model id falls back to
+    # local_llm_fallback_model. On by default (product owner, 2026-10-02): it is used only
+    # when the server answers with the fallback model pulled; with an OpenRouter key nothing
+    # changes unless a model id starts with ``local/``.
+    local_llm_enabled: bool = True
+    local_llm_url: str = "http://localhost:11434"
+    # The 4B fits the 8 GB laptop GPU next to the app and a benchmark; ``-text`` is the same
+    # model without its vision tower (``make llm-pull`` builds it; 740 MiB less GPU memory).
+    local_llm_fallback_model: str = "local/qwen3.5:4b-text"
+    local_llm_num_ctx: int = 32768
+    # GPU only: every layer must sit on the GPU, or the model refuses to load (num_gpu=999)
+    # instead of spilling layers onto the CPU, which slows the whole machine down.
+    local_llm_gpu_only: bool = True
+    # CPU threads the local model may use; with every layer on the GPU they only sample and
+    # wait, and a power-capped laptop GPU otherwise leaves them spinning on several cores.
+    local_llm_num_thread: int = 2
+    # A local verifier's 'supported' with P(supported) below this becomes 'uncertain' (left for
+    # the analyst); 0 keeps every verdict. OpenRouter verdicts carry no probability (docs 16.4a).
+    local_llm_verifier_min_confidence: float = 0.98
+    # Idle time before Ollama frees the GPU memory again (the app's own GPU models need it).
+    local_llm_keep_alive: str = "5m"
+    local_llm_timeout: float = 300.0
+    # Efforts that switch Qwen's thinking on, and the extra token budget it gets for it.
+    local_llm_think_efforts: str = "high,xhigh,max"
+    local_llm_think_tokens: int = 8192
     chroma_host: str = "localhost"
     chroma_port: int = 8000
     chroma_ssl: bool = False
@@ -95,6 +122,20 @@ class Settings(BaseSettings):
         PROJECT_ROOT / "data" / "models" / "acceptance" / "acceptance_model_no_exemplars.json"
     )
     max_questions: int = 10
+    # Interview questions about malware only one top-three group uses (software_questions.py,
+    # docs 21.3.15 C): asked first while the case is not named, with fixed wording and the answers
+    # found / not found / not checked. A "found" counts like the software named in the text; a
+    # "not found" can only lower the leader's (or a named cluster's) separation, by this weight
+    # times the malware's rarity and exclusivity. Off until the pre-registered simulation passes.
+    interview_software_questions: bool = False
+    interview_software_per_group: int = 1
+    interview_software_max_questions: int = 3
+    interview_software_max_users: int = 1
+    interview_software_when_named: bool = False
+    interview_software_negative_weight: float = 0.3
+    # a name must not rest on a "found" alone: without the interview software the leader's (or
+    # the cluster's) separation in the gate window must be >= 0
+    interview_software_found_requires_lead: bool = True
     threat_intel_days: int = 30
     threat_intel_timeout: float = 20.0
     threat_intel_max_items_per_source: int = 100
@@ -246,6 +287,31 @@ class Settings(BaseSettings):
     )
     attribution_combiner_top_n: int = 20
     attribution_combiner_blend: float = 0.5
+    # Documented-overlap clusters (overlap_cluster.py, docs 10.11 / 21.3.15): name the gate
+    # leader together with its ATT&CK-documented twin when the merged pair clears the separation
+    # bar, this mass (3.0 for a nesting pair) and a combined combiner probability. The full-scope
+    # rule passed on fresh seeds 43/47; the product owner narrowed it to the "documented" scope
+    # below, which passed its own pre-registered confirmation on the unused seeds 59/61 on
+    # 2026-10-02 (docs 21.3.15 A′: no wrong cluster, single names unchanged, replay exact).
+    attribution_cluster_naming: bool = True
+    attribution_cluster_min_probability: float = 0.8
+    attribution_cluster_min_discriminative: float = 3.5
+    # Which ATT&CK links make a twin: "documented" (ATT&CK documents the pair as the same activity,
+    # reviewed in attack/same_activity.py, or the profiles nest; product-owner decision 2026-10-02:
+    # groups that only share rare malware or that ATT&CK calls distinct are different actors),
+    # "full" (the pre-registered rule: any relation, shared rare malware too), "nested".
+    attribution_cluster_scope: Literal["documented", "full", "nested"] = "documented"
+    # Calibrated confidence labels on the Top-three view (apt_classifier/confidence_labels.py,
+    # scripts/fit_confidence_labels.py): display only, never a gate, pinned to the combiner
+    # artifact above. Adopted 2026-10-02 after the pre-registered check on fresh seeds 43/47
+    # (docs 21.3.15: "strong" wrong 4.2% pooled, calibration error 0.041). Fails closed (no
+    # labels) when the artifact is missing or was fitted against a different combiner.
+    confidence_labels_enabled: bool = True
+    # refitted for attribution_combiner_fsum.json (2026-10-03); confidence_labels.json stays for
+    # checkouts with the earlier combiner
+    confidence_labels_path: Path = (
+        PROJECT_ROOT / "data" / "models" / "calibration" / "confidence_labels_fsum.json"
+    )
     # Activity clustering (opt-in)
     activity_clusters_enabled: bool = False
     activity_clusters_db_path: Path = PROJECT_ROOT / "data" / "activity_clusters.db"

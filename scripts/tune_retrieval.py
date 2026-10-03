@@ -1,4 +1,4 @@
-"""Dev-only retrieval tuning harness (docs 21.3.15; plan sections 4-6).
+"""Dev-only retrieval tuning harness (docs 21.3.16; plan sections 4-6).
 
 Every subcommand is hard-wired to the public dev split of tram, expert and derived_procedures;
 paths naming CTI-HAL, EvidenceForge, the Elastic posts, the clinic bundle or a test/train split

@@ -1,6 +1,6 @@
 """Dev-only retrieval tuning harness: the cache, the retrieval stand-ins and the candidate rows.
 
-``scripts/tune_retrieval.py`` (docs 21.3.15, plan section 4) runs three stages on top of this:
+``scripts/tune_retrieval.py`` (docs 21.3.16, plan section 4) runs three stages on top of this:
 
 Stage A, :func:`build_cache`, the only stage that embeds or reads ChromaDB. Every dev case text,
 its retrieval segments and its exemplar query texts are embedded once (``CachedEmbedder``).

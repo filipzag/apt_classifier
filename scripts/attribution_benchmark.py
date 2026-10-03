@@ -11,9 +11,14 @@ originating group is recovered by the fused ranking (``rank``: what the analyst 
 ``deterministic_rank``: what the stage decision reads; equal since the vote was removed, both
 kept so older artifacts compare) and which attribution stage is reached.
 
-Leak control per fold (``FoldStore``):
-- technique-index hits whose text equals a held-out sentence are dropped (the dense index
-  embeds the same anonymized sentences);
+Leak control per fold (``FoldStore`` and ``fold_lexical_index``):
+- technique-index hits whose text equals a held-out sentence are dropped, from the dense index
+  (it embeds the same anonymized sentences), and the BM25 lexical index is rebuilt per fold
+  without them (it holds them as ``procedure`` documents; before 2026-10-03 only the dense index
+  was filtered, so a held-out sentence was the top BM25 hit for about 99.7% of fold
+  observations). Not hidden: the fold group's one-word variants of a held sentence filed under
+  other techniques (about 1.4% of queries have one in the BM25 top 3), and, when
+  ``TECHNIQUE_INCLUDE_SYNTHETIC`` is on, synthetic paraphrases generated from procedure examples;
 - the held-out group's actor-behaviour documents for the held-out techniques are dropped;
 - in the *unknown-actor* arm the group is removed from the knowledge base and every one of
   its documents is hidden, so the correct answer is "no named group".
@@ -80,9 +85,15 @@ from apt_classifier.evaluation import (  # noqa: E402
     write_artifact,
 )
 from apt_classifier.evidence.iocs import match_software_aliases  # noqa: E402
-from apt_classifier.evidence.models import EvidenceLedger, Observation, Provenance  # noqa: E402
+from apt_classifier.evidence.models import (  # noqa: E402
+    EvidenceLedger,
+    EvidenceStatus,
+    Observation,
+    Provenance,
+)
 from apt_classifier.group_mlp import refit_without_groups  # noqa: E402
 from apt_classifier.llm import OpenRouterClient  # noqa: E402
+from apt_classifier.overlap_cluster import SAME_ACTIVITY_LINKS, link_kind  # noqa: E402
 from apt_classifier.profile_forest import fit_profile_forest  # noqa: E402
 from apt_classifier.session import AttributionEngine  # noqa: E402
 from apt_classifier.vectorstore import (  # noqa: E402
@@ -133,6 +144,11 @@ FINGERPRINTED_SOURCES = (
     REPO_ROOT / "apt_classifier" / "exemplar_store.py",
     REPO_ROOT / "apt_classifier" / "acceptance.py",
     REPO_ROOT / "apt_classifier" / "vectorstore.py",
+    # Top-three programme: documented-cluster naming, related groups, software questions
+    REPO_ROOT / "apt_classifier" / "overlap_cluster.py",
+    REPO_ROOT / "apt_classifier" / "attack" / "related.py",
+    REPO_ROOT / "apt_classifier" / "attack" / "same_activity.py",
+    REPO_ROOT / "apt_classifier" / "software_questions.py",
 )
 
 
@@ -229,6 +245,50 @@ class FoldStore:
                 continue
             kept.append(hit)
         return kept[:n_results]
+
+
+LEAK_CONTROL = "dense+lexical"  # recorded in fold artifacts; before 2026-10-03 only "dense"
+
+
+def fold_lexical_index(index: Any, held_out_texts: frozenset[str]) -> tuple[Any, int]:
+    """The BM25 index rebuilt without the documents whose normalized text is held out, and how
+    many were removed. Document frequencies and the average length are recomputed, so it equals
+    an index built without those sentences (a hit filter would keep their corpus statistics);
+    about 0.07 s on the real knowledge base. A sentence can be several documents (a technique
+    and its sub-technique, several groups): every one goes."""
+    kept = tuple(
+        document
+        for document in index.documents
+        if normalize_procedure_text(document.text) not in held_out_texts
+    )
+    removed = len(index.documents) - len(kept)
+    if not removed:
+        return index, 0
+    frequencies: Counter[str] = Counter()
+    for document in kept:
+        frequencies.update(set(document.tokens))
+    average = sum(len(d.tokens) for d in kept) / len(kept) if kept else 1.0
+    return type(index)(kept, dict(frequencies), average), removed
+
+
+def hide_lexical(engine: Any, held_out_texts: frozenset[str]) -> int | None:
+    """Swap ``engine.lexical_index`` for the fold's filtered index; returns the number of hidden
+    documents (``None`` when nothing is hidden). Fails closed when there is something to hide but
+    no index while retrieval is lexical or hybrid: retrieval would then build its own,
+    unfiltered index. The caller restores the original index afterwards."""
+    if not held_out_texts:
+        return None
+    index = getattr(engine, "lexical_index", None)
+    if index is None:
+        mode = str(getattr(getattr(engine, "settings", None), "technique_retrieval_mode", "hybrid"))
+        if mode in ("hybrid", "lexical"):
+            raise RuntimeError(
+                f"fold leak control: retrieval mode {mode!r} but the engine has no lexical index "
+                "to filter (retrieval would build an unfiltered one)"
+            )
+        return None
+    engine.lexical_index, removed = fold_lexical_index(index, held_out_texts)
+    return removed
 
 
 def build_folds(
@@ -585,16 +645,35 @@ def _separation_fields(state: Any, truth: str | None, decision: Any) -> dict[str
 
 def _combiner_fields(state: Any, truth: str | None) -> dict[str, Any]:
     """Learned-combiner diagnostics per row: the truth's rank in the RRF order the combiner
-    started from, the probability it assigned to its leader, and its status."""
+    started from, the probability it assigned to its leader, and its status. For offline
+    replays also every combiner probability (the RRF top N), the probabilities of the gate
+    window's members, the RRF order to place 60 (the head from ``rrf_ranks``; past the head the
+    deterministic order is the RRF order), and whether the truth reached the gate window."""
     info = getattr(state.context, "combiner", None)
+    discrimination = getattr(state.context, "discrimination", None)
+    window = [item.group_id for item in discrimination.scores] if discrimination is not None else []
+    window_fields = {"truth_in_window": (truth in window) if truth else None}
     if not isinstance(info, dict):
-        return {"rrf_rank": None, "combiner_leader_probability": None, "combiner_status": None}
+        return {
+            "rrf_rank": None,
+            "combiner_leader_probability": None,
+            "combiner_status": None,
+            **window_fields,
+        }
     ranks = info.get("rrf_ranks") or {}
+    probabilities = info.get("probabilities") or {}
+    deterministic = state.deterministic_fusion or state.fusion
+    head = [gid for gid, _ in sorted(ranks.items(), key=lambda item: item[1])]
+    tail = [entry.group_id for entry in deterministic.entries[len(head) : 60]]
     return {
         "rrf_rank": ranks.get(truth) if truth else None,
         "combiner_leader_probability": info.get("leader_probability"),
         "combiner_null_probability": info.get("null_probability"),
         "combiner_status": info.get("status"),
+        "combiner_probabilities": dict(probabilities),
+        "window_probabilities": {gid: probabilities.get(gid, 0.0) for gid in window},
+        "rrf_top60": (head + tail)[:60],
+        **window_fields,
     }
 
 
@@ -650,6 +729,47 @@ def _top3_fields(state: Any, ranked: list[str]) -> dict[str, Any]:
     }
 
 
+def _combiner_artifact(settings: Any, engine: Any) -> dict[str, Any] | None:
+    """Which combiner artifact scored the run (path, content hash, top N, pipeline fingerprint),
+    so a later replay can tell artifacts fitted on different lists apart."""
+    model = getattr(engine, "combiner", None)
+    path = getattr(settings, "attribution_combiner_path", None)
+    if model is None or not path:
+        return None
+    try:
+        digest = hashlib.sha256(Path(path).read_bytes()).hexdigest()[:24]
+    except OSError:
+        digest = None
+    return {
+        "path": str(path),
+        "sha256": digest,
+        "top_n": int(getattr(model, "top_n", 0) or 0),
+        "pipeline_fingerprint": getattr(model, "pipeline_fingerprint", None),
+        # the fold evidence its training lists hid (combiners fitted before 2026-10-03 record
+        # none: dense store only, the BM25 index was not filtered)
+        "lists_leak_control": (getattr(model, "metadata", None) or {}).get(
+            "lists_leak_control", "dense (unrecorded)"
+        ),
+    }
+
+
+def _cluster_fields(state: Any, decision: Any) -> dict[str, Any]:
+    """The named documented-overlap cluster (if any) and the engine's cluster candidate for the
+    leader (recorded whether or not cluster naming is on, so the gate can be replayed)."""
+    info = (
+        state.context.combiner if isinstance(getattr(state.context, "combiner", None), dict) else {}
+    )
+    return {
+        "named_cluster": list(getattr(decision, "named_cluster", ()) or ()) if decision else [],
+        "cluster_separation": getattr(decision, "cluster_separation", None) if decision else None,
+        "cluster_discriminative": (
+            getattr(decision, "cluster_discriminative", None) if decision else None
+        ),
+        "cluster_probability": getattr(decision, "cluster_probability", None) if decision else None,
+        "cluster_candidate": info.get("cluster"),
+    }
+
+
 def _rank_of(fusion: Any, group_id: str) -> int | None:
     ranked = [entry.group_id for entry in fusion.entries]
     return ranked.index(group_id) + 1 if group_id in ranked else None
@@ -667,19 +787,309 @@ def _truth_exclusive_software(kb: Any, software_ids: Any, truth: set[str]) -> li
     return exclusive
 
 
+# ----- software interview: enumerated simulation (docs 21.3.15 C) -----
+SOFTWARE_INTERVIEW_Q = (0.1, 0.3, 1.0)
+SOFTWARE_INTERVIEW_FP = (0.0, 0.05)
+_STAGE_CODES = {
+    "insufficient_evidence": "ins",
+    "unresolved_activity_cluster": "unr",
+    "known_group_shortlist": "sho",
+    "known_group_hypothesis": "hyp",
+    "known_cluster_hypothesis": "clu",
+}
+
+
+def _named_members(decision: Any) -> list[str]:
+    """The named set of a decision: the group, the cluster's members, or nothing."""
+    if decision is None:
+        return []
+    stage = decision.stage.value
+    if stage == AttributionStage.KNOWN_CLUSTER_HYPOTHESIS.value:
+        return [str(gid) for gid in decision.named_cluster]
+    if stage == AttributionStage.KNOWN_GROUP_HYPOTHESIS.value and decision.leading_group_id:
+        return [str(decision.leading_group_id)]
+    return []
+
+
+def enumerate_software_interview(
+    engine: Any, state: Any, truth_software: set[str]
+) -> dict[str, Any]:
+    """Every answer path of the software questions on an analysed case.
+
+    The questions are the engine's own (``AttributionEngine.software_question``: asked while the
+    case is not named, at most INTERVIEW_SOFTWARE_MAX_QUESTIONS). Each is answered "found" and, on
+    a second branch, "not found" through ``answer_question``, which re-scores the case exactly as
+    an analyst answer does; "not checked" records nothing, so it equals not asking and is no
+    branch (at most 2^3 leaves). Every node is kept (path, stage, named set, separation) so leaf
+    probabilities under any answer model are computed afterwards. ``truth_software`` is the true
+    group's full ATT&CK software list (the removed actor's own list for removed-actor rows); only
+    which asked items it contains is stored. The state is restored to its analysed form."""
+    answers = state.ledger.question_answers
+    root = len(answers)
+    baseline = _named_members(state.attribution_decision)
+    nodes: list[dict[str, Any]] = []
+    truth_asked: set[str] = set()
+
+    def visit(path: tuple[str, ...]) -> None:
+        decision = state.attribution_decision
+        question = engine.software_question(state)
+        nodes.append(
+            {
+                "path": "|".join(path),
+                "stage": _STAGE_CODES.get(decision.stage.value, decision.stage.value)
+                if decision is not None
+                else None,
+                "named": _named_members(decision),
+                "separation": round(float(decision.separation), 3)
+                if decision is not None
+                else None,
+                "leaf": question is None,
+            }
+        )
+        if question is None:
+            return
+        if question.software_id in truth_software:
+            truth_asked.add(str(question.software_id))
+        depth = len(answers)
+        for found in (True, False):
+            del answers[depth:]
+            state.current_question = question
+            engine.answer_question(
+                state, EvidenceStatus.POSITIVE if found else EvidenceStatus.NEGATIVE
+            )
+            step = f"{question.software_id}:{question.target_rank}:{'F' if found else 'N'}"
+            visit((*path, step))
+
+    try:
+        visit(())
+    finally:
+        del answers[root:]
+        state.current_question = None
+        if len(nodes) > 1:
+            engine.rescore(state)
+    return {
+        "baseline_named": baseline,
+        "truth_documents": sorted(truth_asked),
+        "nodes": nodes,
+    }
+
+
+def _path_steps(path: str) -> list[tuple[str, str]]:
+    """[(software id, "F" | "N"), ...] of an encoded node path."""
+    return [(step.split(":")[0], step.split(":")[-1]) for step in path.split("|")] if path else []
+
+
+def _path_probability(path: str, truth: set[str], q: float, fp: float) -> float:
+    """Answer model: "found" with probability q when the true group's ATT&CK entry lists the
+    malware, with probability fp (a wrong "found") otherwise; "not found" in every other case."""
+    probability = 1.0
+    for software_id, answer in _path_steps(path):
+        found = q if software_id in truth else fp
+        probability *= found if answer == "F" else 1.0 - found
+    return probability
+
+
+def _software_expectations(
+    known_rows: list[dict[str, Any]], unknown_rows: list[dict[str, Any]], q: float, fp: float
+) -> dict[str, float]:
+    keys = (
+        "questions",
+        "found_answers",
+        "named",
+        "correct",
+        "gained",
+        "wrong_added",
+        "lost",
+        "removed_questions",
+        "removed_found_answers",
+        "removed_named",
+        "removed_named_added",
+    )
+    totals = dict.fromkeys(keys, 0.0)
+    for arm, rows in (("known", known_rows), ("unknown", unknown_rows)):
+        for row in rows:
+            simulation = row.get("software_interview")
+            if not simulation:
+                continue
+            truth = set(simulation["truth_documents"])
+            base = set(simulation["baseline_named"])
+            base_correct = arm == "known" and row["group_id"] in base
+            base_wrong = arm == "known" and bool(base) and not base_correct
+            for node in simulation["nodes"]:
+                if not node["leaf"]:
+                    continue
+                probability = _path_probability(node["path"], truth, q, fp)
+                if probability <= 0:
+                    continue
+                steps = _path_steps(node["path"])
+                found = sum(1 for _, answer in steps if answer == "F")
+                named = set(node["named"])
+                if arm == "unknown":
+                    totals["removed_questions"] += probability * len(steps)
+                    totals["removed_found_answers"] += probability * found
+                    totals["removed_named"] += probability * bool(named)
+                    totals["removed_named_added"] += probability * (bool(named) and not base)
+                    continue
+                correct = row["group_id"] in named
+                wrong = bool(named) and not correct
+                totals["questions"] += probability * len(steps)
+                totals["found_answers"] += probability * found
+                totals["named"] += probability * bool(named)
+                totals["correct"] += probability * correct
+                totals["gained"] += probability * (correct and not base_correct)
+                totals["wrong_added"] += probability * (wrong and not base_wrong)
+                totals["lost"] += probability * (base_correct and not correct)
+    result = {key: round(value, 4) for key, value in totals.items()}
+    result["hit_rate"] = (
+        round(totals["found_answers"] / totals["questions"], 4) if totals["questions"] else None
+    )
+    return result
+
+
+def summarize_software_interview(
+    known_rows: list[dict[str, Any]],
+    unknown_rows: list[dict[str, Any]],
+    *,
+    cluster_naming: bool,
+) -> dict[str, Any]:
+    """Expected values of the enumerated software interview and the pre-registered criteria
+    C1-C8 (docs 21.3.15). "Gained", "wrong added" and "lost" compare each leaf with the row's own
+    baseline (no netting across rows); every expectation is exact (all leaves enumerated)."""
+    expected = {
+        f"q={q},fp={fp}": _software_expectations(known_rows, unknown_rows, q, fp)
+        for q in SOFTWARE_INTERVIEW_Q
+        for fp in SOFTWARE_INTERVIEW_FP
+    }
+    possible_wrong = 0  # leaves with positive probability at fp = 0 (any 0 < q < 1)
+    possible_removed = 0
+    lost_leaves = 0  # any leaf (fp > 0 makes every leaf possible)
+    all_not_found_changed = 0
+    all_not_found_named = 0
+    baseline_named = 0
+    monotonicity_violations = 0
+    rows_asked = questions = leaves = 0
+    for arm, rows in (("known", known_rows), ("unknown", unknown_rows)):
+        for row in rows:
+            simulation = row.get("software_interview")
+            if not simulation:
+                continue
+            truth = set(simulation["truth_documents"])
+            base = set(simulation["baseline_named"])
+            baseline_named += bool(base)
+            base_correct = arm == "known" and row["group_id"] in base
+            base_wrong = arm == "known" and bool(base) and not base_correct
+            by_path = {node["path"]: node for node in simulation["nodes"]}
+            rows_asked += not by_path.get("", {"leaf": True})["leaf"]
+            for node in simulation["nodes"]:
+                named = set(node["named"])
+                steps = _path_steps(node["path"])
+                if steps and steps[-1][1] == "N":
+                    parent = by_path.get("|".join(node["path"].split("|")[:-1]))
+                    parent_named = set(parent["named"]) if parent is not None else set()
+                    if named and named != parent_named:
+                        monotonicity_violations += 1
+                if not node["leaf"]:
+                    questions += 1
+                    continue
+                leaves += 1
+                if all(answer == "N" for _, answer in steps):
+                    all_not_found_changed += named != base
+                    all_not_found_named += bool(named)
+                feasible = all(answer == "N" or sid in truth for sid, answer in steps)
+                if arm == "known":
+                    correct = row["group_id"] in named
+                    if feasible and bool(named) and not correct and not base_wrong:
+                        possible_wrong += 1
+                    if base_correct and not correct:
+                        lost_leaves += 1
+                elif feasible and named and not base:
+                    possible_removed += 1
+    zero = {q: expected[f"q={q},fp=0.0"] for q in SOFTWARE_INTERVIEW_Q}
+    five = {q: expected[f"q={q},fp=0.05"] for q in SOFTWARE_INTERVIEW_Q}
+    c1 = {
+        "wrong_added": {str(q): zero[q]["wrong_added"] for q in SOFTWARE_INTERVIEW_Q},
+        "removed_named": {str(q): zero[q]["removed_named"] for q in SOFTWARE_INTERVIEW_Q},
+        "possible_wrong_leaves": possible_wrong,
+        "possible_removed_leaves": possible_removed,
+    }
+    c1["pass"] = possible_wrong == 0 and possible_removed == 0
+    c5 = {
+        str(q): round(five[q]["wrong_added"] + five[q]["removed_named_added"], 4)
+        for q in SOFTWARE_INTERVIEW_Q
+    }
+    criteria: dict[str, Any] = {
+        "C1": c1,
+        "C2": {
+            "gained_q0.3": zero[0.3]["gained"],
+            "gained_q1.0": zero[1.0]["gained"],
+            "pass": zero[0.3]["gained"] >= 8 and zero[1.0]["gained"] >= 30,
+        },
+        "C3": {
+            "lost_leaves": lost_leaves,
+            "lost": {key: value["lost"] for key, value in expected.items()},
+            "pass": lost_leaves == 0,
+        },
+        "C4": {
+            "baseline_named": baseline_named,
+            "all_not_found_named": all_not_found_named,
+            "rows_changed": all_not_found_changed,
+            "pass": all_not_found_changed == 0,
+        },
+        "C5": {
+            "wrong_plus_removed_fp0.05": c5,
+            "pass": all(value <= 1.0 for value in c5.values()),
+        },
+        "C6": {
+            "pass": None,
+            "note": "compare the expected names with scripts/software_interview_replay.py",
+        },
+        "C7": {"violations": monotonicity_violations, "pass": monotonicity_violations == 0},
+    }
+    criteria["C8"] = (
+        {
+            "C1": c1["pass"],
+            "C5": criteria["C5"]["pass"],
+            "pass": c1["pass"] and criteria["C5"]["pass"],
+        }
+        if cluster_naming
+        else {"pass": None, "note": "run with --set attribution_cluster_naming=true"}
+    )
+    return {
+        "mode": "enumerate",
+        "answer_model": {
+            "found_if_truth_documents": "q",
+            "found_otherwise": "fp (wrong found)",
+            "not_checked": "same as not asking (no branch)",
+            "q": list(SOFTWARE_INTERVIEW_Q),
+            "fp": list(SOFTWARE_INTERVIEW_FP),
+        },
+        "rows_asked": rows_asked,
+        "questions": questions,
+        "leaves": leaves,
+        "expected": expected,
+        "criteria": criteria,
+    }
+
+
 def run_known(
     engine: AttributionEngine,
     folds: list[Fold],
     *,
     hide_evidence: bool = True,
     client: OpenRouterClient | None = None,
+    software_interview: bool = False,
 ) -> tuple[list[dict[str, Any]], dict]:
     rows: list[dict[str, Any]] = []
     base_store = engine.store
+    base_lexical = getattr(engine, "lexical_index", None)
     related = related_groups(engine.kb)
-    dropped_total = {"technique": 0, "behavior": 0, "profile": 0}
+    dropped_total = {"technique": 0, "behavior": 0, "profile": 0, "lexical": 0}
     try:
         for fold in folds:
+            engine.lexical_index = base_lexical
+            hidden_lexical = hide_lexical(
+                engine, fold.held_out_texts if hide_evidence else frozenset()
+            )
             proxy = FoldStore(
                 base_store,
                 group_id=fold.group_id,
@@ -783,19 +1193,39 @@ def run_known(
                         gid != fold.group_id and gid in related.get(fold.group_id, {})
                         for gid in ranked[:3]
                     ),
+                    # the same, counting only links that document the same activity (docs 10.11)
+                    "leader_same_activity_as_truth": bool(
+                        ranked
+                        and ranked[0] != fold.group_id
+                        and link_kind(engine.kb, fold.group_id, ranked[0]) in SAME_ACTIVITY_LINKS
+                    ),
+                    "top3_same_activity_as_truth": any(
+                        gid != fold.group_id
+                        and link_kind(engine.kb, fold.group_id, gid) in SAME_ACTIVITY_LINKS
+                        for gid in ranked[:3]
+                    ),
                     "candidates": len(ranked),
                     "top3": ranked[:3],
                     "stage": decision.stage.value if decision else None,
                     "margin": decision.margin if decision else None,
                     "maturity": decision.maturity_score if decision else None,
                     "leading": decision.leading_group_id if decision else None,
+                    **_cluster_fields(state, decision),
                     **_top3_fields(state, ranked),
                 }
             )
+            if software_interview:
+                group = engine.kb.groups.get(fold.group_id)
+                rows[-1]["software_interview"] = enumerate_software_interview(
+                    engine, state, set(getattr(group, "software_ids", ()) or ())
+                )
             for key, value in proxy.dropped.items():
                 dropped_total[key] += value
+            rows[-1]["lexical_hidden"] = hidden_lexical or 0
+            dropped_total["lexical"] += rows[-1]["lexical_hidden"]
     finally:
         engine.store = base_store
+        engine.lexical_index = base_lexical
     return rows, dropped_total
 
 
@@ -828,6 +1258,7 @@ def run_unknown(
     folds: list[Fold],
     *,
     client: OpenRouterClient | None = None,
+    software_interview: bool = False,
 ) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
     for fold in folds:
@@ -848,6 +1279,9 @@ def run_unknown(
             hide_group_entirely=True,
         )
         engine = AttributionEngine(settings, reduced, proxy, client)  # type: ignore[arg-type]
+        # the reduced knowledge base's index lacks the actor's own sentences; identical
+        # sentences of other records are hidden too, as the dense store does
+        hidden_lexical = hide_lexical(engine, fold.held_out_texts)
         forest = "off"
         if _forest_votes(engine):
             engine.set_profile_forest(_refit_forest_without_actor(engine, reduced))
@@ -867,6 +1301,7 @@ def run_unknown(
                 "observations": len(fold.observations),
                 "profile_forest": forest,
                 "group_mlp": group_mlp,
+                "lexical_hidden": hidden_lexical or 0,
                 "llm": _llm_accounting(state, client, cost_before),
                 **_separation_fields(state, None, decision),
                 **_combiner_fields(state, None),
@@ -875,9 +1310,16 @@ def run_unknown(
                 "margin": decision.margin if decision else None,
                 "maturity": decision.maturity_score if decision else None,
                 "top3": [entry.group_id for entry in fusion.entries[:3]],
+                "software_ids": sorted(state.context.software_ids),
+                **_cluster_fields(state, decision),
                 **_top3_fields(state, [entry.group_id for entry in fusion.entries]),
             }
         )
+        if software_interview:
+            # the removed actor's own ATT&CK list answers; the engine sees the reduced base
+            rows[-1]["software_interview"] = enumerate_software_interview(
+                engine, state, set(kb.groups[fold.group_id].software_ids)
+            )
     return rows
 
 
@@ -890,6 +1332,8 @@ def summarize(
     known_rows: list[dict[str, Any]], unknown_rows: list[dict[str, Any]]
 ) -> dict[str, Any]:
     named = AttributionStage.KNOWN_GROUP_HYPOTHESIS.value
+    cluster = AttributionStage.KNOWN_CLUSTER_HYPOTHESIS.value
+    named_stages = {named, cluster}
     cases = [
         AttributionEvaluationCase(
             case_id=_case_id("known", index, row),
@@ -907,12 +1351,18 @@ def summarize(
     ]
     predictions = [
         AttributionPrediction(
-            _case_id("known", index, row), tuple(row["top3"]), row["stage"] == named
+            _case_id("known", index, row),
+            tuple(row["top3"]),
+            row["stage"] in named_stages,
+            tuple(row.get("named_cluster") or ()),
         )
         for index, row in enumerate(known_rows)
     ] + [
         AttributionPrediction(
-            _case_id("unknown", index, row), tuple(row["top3"]), row["stage"] == named
+            _case_id("unknown", index, row),
+            tuple(row["top3"]),
+            row["stage"] in named_stages,
+            tuple(row.get("named_cluster") or ()),
         )
         for index, row in enumerate(unknown_rows)
     ]
@@ -928,6 +1378,13 @@ def summarize(
         if known_rows
         else 0.0
     )
+    if known_rows and all("leader_same_activity_as_truth" in row for row in known_rows):
+        # cluster-aware with same-activity links only (cluster_top1 counts any ATT&CK relation,
+        # shared rare malware included)
+        metrics["same_activity_top1"] = fmean(
+            1.0 if row["rank"] == 1 or row.get("leader_same_activity_as_truth") else 0.0
+            for row in known_rows
+        )
     named_rows = [row for row in known_rows if row["stage"] == named]
     metrics["named_risk_cluster_aware"] = (
         fmean(
@@ -1014,6 +1471,28 @@ def summarize(
         metrics["deterministic_top1"] = fmean(1.0 if r == 1 else 0.0 for r in det)
         metrics["deterministic_top5"] = fmean(1.0 if r and r <= 5 else 0.0 for r in det)
         metrics["deterministic_mrr"] = fmean(1.0 / r if r else 0.0 for r in det)
+    clusters = [row for row in known_rows if row["stage"] == cluster]
+    unknown_clusters = sum(1 for row in unknown_rows if row["stage"] == cluster)
+    if clusters or unknown_clusters or any("named_cluster" in row for row in known_rows):
+        # a cluster name is correct when the truth is a member (named_risk above counts it so);
+        # named_correct keeps its single-group meaning
+        correct = [row for row in clusters if row["group_id"] in (row.get("named_cluster") or ())]
+        metrics["named_cluster_correct"] = len(correct)
+        metrics["named_cluster_wrong"] = len(clusters) - len(correct) + unknown_clusters
+        metrics["named_cluster_recovered"] = sum(1 for row in correct if row["rank"] != 1)
+        metrics["cluster_coverage"] = (
+            (len(clusters) + unknown_clusters) / (len(known_rows) + len(unknown_rows))
+            if known_rows or unknown_rows
+            else 0.0
+        )
+        singles = [row for row in known_rows if row["stage"] == named]
+        single_unknown = sum(1 for row in unknown_rows if row["stage"] == named)
+        single_total = len(singles) + single_unknown
+        metrics["named_risk_single"] = (
+            (sum(1 for row in singles if row["rank"] != 1) + single_unknown) / single_total
+            if single_total
+            else 0.0
+        )
     if known_rows:
         metrics["top3"] = fmean(
             1.0 if row["rank"] and row["rank"] <= 3 else 0.0 for row in known_rows
@@ -1023,6 +1502,13 @@ def summarize(
             metrics["cluster_top3"] = fmean(
                 1.0
                 if (row["rank"] and row["rank"] <= 3) or row.get("top3_related_to_truth")
+                else 0.0
+                for row in known_rows
+            )
+        if all("top3_same_activity_as_truth" in row for row in known_rows):
+            metrics["same_activity_top3"] = fmean(
+                1.0
+                if (row["rank"] and row["rank"] <= 3) or row.get("top3_same_activity_as_truth")
                 else 0.0
                 for row in known_rows
             )
@@ -1108,28 +1594,43 @@ def open_set_metrics(
     Also the combined named risk (wrong names on the labelled reports plus any name on the open
     set, over all names) and how often each group leads the open-set rankings, a null for the
     labelled hits (a group that leads many unrelated reports carries less information).
+
+    A documented-cluster name (ATTRIBUTION_CLUSTER_NAMING) is a name given too: on the open set
+    it counts in ``named`` (members under ``named_clusters``), on the labelled set it is wrong
+    when the truth is not a member, as ``summarize`` counts it.
     """
     named = AttributionStage.KNOWN_GROUP_HYPOTHESIS.value
+    cluster = AttributionStage.KNOWN_CLUSTER_HYPOTHESIS.value
     stages = Counter(str(row["stage"]) for row in open_rows)
     names = Counter(str(row.get("leading")) for row in open_rows if row["stage"] == named)
+    clusters = Counter(
+        "+".join(str(gid) for gid in row.get("named_cluster") or ())
+        for row in open_rows
+        if row["stage"] == cluster
+    )
     leaders = Counter(row["top3"][0] for row in open_rows if row.get("top3"))
     by_kind: dict[str, dict[str, int]] = {}
     for row in open_rows:
         kind = row.get("kind") or "unknown"
         entry = by_kind.setdefault(kind, {"reports": 0, "named": 0})
         entry["reports"] += 1
-        entry["named"] += 1 if row["stage"] == named else 0
+        entry["named"] += 1 if row["stage"] in (named, cluster) else 0
     known_named = [row for row in known_rows if row["stage"] == named]
-    wrong = sum(1 for row in known_named if row["rank"] != 1)
-    all_named = len(known_named) + sum(names.values())
+    known_clusters = [row for row in known_rows if row["stage"] == cluster]
+    wrong = sum(1 for row in known_named if row["rank"] != 1) + sum(
+        1 for row in known_clusters if row["group_id"] not in (row.get("named_cluster") or ())
+    )
+    open_named = sum(names.values()) + sum(clusters.values())
+    all_named = len(known_named) + len(known_clusters) + open_named
     return {
         "reports": len(open_rows),
-        "named": sum(names.values()),
+        "named": open_named,
         "named_groups": dict(names.most_common()),
+        **({"named_clusters": dict(clusters.most_common())} if clusters else {}),
         "stage_distribution": dict(sorted(stages.items())),
         "by_kind": by_kind,
         "leader_counts": dict(leaders.most_common()),
-        "combined_named_risk": (wrong + sum(names.values())) / all_named if all_named else 0.0,
+        "combined_named_risk": (wrong + open_named) / all_named if all_named else 0.0,
     }
 
 
@@ -1310,6 +1811,14 @@ def main(argv: list[str] | None = None) -> int:
         help="override a Settings field for this run (e.g. --set technique_family_weight=2.0)",
     )
     add_exemplar_backend_arguments(parser)
+    parser.add_argument(
+        "--simulate-software-interview",
+        choices=("enumerate",),
+        help="after each row, walk every found / not-found path of the software questions "
+        "through the real pipeline and report expected values for q in {0.1, 0.3, 1.0} and a "
+        "wrong-found rate in {0, 0.05} plus the criteria C1-C8 (docs 21.3.15); turns "
+        "INTERVIEW_SOFTWARE_QUESTIONS on unless --set says otherwise. Default: off",
+    )
     args = parser.parse_args(argv)
     level = args.anonymize or ("names" if args.anonymize_actors else None)
     if level is not None and args.cti_hal is None:
@@ -1339,6 +1848,9 @@ def main(argv: list[str] | None = None) -> int:
     except ValueError as error:
         parser.error(str(error))
     overrides.update(exemplar_setting_overrides(args))
+    simulate = args.simulate_software_interview is not None
+    if simulate:
+        overrides.setdefault("interview_software_questions", True)
     settings = Settings(**overrides)
     production = args.pipeline == "production"
     client = OpenRouterClient(settings) if production else None
@@ -1416,7 +1928,11 @@ def main(argv: list[str] | None = None) -> int:
     started = time.time()
     try:
         known_rows, dropped = run_known(
-            engine, folds, hide_evidence=not real_reports, client=client
+            engine,
+            folds,
+            hide_evidence=not real_reports,
+            client=client,
+            software_interview=simulate,
         )
     except LLMUnavailableError as error:
         print(f"aborted: {error}", file=sys.stderr)
@@ -1451,7 +1967,9 @@ def main(argv: list[str] | None = None) -> int:
     )
     started = time.time()
     unknown_rows = (
-        run_unknown(settings, kb, store, unknown_folds, client=client) if unknown_folds else []
+        run_unknown(settings, kb, store, unknown_folds, client=client, software_interview=simulate)
+        if unknown_folds
+        else []
     )
     if client is not None:
         client.close()
@@ -1478,6 +1996,7 @@ def main(argv: list[str] | None = None) -> int:
         "acceptance_artifact": acceptance_fingerprint_inputs(acceptance),
         "exemplar_index": _exemplar_fingerprint_inputs(engine.settings, engine.exemplar_index),
         "combiner": engine.combiner_status,
+        "combiner_artifact": _combiner_artifact(settings, engine),
         "profile_forest": {
             "status": engine.profile_forest_status,
             "fingerprint": getattr(engine.profile_forest, "fingerprint", None),
@@ -1543,6 +2062,17 @@ def main(argv: list[str] | None = None) -> int:
             "sample": args.sample,
             "limit": args.limit,
             "truncated_at": dropped.get("llm_unavailable_at"),
+            # fold evidence hidden from the dense store and the BM25 index; real reports hide nothing
+            "leak_control": (
+                "none (real reports)"
+                if real_reports
+                else LEAK_CONTROL
+                + (
+                    " (synthetic paraphrases not hidden)"
+                    if getattr(settings, "technique_include_synthetic", False)
+                    else ""
+                )
+            ),
             # the ATT&CK folds are always anonymized; real reports only with --anonymize-actors
             "actor_names": ("as_reported" if real_reports and level is None else "anonymized"),
             **(
@@ -1569,6 +2099,9 @@ def main(argv: list[str] | None = None) -> int:
         ),
         "leak_control": {
             "dropped_hits": dropped,
+            "dropped_hits_unknown": {
+                "lexical": sum(int(row.get("lexical_hidden") or 0) for row in unknown_rows)
+            },
             **({"actor_name_replacement": actor_totals} if actor_totals is not None else {}),
             **({"open_set_actor_name_replacement": open_totals} if open_totals is not None else {}),
         },
@@ -1578,6 +2111,12 @@ def main(argv: list[str] | None = None) -> int:
         "unknown": unknown_rows,
         **({"open_set": open_rows} if open_folds else {}),
     }
+    if simulate:
+        report["software_interview"] = summarize_software_interview(
+            known_rows,
+            unknown_rows,
+            cluster_naming=bool(getattr(settings, "attribution_cluster_naming", False)),
+        )
     inactive = _inactive_combiner_rows(known_rows + unknown_rows + open_rows)
     if combiner_expected and inactive and not args.allow_inactive_combiner:
         print(
@@ -1632,6 +2171,25 @@ def main(argv: list[str] | None = None) -> int:
             )
         if actor_totals is not None and "strict" in actor_totals:
             print("  strict masking:", actor_totals["strict"])
+        if simulate:
+            simulation = report["software_interview"]
+            print(
+                f"  software interview: {simulation['rows_asked']} rows asked, "
+                f"{simulation['questions']} questions, {simulation['leaves']} leaves"
+            )
+            for key in ("q=0.1,fp=0.0", "q=0.3,fp=0.0", "q=1.0,fp=0.0", "q=0.3,fp=0.05"):
+                item = simulation["expected"][key]
+                print(
+                    f"    {key:14s} gained {item['gained']:.2f} wrong added "
+                    f"{item['wrong_added']:.2f} lost {item['lost']:.2f} removed named "
+                    f"{item['removed_named']:.2f} hit rate {item['hit_rate']}"
+                )
+            print(
+                "    criteria: "
+                + " ".join(
+                    f"{name}={value.get('pass')}" for name, value in simulation["criteria"].items()
+                )
+            )
         if actor_totals is not None:
             print(
                 f"  actor names anonymized: {actor_totals['reports_changed']}/"

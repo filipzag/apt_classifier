@@ -74,9 +74,11 @@ When no named group meets the evidence bar (stages below *known group hypothesis
 view says so explicitly and labels the leader as the closest documented group, not an attribution;
 on the attribution benchmarks every named known group was correct (32 of 32 on the ATT&CK folds; 10 of 10
 on the CTI-HAL real reports with the group names removed from the text, 15 of 15 with them left in) and
-all 25 actors removed from ATT&CK were correctly left unnamed. When the leader has documented overlap with another
-group (ATT&CK cross-references or rarely shared tooling, for example Carbanak and FIN7), the view says
-so, because the evidence usually cannot separate them.
+all 25 actors removed from ATT&CK were correctly left unnamed. When ATT&CK documents the leader and another
+group as the same or overlapping activity (a reviewed table of its own description text, for example
+Carbanak and FIN7, or nesting profiles), the view says so, because the evidence usually cannot separate them.
+Groups ATT&CK only links through rarely shared malware, or names in order to call them distinct, are shown as
+"ATT&CK-linked" and are kept apart (docs 10.11).
 
 The LLM zero-shot opinion was removed from the ensemble on 2026-09-30 to keep ranking deterministic and cheaper; it had changed the analyst-facing rank in one of ten measured reports. CyberRE-LLM output has its own bounded family and re-orders only the ranking the analyst sees: the stage decision (and so the naming gate) and the independent reviewer read a fusion computed without it (docs 9.11, 9.12, 16.2).
 
@@ -106,8 +108,9 @@ typed by hand.
   `docs/EVIDENCEFORGE_EVALUATION.md`.
 - `scripts/attribution_benchmark.py` (`make benchmark-attribution`; `--pipeline production` for the technique verifier, spends credit) — attribution gate: held-out,
   anonymized procedure sentences per group run through the real pipeline (text in, group out),
-  with a per-fold leak filter and an unknown-actor arm for open-set metrics. Self-consistency over
-  the ATT&CK answer key, NOT real-world attribution accuracy.
+  with a per-fold leak filter (dense store and, since 2026-10-03, the BM25 index; earlier fold
+  numbers are optimistic, docs 21.3.5) and an unknown-actor arm for open-set metrics.
+  Self-consistency over the ATT&CK answer key, NOT real-world attribution accuracy.
 - `scripts/ensemble_benchmark.py` — legacy technique-ID self-consistency diagnostic.
 - `scripts/prepare_cti_hal.py` + `make benchmark-cti-hal` — CTI-HAL (dessertlab): 968 human-annotated
   statements from 55 real reports on six named groups, used for statement-level mapping and the only
@@ -170,7 +173,11 @@ measured before the exemplars) narrative micro-F1 was 0.53, recall 0.56.
 **Attribution (text in, group out; 153 held-out groups):** top-1 0.82 (was 0.38 before the fusion work and
 0.60 before the learned combiner; 0.84 before the source-country vote, which costs one fold here and gains on real
 reports; 0.83 before the 2026-10-03 combiner refit), top-3 0.92, top-5 0.96, MRR 0.87. With the separation gate 32 known groups are named, all correct, and 0/25 removed
-actors are named (was 4): named risk 0.00 (was 0.56) at 18% coverage.
+actors are named (was 4): named risk 0.00 (was 0.56) at 18% coverage. With the 2026-09-30 combiner, same-activity cluster
+naming (on by default since 2026-10-02) also named one documented cluster (APT38 / Lazarus Group, docs 10.11). That 0/25
+is seed 7; across the seven fold seeds used on 2026-10-02 (2026-09-30 combiner) the gate named 4 of 175 removed actors
+(about 2%), each just above the separation bar (docs 21.3.15). These fold numbers were measured without the 2026-10-03
+BM25 fold hiding and are optimistic (seed 7 with the 2026-09-30 combiner: top-1 0.830 -> 0.824, named 32 -> 26; docs 21.3.5).
 
 **CTI-HAL real reports (55 reports, 6 groups; local evaluation only):** statement mapping F1 0.38 (was 0.32 before the
 exemplars), recall 0.34 (was 0.25), hit@1 0.38 (was 0.33); median accepted-technique recall per report 0.42 (was 0.31).
@@ -180,8 +187,8 @@ top-1 0.58, top-3 0.53 (cluster-aware 0.65), top-5 0.60, MRR 0.52 (cluster-aware
 fix, docs 21.3.14); 10 reports
 reached a named hypothesis, all correct (8 before the source-country vote). With the statements as reported (27 of the 55 reports name their own
 group in them) the same pipeline gives top-1 0.56 (was 0.36 before the tool cap, decisive-malware boost, discriminative
-re-ranking, combiner, exemplars and country vote), cluster-aware top-1 0.71, top-5 0.73, MRR 0.64, and 15 named, all
-correct (was 3 under the maturity gate; at the
+re-ranking, combiner, exemplars and country vote), cluster-aware top-1 0.71, top-5 0.73, MRR 0.64, and 19 named, all
+correct: 13 single groups and 6 FIN7 / Carbanak clusters (15 single names before cluster naming; was 3 under the maturity gate; at the
 previous bar of 0.78 the gate named 7 and 3 were wrong, which is why the bar was raised); every earlier before/after
 comparison in this README and the docs was measured that way. Four of the six top-1 answers lost to the replacement
 are malware evidence removed with the name (Carbanak is both a group and its malware; a diagnostic run keeping such
@@ -220,9 +227,10 @@ make setup
 cp .env.example .env
 ```
 
-Set `OPENROUTER_API_KEY` in `.env` (optional: without it the app runs in **local mode**, with
-sentence-split extraction and no verifier, CyberRE or AI review), then start Chroma and
-build the index:
+Set `OPENROUTER_API_KEY` in `.env` (optional: without it the app uses a local LLM when Ollama
+runs with the model, see [Optional local LLM](#optional-local-llm-ollama), and otherwise runs in
+**local mode**, with sentence-split extraction and no verifier, CyberRE or AI review), then start
+Chroma and build the index:
 
 ```bash
 make up
@@ -329,6 +337,55 @@ only their own. Without Google credentials (`AUTH_MODE=auto` or `off`) the app r
 local analyst with administrator rights, which is also how the tests run. The legacy Streamlit
 UI has no sign-in and should only be run locally.
 
+### Optional local LLM (Ollama)
+
+A small open model on your own GPU can take over the LLM steps at no cost (docs 16.4a). It is
+on by default (`LOCAL_LLM_ENABLED=true`) but only used when Ollama answers with the model
+pulled; otherwise nothing changes.
+
+1. Install or upgrade [Ollama](https://ollama.com/download). Ollama 0.16 cannot run Qwen 3.5;
+   0.35 works. The official installer needs sudo:
+
+   ```bash
+   curl -fsSL https://ollama.com/install.sh | sh
+   ```
+
+   Without sudo, unpack the `ollama-linux-amd64.tar.zst` release into your home directory, start
+   it with `OLLAMA_HOST=127.0.0.1:11435 ollama serve` and set
+   `LOCAL_LLM_URL=http://127.0.0.1:11435` in `.env`.
+2. Pull the model (`qwen3.5:4b`, about 3 GB; `make llm-pull` then registers `qwen3.5:4b-text`,
+   the same model without its unused image encoder, which saves about 740 MB of GPU memory) and
+   check its speed and GPU memory:
+
+   ```bash
+   make llm-pull
+   make llm-check
+   ```
+
+3. Restart the app (`make run-next` or `make api`); it looks for the model at start-up.
+
+What it then does:
+
+- **Without `OPENROUTER_API_KEY`:** the technique verifier, interview phrasing and the AI review
+  run on the local model, and report prose is split into sentences and rewritten sentence by
+  sentence before technique mapping. Nothing leaves the computer.
+- **With a key:** everything stays on OpenRouter. To move single steps to the local model, give
+  them a `local/` model id:
+
+  ```text
+  EXTRACT_MODEL=local/qwen3.5:4b-text            # prose rewritten sentence by sentence; interview phrasing
+  TECHNIQUE_VERIFIER_MODEL=local/qwen3.5:4b-text # checks of ambiguous technique matches
+  ```
+
+- **GPU only:** the model runs entirely on the GPU (about 4 GB) with at most 2 CPU threads. When
+  the GPU is too full, the step reports that the model "does not fit in the free GPU memory"
+  instead of slowing the computer; free GPU memory or lower `LOCAL_LLM_NUM_CTX`. `make llm-check`
+  also warns when a laptop has capped the GPU's power, which makes the model very slow.
+- **Verifier confidence:** the local verifier accepts a technique only when it is at least 98%
+  sure (`LOCAL_LLM_VERIFIER_MIN_CONFIDENCE=0.98`); less certain matches stay for the analyst.
+- **Off:** `LOCAL_LLM_ENABLED=false` in `.env`, or `make api-local` / `make run-local` for no LLM
+  at all.
+
 ### Optional Elastic Agent Builder MCP
 
 The supported connector targets Elastic Agent Builder MCP on Elasticsearch 9.2+/9.3+ or Elastic Serverless, not the deprecated standalone Elasticsearch MCP server. Create an API key restricted to intended security indices with `read` and `view_index_metadata`, plus Kibana `feature_agentBuilder.read` access, then configure:
@@ -355,6 +412,7 @@ All settings are environment variables documented in `.env.example`. Important v
 - `EMBEDDING_MODEL=basel/ATTACK-BERT` (pinned by `EMBEDDING_MODEL_REVISION`)
 - `EXTRACT_MODEL=openai/gpt-5.6-sol`
 - `REVIEW_MODEL=anthropic/claude-sonnet-5`
+- `LOCAL_LLM_ENABLED=true` (local LLM via Ollama, `qwen3.5:4b-text` by default, GPU only, used when Ollama answers with `LOCAL_LLM_FALLBACK_MODEL` pulled: without an OpenRouter key it verifies ambiguous techniques, rewrites report prose sentence by sentence and runs the review; with a key only `local/` model ids use it; `make llm-pull`, `make llm-check`; docs 16.4a)
 - `SIMILARITY_THRESHOLD=0.45`
 - `BEHAVIOR_SIMILARITY_THRESHOLD=0.55`
 - `THREAT_INTEL_DAYS=30`

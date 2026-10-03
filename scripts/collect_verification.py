@@ -247,8 +247,15 @@ def summarize_attribution(payload: dict[str, Any]) -> dict[str, Any]:
         "leader_probability_auc",
         "top3",
         "cluster_top3",
+        "same_activity_top1",
+        "same_activity_top3",
         "top1_given_top3",
         "pairwise_12",
+        "named_cluster_correct",
+        "named_cluster_wrong",
+        "named_cluster_recovered",
+        "cluster_coverage",
+        "named_risk_single",
         "top1_count",
         "top1_wilson95",
         "lenient_top1",
@@ -295,6 +302,21 @@ def elastic_headline_warning(payload: dict[str, Any] | None) -> str | None:
     return (
         "elastic_attribution is not the headline run (strict level, every report, every "
         "sentence; docs 21.3.4c); regenerate it with `make benchmark-elastic`"
+    )
+
+
+def fold_leak_control_warning(payload: dict[str, Any] | None) -> str | None:
+    """ATT&CK fold runs hide each fold's held-out sentences from the dense store and, since
+    2026-10-03, from the BM25 index (``parameters.leak_control == "dense+lexical"``); an
+    unmarked fold artifact predates that and its fold numbers are optimistic (docs 21.3.5)."""
+    if payload is None or payload.get("benchmark") != "attribution_text_heldout":
+        return None
+    if (payload.get("parameters") or {}).get("leak_control") == "dense+lexical":
+        return None
+    return (
+        "attribution_text_heldout was measured before held-out sentences were hidden from the "
+        "BM25 index (no parameters.leak_control); its fold numbers are optimistic, regenerate it "
+        "with `make benchmark-attribution` (docs 21.3.5)"
     )
 
 
@@ -408,6 +430,7 @@ def compose(
         for warning in (
             cti_hal_headline_warning(cti_hal_attribution),
             elastic_headline_warning(elastic_attribution),
+            fold_leak_control_warning(attribution),
         )
         if warning
     ]

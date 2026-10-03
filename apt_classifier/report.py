@@ -12,6 +12,7 @@ from typing import Any
 from apt_classifier.attack_flow import build_attack_flow
 from apt_classifier.canvas import build_analyst_canvas
 from apt_classifier.navigator import export_layers
+from apt_classifier.overlap_cluster import recorded_cluster_scope, split_related
 from apt_classifier.platforms import ledger_platforms
 
 # Stage vocabulary shown to analysts. Icons carry the meaning together with the label so the
@@ -41,6 +42,15 @@ STAGE_INFO: dict[str, dict[str, str]] = {
         "summary": "One documented group clears the evidence bar.",
         "advice": "Check the documented-overlap note and run the independent review before reporting.",
     },
+    "known_cluster_hypothesis": {
+        "label": "Named documented-overlap cluster",
+        "icon": "🟢",
+        "summary": (
+            "Two groups ATT&CK documents as overlapping together clear the evidence bar; the "
+            "evidence does not separate them."
+        ),
+        "advice": "Report the cluster, not either member, and run the independent review first.",
+    },
 }
 
 SHORT_STAGE = {
@@ -48,6 +58,7 @@ SHORT_STAGE = {
     "unresolved_activity_cluster": "Cluster",
     "known_group_shortlist": "Shortlist",
     "known_group_hypothesis": "Named",
+    "known_cluster_hypothesis": "Named cluster",
 }
 
 
@@ -79,7 +90,18 @@ def assessment_markdown(kb: Any, state: Any, *, case_name: str = "") -> str:
                 f"**Best-supported alternative:** {group_name(kb, runner)}"
                 + (" (documented-related)" if getattr(decision, "runner_up_related", False) else "")
             )
-        if decision.leading_group_name:
+        members = tuple(getattr(decision, "named_cluster", ()) or ())
+        if decision.stage.value == "known_cluster_hypothesis" and members:
+            lines.append(
+                "**Leading hypothesis (documented-overlap cluster):** "
+                + " / ".join(group_name(kb, gid) for gid in members)
+            )
+            lines.append(
+                f"**Why a cluster:** ATT&CK link: {getattr(decision, 'cluster_reason', '')}. "
+                "The evidence separates the pair from the rest of the shortlist but not the "
+                "members from each other; do not report either member alone."
+            )
+        elif decision.leading_group_name:
             role = (
                 "Leading hypothesis"
                 if decision.stage.value == "known_group_hypothesis"
@@ -87,10 +109,22 @@ def assessment_markdown(kb: Any, state: Any, *, case_name: str = "") -> str:
             )
             lines.append(f"**{role}:** {decision.leading_group_name} ({decision.leading_group_id})")
         related = getattr(decision, "related_leading_groups", {}) or {}
-        if related:
+        same, other = split_related(
+            kb,
+            decision.leading_group_id or "",
+            related,
+            scope=recorded_cluster_scope(state),
+            named_cluster=tuple(getattr(decision, "named_cluster", ()) or ()),
+        )
+        if same:
             lines.append(
-                "**Documented overlap:** "
-                + "; ".join(f"{group_name(kb, gid)}: {reason}" for gid, reason in related.items())
+                "**Documented overlap (same or overlapping activity):** "
+                + "; ".join(f"{group_name(kb, gid)}: {reason}" for gid, reason in same)
+            )
+        if other:
+            lines.append(
+                "**ATT&CK-linked, not documented as the same actor:** "
+                + "; ".join(f"{group_name(kb, gid)}: {reason}" for gid, reason, _ in other)
             )
         decisive = getattr(state.context, "decisive_software", {}) or {}
         if float(decisive.get("factor", 1.0) or 1.0) > 1.0:
@@ -126,7 +160,7 @@ def assessment_markdown(kb: Any, state: Any, *, case_name: str = "") -> str:
     if answers:
         lines += ["", "## Interview answers"]
         lines += [
-            f"- {answer.question} — **{answer.status.value}**"
+            f"- {answer.question} — **{_answer_label(answer)}**"
             + (f" ({answer.answer_text})" if answer.answer_text else "")
             for answer in answers
         ]
@@ -183,6 +217,27 @@ def assessment_markdown(kb: Any, state: Any, *, case_name: str = "") -> str:
     return "\n".join(lines)
 
 
+_SOFTWARE_ANSWER_LABELS = {"positive": "found", "negative": "not found", "unknown": "not checked"}
+
+
+def _answer_label(answer: Any) -> str:
+    status = answer.status.value
+    if getattr(answer, "kind", "technique") == "software":
+        return _SOFTWARE_ANSWER_LABELS.get(status, status)
+    return status
+
+
+def pilot_log_jsonl(state: Any) -> str:
+    """One JSON line per software-question answer (the pilot record, docs 21.3.15 C)."""
+    rows = [
+        answer.metadata["pilot"]
+        for answer in getattr(state.ledger, "question_answers", []) or []
+        if getattr(answer, "kind", "technique") == "software"
+        and isinstance(answer.metadata.get("pilot"), dict)
+    ]
+    return "".join(json.dumps(row, sort_keys=True, default=str) + "\n" for row in rows)
+
+
 def navigator_layers(kb: Any, state: Any) -> Any:
     return export_layers(
         kb,
@@ -220,7 +275,7 @@ def audit_payload(kb: Any, state: Any, *, case_name: str = "") -> dict[str, Any]
     }
 
 
-EXPORT_KINDS = ("markdown", "json", "navigator", "attack-flow")
+EXPORT_KINDS = ("markdown", "json", "navigator", "attack-flow", "pilot-log")
 
 
 def export_document(kb: Any, state: Any, kind: str, *, case_name: str = "") -> tuple[str, str, str]:
@@ -245,4 +300,6 @@ def export_document(kb: Any, state: Any, kind: str, *, case_name: str = "") -> t
             "application/json",
             f"{stem}-attack-flow.json",
         )
+    if kind == "pilot-log":
+        return pilot_log_jsonl(state), "application/x-ndjson", f"{stem}-pilot-log.jsonl"
     raise ValueError(f"unknown export kind {kind!r}; expected one of {', '.join(EXPORT_KINDS)}")

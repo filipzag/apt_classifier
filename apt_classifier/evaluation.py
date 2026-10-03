@@ -98,6 +98,8 @@ class AttributionPrediction:
     case_id: str
     ranked_group_ids: tuple[str, ...]
     named_attribution: bool
+    # a named documented-overlap cluster: the name is correct when the truth is a member
+    named_members: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -428,7 +430,9 @@ def evaluate_attribution_predictions(
         reciprocal_ranks.append(1.0 / rank if rank else 0.0)
         if prediction.named_attribution:
             named_known += 1
-            named_known_correct += int(rank == 1)
+            named_known_correct += int(
+                expected in prediction.named_members if prediction.named_members else rank == 1
+            )
     unknown_rejected = sum(
         not by_case.get(
             case.case_id, AttributionPrediction(case.case_id, (), False)

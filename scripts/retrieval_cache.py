@@ -1,7 +1,7 @@
 """Cross-validation helpers shared by the acceptance fit and the dev-only tuning harness.
 
 ``scripts/fit_acceptance_model.py --threshold-selection oof_runtime`` and the harness
-(``scripts/tune_retrieval.py``, docs 21.3.15) choose the acceptance threshold on out-of-fold
+(``scripts/tune_retrieval.py``, docs 21.3.16) choose the acceptance threshold on out-of-fold
 probabilities. The folds must keep near-copies of a text together, or the held-out fold scores
 a case whose twin trained the model: the public dev cases have no document ids
 (``document_id == case_id``), so near-duplicates are found from the texts themselves.

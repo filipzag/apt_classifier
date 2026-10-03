@@ -124,16 +124,19 @@ def local_client(tmp_path_factory: pytest.TempPathFactory) -> TestClient:
     from apt_classifier.config import get_settings
     from apt_classifier.service import CaseService
 
-    previous = os.environ.get("OPENROUTER_API_KEY")
-    os.environ["OPENROUTER_API_KEY"] = ""  # blank overrides .env: local mode
+    # blank key and local LLM off override .env: local mode
+    overrides = {"OPENROUTER_API_KEY": "", "LOCAL_LLM_ENABLED": "false"}
+    previous = {name: os.environ.get(name) for name in overrides}
+    os.environ.update(overrides)
     get_settings.cache_clear()
     try:
         service = CaseService(cases_dir=tmp_path_factory.mktemp("cases"))
     finally:
-        if previous is None:
-            os.environ.pop("OPENROUTER_API_KEY", None)
-        else:
-            os.environ["OPENROUTER_API_KEY"] = previous
+        for name, value in previous.items():
+            if value is None:
+                os.environ.pop(name, None)
+            else:
+                os.environ[name] = value
         get_settings.cache_clear()
     assert service.local_mode
     return TestClient(create_app(service, serve_web=False), raise_server_exceptions=False)
@@ -325,3 +328,109 @@ def test_local_flow_target_os(local_client: TestClient) -> None:
     assert refused.status_code == 400
     for case in (plain, linux):
         assert local_client.delete(f"/api/cases/{case['case_id']}").status_code == 204
+
+
+# ----- software questions through the API (fake vector store, no index needed) -----
+
+PILOT_KEYS = {
+    "schema",
+    "case_id",
+    "question_id",
+    "software_id",
+    "software_name",
+    "target_rank",
+    "window_size",
+    "asked_at",
+    "answered_at",
+    "answer",
+    "note_present",
+    "before",
+    "after",
+    "predicted_delta_found",
+    "attack_version",
+    "pipeline_fingerprint",
+    "settings",
+}
+SNAPSHOT_KEYS = {"stage", "leader", "named_cluster", "separation", "combiner_probability"}
+
+
+@pytest.fixture
+def software_client(tmp_path: Path) -> TestClient:
+    from apt_classifier.service import CaseService
+    from tests.test_software_questions import software_engine
+
+    engine = software_engine()
+    service = CaseService(engine.settings, engine=engine, cases_dir=tmp_path / "cases")
+    return TestClient(create_app(service, serve_web=False), raise_server_exceptions=False)
+
+
+def test_software_questions_take_three_answers_and_log_a_pilot_record(
+    software_client: TestClient,
+) -> None:
+    from tests.test_software_questions import LSASS, POWERSHELL
+
+    created = software_client.post(
+        "/api/cases",
+        data={"narrative": f"{POWERSHELL} {LSASS}"},
+        headers={"X-Requested-With": "Vestige"},
+    )
+    assert created.status_code == 201, created.text
+    case_id = created.json()["case_id"]
+    interview = software_client.get(f"/api/cases/{case_id}/interview").json()
+    question = interview["question"]
+    assert question["kind"] == "software" and question["software_id"].startswith("S")
+    assert question["target_rank"] in {1, 2, 3}
+    # "not visible" is not an answer to a software question
+    refused = software_client.post(
+        f"/api/cases/{case_id}/interview/answer", json={"status": "not_visible"}
+    )
+    assert refused.status_code == 400
+    note = "seen on host WS-17 by analyst jane.doe@example.com"
+    answers = []
+    for status in ("not_checked", "not_found", "found"):
+        state = software_client.post(
+            f"/api/cases/{case_id}/interview/answer", json={"status": status, "text": note}
+        ).json()
+        answers.append(state["answered"][-1])
+        if not state["question"] or state["question"].get("kind") != "software":
+            break
+    assert [item["status"] for item in answers] == ["unknown", "negative", "positive"]
+    assert all(item["kind"] == "software" and item["software_id"] for item in answers)
+    log = software_client.get(f"/api/cases/{case_id}/interview/pilot-log").json()
+    assert [row["answer"] for row in log] == ["not_checked", "not_found", "found"]
+    for row in log:
+        assert set(row) == PILOT_KEYS
+        assert set(row["before"]) == SNAPSHOT_KEYS and set(row["after"]) == SNAPSHOT_KEYS
+        assert row["note_present"] is True and row["case_id"] == case_id
+        text = repr(row)
+        assert "jane.doe" not in text and "WS-17" not in text and "owner" not in text
+    exported = software_client.get(f"/api/cases/{case_id}/export/pilot-log")
+    assert exported.status_code == 200
+    lines = [line for line in exported.text.splitlines() if line]
+    assert len(lines) == len(log) and "pilot-log.jsonl" in exported.headers["content-disposition"]
+    # the aggregate across cases is for administrators (sign-in off: the local admin)
+    aggregate = software_client.get("/api/pilot/software-questions.jsonl")
+    assert aggregate.status_code == 200
+    assert aggregate.headers["content-type"].startswith("application/x-ndjson")
+    assert len([line for line in aggregate.text.splitlines() if line]) == len(log)
+
+
+def test_pilot_aggregate_is_admin_only(software_client: TestClient) -> None:
+    from api.auth import current_user
+    from apt_classifier.users import User
+
+    analyst = User(
+        id="u1",
+        email="analyst@example.com",
+        name="Analyst",
+        picture="",
+        role="analyst",
+        active=True,
+        created_at="",
+    )
+    software_client.app.dependency_overrides[current_user] = lambda: analyst
+    try:
+        assert software_client.get("/api/pilot/software-questions.jsonl").status_code == 403
+        assert software_client.get("/api/cases").status_code == 200
+    finally:
+        software_client.app.dependency_overrides.clear()

@@ -116,8 +116,8 @@ def render_sidebar(
     st.sidebar.markdown("### Vestige")
     if runtime.local_only(settings):
         st.sidebar.warning(
-            "**Local mode.** No OpenRouter key is configured: free text is split into sentences "
-            "locally, and the verifier, LLM vote, CyberRE and AI review are unavailable. "
+            "**Local mode.** No LLM is configured (no OpenRouter key, no local Ollama model): "
+            "free text is split into sentences locally, and the verifier, LLM vote, CyberRE and AI review are unavailable. "
             "Retrieval, gating and ranking are unaffected.",
             icon="🔌",
         )
@@ -132,7 +132,7 @@ def render_sidebar(
         format_func=lambda key: PRESETS[key].label,
         index=preset_keys.index(current_preset) if current_preset in preset_keys else 0,
         help="Balanced is the default. Conservative accepts less and sends more to the verifier. "
-        "Exploratory widens the candidate list. Local only never calls OpenRouter.",
+        "Exploratory widens the candidate list. Local only never calls an LLM.",
     )
     st.sidebar.caption(PRESETS[preset_choice].description)
     settings = apply_preset(
@@ -225,6 +225,6 @@ def render_sidebar(
         st.caption(f"Acceptance model: {engine.acceptance_model_status}")
         usage = getattr(engine.llm, "total_usage", None)
         if usage is not None:
-            st.metric("OpenRouter spend this session", f"${usage.cost_usd:.4f}")
+            st.metric("LLM spend this session", f"${usage.cost_usd:.4f}")
             st.caption(f"{usage.prompt_tokens:,} input + {usage.completion_tokens:,} output tokens")
     return updated, weights, rescore

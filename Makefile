@@ -7,7 +7,7 @@ EVIDENCEFORGE_CLINIC_DIR ?= ../evidenceforge_clinic
 PUBLIC_BASELINE ?= data/audits/public_heldout_baseline.json
 PUBLIC_CURRENT ?= data/audits/public_heldout_current.json
 
-.PHONY: exemplars exemplars-chroma exemplars-chroma-verify exemplar-equivalence fit-forest fit-mlp fit-combiner api api-dev api-local api-auth-demo web-install web-dev web-build web-check run-next setup up down ingest run run-local test lint evidenceforge-eval evidenceforge-eval-all benchmark-public benchmark-curated verify-results check-regression fit-acceptance benchmark-attribution train-reranker generate-synthetic benchmark-cti-hal benchmark-cti-hal-production benchmark-attribution-production prepare-elastic benchmark-elastic benchmark-elastic-production
+.PHONY: llm-pull llm-check exemplars exemplars-chroma exemplars-chroma-verify exemplar-equivalence fit-forest fit-mlp fit-combiner fit-confidence-labels api api-dev api-local api-auth-demo web-install web-dev web-build web-check run-next setup up down ingest run run-local test lint evidenceforge-eval evidenceforge-eval-all benchmark-public benchmark-curated verify-results check-regression fit-acceptance benchmark-attribution train-reranker generate-synthetic benchmark-cti-hal benchmark-cti-hal-production benchmark-attribution-production prepare-elastic benchmark-elastic benchmark-elastic-production
 
 setup:
 	python3 -m venv --system-site-packages .venv
@@ -26,10 +26,10 @@ ingest:
 run:
 	PYTHONPATH=. $(PYTHON) -m streamlit run app/streamlit_app.py --server.address=127.0.0.1 --server.headless=true --browser.gatherUsageStats=false
 
-# Same app without any OpenRouter call (blank key overrides .env): local retrieval, gating,
+# Same app without any LLM call (blank key and local LLM off override .env): local retrieval, gating,
 # ranking and the deterministic interview only.
 run-local:
-	OPENROUTER_API_KEY= PYTHONPATH=. $(PYTHON) -m streamlit run app/streamlit_app.py --server.address=127.0.0.1 --server.headless=true --browser.gatherUsageStats=false
+	OPENROUTER_API_KEY= LOCAL_LLM_ENABLED=false PYTHONPATH=. $(PYTHON) -m streamlit run app/streamlit_app.py --server.address=127.0.0.1 --server.headless=true --browser.gatherUsageStats=false
 
 test:
 	PYTHONPATH=. $(PYTHON) -m pytest
@@ -71,7 +71,12 @@ check-regression:
 # Learned attribution combiner: ATT&CK folds only (training seeds), randomised evidence regimes,
 # unknown-actor lists, group-level CV; writes data/models/combiner/attribution_combiner_fsum.json.
 fit-combiner:
-	PYTHONPATH=. $(PYTHON) scripts/fit_attribution_combiner.py --seeds 11 23 37 --variants 5 --unknown-all --overwrite
+	PYTHONPATH=. $(PYTHON) scripts/fit_attribution_combiner.py --seeds 11 23 37 --variants 5 --unknown-all --overwrite --overwrite-production
+
+# Calibrated confidence labels (display only; offline, seconds): fitted on the design folds
+# (seeds 41/53), seed 7 and CTI-HAL scored as report-only numbers. Refit after fit-combiner.
+fit-confidence-labels:
+	PYTHONPATH=. $(PYTHON) scripts/fit_confidence_labels.py --evaluate data/audits/attribution_heldout_current.json data/audits/attribution_cti_hal_current.json data/audits/attribution_cti_hal_as_reported.json
 
 # Labelled real-report sentences (public train splits) used as technique-mapping evidence;
 # needs scripts/prepare_public_benchmarks.py output. Run before fit-acceptance. Re-embedding gives
@@ -176,6 +181,18 @@ benchmark-elastic:
 benchmark-elastic-production:
 	PYTHONPATH=. $(PYTHON) scripts/attribution_benchmark.py --pipeline production --report-set elastic --cti-hal $(ELASTIC_ROOT)/reports.jsonl --anonymize strict --output data/audits/attribution_elastic_production.json
 
+# ----- local LLM (Ollama; LOCAL_LLM_ENABLED=true + local/ model ids, see .env.example) -----
+LOCAL_LLM_MODELS ?= qwen3.5:4b
+OLLAMA ?= ollama
+# pulls the model, then registers qwen3.5:4b-text: the same weights without the vision tower,
+# which Ollama otherwise loads onto the GPU (about 740 MiB; docs 16.4a)
+llm-pull:
+	for model in $(LOCAL_LLM_MODELS); do $(OLLAMA) pull $$model || exit 1; done
+	PYTHONPATH=. $(PYTHON) scripts/ollama_text_only.py --ollama $(OLLAMA) --source qwen3.5:4b --name qwen3.5:4b-text
+
+llm-check:
+	PYTHONPATH=. $(PYTHON) scripts/local_llm_check.py
+
 # ----- modern front end (FastAPI + React) -----
 api:
 	PYTHONPATH=. $(PYTHON) -m uvicorn api.main:app --host 127.0.0.1 --port 8100
@@ -188,7 +205,7 @@ api-auth-demo:
 	AUTH_MODE=google GOOGLE_CLIENT_ID=demo GOOGLE_CLIENT_SECRET=demo AUTH_SECRET_KEY=demo-only AUTH_ALLOWED_DOMAINS=example.com PYTHONPATH=. $(PYTHON) -m uvicorn api.main:app --host 127.0.0.1 --port 8100
 
 api-local:
-	OPENROUTER_API_KEY= PYTHONPATH=. $(PYTHON) -m uvicorn api.main:app --host 127.0.0.1 --port 8100
+	OPENROUTER_API_KEY= LOCAL_LLM_ENABLED=false PYTHONPATH=. $(PYTHON) -m uvicorn api.main:app --host 127.0.0.1 --port 8100
 
 web-install:
 	cd web && npm ci

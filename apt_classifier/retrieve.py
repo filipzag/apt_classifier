@@ -1992,7 +1992,7 @@ def _assign_states_for_group(
                 candidate.model_copy(
                     update={
                         "state": TechniqueCandidateState.AUTO_REJECTED,
-                        "state_reason": "OpenRouter verifier: unsupported",
+                        "state_reason": "LLM verifier: unsupported",
                     }
                 )
             )
@@ -2002,7 +2002,7 @@ def _assign_states_for_group(
                 candidate.model_copy(
                     update={
                         "state": TechniqueCandidateState.AUTO_ACCEPTED,
-                        "state_reason": "OpenRouter verifier: supported",
+                        "state_reason": "LLM verifier: supported",
                     }
                 )
             )
@@ -2691,6 +2691,10 @@ def build_classifier_context(
     context.specific_behavior_scores = retrieval.specific_behavior_scores
     context.specific_behavior_signals = retrieval.specific_behavior_signals
     context.specific_behavior_matches = tuple(retrieval.specific_behavior_matches or ())
+    # the software the case text names, before any interview answer; the answers are applied
+    # here as well as on rescoring, so a reloaded case reaches the identical decision
+    context.document_software_ids = set(software_ids)
+    apply_software_answers(context, ledger)
     return context
 
 
@@ -2760,6 +2764,33 @@ def refresh_context_answers(
         existing = set(context.technique_observations.get(answer.technique_id, ()))
         existing.add(answer.id)
         context.technique_observations[answer.technique_id] = tuple(sorted(existing))
+    apply_software_answers(context, ledger)
+    return context
+
+
+def apply_software_answers(context: Any, ledger: EvidenceLedger) -> Any:
+    """Software interview answers (software_questions.py) on top of the software the case text
+    names. A "found" counts exactly like a name matched in the text (``software_ids``); a "not
+    found" goes to ``negative_software_ids``, which only the naming gate reads (never a classifier,
+    the fusion or the combiner), and never cancels software the text names or an analyst found.
+    Recomputed from the ledger each time, so the result never depends on earlier passes."""
+    document = getattr(context, "document_software_ids", None)
+    if document is None:
+        document = set(getattr(context, "software_ids", set()) or set())
+        context.document_software_ids = set(document)
+    found: set[str] = set()
+    not_found: set[str] = set()
+    for answer in ledger.question_answers:
+        software_id = getattr(answer, "software_id", None)
+        if getattr(answer, "kind", "technique") != "software" or not software_id:
+            continue
+        if answer.status is EvidenceStatus.POSITIVE:
+            found.add(software_id)
+        elif answer.status is EvidenceStatus.NEGATIVE:
+            not_found.add(software_id)
+    context.software_ids = set(document) | found
+    context.interview_found_software = found - set(document)
+    context.negative_software_ids = not_found - context.software_ids
     return context
 
 
