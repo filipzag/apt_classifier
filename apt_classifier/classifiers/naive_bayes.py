@@ -25,7 +25,10 @@ class BernoulliNaiveBayesClassifier:
 
     def classify(self, context: ClassifierContext) -> ClassifierResult:
         evidence = ranking_techniques(context)
-        applicable = bool(evidence or context.negative_techniques)
+        negatives = context.negative_techniques
+        applicable = bool(evidence or negatives)
+        documented_penalty = self.negative_weight * safe_log(1.0 - self.alpha)
+        undocumented_penalty = self.negative_weight * safe_log(1.0 - self.beta)
         scores: dict[str, float] = {}
         for group_id in group_ids(context):
             known = group_techniques(context, group_id)
@@ -38,9 +41,14 @@ class BernoulliNaiveBayesClassifier:
                 else:
                     theta = self.beta
                 score += float(confidence) * safe_log(theta)
-            for technique_id in context.negative_techniques:
-                theta = self.alpha if technique_id in known else self.beta
-                score += self.negative_weight * safe_log(1.0 - theta)
+            if negatives:
+                # counted, not summed over the set: the term never depends on set iteration
+                # order (PYTHONHASHSEED), and groups with equal counts get a bit-identical term
+                documented = sum(1 for technique_id in negatives if technique_id in known)
+                score += (
+                    documented * documented_penalty
+                    + (len(negatives) - documented) * undocumented_penalty
+                )
             scores[group_id] = score
         return build_result(self.name, context, scores, applicable=applicable)
 

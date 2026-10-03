@@ -65,6 +65,69 @@ def test_negative_evidence_changes_bayes_order(synthetic_kb):
     assert abs(sum(probabilities.values()) - 1.0) < 1e-12
 
 
+def _negative_tie_context(groups: int = 12) -> ClassifierContext:
+    """Every group documents T1 and exactly one of the negated techniques N00..N11, so every
+    Naive Bayes score is mathematically equal."""
+    from types import SimpleNamespace
+
+    negatives = [f"N{index:02d}" for index in range(groups)]
+    kb = SimpleNamespace(
+        groups={f"G{index:02d}": SimpleNamespace() for index in range(groups)},
+        group_techniques={f"G{index:02d}": ["T1", negatives[index]] for index in range(groups)},
+        techniques={tid: SimpleNamespace(parent_id=None) for tid in ["T1", *negatives]},
+    )
+    return ClassifierContext(
+        kb=kb,
+        observed_techniques={"T1": 1.0},
+        technique_observations={"T1": ("o1",)},
+        negative_techniques=set(negatives),
+        semantic_profile_scores={},
+        group_text_scores={},
+        software_ids=set(),
+    )
+
+
+def test_negative_evidence_keeps_equal_groups_tied():
+    """Summing the negative term over the set in iteration order split these exact ties by one
+    ulp, and which groups came first followed PYTHONHASHSEED; counting keeps them tied."""
+    from math import log
+
+    classifier = BernoulliNaiveBayesClassifier()
+    result = classifier.classify(_negative_tie_context())
+    assert len({entry.score for entry in result.entries}) == 1
+    assert {entry.rank for entry in result.entries} == {1}
+    assert [entry.group_id for entry in result.entries] == [f"G{i:02d}" for i in range(12)]
+    expected = (
+        log(1 / 12)
+        + log(classifier.alpha)
+        + classifier.negative_weight * (log(1 - classifier.alpha) + 11 * log(1 - classifier.beta))
+    )
+    assert result.entries[0].score == pytest.approx(expected, abs=1e-12)
+
+
+def test_negative_evidence_does_not_depend_on_the_hash_seed():
+    import os
+    import subprocess
+    import sys
+
+    script = (
+        "from tests.test_classifiers import BernoulliNaiveBayesClassifier, _negative_tie_context\n"
+        "result = BernoulliNaiveBayesClassifier().classify(_negative_tie_context())\n"
+        "print([(entry.group_id, entry.rank, entry.score.hex()) for entry in result.entries])\n"
+    )
+    outputs = {
+        subprocess.run(
+            [sys.executable, "-c", script],
+            check=True,
+            capture_output=True,
+            text=True,
+            env={**os.environ, "PYTHONHASHSEED": seed},
+        ).stdout
+        for seed in ("0", "1", "2", "3")
+    }
+    assert len(outputs) == 1
+
+
 def test_software_abstains_without_named_software(synthetic_kb):
     ctx = context(synthetic_kb)
     ctx.software_ids = set()
