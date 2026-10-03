@@ -1252,8 +1252,9 @@ to analysts: on its own it is weaker than the origin aggregated from the ranked 
 The group forest votes at weight 0. The source-country vote is on by default since 2026-10-01
 (`SOURCE_COUNTRY_WEIGHT=1.0`), together with the combiner refitted with it as a feature (feature
 schema 2, `data/models/combiner/attribution_combiner_fsum.json`). To turn it off, set
-`SOURCE_COUNTRY_WEIGHT=0` with a combiner fitted without the country vote (see the 2026-10-03 refit
-in 21.3.9). In the attribution benchmark's unknown-actor arm, the voting forest is refitted on the knowledge base without the removed actor,
+`SOURCE_COUNTRY_WEIGHT=0` with
+`ATTRIBUTION_COMBINER_PATH=data/models/combiner/attribution_combiner_no_country_fsum.json`, a combiner
+fitted without the country vote (the 2026-10-03 refit in 21.3.9). In the attribution benchmark's unknown-actor arm, the voting forest is refitted on the knowledge base without the removed actor,
 because masking the actor's output would still leak its profile into the other votes. The combiner
 fit's unknown lists do the same.
 
@@ -1266,8 +1267,8 @@ campaigns as five averaged networks (MRR 0.71 against 0.69) and takes about 20 s
 member joins the `learned_profile` family only when `GROUP_MLP_WEIGHT` > 0. At the default 0 it is
 not loaded, so the fusion and the combiner fingerprint are unchanged. In the unknown-actor arm the
 benchmark refits it without the removed actor. Measured on 2026-10-01 at weight 1.0 with its own
-combiner (`attribution_combiner_group_mlp.json`, on earlier classifier code), before the anonymizer
-fix of 21.3.14: anonymized
+combiner (`attribution_combiner_group_mlp.json`, on earlier classifier code; refit 2026-10-03 as
+`attribution_combiner_group_mlp_fsum.json`), before the anonymizer fix of 21.3.14: anonymized
 CTI-HAL top-1 went from 0.455 to 0.473 and as reported stayed at 0.564, but on the ATT&CK folds
 top-1 fell from 0.830 to 0.817 with one wrong name (Silence named as Kimsuky). It fails the naming
 gate and is not adopted.
@@ -3390,10 +3391,21 @@ shortlist order; RRF mixed top-1 on them 0.425 -> 0.420).
 
 Cross-validation top-1 is 0.0014 short of the "within 0.01" bar used for combiner refits; on
 today's lists the 2026-09-30 weights score top-1 0.730 and the refit 0.731, so the gap is the
-list set, not the fit. Adopted by the product owner on 2026-10-03 with that caveat. The
-no-country and group-network combiners were fitted for the earlier classifier code and do not
-load on this code until they are refitted the same way (`--set source_country_weight=0` or
-`--set group_mlp_weight=1.0`).
+list set, not the fit. Adopted by the product owner on 2026-10-03 with that caveat.
+
+The two opt-in combiners were refitted the same way (`--set source_country_weight=0`,
+`--set group_mlp_weight=1.0`) as `attribution_combiner_no_country_fsum.json` and
+`attribution_combiner_group_mlp_fsum.json`; without a refit those settings would run with no
+combiner at all. Against the previous code with its previous artifact, with the same setting:
+
+| Setting | ATT&CK folds, seed 7 | CTI-HAL anonymized | CTI-HAL as reported |
+|---|---|---|---|
+| `SOURCE_COUNTRY_WEIGHT=0` (CV mixed top-1 0.709) | top-1 128 -> 124 of 153, 33 -> 32 named, all correct, 0/25 removed named | top-1 24 -> 26 of 55, 8 -> 10 named, all correct | top-1 30 -> 31, 13 -> 14 named, all correct |
+| `GROUP_MLP_WEIGHT=1.0` (CV mixed top-1 0.722) | top-1 125 -> 124, still one wrong name (Silence named as Kimsuky, as before) | unchanged top-1 26, 10 named, all correct | top-1 31 -> 31, 15 named, all correct |
+
+The no-country fold drop (4 folds) exceeds the 0.02 bar used for the default; its previous artifact
+was the schema-1 combiner fitted before the country vote existed. The group-network setting keeps
+the wrong name that failed its naming gate on 2026-10-01 and stays opt-in only.
 
 #### 21.3.10 Labelled-sentence exemplars: technique recall on real text (2026-09-30)
 
