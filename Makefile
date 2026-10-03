@@ -7,7 +7,7 @@ EVIDENCEFORGE_CLINIC_DIR ?= ../evidenceforge_clinic
 PUBLIC_BASELINE ?= data/audits/public_heldout_baseline.json
 PUBLIC_CURRENT ?= data/audits/public_heldout_current.json
 
-.PHONY: exemplars fit-forest fit-mlp fit-text-group fit-combiner fit-confidence-labels api api-dev api-local api-auth-demo web-install web-dev web-build web-check run-next setup up down ingest run run-local test lint evidenceforge-eval evidenceforge-eval-all benchmark-public benchmark-curated verify-results check-regression fit-acceptance benchmark-attribution train-reranker generate-synthetic benchmark-cti-hal benchmark-cti-hal-production benchmark-attribution-production
+.PHONY: llm-pull llm-check exemplars fit-forest fit-mlp fit-text-group fit-combiner fit-confidence-labels api api-dev api-local api-auth-demo web-install web-dev web-build web-check run-next setup up down ingest run run-local test lint evidenceforge-eval evidenceforge-eval-all benchmark-public benchmark-curated verify-results check-regression fit-acceptance benchmark-attribution train-reranker generate-synthetic benchmark-cti-hal benchmark-cti-hal-production benchmark-attribution-production
 
 setup:
 	python3 -m venv --system-site-packages .venv
@@ -26,10 +26,10 @@ ingest:
 run:
 	PYTHONPATH=. $(PYTHON) -m streamlit run app/streamlit_app.py --server.address=127.0.0.1 --server.headless=true --browser.gatherUsageStats=false
 
-# Same app without any OpenRouter call (blank key overrides .env): local retrieval, gating,
+# Same app without any LLM call (blank key and local LLM off override .env): local retrieval, gating,
 # ranking and the deterministic interview only.
 run-local:
-	OPENROUTER_API_KEY= PYTHONPATH=. $(PYTHON) -m streamlit run app/streamlit_app.py --server.address=127.0.0.1 --server.headless=true --browser.gatherUsageStats=false
+	OPENROUTER_API_KEY= LOCAL_LLM_ENABLED=false PYTHONPATH=. $(PYTHON) -m streamlit run app/streamlit_app.py --server.address=127.0.0.1 --server.headless=true --browser.gatherUsageStats=false
 
 test:
 	PYTHONPATH=. $(PYTHON) -m pytest
@@ -136,6 +136,14 @@ benchmark-cti-hal-production:
 benchmark-attribution-production:
 	PYTHONPATH=. $(PYTHON) scripts/attribution_benchmark.py --pipeline production --output data/audits/attribution_heldout_production.json
 
+# ----- local LLM (Ollama; LOCAL_LLM_ENABLED=true + local/ model ids, see .env.example) -----
+LOCAL_LLM_MODELS ?= qwen3.5:4b
+llm-pull:
+	for model in $(LOCAL_LLM_MODELS); do ollama pull $$model || exit 1; done
+
+llm-check:
+	PYTHONPATH=. $(PYTHON) scripts/local_llm_check.py
+
 # ----- modern front end (FastAPI + React) -----
 api:
 	PYTHONPATH=. $(PYTHON) -m uvicorn api.main:app --host 127.0.0.1 --port 8100
@@ -148,7 +156,7 @@ api-auth-demo:
 	AUTH_MODE=google GOOGLE_CLIENT_ID=demo GOOGLE_CLIENT_SECRET=demo AUTH_SECRET_KEY=demo-only AUTH_ALLOWED_DOMAINS=example.com PYTHONPATH=. $(PYTHON) -m uvicorn api.main:app --host 127.0.0.1 --port 8100
 
 api-local:
-	OPENROUTER_API_KEY= PYTHONPATH=. $(PYTHON) -m uvicorn api.main:app --host 127.0.0.1 --port 8100
+	OPENROUTER_API_KEY= LOCAL_LLM_ENABLED=false PYTHONPATH=. $(PYTHON) -m uvicorn api.main:app --host 127.0.0.1 --port 8100
 
 web-install:
 	cd web && npm ci

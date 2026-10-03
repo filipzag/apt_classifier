@@ -1686,7 +1686,7 @@ def _assign_states_for_group(
                 candidate.model_copy(
                     update={
                         "state": TechniqueCandidateState.AUTO_REJECTED,
-                        "state_reason": "OpenRouter verifier: unsupported",
+                        "state_reason": "LLM verifier: unsupported",
                     }
                 )
             )
@@ -1696,7 +1696,7 @@ def _assign_states_for_group(
                 candidate.model_copy(
                     update={
                         "state": TechniqueCandidateState.AUTO_ACCEPTED,
-                        "state_reason": "OpenRouter verifier: supported",
+                        "state_reason": "LLM verifier: supported",
                     }
                 )
             )

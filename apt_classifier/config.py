@@ -16,6 +16,29 @@ class Settings(BaseSettings):
     )
 
     openrouter_api_key: SecretStr | None = None
+    # Local LLM (Ollama, docs 16.4a). Model ids prefixed ``local/`` in the per-task settings
+    # below run on it; without an OpenRouter key every other model id falls back to
+    # local_llm_fallback_model. On by default (product owner, 2026-10-02): it is used only
+    # when the server answers with the fallback model pulled; with an OpenRouter key nothing
+    # changes unless a model id starts with ``local/``.
+    local_llm_enabled: bool = True
+    local_llm_url: str = "http://localhost:11434"
+    # The 4B fits the 8 GB laptop GPU next to the app and a benchmark; the 9B (6.1 GiB) only
+    # when nothing else holds GPU memory (docs 16.4a).
+    local_llm_fallback_model: str = "local/qwen3.5:4b"
+    local_llm_num_ctx: int = 32768
+    # GPU only: every layer must sit on the GPU, or the model refuses to load (num_gpu=999)
+    # instead of spilling layers onto the CPU, which slows the whole machine down.
+    local_llm_gpu_only: bool = True
+    # CPU threads the local model may use; with every layer on the GPU they only sample and
+    # wait, and a power-capped laptop GPU otherwise leaves them spinning on several cores.
+    local_llm_num_thread: int = 2
+    # Idle time before Ollama frees the GPU memory again (the app's own GPU models need it).
+    local_llm_keep_alive: str = "5m"
+    local_llm_timeout: float = 300.0
+    # Efforts that switch Qwen's thinking on, and the extra token budget it gets for it.
+    local_llm_think_efforts: str = "high,xhigh,max"
+    local_llm_think_tokens: int = 8192
     chroma_host: str = "localhost"
     chroma_port: int = 8000
     chroma_ssl: bool = False

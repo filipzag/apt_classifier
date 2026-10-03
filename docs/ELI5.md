@@ -195,7 +195,8 @@ Here's what makes this robot different from a regular AI:
 6. **What goes to the cloud, and what does not.** Windows and Sysmon logs are parsed on your own computer.
    With an OpenRouter key, the online AI service receives the written clues, alert text, interview context, the
    observations the technique checker double-checks (these can include text taken from logs, such as command
-   lines) and the AI review. Without a key (local mode) nothing is sent.
+   lines) and the AI review. Without a key nothing is sent: if a local AI model (Ollama) runs on your
+   computer, those steps run there instead, and otherwise they are switched off (local mode).
 7. **"No" only counts if you were looking.** A negative answer is only evidence if you had the right tools to see it.
 8. **Uncertainty is preserved.** The robot would rather say "I don't know" than guess wrong.
 

@@ -2437,6 +2437,85 @@ Technique matches and actor-specific behavior references are retained in compact
 
 For Anthropic schema-constrained calls, configured `max/xhigh` effort is mapped to medium structured-output reasoning so hidden reasoning cannot consume the entire visible JSON budget.
 
+### 16.4a Local LLM (Ollama), hybrid routing
+
+Added 2026-10-02 and on by default (`LOCAL_LLM_ENABLED=true`, product owner's decision): the
+local model is used only when the Ollama server at `LOCAL_LLM_URL` answers with
+`LOCAL_LLM_FALLBACK_MODEL` pulled. `OpenRouterClient` routes by model id: ids prefixed `local/`
+(for example `TECHNIQUE_VERIFIER_MODEL=local/qwen3.5:4b`) go to Ollama; every other id goes to
+OpenRouter. Without an OpenRouter key a remote id is answered by `LOCAL_LLM_FALLBACK_MODEL`, so
+with a key nothing changes unless a model id starts with `local/`, and without one the
+technique verifier, the prose normaliser, interview phrasing and the review run locally instead
+of being switched off. Benchmarks are unaffected: their local pipeline builds no LLM client and
+their production pipeline is run with a key. The system endpoint reports `llm_provider`
+(`openrouter`/`local`/`hybrid`/`none`), the model answering each task (`llm_models`) and
+`prose_normalisation` (`extract`/`sentences`/`split`).
+
+- **Setting it up:** a current Ollama (0.16 cannot load Qwen3.5; 0.35 works), `make llm-pull`
+  (`qwen3.5:4b`), `make llm-check`, then restart the app, which checks for the model at start-up.
+  A server on another address (for example a user-level install without sudo on port 11435) is
+  set with `LOCAL_LLM_URL`. With an OpenRouter key, `EXTRACT_MODEL=local/qwen3.5:4b` moves the
+  prose normaliser and interview phrasing to the local model and
+  `TECHNIQUE_VERIFIER_MODEL=local/qwen3.5:4b` the verifier. Step by step: README, "Optional local
+  LLM (Ollama)".
+- **Model choice (research 2026-10-02):** Qwen3.5 (Apache-2.0, March 2026; vendor IFEval 91.5 for
+  the 9B, 89.8 for the 4B). Its hybrid attention (Gated DeltaNet:full = 3:1) keeps the KV cache for
+  whole reports small. The default `LOCAL_LLM_FALLBACK_MODEL` is the **4B** (3.9 GiB at a 32k
+  context), the only size that fits the 8 GB RTX 4060 Laptop next to the app's own GPU models and
+  a benchmark. The 9B (Ollama build 6.1 GiB with its vision projector) loads only when nothing else
+  holds GPU memory. Mixture-of-experts models (Qwen3.6-35B-A3B, Gemma 4 26B-A4B) need 17-22 GB.
+- **GPU only (`LOCAL_LLM_GPU_ONLY=true`):** every request sends `num_gpu=999`, so Ollama either puts
+  every layer on the GPU or refuses to load (measured: a CUDA out-of-memory error, no CPU spill);
+  the client reports this once, without retries, as "does not fit in the free GPU memory".
+  Without it Ollama silently ran 45% of the 9B on the CPU (one verifier call 13 minutes) and slowed
+  the whole machine. `LOCAL_LLM_NUM_THREAD=2` bounds the CPU threads, `LOCAL_LLM_KEEP_ALIVE=5m`
+  frees the GPU memory soon after the last call, and `LOCAL_LLM_TIMEOUT=300` ends a stuck call.
+- **Context size:** `LOCAL_LLM_NUM_CTX=32768` (whole reports). The cache grows with it, so in
+  GPU-only mode a model that does not load can often be made to fit by lowering it.
+- **Laptop power cap:** the laptop's power and thermal management can lower the GPU limit from
+  55 W to 15 W and hold it in P8 (210 MHz) even under load; the 4B then generates 0.4 tokens/s
+  instead of 50. `make llm-check` prints the GPU state and warns when the limit is below half its
+  default.
+- **Native API:** the client calls Ollama's `/api/chat`, not its OpenAI-compatible `/v1`, because
+  only the native API sets `num_ctx` per request; Ollama's default context silently truncates a
+  whole report. `format` carries the JSON schema (grammar-constrained decoding), the same parser
+  and single retry as OpenRouter apply, and the cost is recorded as 0.
+- **Sampling:** Qwen's recommended values (non-thinking 0.7/0.8/20, thinking 1.0/0.95/20) without
+  its chat `presence_penalty`, because extraction copies report text verbatim. Thinking is on only
+  for the efforts in `LOCAL_LLM_THINK_EFFORTS` (`high,xhigh,max`, i.e. the review), with
+  `LOCAL_LLM_THINK_TOKENS` added to the output budget. Seeds are always sent (0 when the caller
+  passes none), so benchmark runs repeat.
+- **Technique verifier, measured 2026-10-02 (4B, thinking off):** with the production prompt the
+  4B agreed with almost everything (branch-office: 19 supported, 0 correct; clinic micro-F1 below
+  no verifier in every mode). Local models therefore get their own prompt
+  (`cyberre._verifier_prompt`): it names the usual false positive (a shared word, tool or
+  category) and puts `required_behavior` and `support_span` before `verdict` in the schema, so
+  the verdict follows from the evidence. Developed on the branch-office and manufacturing bundles
+  (F1 up or equal in all six mode comparisons; one-candidate-per-call and thinking were slower
+  and not better; thinking took 2.5-4 min per call), then confirmed once on the held-out clinic
+  bundle, micro-F1 no verifier -> 4B -> GPT-5.6: narrative 0.357 -> 0.378 -> 0.526, windows
+  0.600 -> 0.571 -> 0.571, ecar 0.545 -> 0.571 -> 0.615. Most remaining false accepts are
+  interpreter techniques (T1059.x) for commands whose labelled purpose is something else.
+- **Prose normaliser, measured 2026-10-02 (CTI-HAL statements joined into prose, deterministic
+  mapping, no verifier):** the 4B rewriting whole reports with the production extraction prompt
+  lowered technique F1 from 0.431 to 0.370 on 14 reports because it leaves actions out. Splitting
+  first and letting the 4B rewrite each sentence 1:1 (thinking off) gained on those 14 reports
+  (0.431 -> 0.503), not on the other 41 (0.470 -> 0.460), and over all 55 F1 0.459 -> 0.472
+  (precision 0.552 -> 0.564, recall 0.393 -> 0.405; 22 reports better, 20 worse). The product
+  owner adopted it as the local prose normaliser: `prose_normalisation` sends prose to OpenRouter's
+  whole-report extraction when OpenRouter answers the extract model, to
+  `evidence/standardise.py` when a local model does, and to the plain split without an LLM. The
+  split decides coverage: an omitted sentence, a rewrite under three words ("None.") and a failed
+  call keep the split sentence; a rewritten observation keeps its line provenance and the
+  original sentence in `provenance.metadata["original_sentence"]`; at most 60 sentences go into
+  one call. Alerts stay on the plain split (not measured), and the case diagnostics record
+  `normalization: local_llm_sentences` with rewritten/kept/failed counts.
+- **Availability:** `llm_available` needs an OpenRouter key or the local server answering
+  `/api/tags` with the fallback model pulled (cached 30 s per URL), so an old Ollama without the
+  model leaves the app in local mode. The API decides once at start-up. `make api-local` /
+  `make run-local` force no-LLM mode, and the test suite switches the local LLM off in
+  `tests/conftest.py`.
+
 ### 16.5 Review limitations
 
 The review can critique evidence and ranking but cannot add reliable evidence. A reviewer’s confidence is not an attribution probability. The deterministic RRF ranking remains authoritative; reconciliation stores any alternative ordering under `advisory_ranking` and records differences under `rank_changes` without applying them. The report retains the counter-case, limitations, disconfirmation tests, and fame-bias measurements.
@@ -3012,7 +3091,23 @@ group-balanced random subset of real reports (to fit a credit budget); the run a
 LLM call of the first fold fails and stops, keeping the measured folds and recording
 `truncated_at`, if the API goes away mid-run. A per-fold store proxy
 hides the group's own evidence (technique-index hits identical to a held-out sentence and
-the group's actor-behaviour documents for the held-out techniques). An *unknown-actor* arm
+the group's actor-behaviour documents for the held-out techniques), and since 2026-10-03 the
+BM25 lexical index is rebuilt per fold without the documents whose text is a held-out
+sentence (`fold_lexical_index`; document frequencies and average length recomputed). Before
+that, only the dense index was filtered and a held-out sentence was the top BM25 hit for
+1,268 of 1,272 seed-7 fold observations; fold artifacts, design/confirmation seeds and the
+combiner lists made before then carry that leak (`parameters.leak_control` is `dense+lexical`
+from then on, and the combiner records `lists_leak_control`). Not hidden: the fold group's
+one-word variants of a held sentence filed under other techniques (about 1.4% of queries have
+one in the BM25 top 3) and, with `TECHNIQUE_INCLUDE_SYNTHETIC` on, synthetic paraphrases of
+procedure examples. Measured on 2026-10-03 with the shipped combiner
+(`data/audits/bm25_fold_hiding_2026-10-03/`): seed 7 technique recall 0.723 -> 0.604, top-1 0.830 ->
+0.824, MRR 0.880 -> 0.867, named 32 -> 26 (0 wrong either way, 0/25 removed actors named); seed 41
+recall 0.740 -> 0.600, top-1 0.863 -> 0.824, named 37 -> 33. 153 (seed 7) and 190 (seed 41) correctly
+accepted techniques existed only through the leak. A combiner refitted on leak-closed lists did not
+beat the shipped one (seed 7 top-1 0.804, seed 41 0.817; CTI-HAL as reported 0.564 -> 0.545), so the
+shipped combiner stays; the refit is kept as `attribution_combiner_bm25_clean_rejected.json`. Fold
+numbers quoted elsewhere in this document before 2026-10-03 were measured with the leak. An *unknown-actor* arm
 removes sampled groups from the knowledge base and hides all their documents, so the
 correct answer is "no named group"; `unknown_recall`, `false_named_attribution_rate`,
 `named_coverage` and `named_risk` come from `evaluation.evaluate_attribution_predictions`.
@@ -3021,7 +3116,8 @@ stages, accepted techniques and the technique recall of the mapping step.
 
 Interpretation: group technique lists, technique-profile centroids and descriptions still
 contain the held-out techniques, so this is self-consistency over the ATT&CK answer key
-with the text leak removed, not field attribution accuracy. It and the CTI-HAL
+with the text leak removed (fully only since 2026-10-03, see above), not field attribution
+accuracy. It and the CTI-HAL
 real-report run (21.3.4b) measure the stage machinery; only this one has an unknown-actor arm.
 
 `scripts/ensemble_benchmark.py` is the older technique-ID version (perfect mapping

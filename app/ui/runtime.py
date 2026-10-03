@@ -21,6 +21,7 @@ from apt_classifier.config import Settings, get_settings
 from apt_classifier.embeddings import SentenceTransformerEmbedder
 from apt_classifier.evidence.models import EvidenceLedger
 from apt_classifier.llm import OpenRouterClient
+from apt_classifier.llm import llm_available as _llm_available
 from apt_classifier.session import (
     AnalysisState,
     AttributionEngine,
@@ -44,15 +45,12 @@ def load_resources(kb_path: str, kb_mtime: int) -> tuple[AttackKnowledgeBase, Ch
 
 
 def llm_available(settings: Settings) -> bool:
-    try:
-        settings.require_api_key()
-    except RuntimeError:
-        return False
-    return True
+    """An OpenRouter key, or LOCAL_LLM_ENABLED with a reachable Ollama server."""
+    return _llm_available(settings)
 
 
 def local_only(settings: Settings) -> bool:
-    """True when no OpenRouter key is configured: the UI runs without any LLM step."""
+    """True when no LLM is configured (no key, no local server): the UI runs without LLM steps."""
     return not llm_available(settings)
 
 

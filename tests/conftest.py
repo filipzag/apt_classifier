@@ -1,6 +1,11 @@
+import os
 from types import SimpleNamespace
 
 import pytest
+
+# The local LLM is on by default and used whenever Ollama answers with the model pulled; tests
+# never talk to a real server (tests of the local client pass their own settings).
+os.environ["LOCAL_LLM_ENABLED"] = "false"
 
 
 @pytest.fixture

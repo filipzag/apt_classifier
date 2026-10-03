@@ -11,9 +11,14 @@ originating group is recovered by the fused ranking (``rank``: what the analyst 
 ``deterministic_rank``: what the stage decision reads; equal since the vote was removed, both
 kept so older artifacts compare) and which attribution stage is reached.
 
-Leak control per fold (``FoldStore``):
-- technique-index hits whose text equals a held-out sentence are dropped (the dense index
-  embeds the same anonymized sentences);
+Leak control per fold (``FoldStore`` and ``fold_lexical_index``):
+- technique-index hits whose text equals a held-out sentence are dropped, from the dense index
+  (it embeds the same anonymized sentences), and the BM25 lexical index is rebuilt per fold
+  without them (it holds them as ``procedure`` documents; before 2026-10-03 only the dense index
+  was filtered, so a held-out sentence was the top BM25 hit for about 99.7% of fold
+  observations). Not hidden: the fold group's one-word variants of a held sentence filed under
+  other techniques (about 1.4% of queries have one in the BM25 top 3), and, when
+  ``TECHNIQUE_INCLUDE_SYNTHETIC`` is on, synthetic paraphrases generated from procedure examples;
 - the held-out group's actor-behaviour documents for the held-out techniques are dropped;
 - in the *unknown-actor* arm the group is removed from the knowledge base and every one of
   its documents is hidden, so the correct answer is "no named group".
@@ -216,6 +221,50 @@ class FoldStore:
                 continue
             kept.append(hit)
         return kept[:n_results]
+
+
+LEAK_CONTROL = "dense+lexical"  # recorded in fold artifacts; before 2026-10-03 only "dense"
+
+
+def fold_lexical_index(index: Any, held_out_texts: frozenset[str]) -> tuple[Any, int]:
+    """The BM25 index rebuilt without the documents whose normalized text is held out, and how
+    many were removed. Document frequencies and the average length are recomputed, so it equals
+    an index built without those sentences (a hit filter would keep their corpus statistics);
+    about 0.07 s on the real knowledge base. A sentence can be several documents (a technique
+    and its sub-technique, several groups): every one goes."""
+    kept = tuple(
+        document
+        for document in index.documents
+        if normalize_procedure_text(document.text) not in held_out_texts
+    )
+    removed = len(index.documents) - len(kept)
+    if not removed:
+        return index, 0
+    frequencies: Counter[str] = Counter()
+    for document in kept:
+        frequencies.update(set(document.tokens))
+    average = sum(len(d.tokens) for d in kept) / len(kept) if kept else 1.0
+    return type(index)(kept, dict(frequencies), average), removed
+
+
+def hide_lexical(engine: Any, held_out_texts: frozenset[str]) -> int | None:
+    """Swap ``engine.lexical_index`` for the fold's filtered index; returns the number of hidden
+    documents (``None`` when nothing is hidden). Fails closed when there is something to hide but
+    no index while retrieval is lexical or hybrid: retrieval would then build its own,
+    unfiltered index. The caller restores the original index afterwards."""
+    if not held_out_texts:
+        return None
+    index = getattr(engine, "lexical_index", None)
+    if index is None:
+        mode = str(getattr(getattr(engine, "settings", None), "technique_retrieval_mode", "hybrid"))
+        if mode in ("hybrid", "lexical"):
+            raise RuntimeError(
+                f"fold leak control: retrieval mode {mode!r} but the engine has no lexical index "
+                "to filter (retrieval would build an unfiltered one)"
+            )
+        return None
+    engine.lexical_index, removed = fold_lexical_index(index, held_out_texts)
+    return removed
 
 
 def actor_names(kb: AttackKnowledgeBase) -> tuple[str, ...]:
@@ -584,6 +633,11 @@ def _combiner_artifact(settings: Any, engine: Any) -> dict[str, Any] | None:
         "sha256": digest,
         "top_n": int(getattr(model, "top_n", 0) or 0),
         "pipeline_fingerprint": getattr(model, "pipeline_fingerprint", None),
+        # the fold evidence its training lists hid (combiners fitted before 2026-10-03 record
+        # none: dense store only, the BM25 index was not filtered)
+        "lists_leak_control": (getattr(model, "metadata", None) or {}).get(
+            "lists_leak_control", "dense (unrecorded)"
+        ),
     }
 
 
@@ -905,8 +959,9 @@ def run_known(
     base_store = engine.store
     base_text = getattr(engine, "text_group", None)
     base_text_status = getattr(engine, "text_group_status", None)
+    base_lexical = getattr(engine, "lexical_index", None)
     related = related_groups(engine.kb)
-    dropped_total = {"technique": 0, "behavior": 0, "profile": 0}
+    dropped_total = {"technique": 0, "behavior": 0, "profile": 0, "lexical": 0}
     try:
         for fold in folds:
             if base_text is not None and hide_evidence:
@@ -919,6 +974,10 @@ def run_known(
                         texts=fold.held_out_texts,
                     )
                 )
+            engine.lexical_index = base_lexical
+            hidden_lexical = hide_lexical(
+                engine, fold.held_out_texts if hide_evidence else frozenset()
+            )
             proxy = FoldStore(
                 base_store,
                 group_id=fold.group_id,
@@ -1035,10 +1094,13 @@ def run_known(
                 )
             for key, value in proxy.dropped.items():
                 dropped_total[key] += value
+            rows[-1]["lexical_hidden"] = hidden_lexical or 0
+            dropped_total["lexical"] += rows[-1]["lexical_hidden"]
     finally:
         engine.store = base_store
         if base_text is not None:
             engine.set_text_group(base_text, base_text_status)
+        engine.lexical_index = base_lexical
     return rows, dropped_total
 
 
@@ -1092,6 +1154,9 @@ def run_unknown(
             hide_group_entirely=True,
         )
         engine = AttributionEngine(settings, reduced, proxy, client)  # type: ignore[arg-type]
+        # the reduced knowledge base's index lacks the actor's own sentences; identical
+        # sentences of other records are hidden too, as the dense store does
+        hidden_lexical = hide_lexical(engine, fold.held_out_texts)
         forest = "off"
         if _forest_votes(engine):
             engine.set_profile_forest(_refit_forest_without_actor(engine, reduced))
@@ -1120,6 +1185,7 @@ def run_unknown(
                 "profile_forest": forest,
                 "group_mlp": group_mlp,
                 "text_group": text_group,
+                "lexical_hidden": hidden_lexical or 0,
                 "llm": _llm_accounting(state, client, cost_before),
                 **_separation_fields(state, None, decision),
                 **_combiner_fields(state, None),
@@ -1654,6 +1720,17 @@ def main(argv: list[str] | None = None) -> int:
             "sample": args.sample,
             "limit": args.limit,
             "truncated_at": dropped.get("llm_unavailable_at"),
+            # fold evidence hidden from the dense store and the BM25 index; real reports hide nothing
+            "leak_control": (
+                "none (real reports)"
+                if real_reports
+                else LEAK_CONTROL
+                + (
+                    " (synthetic paraphrases not hidden)"
+                    if getattr(settings, "technique_include_synthetic", False)
+                    else ""
+                )
+            ),
             # the ATT&CK folds are always anonymized; real reports only with --anonymize-actors
             "actor_names": (
                 "as_reported" if real_reports and not args.anonymize_actors else "anonymized"
@@ -1663,6 +1740,9 @@ def main(argv: list[str] | None = None) -> int:
         "fingerprint_inputs": fingerprint_inputs,
         "leak_control": {
             "dropped_hits": dropped,
+            "dropped_hits_unknown": {
+                "lexical": sum(int(row.get("lexical_hidden") or 0) for row in unknown_rows)
+            },
             **({"actor_name_replacement": actor_totals} if actor_totals is not None else {}),
         },
         "runtime_seconds": {"known": round(known_seconds, 1), "unknown": round(unknown_seconds, 1)},

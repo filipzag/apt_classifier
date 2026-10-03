@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Any
 
 from apt_classifier.evidence.models import EvidenceLedger, Observation, Provenance, StrategicContext
-from apt_classifier.llm import OpenRouterClient
+from apt_classifier.llm import OpenRouterClient, supports_seed
 
 ACTION_SCHEMA: dict[str, Any] = {
     "type": "object",
@@ -70,7 +70,7 @@ def _settings_value(client: Any, name: str, fallback: str) -> str:
 
 
 def _gpt_seed(model: str, seed: int | None) -> int | None:
-    return seed if seed is not None and "gpt" in model.casefold() else None
+    return seed if seed is not None and supports_seed(model) else None
 
 
 def _action_items(parsed: Any) -> list[Any]:

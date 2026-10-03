@@ -108,8 +108,9 @@ typed by hand.
   `docs/EVIDENCEFORGE_EVALUATION.md`.
 - `scripts/attribution_benchmark.py` (`make benchmark-attribution`; `--pipeline production` for the technique verifier, spends credit) — attribution gate: held-out,
   anonymized procedure sentences per group run through the real pipeline (text in, group out),
-  with a per-fold leak filter and an unknown-actor arm for open-set metrics. Self-consistency over
-  the ATT&CK answer key, NOT real-world attribution accuracy.
+  with a per-fold leak filter (dense store and, since 2026-10-03, the BM25 index; earlier fold
+  numbers are optimistic, docs 21.3.5) and an unknown-actor arm for open-set metrics.
+  Self-consistency over the ATT&CK answer key, NOT real-world attribution accuracy.
 - `scripts/ensemble_benchmark.py` — legacy technique-ID self-consistency diagnostic.
 - `scripts/prepare_cti_hal.py` + `make benchmark-cti-hal` — CTI-HAL (dessertlab): 968 human-annotated
   statements from 55 real reports on six named groups, used for statement-level mapping and the only
@@ -210,9 +211,10 @@ make setup
 cp .env.example .env
 ```
 
-Set `OPENROUTER_API_KEY` in `.env` (optional: without it the app runs in **local mode**, with
-sentence-split extraction and no verifier, CyberRE or AI review), then start Chroma and
-build the index:
+Set `OPENROUTER_API_KEY` in `.env` (optional: without it the app uses a local LLM when Ollama
+runs with the model, see [Optional local LLM](#optional-local-llm-ollama), and otherwise runs in
+**local mode**, with sentence-split extraction and no verifier, CyberRE or AI review), then start
+Chroma and build the index:
 
 ```bash
 make up
@@ -318,6 +320,51 @@ only their own. Without Google credentials (`AUTH_MODE=auto` or `off`) the app r
 local analyst with administrator rights, which is also how the tests run. The legacy Streamlit
 UI has no sign-in and should only be run locally.
 
+### Optional local LLM (Ollama)
+
+A small open model on your own GPU can take over the LLM steps at no cost (docs 16.4a). It is
+on by default (`LOCAL_LLM_ENABLED=true`) but only used when Ollama answers with the model
+pulled; otherwise nothing changes.
+
+1. Install or upgrade [Ollama](https://ollama.com/download). Ollama 0.16 cannot run Qwen 3.5;
+   0.35 works. The official installer needs sudo:
+
+   ```bash
+   curl -fsSL https://ollama.com/install.sh | sh
+   ```
+
+   Without sudo, unpack the `ollama-linux-amd64.tar.zst` release into your home directory, start
+   it with `OLLAMA_HOST=127.0.0.1:11435 ollama serve` and set
+   `LOCAL_LLM_URL=http://127.0.0.1:11435` in `.env`.
+2. Pull the model (`qwen3.5:4b`, about 3 GB) and check its speed and GPU memory:
+
+   ```bash
+   make llm-pull
+   make llm-check
+   ```
+
+3. Restart the app (`make run-next` or `make api`); it looks for the model at start-up.
+
+What it then does:
+
+- **Without `OPENROUTER_API_KEY`:** the technique verifier, interview phrasing and the AI review
+  run on the local model, and report prose is split into sentences and rewritten sentence by
+  sentence before technique mapping. Nothing leaves the computer.
+- **With a key:** everything stays on OpenRouter. To move single steps to the local model, give
+  them a `local/` model id:
+
+  ```text
+  EXTRACT_MODEL=local/qwen3.5:4b            # prose rewritten sentence by sentence; interview phrasing
+  TECHNIQUE_VERIFIER_MODEL=local/qwen3.5:4b # checks of ambiguous technique matches
+  ```
+
+- **GPU only:** the model runs entirely on the GPU (about 4 GB) with at most 2 CPU threads. When
+  the GPU is too full, the step reports that the model "does not fit in the free GPU memory"
+  instead of slowing the computer; free GPU memory or lower `LOCAL_LLM_NUM_CTX`. `make llm-check`
+  also warns when a laptop has capped the GPU's power, which makes the model very slow.
+- **Off:** `LOCAL_LLM_ENABLED=false` in `.env`, or `make api-local` / `make run-local` for no LLM
+  at all.
+
 ### Optional Elastic Agent Builder MCP
 
 The supported connector targets Elastic Agent Builder MCP on Elasticsearch 9.2+/9.3+ or Elastic Serverless, not the deprecated standalone Elasticsearch MCP server. Create an API key restricted to intended security indices with `read` and `view_index_metadata`, plus Kibana `feature_agentBuilder.read` access, then configure:
@@ -344,6 +391,7 @@ All settings are environment variables documented in `.env.example`. Important v
 - `EMBEDDING_MODEL=basel/ATTACK-BERT` (pinned by `EMBEDDING_MODEL_REVISION`)
 - `EXTRACT_MODEL=openai/gpt-5.6-sol`
 - `REVIEW_MODEL=anthropic/claude-sonnet-5`
+- `LOCAL_LLM_ENABLED=true` (local LLM via Ollama, GPU only, used when Ollama answers with `LOCAL_LLM_FALLBACK_MODEL` pulled: without an OpenRouter key it verifies ambiguous techniques, rewrites report prose sentence by sentence and runs the review; with a key only `local/` model ids use it; `make llm-pull`, `make llm-check`; docs 16.4a)
 - `SIMILARITY_THRESHOLD=0.45`
 - `BEHAVIOR_SIMILARITY_THRESHOLD=0.55`
 - `THREAT_INTEL_DAYS=30`

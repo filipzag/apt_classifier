@@ -36,7 +36,7 @@ function ReviewView({ caseId, data }: { caseId: string; data: CasePayload }) {
       />
       {local ? (
         <Callout tone="warning" title="Unavailable in local mode">
-          Set OPENROUTER_API_KEY and restart the service to enable the independent review and CyberRE-LLM.
+          Set OPENROUTER_API_KEY, or LOCAL_LLM_ENABLED=true with Ollama running, and restart the service to enable the independent review and CyberRE-LLM.
         </Callout>
       ) : null}
 

@@ -83,6 +83,8 @@ class ElasticImportIn(BaseModel):
 
 def describe_error(exc: BaseException) -> str:
     text = str(exc) or type(exc).__name__
+    if "Local LLM" in text:
+        return f"The local LLM (Ollama) failed; check `make llm-check`. {text[:240]}"
     if "402" in text or "Payment Required" in text:
         return "OpenRouter refused the request: the account has no credit left (402)."
     if "401" in text and "openrouter" in text.lower():
