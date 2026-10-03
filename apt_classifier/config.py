@@ -23,9 +23,9 @@ class Settings(BaseSettings):
     # changes unless a model id starts with ``local/``.
     local_llm_enabled: bool = True
     local_llm_url: str = "http://localhost:11434"
-    # The 4B fits the 8 GB laptop GPU next to the app and a benchmark; the 9B (6.1 GiB) only
-    # when nothing else holds GPU memory (docs 16.4a).
-    local_llm_fallback_model: str = "local/qwen3.5:4b"
+    # The 4B fits the 8 GB laptop GPU next to the app and a benchmark; ``-text`` is the same
+    # model without its vision tower (``make llm-pull`` builds it; 740 MiB less GPU memory).
+    local_llm_fallback_model: str = "local/qwen3.5:4b-text"
     local_llm_num_ctx: int = 32768
     # GPU only: every layer must sit on the GPU, or the model refuses to load (num_gpu=999)
     # instead of spilling layers onto the CPU, which slows the whole machine down.
@@ -33,6 +33,9 @@ class Settings(BaseSettings):
     # CPU threads the local model may use; with every layer on the GPU they only sample and
     # wait, and a power-capped laptop GPU otherwise leaves them spinning on several cores.
     local_llm_num_thread: int = 2
+    # A local verifier's 'supported' with P(supported) below this becomes 'uncertain' (left for
+    # the analyst); 0 keeps every verdict. OpenRouter verdicts carry no probability (docs 16.4a).
+    local_llm_verifier_min_confidence: float = 0.98
     # Idle time before Ollama frees the GPU memory again (the app's own GPU models need it).
     local_llm_keep_alive: str = "5m"
     local_llm_timeout: float = 300.0

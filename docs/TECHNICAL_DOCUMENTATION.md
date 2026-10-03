@@ -2433,7 +2433,8 @@ their production pipeline is run with a key. The system endpoint reports `llm_pr
 `prose_normalisation` (`extract`/`sentences`/`split`).
 
 - **Setting it up:** a current Ollama (0.16 cannot load Qwen3.5; 0.35 works), `make llm-pull`
-  (`qwen3.5:4b`), `make llm-check`, then restart the app, which checks for the model at start-up.
+  (pulls `qwen3.5:4b` and registers `qwen3.5:4b-text`, see below), `make llm-check`, then restart
+  the app, which checks for the model at start-up.
   A server on another address (for example a user-level install without sudo on port 11435) is
   set with `LOCAL_LLM_URL`. With an OpenRouter key, `EXTRACT_MODEL=local/qwen3.5:4b` moves the
   prose normaliser and interview phrasing to the local model and
@@ -2441,9 +2442,13 @@ their production pipeline is run with a key. The system endpoint reports `llm_pr
   LLM (Ollama)".
 - **Model choice (research 2026-10-02):** Qwen3.5 (Apache-2.0, March 2026; vendor IFEval 91.5 for
   the 9B, 89.8 for the 4B). Its hybrid attention (Gated DeltaNet:full = 3:1) keeps the KV cache for
-  whole reports small. The default `LOCAL_LLM_FALLBACK_MODEL` is the **4B** (3.9 GiB at a 32k
-  context), the only size that fits the 8 GB RTX 4060 Laptop next to the app's own GPU models and
-  a benchmark. The 9B (Ollama build 6.1 GiB with its vision projector) loads only when nothing else
+  whole reports small. The default `LOCAL_LLM_FALLBACK_MODEL` is the **4B**, the only size that
+  fits the 8 GB RTX 4060 Laptop next to the app's own GPU models and a benchmark, as
+  `qwen3.5:4b-text`: Ollama's build bundles the vision encoder in the model file and loads it onto
+  the GPU although Vestige sends text only, so `scripts/ollama_text_only.py` (run by
+  `make llm-pull`) registers a copy without the `v.*` tensors and `qwen35.vision.*` keys, every
+  other byte and the Modelfile unchanged. Measured 2026-10-03: identical verifier answers on
+  recorded inputs, GPU memory at a 32k context 4,547 -> 3,807 MiB. The 9B (Ollama build 6.1 GiB with its vision projector) loads only when nothing else
   holds GPU memory. Mixture-of-experts models (Qwen3.6-35B-A3B, Gemma 4 26B-A4B) need 17-22 GB.
 - **GPU only (`LOCAL_LLM_GPU_ONLY=true`):** every request sends `num_gpu=999`, so Ollama either puts
   every layer on the GPU or refuses to load (measured: a CUDA out-of-memory error, no CPU spill);
@@ -2461,8 +2466,10 @@ their production pipeline is run with a key. The system endpoint reports `llm_pr
   only the native API sets `num_ctx` per request; Ollama's default context silently truncates a
   whole report. `format` carries the JSON schema (grammar-constrained decoding), the same parser
   and single retry as OpenRouter apply, and the cost is recorded as 0.
-- **Sampling:** Qwen's recommended values (non-thinking 0.7/0.8/20, thinking 1.0/0.95/20) without
-  its chat `presence_penalty`, because extraction copies report text verbatim. Thinking is on only
+- **Sampling:** Qwen's recommended values (non-thinking 0.7/0.8/20, thinking 1.0/0.95/20).
+  `presence_penalty` is not sent, so the model's own Ollama default applies: 1.5 for qwen3.5:4b,
+  and every measurement in this section ran with it (an earlier version of this note said the
+  penalty was off; Ollama merges the model's defaults into each request). Thinking is on only
   for the efforts in `LOCAL_LLM_THINK_EFFORTS` (`high,xhigh,max`, i.e. the review), with
   `LOCAL_LLM_THINK_TOKENS` added to the output budget. Seeds are always sent (0 when the caller
   passes none), so benchmark runs repeat.
@@ -2477,6 +2484,35 @@ their production pipeline is run with a key. The system endpoint reports `llm_pr
   bundle, micro-F1 no verifier -> 4B -> GPT-5.6: narrative 0.357 -> 0.378 -> 0.526, windows
   0.600 -> 0.571 -> 0.571, ecar 0.545 -> 0.571 -> 0.615. Most remaining false accepts are
   interpreter techniques (T1059.x) for commands whose labelled purpose is something else.
+- **Verifier confidence and interpreter rule, measured 2026-10-03 (4B text-only, thinking off):**
+  the product owner chose the cheap levers over trying other models (a researched shortlist of
+  Qwen3.5-9B at 3 bits, Granite 4.2 3B and Qwen3-4B-Instruct-2507 was not run).
+  - *Confidence.* Local verifier calls request the top-20 token alternatives; at each verdict
+    `_verdict_confidences` renormalises P("supported") over the tokens that can start an allowed
+    verdict (Ollama reports the distribution before the JSON grammar, where "No" or "false" lead)
+    and stores it in `TechniqueVerification.confidence`. A local "supported" below
+    `LOCAL_LLM_VERIFIER_MIN_CONFIDENCE` (0.98) becomes "uncertain" and stays for the analyst;
+    OpenRouter verdicts carry no probability and are never gated. The threshold was fitted by a
+    rule written before the results were read (best mean F1 over the six dev bundle/modes, ties
+    to the lower threshold, at least as many wrong as correct accepts removed). It is fragile: the
+    model is confident even when wrong (wrong accepts at 0.89-0.999), and the fit gave 0.999 for
+    the plain prompt but 0.98 with the rule, where 0.999 would cost F1.
+  - *Interpreter rule.* For log-derived observations (provenance `winlog*`, `ecar*`, `sysmon*`,
+    `elasticsearch*`, `evidenceforge_*`) the local prompt adds: map what a wrapped command is
+    for, and support T1059.x only when the interpreter itself is the point (a script, an
+    encoded or obfuscated command, a chain of commands). Dev bundles (branch-office +
+    manufacturing, 1,108 candidates): correct accepts 6 -> 13, wrong 11 -> 15, F1 up in all six
+    bundle/modes (mean 0.516 -> 0.638; 0.652 with the threshold); it worked by supporting the
+    purpose technique, not by dropping T1059 (4 wrong T1059 accepts either way). On report prose
+    it backfired (80 CTI-HAL statements with a T1059 candidate, 1,330 candidates): wrong accepts
+    10 -> 24 with 7 correct either way, so prose, alerts and interview answers keep the plain
+    prompt. The threshold helped on prose too (plain prompt: precision 0.41 -> 0.46 at 0.98).
+    The 4B verifier recovers few labelled techniques from prose (7 of 78).
+  - *Held-out clinic, run once with the final setup*, micro-F1 no verifier -> 4B before -> 4B
+    final -> GPT-5.6: narrative 0.357 -> 0.378 -> **0.556** -> 0.526, windows 0.600 -> 0.571 ->
+    **0.462** -> 0.571, ecar 0.545 -> 0.571 -> **0.643** -> 0.615; mean 0.501 -> 0.507 -> 0.554 ->
+    0.571. Narrative and ecar now match or beat GPT-5.6; windows regressed (three wrong accepts,
+    none correct, on a small mode).
 - **Prose normaliser, measured 2026-10-02 (CTI-HAL statements joined into prose, deterministic
   mapping, no verifier):** the 4B rewriting whole reports with the production extraction prompt
   lowered technique F1 from 0.431 to 0.370 on 14 reports because it leaves actions out. Splitting

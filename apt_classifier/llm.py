@@ -16,9 +16,9 @@ MODEL_PRICING = {
 # other id goes to OpenRouter. The per-task model settings are the only switch.
 LOCAL_PREFIX = "local/"
 # Qwen3.5's recommended sampling (model card), non-thinking for the structured tasks and
-# thinking for the high-effort ones, but without its chat presence_penalty (1.5): extraction
-# copies report text verbatim and JSON repeats its keys, both of which a repeat penalty
-# pushes against. A fixed seed keeps benchmark runs repeatable.
+# thinking for the high-effort ones. presence_penalty is not sent, so the model's own Ollama
+# default applies (1.5 for qwen3.5:4b, which every measurement in docs 16.4a ran with).
+# A fixed seed keeps benchmark runs repeatable.
 _LOCAL_SAMPLING = {"temperature": 0.7, "top_p": 0.8, "top_k": 20}
 _LOCAL_THINKING_SAMPLING = {"temperature": 1.0, "top_p": 0.95, "top_k": 20}
 
@@ -186,7 +186,10 @@ class OpenRouterClient:
         schema_name: str = "structured_response",
         max_tokens: int = 4096,
         seed: int | None = None,
+        top_logprobs: int = 0,
     ) -> LLMResponse:
+        """``top_logprobs`` > 0 asks a local model for per-token probabilities (``raw["logprobs"]``);
+        OpenRouter ignores it."""
         model = self.resolve_model(model)
         if is_local_model(model):
             if not self.local_enabled:
@@ -198,6 +201,7 @@ class OpenRouterClient:
                 schema=schema,
                 max_tokens=max_tokens,
                 seed=seed,
+                top_logprobs=top_logprobs,
             )
         if self.api_key is None:
             raise OpenRouterError(f"{model} needs an OpenRouter key")
@@ -263,6 +267,7 @@ class OpenRouterClient:
         schema: dict[str, Any] | None,
         max_tokens: int,
         seed: int | None,
+        top_logprobs: int = 0,
     ) -> LLMResponse:
         # Ollama's native API, not its OpenAI-compatible /v1: only the native one takes
         # num_ctx per request, and the default context silently truncates whole reports.
@@ -296,6 +301,9 @@ class OpenRouterClient:
         }
         if schema is not None:
             body["format"] = schema
+        if top_logprobs > 0:
+            body["logprobs"] = True
+            body["top_logprobs"] = top_logprobs
         attempts = 2 if schema is not None else 1
         last_finish_reason = "unknown"
         last_content = ""
@@ -317,7 +325,7 @@ class OpenRouterClient:
                     raise OpenRouterError(
                         f"Local LLM {model} does not fit in the free GPU memory and GPU-only mode "
                         "keeps it off the CPU. Free GPU memory, lower LOCAL_LLM_NUM_CTX or use a "
-                        "smaller model (local/qwen3.5:4b)."
+                        "smaller model (local/qwen3.5:4b-text)."
                     ) from exc
                 raise
             try:

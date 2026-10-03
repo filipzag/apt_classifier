@@ -134,8 +134,12 @@ benchmark-attribution-production:
 
 # ----- local LLM (Ollama; LOCAL_LLM_ENABLED=true + local/ model ids, see .env.example) -----
 LOCAL_LLM_MODELS ?= qwen3.5:4b
+OLLAMA ?= ollama
+# pulls the model, then registers qwen3.5:4b-text: the same weights without the vision tower,
+# which Ollama otherwise loads onto the GPU (about 740 MiB; docs 16.4a)
 llm-pull:
-	for model in $(LOCAL_LLM_MODELS); do ollama pull $$model || exit 1; done
+	for model in $(LOCAL_LLM_MODELS); do $(OLLAMA) pull $$model || exit 1; done
+	PYTHONPATH=. $(PYTHON) scripts/ollama_text_only.py --ollama $(OLLAMA) --source qwen3.5:4b --name qwen3.5:4b-text
 
 llm-check:
 	PYTHONPATH=. $(PYTHON) scripts/local_llm_check.py

@@ -335,7 +335,9 @@ pulled; otherwise nothing changes.
    Without sudo, unpack the `ollama-linux-amd64.tar.zst` release into your home directory, start
    it with `OLLAMA_HOST=127.0.0.1:11435 ollama serve` and set
    `LOCAL_LLM_URL=http://127.0.0.1:11435` in `.env`.
-2. Pull the model (`qwen3.5:4b`, about 3 GB) and check its speed and GPU memory:
+2. Pull the model (`qwen3.5:4b`, about 3 GB; `make llm-pull` then registers `qwen3.5:4b-text`,
+   the same model without its unused image encoder, which saves about 740 MB of GPU memory) and
+   check its speed and GPU memory:
 
    ```bash
    make llm-pull
@@ -353,14 +355,16 @@ What it then does:
   them a `local/` model id:
 
   ```text
-  EXTRACT_MODEL=local/qwen3.5:4b            # prose rewritten sentence by sentence; interview phrasing
-  TECHNIQUE_VERIFIER_MODEL=local/qwen3.5:4b # checks of ambiguous technique matches
+  EXTRACT_MODEL=local/qwen3.5:4b-text            # prose rewritten sentence by sentence; interview phrasing
+  TECHNIQUE_VERIFIER_MODEL=local/qwen3.5:4b-text # checks of ambiguous technique matches
   ```
 
 - **GPU only:** the model runs entirely on the GPU (about 4 GB) with at most 2 CPU threads. When
   the GPU is too full, the step reports that the model "does not fit in the free GPU memory"
   instead of slowing the computer; free GPU memory or lower `LOCAL_LLM_NUM_CTX`. `make llm-check`
   also warns when a laptop has capped the GPU's power, which makes the model very slow.
+- **Verifier confidence:** the local verifier accepts a technique only when it is at least 98%
+  sure (`LOCAL_LLM_VERIFIER_MIN_CONFIDENCE=0.98`); less certain matches stay for the analyst.
 - **Off:** `LOCAL_LLM_ENABLED=false` in `.env`, or `make api-local` / `make run-local` for no LLM
   at all.
 
@@ -390,7 +394,7 @@ All settings are environment variables documented in `.env.example`. Important v
 - `EMBEDDING_MODEL=basel/ATTACK-BERT` (pinned by `EMBEDDING_MODEL_REVISION`)
 - `EXTRACT_MODEL=openai/gpt-5.6-sol`
 - `REVIEW_MODEL=anthropic/claude-sonnet-5`
-- `LOCAL_LLM_ENABLED=true` (local LLM via Ollama, GPU only, used when Ollama answers with `LOCAL_LLM_FALLBACK_MODEL` pulled: without an OpenRouter key it verifies ambiguous techniques, rewrites report prose sentence by sentence and runs the review; with a key only `local/` model ids use it; `make llm-pull`, `make llm-check`; docs 16.4a)
+- `LOCAL_LLM_ENABLED=true` (local LLM via Ollama, `qwen3.5:4b-text` by default, GPU only, used when Ollama answers with `LOCAL_LLM_FALLBACK_MODEL` pulled: without an OpenRouter key it verifies ambiguous techniques, rewrites report prose sentence by sentence and runs the review; with a key only `local/` model ids use it; `make llm-pull`, `make llm-check`; docs 16.4a)
 - `SIMILARITY_THRESHOLD=0.45`
 - `BEHAVIOR_SIMILARITY_THRESHOLD=0.55`
 - `THREAT_INTEL_DAYS=30`

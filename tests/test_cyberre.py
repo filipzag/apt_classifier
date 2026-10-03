@@ -458,3 +458,131 @@ def test_local_models_get_the_reason_first_verifier_prompt():
     assert "false positives" in system
     # the OpenRouter path keeps the measured production prompt
     assert _verifier_prompt("openai/gpt-5.6-sol")[1] is VERIFY_SCHEMA
+
+
+def _ollama_payload(decisions, alternatives):
+    """Ollama-style payload whose tokens spell the decisions JSON one character at a time,
+    except each verdict value, which is one token listing ``alternatives[i]`` (token -> p)."""
+    import json
+    import math
+    import re
+
+    text = json.dumps({"decisions": decisions})
+    tokens, position = [], 0
+    for index, match in enumerate(re.finditer(r'"verdict": "(\w+)"', text)):
+        start, end = match.start(1), match.end(1)
+        tokens += [{"token": ch, "logprob": 0.0} for ch in text[position:start]]
+        tops = [{"token": t, "logprob": math.log(p)} for t, p in alternatives[index].items()]
+        tokens.append({"token": match.group(1), "logprob": 0.0, "top_logprobs": tops})
+        position = end
+    tokens += [{"token": ch, "logprob": 0.0} for ch in text[position:]]
+    return {"message": {"content": text}, "logprobs": tokens}
+
+
+class LocalVerifierClient(VerifierClient):
+    def __init__(self, decisions, alternatives):
+        super().__init__(decisions)
+        self.alternatives = alternatives
+
+    def complete(self, messages, **kwargs):
+        self.calls.append((messages, kwargs))
+        payload = _ollama_payload(self.decisions, self.alternatives)
+        return LLMResponse(
+            payload["message"]["content"],
+            {"decisions": self.decisions},
+            LLMUsage(20, 10, 0.0),
+            kwargs["model"],
+            payload,
+        )
+
+
+def _two_decisions():
+    return [
+        {"technique_id": "T1", "verdict": "supported", "support_span": "PowerShell", "reason": "r"},
+        {"technique_id": "T2", "verdict": "unsupported", "support_span": "", "reason": "r"},
+    ]
+
+
+def test_verdict_confidence_counts_only_allowed_verdicts():
+    from apt_classifier.cyberre import _verdict_confidences
+
+    payload = _ollama_payload(
+        _two_decisions(),
+        [{"supported": 0.6, "un": 0.2, "No": 0.2}, {"unsupported": 0.9, "supported": 0.1}],
+    )
+    first, second = _verdict_confidences(payload)
+    assert abs(first - 0.75) < 1e-9  # "No" is outside the JSON grammar and ignored
+    assert abs(second - 0.1) < 1e-9
+    assert _verdict_confidences({"message": {"content": "{}"}}) == []
+
+
+def test_low_confidence_support_becomes_uncertain_for_local_models():
+    kb = SimpleNamespace(techniques={"T1": SimpleNamespace(description="Runs PowerShell.")})
+    observation = SimpleNamespace(
+        id="obs-1",
+        text="PowerShell ran.",
+        provenance=SimpleNamespace(raw_excerpt="PowerShell ran."),
+    )
+    alternatives = [{"supported": 0.6, "un": 0.2}, {"unsupported": 0.9, "supported": 0.1}]
+    candidates = [candidate("T1", 1), candidate("T2", 2)]
+    gated = verify_technique_candidates(
+        LocalVerifierClient(_two_decisions(), alternatives),
+        kb,
+        observation,
+        candidates,
+        model="local/qwen3.5:4b",
+        effort="low",
+        min_confidence=0.98,
+    )
+    by_id = {c.technique_id: c for c in gated.candidates}
+    assert by_id["T1"].verification.verdict is TechniqueVerificationVerdict.UNCERTAIN
+    assert by_id["T1"].state is TechniqueCandidateState.NEEDS_REVIEW
+    assert abs(by_id["T1"].verification.confidence - 0.75) < 1e-9
+    assert by_id["T2"].verification.verdict is TechniqueVerificationVerdict.UNSUPPORTED
+    kept = verify_technique_candidates(
+        LocalVerifierClient(_two_decisions(), alternatives),
+        kb,
+        observation,
+        [candidate("T1", 1), candidate("T2", 2)],
+        model="local/qwen3.5:4b",
+        effort="low",
+    )
+    assert kept.candidates[0].verification.verdict is TechniqueVerificationVerdict.SUPPORTED
+
+
+def test_openrouter_verdicts_carry_no_confidence_and_are_never_gated():
+    kb = SimpleNamespace(techniques={"T1": SimpleNamespace(description="Runs PowerShell.")})
+    observation = SimpleNamespace(
+        id="obs-1",
+        text="PowerShell ran.",
+        provenance=SimpleNamespace(raw_excerpt="PowerShell ran."),
+    )
+    result = verify_technique_candidates(
+        VerifierClient(_two_decisions()[:1]),
+        kb,
+        observation,
+        [candidate("T1", 1)],
+        model="openai/gpt-5.6-sol",
+        effort="low",
+        min_confidence=0.98,
+    )
+    verification = result.candidates[0].verification
+    assert verification.verdict is TechniqueVerificationVerdict.SUPPORTED
+    assert verification.confidence is None
+
+
+def test_interpreter_rule_applies_to_log_observations_only():
+    from apt_classifier.cyberre import _verifier_prompt
+
+    rule = "Map what the activity is for."
+    for source in (
+        "winlog",
+        "winlog_correlation",
+        "ecar",
+        "elasticsearch_mcp",
+        "evidenceforge_windows",
+    ):
+        assert rule in _verifier_prompt("local/qwen3.5:4b", source)[0], source
+    for source in ("free_text", "unknown", "alerts", "analyst_interview", ""):
+        assert rule not in _verifier_prompt("local/qwen3.5:4b", source)[0], source
+    assert rule not in _verifier_prompt("openai/gpt-5.6-sol", "winlog")[0]
