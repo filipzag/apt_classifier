@@ -182,7 +182,7 @@ class Settings(BaseSettings):
     profile_forest_family_weight: float = 1.0
     # Default since 2026-10-01 by the product owner's decision (docs 21.3.11): real reports improve
     # (anonymized top-1 0.436 -> 0.455, 8 -> 10 names) at the cost of one ATT&CK fold (0.837 -> 0.830).
-    # It needs the combiner fitted with it (data/models/combiner/attribution_combiner_fsum.json);
+    # It needs the combiner fitted with it (data/models/combiner/attribution_combiner_0930_fsum.json);
     # to turn it off use 0.0 with attribution_combiner_no_country_fsum.json. The group forest
     # stays at 0: it hurts
     # real reports at every weight tried.
@@ -289,13 +289,14 @@ class Settings(BaseSettings):
     # model over per-classifier ranks, discrimination channels and evidence-regime features,
     # blended half-and-half with the RRF order; the naming gate then scores the leader against
     # the union of both shortlists. Adopted 2026-09-30 (docs 21.3.9): folds top-1 0.601 -> 0.830,
-    # CTI-HAL 0.509 -> 0.527, every named group correct on both sets. Refitted 2026-10-03 on the
-    # hardened classifiers (folds 0.817, CTI-HAL anonymized 0.473). Loads fail-closed.
+    # CTI-HAL 0.509 -> 0.527, every named group correct on both sets. Since 2026-10-04 the same
+    # weights, stamped for the hardened classifiers (identical rankings); the 2026-10-03 refit
+    # (attribution_combiner_fsum.json) lost 5 of 153 leak-free folds and is not used. Fail-closed.
     attribution_combiner_enabled: bool = True
-    # refit 2026-10-03 for the exactly rounded classifier sums (docs 21.3.9); the earlier artifacts
-    # stay next to it for checkouts with the previous classifier code
+    # the 2026-09-30 weights stamped for the exactly rounded classifier sums (docs 21.3.9); the
+    # earlier artifacts stay next to it for checkouts with the previous classifier code
     attribution_combiner_path: Path = (
-        PROJECT_ROOT / "data" / "models" / "combiner" / "attribution_combiner_fsum.json"
+        PROJECT_ROOT / "data" / "models" / "combiner" / "attribution_combiner_0930_fsum.json"
     )
     attribution_combiner_top_n: int = 20
     attribution_combiner_blend: float = 0.5
@@ -319,8 +320,8 @@ class Settings(BaseSettings):
     # (docs 21.3.15: "strong" wrong 4.2% pooled, calibration error 0.041). Fails closed (no
     # labels) when the artifact is missing or was fitted against a different combiner.
     confidence_labels_enabled: bool = True
-    # refitted for attribution_combiner_fsum.json (2026-10-03); confidence_labels.json stays for
-    # checkouts with the earlier combiner
+    # the 2026-10-02 labels re-pinned to attribution_combiner_0930_fsum.json (same weights, same
+    # rankings); confidence_labels.json stays for checkouts with the earlier combiner
     confidence_labels_path: Path = (
         PROJECT_ROOT / "data" / "models" / "calibration" / "confidence_labels_fsum.json"
     )

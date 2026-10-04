@@ -1251,7 +1251,7 @@ to analysts: on its own it is weaker than the origin aggregated from the ranked 
 
 The group forest votes at weight 0. The source-country vote is on by default since 2026-10-01
 (`SOURCE_COUNTRY_WEIGHT=1.0`), together with the combiner refitted with it as a feature (feature
-schema 2, `data/models/combiner/attribution_combiner_fsum.json`). To turn it off, set
+schema 2, `data/models/combiner/attribution_combiner_0930_fsum.json`). To turn it off, set
 `SOURCE_COUNTRY_WEIGHT=0` with
 `ATTRIBUTION_COMBINER_PATH=data/models/combiner/attribution_combiner_no_country_fsum.json`, a combiner
 fitted without the country vote (the 2026-10-03 refit in 21.3.9). In the attribution benchmark's unknown-actor arm, the voting forest is refitted on the knowledge base without the removed actor,
@@ -3720,6 +3720,19 @@ was the schema-1 combiner fitted before the country vote existed. The group-netw
 the wrong name that failed its naming gate on 2026-10-01 and stays opt-in only. The free-text
 group model's trial combiner (`attribution_combiner_text_group.json`, 21.3.16) was fitted for the
 earlier classifier code and needs the same refit before `TEXT_GROUP_WEIGHT` > 0 is used.
+
+**Leak-free check and decision (2026-10-04).** After the merge with the BM25 fold hiding (21.3.5) the
+refit was checked on the leak-free fold benchmark. Against the previous code with the 2026-09-30
+combiner it lost 5 folds (seed 7 top-1 126 -> 121 of 153, MRR 0.867 -> 0.848, 26 named, all correct),
+more than the 2 measured before the hiding, and gained one CTI-HAL anonymized report (25 -> 26; as
+reported unchanged). The 2026-09-30 weights stamped for the merged code reproduced the previous code
+exactly (0 rank changes on those folds and both CTI-HAL runs), so the product owner chose them:
+the default is `attribution_combiner_0930_fsum.json` (a `metadata.fingerprint_refreshed` entry records
+the stamp) and the refit stays on disk unused. The confidence labels were re-pinned to it
+(`confidence_labels_fsum.json`, `provenance.repinned`): a fresh fit on the leak-free design seeds 41/53
+was refused by its own rule, because only 6 rows reached the "set" label (0 misses, upper bound
+0.39 against the 0.20 bar; the adopted fit had 24). The no-country and group-network refits above
+remain the opt-in artifacts.
 
 #### 21.3.10 Labelled-sentence exemplars: technique recall on real text (2026-09-30)
 

@@ -170,20 +170,20 @@ development bundles narrated telemetry loses some ranking, so structured-telemet
 `TECHNIQUE_EXEMPLARS_ENABLED=false` (docs 21.3.10). With the OpenRouter verifier enabled (production pipeline,
 measured before the exemplars) narrative micro-F1 was 0.53, recall 0.56.
 
-**Attribution (text in, group out; 153 held-out groups):** top-1 0.82 (was 0.38 before the fusion work and
-0.60 before the learned combiner; 0.84 before the source-country vote, which costs one fold here and gains on real
-reports; 0.83 before the 2026-10-03 combiner refit), top-3 0.92, top-5 0.96, MRR 0.87. With the separation gate 32 known groups are named, all correct, and 0/25 removed
-actors are named (was 4): named risk 0.00 (was 0.56) at 18% coverage. With the 2026-09-30 combiner, same-activity cluster
-naming (on by default since 2026-10-02) also named one documented cluster (APT38 / Lazarus Group, docs 10.11). That 0/25
-is seed 7; across the seven fold seeds used on 2026-10-02 (2026-09-30 combiner) the gate named 4 of 175 removed actors
-(about 2%), each just above the separation bar (docs 21.3.15). These fold numbers were measured without the 2026-10-03
-BM25 fold hiding and are optimistic (seed 7 with the 2026-09-30 combiner: top-1 0.830 -> 0.824, named 32 -> 26; docs 21.3.5).
+**Attribution (text in, group out; 153 held-out groups):** on the leak-free fold benchmark (seed 7; since
+2026-10-03 the BM25 index is rebuilt per fold without the held-out sentences, docs 21.3.5) top-1 0.82, top-3 0.90,
+top-5 0.94, MRR 0.87; with the separation gate 26 known groups are named, all correct, plus one documented same-activity
+cluster (docs 10.11), and 0/25 removed actors are named: named risk 0.00. Before the BM25 fold hiding the same
+combiner read top-1 0.83 (was 0.38 before the fusion work and 0.60 before the learned combiner; 0.84 before the
+source-country vote, which costs one fold here and gains on real reports), top-3 0.93, top-5 0.96, MRR 0.88, 32 named;
+across the seven fold seeds used on 2026-10-02 (also before the hiding) the gate named 4 of 175 removed actors (about
+2%), each just above the separation bar (docs 21.3.15).
 
 **CTI-HAL real reports (55 reports, 6 groups; local evaluation only):** statement mapping F1 0.38 (was 0.32 before the
 exemplars), recall 0.34 (was 0.25), hit@1 0.38 (was 0.33); median accepted-technique recall per report 0.42 (was 0.31).
 Attribution, with every ATT&CK group name and alias in the statements replaced by "the adversary" as in the ATT&CK
-folds: **top-1 0.47** (0.44 before the source-country vote, 0.46 before the 2026-10-03 combiner refit), cluster-aware
-top-1 0.58, top-3 0.53 (cluster-aware 0.65), top-5 0.60, MRR 0.52 (cluster-aware top-1 0.58, top-5 0.64, MRR 0.53 before the 2026-10-01 anonymizer
+folds: **top-1 0.46** (0.44 before the source-country vote), cluster-aware top-1 0.56, top-3 0.53
+(cluster-aware 0.65), top-5 0.60, MRR 0.51 (cluster-aware top-1 0.58, top-5 0.64, MRR 0.53 before the 2026-10-01 anonymizer
 fix, docs 21.3.14); 10 reports
 reached a named hypothesis, all correct (8 before the source-country vote). With the statements as reported (27 of the 55 reports name their own
 group in them) the same pipeline gives top-1 0.56 (was 0.36 before the tool cap, decisive-malware boost, discriminative
@@ -284,9 +284,9 @@ The shortlist is ordered by a learned combiner (`apt_classifier/combiner.py`): a
 model over per-classifier ranks, the discrimination channels and the case's evidence regime,
 blended half-and-half with reciprocal-rank fusion. It is fitted only on ATT&CK-derived folds
 (`make fit-combiner`, no credit, about an hour) and loads fail-closed on an ATT&CK-version or
-pipeline mismatch. On the held-out ATT&CK folds it lifted top-1 from 0.60 to 0.83 (0.82 since the
-2026-10-03 refit) and on the 55 CTI-HAL real reports (statements as reported) from 0.51 to 0.53 with every
-named group still correct; the naming gate scores
+pipeline mismatch. On the held-out ATT&CK folds it lifted top-1 from 0.60 to 0.83 (fold benchmark before
+the 2026-10-03 BM25 hiding) and on the 55 CTI-HAL real reports (statements as reported) from 0.51 to 0.53 with
+every named group still correct; the naming gate scores
 the leader against the union of both shortlists so a re-ordering cannot hide a competitor. The
 assessment page shows its calibrated leader probability. Disable with
 `ATTRIBUTION_COMBINER_ENABLED=false`.
