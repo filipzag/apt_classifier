@@ -68,6 +68,11 @@ def main() -> None:
     parser.add_argument("--cases-dir", type=Path, default=AUDITS)
     args = parser.parse_args()
 
+    stale = [
+        path for path in (AUDITS / f"{args.arm}_train_log.json", MODELS / args.arm) if path.exists()
+    ] + sorted(AUDITS.glob(f"{args.arm}_step*_dev.jsonl"))
+    if stale:  # checkpoint dev predictions resume by case id: never mix two runs
+        raise SystemExit(f"arm {args.arm!r} already has outputs: {[str(path) for path in stale]}")
     random.seed(args.seed)
     torch.manual_seed(args.seed)
     rng = random.Random(args.seed)
