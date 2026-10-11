@@ -1,0 +1,11 @@
+# Isolated venv for the cribl-decision fine-tuning experiment (scripts/cribl_finetune/README.md).
+# Qwen3.5 needs transformers >= 5; the project .venv keeps transformers 4.57 for ATTACK-BERT.
+--extra-index-url https://download.pytorch.org/whl/cu130
+torch==2.11.0+cu130
+transformers==5.19.0
+peft==0.21.2
+bitsandbytes==0.50.2
+accelerate==1.15.0
+flash-linear-attention==0.5.2
+numpy==2.4.4
+safetensors

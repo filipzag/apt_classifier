@@ -7,7 +7,7 @@ EVIDENCEFORGE_CLINIC_DIR ?= ../evidenceforge_clinic
 PUBLIC_BASELINE ?= data/audits/public_heldout_baseline.json
 PUBLIC_CURRENT ?= data/audits/public_heldout_current.json
 
-.PHONY: llm-pull llm-check exemplars exemplars-chroma exemplars-chroma-verify exemplar-equivalence fit-forest fit-mlp fit-text-group fit-combiner fit-confidence-labels api api-dev api-local api-auth-demo web-install web-dev web-build web-check run-next setup up down ingest run run-local test lint evidenceforge-eval evidenceforge-eval-all benchmark-public benchmark-curated verify-results check-regression fit-acceptance benchmark-attribution train-reranker generate-synthetic benchmark-cti-hal benchmark-cti-hal-production benchmark-attribution-production prepare-elastic benchmark-elastic benchmark-elastic-production
+.PHONY: llm-pull llm-check cribl-venv cribl-export cribl-probe cribl-train cribl-eval exemplars exemplars-chroma exemplars-chroma-verify exemplar-equivalence fit-forest fit-mlp fit-text-group fit-combiner fit-confidence-labels api api-dev api-local api-auth-demo web-install web-dev web-build web-check run-next setup up down ingest run run-local test lint evidenceforge-eval evidenceforge-eval-all benchmark-public benchmark-curated verify-results check-regression fit-acceptance benchmark-attribution train-reranker generate-synthetic benchmark-cti-hal benchmark-cti-hal-production benchmark-attribution-production prepare-elastic benchmark-elastic benchmark-elastic-production
 
 setup:
 	python3 -m venv --system-site-packages .venv
@@ -138,6 +138,44 @@ train-reranker:
 		--dev $(PUBLIC_NORMALIZED)/tram_dev.jsonl $(PUBLIC_NORMALIZED)/expert_dev.jsonl $(PUBLIC_NORMALIZED)/derived_procedures_dev.jsonl \
 		--use-retrieval-negatives --epochs 1 --batch-size 8 \
 		--pairs-cache data/models/reranker_pairs_cache.json --output data/models/technique-reranker
+
+# cribl-decision fine-tuning experiment (scripts/cribl_finetune/README.md): its own venv with
+# transformers 5 (the project .venv keeps 4.57 for ATTACK-BERT); a CUDA GPU is required. From a
+# worktree, point CRIBL_VENV at the main checkout's venv. Writes only data/audits/cribl_ft/ and
+# data/models/cribl_ft/; no product setting changes.
+CRIBL_VENV ?= .venv-cribl
+CRIBL_PYTHON = $(CRIBL_VENV)/bin/python
+CRIBL_FORMAT ?= plain
+CRIBL_ARM ?= B1
+CRIBL_INIT ?= cribl
+CRIBL_SPLIT ?= dev
+CRIBL_ADAPTER ?= cribl
+cribl-venv:
+	python3 -m venv $(CRIBL_VENV)
+	$(CRIBL_VENV)/bin/pip install --upgrade pip
+	$(CRIBL_VENV)/bin/pip install -r scripts/cribl_finetune/requirements.txt
+
+# Case files. The train-split candidates need ChromaDB (make up) and run with the exemplar index
+# off: it holds the train sentences, which would vote for their own answer.
+cribl-export:
+	mkdir -p data/audits/cribl_ft
+	TECHNIQUE_EXEMPLARS_ENABLED=false PYTHONPATH=. $(PYTHON) scripts/benchmark_mapping.py --split train \
+		--modes hybrid --max-candidate-rows 12 --bootstrap-samples 10 --quiet \
+		--output data/audits/cribl_ft/train_candidates.json
+	PYTHONPATH=. $(PYTHON) scripts/cribl_finetune/export_cases.py
+
+# Smoke test + zero-shot prompt-format probe on the first 200 dev cases (dev only).
+cribl-probe:
+	$(CRIBL_PYTHON) scripts/cribl_finetune/probe.py
+
+# QLoRA fine-tuning; CRIBL_INIT=fresh trains a new LoRA on the plain base (control arm).
+cribl-train:
+	$(CRIBL_PYTHON) scripts/cribl_finetune/train.py --arm $(CRIBL_ARM) --init $(CRIBL_INIT) --format $(CRIBL_FORMAT)
+
+# Score a split (dev, cti_hal, test) with an adapter (cribl, none or a checkpoint directory).
+cribl-eval:
+	$(CRIBL_PYTHON) scripts/cribl_finetune/evaluate.py --split $(CRIBL_SPLIT) --adapter $(CRIBL_ADAPTER) \
+		--name $(CRIBL_ARM) --format $(CRIBL_FORMAT)
 
 # LLM-generated observation sentences for sparsely documented techniques (indexed as the
 # 'synthetic' field; re-run `make ingest` afterwards). Resumable; about $2 for ~575 techniques.
