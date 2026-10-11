@@ -9,7 +9,8 @@ of the option letters `` A`` … , softmaxed over the offered options only.
 from __future__ import annotations
 
 import os
-from collections.abc import Mapping, Sequence
+import time
+from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
@@ -32,6 +33,39 @@ TARGET_MODULES = (
     r"|self_attn\.(q_proj|k_proj|v_proj|o_proj))"
 )
 LORA_SHAPE = {"r": 16, "lora_alpha": 32, "lora_dropout": 0.05, "bias": "none"}
+
+
+OOM_WAIT_S = 60
+
+
+def is_oom(error: BaseException) -> bool:
+    """A GPU allocation failure (the GPU is shared with other sessions' jobs)."""
+    text = str(error)
+    return isinstance(error, torch.cuda.OutOfMemoryError) or (
+        isinstance(error, RuntimeError)
+        and ("out of memory" in text or "CUBLAS_STATUS_ALLOC_FAILED" in text)
+    )
+
+
+def wait_after_oom(note: str = "") -> None:
+    print(
+        f"GPU out of memory{f' ({note})' if note else ''}; retrying in {OOM_WAIT_S} s", flush=True
+    )
+    torch.cuda.empty_cache()
+    time.sleep(OOM_WAIT_S)
+
+
+def with_oom_retry(call: Callable[[], Any], attempts: int = 10, note: str = "") -> Any:
+    """``call()``, waiting and calling again after a GPU allocation failure (for resumable work
+    such as ``evaluate.run_split``)."""
+    for attempt in range(attempts):
+        try:
+            return call()
+        except (RuntimeError, torch.cuda.OutOfMemoryError) as error:
+            if not is_oom(error) or attempt == attempts - 1:
+                raise
+        wait_after_oom(note)  # outside the handler, so the failed frames are freed first
+    raise AssertionError("unreachable")
 
 
 def require_cuda() -> torch.device:

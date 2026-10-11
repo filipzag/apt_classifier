@@ -129,7 +129,7 @@ def main() -> None:
     parser.add_argument("--out", type=Path, default=OUT)
     args = parser.parse_args()
 
-    from decision_model import Readout, load_model
+    from decision_model import Readout, load_model, with_oom_retry
 
     cases = read_jsonl(args.cases_dir / f"cases_{args.split}.jsonl")
     if args.limit:
@@ -139,7 +139,10 @@ def main() -> None:
     model, tokenizer, info = load_model(args.adapter)
     readout = Readout(model, tokenizer, args.format)
     started = time.monotonic()
-    rows = run_split(readout, cases, args.out / f"{stem}.jsonl", rotations=args.rotations)
+    rows = with_oom_retry(
+        lambda: run_split(readout, cases, args.out / f"{stem}.jsonl", rotations=args.rotations),
+        note=stem,
+    )
     report = {
         "generated_at": datetime.now(UTC).isoformat(timespec="seconds"),
         "split": args.split,

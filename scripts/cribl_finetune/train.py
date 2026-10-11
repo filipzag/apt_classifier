@@ -29,12 +29,13 @@ from common import (
     read_jsonl,
     target_distribution,
 )
-from decision_model import Readout, load_model
+from decision_model import Readout, is_oom, load_model, wait_after_oom, with_oom_retry
 from evaluate import metrics, run_split
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 AUDITS = REPO_ROOT / "data" / "audits" / "cribl_ft"
 MODELS = REPO_ROOT / "data" / "models" / "cribl_ft"
+MAX_OOM_SKIPS = 50
 
 
 def schedule(step: int, total: int, warmup: int) -> float:
@@ -106,6 +107,7 @@ def main() -> None:
         "optimizer_steps": total_steps,
         "checkpoints": [],
         "skipped_long": 0,
+        "oom_skipped": 0,
     }
     log_path = AUDITS / f"{args.arm}_train_log.json"
 
@@ -117,7 +119,12 @@ def main() -> None:
         model.save_pretrained(str(directory))
         model.eval()
         started = time.monotonic()
-        dev_rows = run_split(readout, dev, AUDITS / f"{args.arm}_step{seen}_dev.jsonl", progress=0)
+        dev_rows = with_oom_retry(
+            lambda: run_split(
+                readout, dev, AUDITS / f"{args.arm}_step{seen}_dev.jsonl", progress=0
+            ),
+            note="dev scoring",
+        )
         report = metrics(dev, dev_rows)
         model.train()
         pooled = report["arm"]["pooled"]
@@ -164,12 +171,23 @@ def main() -> None:
             except ValueError:
                 input_ids = None
                 log["skipped_long"] += 1
+            oom = False
             if input_ids is not None:
-                logits = readout.letter_logits(input_ids, len(options))
-                wanted = torch.tensor(target, device=logits.device)
-                loss = -(wanted * torch.log_softmax(logits, dim=-1)).sum()
-                (loss / args.accum).backward()
-                running.append(float(loss))
+                try:
+                    logits = readout.letter_logits(input_ids, len(options))
+                    wanted = torch.tensor(target, device=logits.device)
+                    loss = -(wanted * torch.log_softmax(logits, dim=-1)).sum()
+                    (loss / args.accum).backward()
+                    running.append(float(loss))
+                except (RuntimeError, torch.cuda.OutOfMemoryError) as error:
+                    if not is_oom(error) or log["oom_skipped"] >= MAX_OOM_SKIPS:
+                        raise
+                    oom = True
+            if oom:  # another job took the GPU: drop this window's partial gradients, wait
+                logits = loss = None
+                log["oom_skipped"] += 1
+                optimizer.zero_grad(set_to_none=True)
+                wait_after_oom(f"training example {seen}")
             seen += 1
             if seen % args.accum == 0 or seen == examples_total:
                 for group in optimizer.param_groups:
