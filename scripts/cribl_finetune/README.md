@@ -21,9 +21,10 @@ Cribl's own prompt format and "decision slot" are not published, so this folder 
 
 ## Environments
 
-- **`.venv-cribl`** (`make cribl-venv`, about 5 GB): isolated, transformers 5 + peft + bitsandbytes +
-  flash-linear-attention. Qwen3.5 does not load in the project `.venv`, whose transformers 4.57 is
-  kept for ATTACK-BERT.
+- **`.venv-cribl`** (`make cribl-venv`, about 5 GB): isolated, transformers 5 + peft + bitsandbytes.
+  Qwen3.5 does not load in the project `.venv`, whose transformers 4.57 is kept for ATTACK-BERT.
+  transformers picks up flash-linear-attention on its own; it cuts a training step from 3.0 to
+  2.2 s (forward speed is the same, because the dense matrix multiplies dominate on this GPU).
 - **The project `.venv`**: runs only `export_cases.py`, which needs the KB, ChromaDB and the
   benchmark code.
 - **`common.py`**: standard library only. Both sides import it, and the tests cover it.

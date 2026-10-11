@@ -24,8 +24,12 @@
   "question": {
     "framing": "Jev C1 (jev_judge.py @ f9b452c): state {sentence, source}, flat choice over the case's first 10 catalogue candidates in rank order, labels 'Name (Txxxx)', what = description cut at 400 characters, none_of_these last",
     "rotations": "3 option orders (rotation r moves the first r candidates to the end, none stays last), per-option P floored at 0.005, geometric mean, renormalised; pick = argmax (ties in canonical order); none_of_these = no pick",
-    "readout": "options lettered A..; the prompt ends with 'Answer:'; logits of the tokens ' A' ' B' .. at the last position through the native lm_head, softmax over the offered options",
-    "formats": ["plain", "chat", "json"]
+    "readout": "options lettered A..; the prompt ends with 'Answer:'; the final hidden state at the last position times the native lm_head rows of the tokens ' A' ' B' .., in float32, softmax over the offered options",
+    "formats": [
+      "plain",
+      "chat",
+      "json"
+    ]
   },
   "data": {
     "train": "public tram/expert/derived_procedures train splits (CC-BY-4.0); candidates from scripts/benchmark_mapping.py --split train --modes hybrid with TECHNIQUE_EXEMPLARS_ENABLED=false; exact and near (token Jaccard >= 0.9) duplicates of any dev, test or CTI-HAL text dropped; target = the gold options offered (uniform), else none_of_these",
@@ -44,7 +48,12 @@
     ]
   },
   "fixed": {
-    "lora_shape": {"r": 16, "lora_alpha": 32, "lora_dropout": 0.05, "target_modules": "language-model linear_attn in_proj_qkv/in_proj_z/in_proj_a/in_proj_b/out_proj and self_attn q/k/v/o_proj (Cribl's shape)"},
+    "lora_shape": {
+      "r": 16,
+      "lora_alpha": 32,
+      "lora_dropout": 0.05,
+      "target_modules": "language-model linear_attn in_proj_qkv/in_proj_z/in_proj_a/in_proj_b/out_proj and self_attn q/k/v/o_proj (Cribl's shape)"
+    },
     "optimizer": "AdamW, lr 1e-4, weight decay 0, cosine schedule with 3% linear warmup, gradient clip 1.0",
     "batch": "1 example per forward, 16 per optimizer step",
     "epochs": 2,
@@ -54,9 +63,18 @@
     "loss": "cross-entropy of the letter softmax against the target distribution"
   },
   "arms": [
-    {"id": "B0", "description": "Cribl's adapter zero-shot in the chosen format"},
-    {"id": "B1", "description": "Cribl's adapter, trained further (init=cribl)"},
-    {"id": "B2", "description": "control: a fresh LoRA of the same shape on the plain base (init=fresh), same data and schedule"}
+    {
+      "id": "B0",
+      "description": "Cribl's adapter zero-shot in the chosen format"
+    },
+    {
+      "id": "B1",
+      "description": "Cribl's adapter, trained further (init=cribl)"
+    },
+    {
+      "id": "B2",
+      "description": "control: a fresh LoRA of the same shape on the plain base (init=fresh), same data and schedule"
+    }
   ],
   "references": [
     "pipeline rank-1 (the first candidate) on the same cases",
@@ -87,5 +105,14 @@
   ],
   "adoption": "none: an experiment. Any product use (a local judge in place of Jev, the judge_union arm) is a separate decision with the public held-out gate and the attribution naming gate",
   "reporting": "every arm and checkpoint (dev curve), single-order and 3-order numbers, per dataset, no-pick counts, calibration, training time and peak GPU memory; reversals reported as measured",
-  "amendments": []
+  "amendments": [
+    {
+      "id": 1,
+      "date": "2026-10-11",
+      "before": "the full-dev B0 run and any training",
+      "change": "letter logits computed in float32 from the final hidden state and the lm_head rows instead of read from the model's bf16 logits",
+      "reason": "bf16 logits are rounded to 1/8 at typical magnitudes, which quantises the probabilities; on 20 dev cases the argmax was identical (20/20) and probabilities moved by at most 0.018",
+      "informed_by": "the format probe (first 200 dev cases) ran with bf16 logits; its format choice (chat) is kept"
+    }
+  ]
 }

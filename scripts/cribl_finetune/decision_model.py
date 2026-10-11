@@ -130,7 +130,9 @@ def load_model(
 
 
 class Readout:
-    """Letter probabilities at the decision slot."""
+    """Letter probabilities at the decision slot: the final hidden state at the last position
+    times the native ``lm_head`` rows of the letters, in float32 (the model's own bf16 logits
+    are rounded to 1/8 at typical magnitudes, too coarse for calibrated probabilities)."""
 
     def __init__(self, model: Any, tokenizer: Any, fmt: str, max_tokens: int = 2048) -> None:
         self.model = model
@@ -144,6 +146,9 @@ class Readout:
                 raise SystemExit(f"option token {text!r} is not one token: {ids}")
             self.letter_ids.append(ids[0])
         self.device = next(model.parameters()).device
+        base = model.get_base_model() if hasattr(model, "get_base_model") else model
+        self.backbone = base.model
+        self.lm_head = base.lm_head
 
     def encode(self, state: Mapping[str, Any], instructions: str, options: Sequence[Any]) -> Any:
         prompt = render_prompt(state, instructions, options, self.fmt)
@@ -154,9 +159,9 @@ class Readout:
 
     def letter_logits(self, input_ids: Any, count: int) -> Any:
         """Float32 logits of the first ``count`` letters at the last position."""
-        output = self.model(input_ids=input_ids, use_cache=False, logits_to_keep=1)
-        logits = output.logits[0, -1]
-        return logits[self.letter_ids[:count]].float()
+        hidden = self.backbone(input_ids=input_ids, use_cache=False).last_hidden_state[0, -1]
+        weights = self.lm_head.weight[self.letter_ids[:count]]
+        return weights.float() @ hidden.float()
 
     @torch.inference_mode()
     def probabilities(
