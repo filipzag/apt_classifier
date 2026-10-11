@@ -45,6 +45,7 @@ JEV_FRAMING = Path(
 MAIN_AUDITS = Path("/home/fzagar/apt_classifier/data/audits")
 OUT = REPO_ROOT / "data" / "audits" / "cribl_ft"
 NEAR_DUPLICATE = 0.9
+SPLITS = ("dev", "cti_hal", "test", "train")
 
 
 def clean_text(text: Any) -> str:
@@ -217,17 +218,21 @@ def main() -> None:
     )
     parser.add_argument("--train", type=Path, default=OUT / "train_candidates.json")
     parser.add_argument("--out", type=Path, default=OUT)
+    parser.add_argument(
+        "--splits", nargs="+", choices=SPLITS, default=list(SPLITS), help="default: all four"
+    )
     args = parser.parse_args()
 
     settings = get_settings()
     kb = AttackKnowledgeBase.load(settings.kb_path)
     catalog = build_catalog(_load(settings.attack_bundle_path), kb)
     args.out.mkdir(parents=True, exist_ok=True)
-    manifest: dict[str, Any] = {
-        "attack_version": kb.version,
-        "catalog_size": len(catalog),
-        "splits": {},
-    }
+    manifest_path = args.out / "cases_manifest.json"
+    manifest: dict[str, Any] = (
+        json.loads(manifest_path.read_text(encoding="utf-8")) if manifest_path.exists() else {}
+    )
+    manifest.update({"attack_version": kb.version, "catalog_size": len(catalog)})
+    manifest.setdefault("splits", {})
 
     sources = {
         "dev": args.jev_framing / "s1_dev_c1.json",
@@ -235,9 +240,18 @@ def main() -> None:
         "test": args.public_test,
         "train": args.train,
     }
-    held_out_texts: list[str] = []
-    for split in ("dev", "cti_hal", "test", "train"):
-        artifact = _load(sources[split])
+    artifacts = {split: _load(sources[split]) for split in args.splits}
+    held_out_texts = (
+        [
+            str(case.get("text") or "")
+            for split in ("dev", "cti_hal", "test")
+            for case in _cases(artifacts.get(split) or _load(sources[split]))
+        ]
+        if "train" in args.splits
+        else []
+    )
+    for split in args.splits:
+        artifact = artifacts[split]
         info: dict[str, Any] = {
             "source": str(sources[split]),
             "source_sha256": _sha256(sources[split]),
@@ -261,8 +275,6 @@ def main() -> None:
             if artifact.get("split") != "train":
                 raise SystemExit(f"{sources[split]} is not a train-split artifact")
             rows, info["dedup"] = drop_near_duplicates(rows, held_out_texts)
-        else:
-            held_out_texts += [row["text"] for row in rows]
         info["cases"] = write_jsonl(args.out / f"cases_{split}.jsonl", rows)
         info["gold_in_candidates"] = round(
             sum(row["gold_in_candidates"] for row in rows) / max(len(rows), 1), 6
@@ -281,7 +293,7 @@ def main() -> None:
                 else ""
             )
         )
-    (args.out / "cases_manifest.json").write_text(
+    manifest_path.write_text(
         json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8"
     )
 
