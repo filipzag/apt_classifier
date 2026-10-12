@@ -52,6 +52,26 @@ def example(row: dict[str, Any], rng: random.Random) -> tuple[list[dict[str, str
     return options, target_distribution(options, row["gold_ids"])
 
 
+def resume_point(arm: str, directory: Path, log_path: Path) -> int:
+    """The example count of checkpoint ``directory`` of ``arm``; refuses unless it is this
+    arm's checkpoint, its log exists and nothing past it was written (dev predictions or
+    later checkpoint dirs)."""
+    directory = directory.resolve()
+    if directory.parent != (MODELS / arm).resolve() or not directory.name.startswith("step_"):
+        raise SystemExit(f"{directory} is not a checkpoint of arm {arm!r}")
+    start = int(directory.name.removeprefix("step_"))
+    if not log_path.exists() or not (directory / "adapter_model.safetensors").exists():
+        raise SystemExit(f"cannot resume {arm!r}: missing log or adapter")
+    later = [
+        path
+        for path in [*AUDITS.glob(f"{arm}_step*_dev.jsonl"), *(MODELS / arm).glob("step_*")]
+        if int(path.name.split("step", 1)[1].lstrip("_").split("_")[0]) > start
+    ]
+    if later:
+        raise SystemExit(f"outputs past step {start} exist: {[str(path) for path in later]}")
+    return start
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__.split("\n", 1)[0])
     parser.add_argument("--arm", required=True, help="run name, e.g. B1 or B2")
@@ -67,13 +87,25 @@ def main() -> None:
     parser.add_argument("--limit-train", type=int, help="first N shuffled train rows (pilot)")
     parser.add_argument("--dev-limit", type=int, help="score only the first N dev cases (pilot)")
     parser.add_argument("--cases-dir", type=Path, default=AUDITS)
+    parser.add_argument(
+        "--resume-from",
+        type=Path,
+        help="a checkpoint dir of this arm (<models>/<arm>/step_N): continue the same run from it",
+    )
     args = parser.parse_args()
 
-    stale = [
-        path for path in (AUDITS / f"{args.arm}_train_log.json", MODELS / args.arm) if path.exists()
-    ] + sorted(AUDITS.glob(f"{args.arm}_step*_dev.jsonl"))
-    if stale:  # checkpoint dev predictions resume by case id: never mix two runs
-        raise SystemExit(f"arm {args.arm!r} already has outputs: {[str(path) for path in stale]}")
+    log_path = AUDITS / f"{args.arm}_train_log.json"
+    start = 0
+    if args.resume_from:
+        start = resume_point(args.arm, args.resume_from, log_path)
+    else:
+        stale = [path for path in (log_path, MODELS / args.arm) if path.exists()] + sorted(
+            AUDITS.glob(f"{args.arm}_step*_dev.jsonl")
+        )
+        if stale:  # checkpoint dev predictions resume by case id: never mix two runs
+            raise SystemExit(
+                f"arm {args.arm!r} already has outputs: {[str(path) for path in stale]}"
+            )
     random.seed(args.seed)
     torch.manual_seed(args.seed)
     rng = random.Random(args.seed)
@@ -85,7 +117,9 @@ def main() -> None:
     if args.dev_limit:
         dev = dev[: args.dev_limit]
 
-    model, tokenizer, info = load_model(args.init, trainable=True)
+    model, tokenizer, info = load_model(
+        str(args.resume_from) if args.resume_from else args.init, trainable=True
+    )
     readout = Readout(model, tokenizer, args.format, max_tokens=args.max_tokens)
     trainable = [p for p in model.parameters() if p.requires_grad]
     optimizer = torch.optim.AdamW(trainable, lr=args.lr, weight_decay=0.0)
@@ -109,7 +143,22 @@ def main() -> None:
         "skipped_long": 0,
         "oom_skipped": 0,
     }
-    log_path = AUDITS / f"{args.arm}_train_log.json"
+    if start:
+        previous = json.loads(log_path.read_text(encoding="utf-8"))
+        log = {
+            **previous,
+            "checkpoints": [c for c in previous["checkpoints"] if c["examples_seen"] <= start],
+            "loss": [c for c in previous.get("loss", []) if c["examples_seen"] <= start],
+            "resumed": {
+                "from": str(args.resume_from),
+                "examples_seen": start,
+                "at": datetime.now(UTC).isoformat(timespec="seconds"),
+                "model": info,
+                "replayed": "same seed and data/option order (the skipped examples consume the "
+                "random generator as before); optimizer moments and dropout draws start afresh; "
+                "the partial accumulation window at the checkpoint is lost",
+            },
+        }
 
     def save_log() -> None:
         log_path.write_text(json.dumps(log, indent=2) + "\n", encoding="utf-8")
@@ -155,7 +204,8 @@ def main() -> None:
 
     model.train()
     started = time.monotonic()
-    seen = step = 0
+    seen = 0
+    step = start // args.accum
     running: list[float] = []
     optimizer.zero_grad(set_to_none=True)
     torch.cuda.reset_peak_memory_stats()
@@ -166,6 +216,9 @@ def main() -> None:
             if seen >= examples_total:
                 break
             options, target = example(row, rng)
+            if seen < start:  # resumed: replay the order without training
+                seen += 1
+                continue
             try:
                 input_ids = readout.encode(c1_state(row["text"]), C1_INSTRUCTIONS, options)
             except ValueError:
@@ -210,12 +263,14 @@ def main() -> None:
                     running.clear()
                     print(
                         f"step {step}/{total_steps} loss {mean:.4f} "
-                        f"{elapsed / seen:.2f} s/example, peak {torch.cuda.max_memory_allocated() / 2**30:.1f} GiB",
+                        f"{elapsed / (seen - start):.2f} s/example, peak {torch.cuda.max_memory_allocated() / 2**30:.1f} GiB",
                         flush=True,
                     )
             if seen % every == 0 or seen == examples_total:
                 log["peak_gpu_gib"] = round(torch.cuda.max_memory_allocated() / 2**30, 2)
-                log["train_s"] = round(time.monotonic() - started, 1)
+                log["train_s" if not start else "train_s_after_resume"] = round(
+                    time.monotonic() - started, 1
+                )
                 checkpoint(seen)
     log["finished_at"] = datetime.now(UTC).isoformat(timespec="seconds")
     save_log()
