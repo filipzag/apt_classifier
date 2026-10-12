@@ -229,6 +229,32 @@ def pick_from(distribution: Mapping[str, float], order: Sequence[str]) -> tuple[
     return (None if label == NONE_OF_THESE else label), probability
 
 
+def forced_pick(
+    distribution: Mapping[str, float], order: Sequence[str]
+) -> tuple[str | None, float | None]:
+    """The never-abstain rule (prereg amendment 4): the most probable technique, never
+    ``none_of_these``, with its probability renormalised over the techniques (ties in ``order``);
+    ``(None, None)`` when no technique has probability."""
+    techniques = {label: p for label, p in distribution.items() if label != NONE_OF_THESE}
+    total = math.fsum(techniques.values())
+    if total <= 0:
+        return None, None
+    label, probability = ranked(techniques, order)[0]
+    return label, probability / total
+
+
+def forced_row(
+    row: Mapping[str, Any], order: Sequence[str], key: str = "distribution"
+) -> dict[str, Any]:
+    """``row`` re-decided by :func:`forced_pick` on ``row[key]``; ``p_none`` keeps the abstain
+    signal. A row without a distribution (an error) stays a miss."""
+    distribution = row.get(key)
+    if not distribution:
+        return {**row, "pick": None, "p_pick": None, "p_none": None}
+    pick, p_pick = forced_pick(distribution, order)
+    return {**row, "pick": pick, "p_pick": p_pick, "p_none": distribution.get(NONE_OF_THESE)}
+
+
 def hits(pick: str | None, gold: Iterable[str]) -> tuple[bool, bool]:
     """(exact, parent-aware) of one pick; no pick is a miss on both."""
     if pick is None:
@@ -375,8 +401,9 @@ def paired_delta(
 
 def reference_rows(cases: Sequence[Mapping[str, Any]], source: str) -> list[dict[str, Any]]:
     """Scorable rows for a reference stored in the case file: ``pipeline`` (the rank-1
-    candidate, no probability) or ``jev_c1`` (Jev's stored pick and P; cases without a Jev
-    record are left out)."""
+    candidate, no probability), ``jev_c1`` (Jev's stored pick and P) or ``jev_c1_forced``
+    (Jev's stored distribution under :func:`forced_pick`); cases without a Jev record are left
+    out of the Jev references."""
     rows = []
     for case in cases:
         base = {
@@ -392,6 +419,14 @@ def reference_rows(cases: Sequence[Mapping[str, Any]], source: str) -> list[dict
                 continue
             pick = record.get("pick") if record.get("status") == "ok" else None
             rows.append({**base, "pick": pick, "p_pick": record.get("p_final")})
+        elif source == "jev_c1_forced":
+            record = case.get("jev_c1")
+            if record is None:
+                continue
+            decided = record.get("status") in ("ok", "no_pick")  # an error has no distribution
+            order = [item["id"] for item in case["candidates"][:FLAT_K]]
+            distribution = record.get("distribution") if decided else None
+            rows.append(forced_row({**base, "distribution": distribution}, order))
         else:
             raise ValueError(f"unknown reference {source!r}")
     return rows

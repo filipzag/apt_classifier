@@ -108,6 +108,17 @@ def test_pick_from_none_and_ties():
     assert common.pick_from({"b": 0.5, "a": 0.5}, ["a", "b"]) == ("a", 0.5)
 
 
+def test_forced_pick_never_abstains_and_renormalises():
+    distribution = {"a": 0.1, "b": 0.3, common.NONE_OF_THESE: 0.6}
+    label, probability = common.forced_pick(distribution, ["a", "b"])
+    assert label == "b" and probability == pytest.approx(0.75)
+    assert common.forced_pick({"b": 0.2, "a": 0.2, common.NONE_OF_THESE: 0.6}, ["a", "b"])[0] == "a"
+    assert common.forced_pick({common.NONE_OF_THESE: 1.0}, []) == (None, None)
+    row = common.forced_row({"case_id": "1", "distribution": distribution}, ["a", "b"])
+    assert (row["pick"], row["p_none"]) == ("b", 0.6)
+    assert common.forced_row({"case_id": "1", "status": "error"}, [])["pick"] is None
+
+
 def test_score_block_counts_misses_and_ece():
     rows = [
         {"gold_ids": ["T1"], "pick": "T1", "p_pick": 0.9},
@@ -150,6 +161,21 @@ def test_reference_rows_use_status():
     assert [row["pick"] for row in common.reference_rows(cases, "pipeline")] == ["T1", "T2"]
     jev = common.reference_rows(cases, "jev_c1")
     assert len(jev) == 1 and jev[0]["pick"] is None
+    cases[0]["candidates"] = [{"id": "T2"}, {"id": "T1"}]
+    cases[0]["jev_c1"]["distribution"] = {"T1": 0.2, "T2": 0.2, common.NONE_OF_THESE: 0.6}
+    forced = common.reference_rows(cases, "jev_c1_forced")
+    assert len(forced) == 1 and forced[0]["pick"] == "T2"  # a Jev no-pick is re-decided
+    cases[0]["jev_c1"]["status"] = "error"
+    assert common.reference_rows(cases, "jev_c1_forced")[0]["pick"] is None
+
+
+def test_rescore_auroc_counts_ties_half():
+    from scripts.cribl_finetune.rescore import auroc
+
+    assert auroc([(0.9, True), (0.1, False)]) == 1.0
+    assert auroc([(0.5, True), (0.5, False)]) == 0.5
+    assert auroc([(0.2, True), (0.8, False), (0.5, True)]) == 0.0
+    assert auroc([(0.2, True)]) is None
 
 
 def _technique(technique_id, tactics=(), parent=None):

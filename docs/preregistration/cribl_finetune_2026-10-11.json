@@ -132,6 +132,26 @@
       "deviation": "same code, 4-bit NF4 base, seeds and data order; a different GPU model gives floating-point differences; B0 and B1 test scores also come from the pod, their dev and CTI-HAL scores from the laptop",
       "data": "the upload holds only public CC-BY-4.0 case files (train, dev, test), logs and adapters; CTI-HAL (no licence) is not uploaded",
       "informed_by": "nothing new beyond amendment 2: no confirmation result exists yet"
+    },
+    {
+      "id": 4,
+      "date": "2026-10-13",
+      "before": "any CTI-HAL confirmation result: B0's CTI-HAL run had started, no CTI-HAL prediction or metric of any arm had been read",
+      "change": "a second decision rule, never_abstain: the pick is the most probable of the ten techniques in the stored three-order distribution, never none_of_these, with P(pick) renormalised over the techniques (common.forced_pick); P(none_of_these) is kept as a separate flag. The question, the models and the stored predictions are unchanged; scripts/cribl_finetune/rescore.py applies the rule offline",
+      "reason": "under the registered metric a no-pick is always a miss and a pick can only gain, so abstaining can never raise exact or parent-aware; the trained arms said none_of_these on 22-23% of dev cases (training targets were none_of_these for 27.6% of examples, dev's gold-absent share is 16.2%) and on 33% of test",
+      "selection": "dev only, the registered rules under the new decision rule: B1 step_9462 (exact 0.687405, tied with step_12616, the earlier wins), B2 step_12616 (0.679818), finalist B1; B0 0.485584; Jev C1 under the same rule 0.520486",
+      "confirmation": "CTI-HAL (968 statements, laptop, local only): B0, B1 step_9462 and B2 step_12616 (a new CTI-HAL run; B2 step_6308 is still scored for the registered rule), rescored once with rescore.py",
+      "success": {
+        "headline": "the finalist on CTI-HAL under never_abstain: exact minus pipeline rank-1 with a paired 95% CI lower bound above 0, and exact at least Jev C1 as reported (0.460) and Jev C1 under the same rule (from its stored distributions)",
+        "secondary": [
+          "CTI-HAL ECE of the renormalised P(pick) at most Jev C1's under the same rule",
+          "B1 above B2 on dev and CTI-HAL under the same rule",
+          "diagnostic: AUROC of P(none_of_these) for the cases whose gold is not among the candidates"
+        ]
+      },
+      "test": "the public test split was scored with the registered rule before this amendment and that result is part of what motivated it, so test numbers under never_abstain are reported but are not confirmatory; B2 step_12616 is scored on test on the laptop for completeness",
+      "registered_outcome_stands": "the registered rule's results stay the registered outcome (test: B1 exact 0.465852 vs pipeline rank-1 0.501078, paired CI [-0.060388, -0.009346], the secondary test criterion failed); never_abstain is reported beside them, never in their place",
+      "informed_by": "dev (all checkpoints, offline replay) and the public test result of the registered rule; nothing from CTI-HAL"
     }
   ]
 }

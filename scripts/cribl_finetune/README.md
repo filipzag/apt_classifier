@@ -73,3 +73,15 @@ The metrics are those of `scripts/jev_benchmark.py`:
 - **paired deltas**: 95% case-bootstrap intervals, 1000 samples, seed 7.
 
 The ceiling is that gold is among the candidates in 0.838 of dev and 0.741 of CTI-HAL cases.
+
+### Never-abstain rule (prereg amendment 4)
+
+A no-pick is always a miss, so saying `none_of_these` can never raise exact or parent-aware. The
+trained arms said it on a fifth of dev and a third of test. `rescore.py` re-decides stored
+predictions without the model: the pick is the most probable of the ten techniques, and
+P(`none_of_these`) is kept as a separate flag (`none_flag`: its AUROC for cases whose gold is not
+among the candidates). It also scores Jev C1 under the same rule from Jev's stored distributions.
+
+```bash
+python3 scripts/cribl_finetune/rescore.py --split cti_hal B1_cti_hal.jsonl   # writes B1_cti_hal_forced.json
+```
