@@ -11,7 +11,7 @@ as pre-registration amendment 3.
 scripts/cribl_finetune/runpod/pack.sh
 ```
 
-This writes `data/audits/cribl_ft/runpod/cribl_runpod.tar.gz`, about 40 MB. It holds the code, the public
+This writes `data/audits/cribl_ft/runpod/cribl_runpod.tar.gz`, about 110 MB. It holds the code, the public
 case files, the B1/B2 logs and the B1 and B2 checkpoints.
 
 ## 2. Start a pod
@@ -27,7 +27,7 @@ case files, the B1/B2 logs and the B1 and B2 checkpoints.
 Upload `cribl_runpod.tar.gz` to `/workspace` (drag it into the file browser), then:
 
 ```bash
-mkdir -p /workspace/cribl && tar xzf /workspace/cribl_runpod.tar.gz -C /workspace/cribl
+mkdir -p /workspace/cribl && tar xzf /workspace/cribl_runpod.tar.gz --no-same-owner -C /workspace/cribl
 nohup bash /workspace/cribl/scripts/cribl_finetune/runpod/remote_run.sh > /workspace/run.log 2>&1 &
 tail -f /workspace/run.log
 ```
