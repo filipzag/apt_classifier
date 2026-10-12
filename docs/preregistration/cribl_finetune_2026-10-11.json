@@ -152,6 +152,16 @@
       "test": "the public test split was scored with the registered rule before this amendment and that result is part of what motivated it, so test numbers under never_abstain are reported but are not confirmatory; B2 step_12616 is scored on test on the laptop for completeness",
       "registered_outcome_stands": "the registered rule's results stay the registered outcome (test: B1 exact 0.465852 vs pipeline rank-1 0.501078, paired CI [-0.060388, -0.009346], the secondary test criterion failed); never_abstain is reported beside them, never in their place",
       "informed_by": "dev (all checkpoints, offline replay) and the public test result of the registered rule; nothing from CTI-HAL"
+    },
+    {
+      "id": 5,
+      "date": "2026-10-13",
+      "before": "any CTI-HAL confirmation result",
+      "change": "the CTI-HAL confirmations (B1 step_9462, B2 step_12616, B0, B2 step_6308) and B2 step_12616 on test run on a rented RunPod RTX 4090 (scripts/cribl_finetune/runpod/remote_confirm.sh) instead of the laptop, reversing amendment 3's 'CTI-HAL stays local'",
+      "reason": "the laptop capped its GPU again (battery not charging on a weak USB-C supply, 6-8 W, 210 MHz)",
+      "data": "the owner decided on 2026-10-13 to upload the CTI-HAL statement file (no published licence) to a secure-cloud pod for this run only; the upload is deleted and the pod terminated once the results are downloaded",
+      "deviation": "17 B0 and 210 B1 CTI-HAL rows scored on the laptop before the switch are set aside unread (data/audits/cribl_ft/laptop_partial/) and not used; every CTI-HAL row comes from the pod",
+      "informed_by": "nothing from CTI-HAL: no CTI-HAL metric of any arm had been computed or read"
     }
   ]
 }

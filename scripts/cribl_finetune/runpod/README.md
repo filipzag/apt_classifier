@@ -59,3 +59,11 @@ The CTI-HAL confirmation then runs locally, once for each arm:
 ```bash
 make cribl-eval CRIBL_VENV=/home/fzagar/apt_classifier/.venv-cribl CRIBL_FORMAT=chat CRIBL_SPLIT=cti_hal CRIBL_ARM=B0 CRIBL_ADAPTER=cribl
 ```
+
+## Confirmation runs on a pod (amendment 5)
+
+`remote_confirm.sh` scores the list in `CRIBL_RUNS` (`split:name:adapter`; by default the CTI-HAL
+confirmations of amendments 4 and 5 and B2 step_12616 on test) and writes
+`/workspace/cribl_confirm.tar.gz`. Its upload holds the code, `cases_cti_hal.jsonl`,
+`cases_test.jsonl` and the B1 step_9462, B2 step_6308 and B2 step_12616 checkpoints. CTI-HAL has no
+licence: the owner allowed this one upload; delete it and terminate the pod right after downloading.
