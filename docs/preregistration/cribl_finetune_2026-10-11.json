@@ -122,6 +122,16 @@
       "reason": "a 4-second system suspend at 09:58 left the B2 process crawling (stuck at optimizer step 520/789 for 2 h, GPU idle, while a fresh process ran at full speed); the owner chose to resume from the last checkpoint",
       "deviation": "the same seed and data/option order are replayed; AdamW moments and dropout draws restart; the 4 examples of the partial accumulation window at the checkpoint are lost. B2's 0.5- and 1-epoch dev scores come from the original process",
       "informed_by": "B1's full dev curve and B2's 0.5/1-epoch dev scores were known; no selection rule changed"
+    },
+    {
+      "id": 3,
+      "date": "2026-10-12",
+      "before": "B2's second epoch and any confirmation run",
+      "change": "B2's second epoch (resumed from step_6308 as in amendment 2) and the public-test confirmations of B0, B1 and B2 run on a rented RunPod GPU (scripts/cribl_finetune/runpod/); CTI-HAL confirmations stay on the laptop",
+      "reason": "the laptop capped its GPU at 15 W (P8, 210 MHz) from about 15:30, which slowed training about 25-fold; the owner chose RunPod",
+      "deviation": "same code, 4-bit NF4 base, seeds and data order; a different GPU model gives floating-point differences; B0 and B1 test scores also come from the pod, their dev and CTI-HAL scores from the laptop",
+      "data": "the upload holds only public CC-BY-4.0 case files (train, dev, test), logs and adapters; CTI-HAL (no licence) is not uploaded",
+      "informed_by": "nothing new beyond amendment 2: no confirmation result exists yet"
     }
   ]
 }
