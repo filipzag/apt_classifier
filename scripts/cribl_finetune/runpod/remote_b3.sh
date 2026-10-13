@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# On a RunPod GPU pod: train B3 (B1 step_9462 trained further on AnnoCTR report sentences plus an
+# On a RunPod GPU pod: train B3 for 4 epochs (B1 step_9462 trained further on AnnoCTR report sentences plus an
 # equal replay sample of the public train set; prereg docs/preregistration/cribl_annoctr_2026-10-13.json),
 # select its checkpoint on AnnoCTR dev, then score B1 on AnnoCTR dev/test and the selected B3 on
 # CTI-HAL, AnnoCTR test and the public test. Writes /workspace/cribl_b3.tar.gz.
@@ -37,7 +37,7 @@ if [ ! -f "$A/B3_train_log.json" ] || ! "$PY" -c "import json,sys; sys.exit('fin
   [ -f "$A/B3_train_log.json" ] && { log "B3 log exists but is unfinished: restart from scratch"; rm -rf "$A"/B3_train_log.json "$A"/B3_step*_dev.jsonl "$M/B3"; }
   replay=$(grep -c . "$A/cases_annoctr_train.jsonl")
   log "train B3 (AnnoCTR train + $replay public replay rows)"
-  "$PY" train.py --arm B3 --init "$M/B1/step_9462" --format chat --lr 5e-5 \
+  "$PY" train.py --arm B3 --init "$M/B1/step_9462" --format chat --lr 5e-5 --epochs 4 \
     --train-file cases_annoctr_train.jsonl --replay-file cases_train.jsonl --replay-count "$replay" \
     --family-target-datasets annoctr --dev-file cases_annoctr_dev.jsonl --select forced_parent_aware \
     2>&1 | tee -a "$A/B3_train_remote.out" \

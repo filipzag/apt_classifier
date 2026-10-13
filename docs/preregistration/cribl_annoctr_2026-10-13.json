@@ -55,6 +55,16 @@
       "reason": "no secure RTX 4090 or L40 was available",
       "deviation": "a different GPU gives floating-point differences against B1's CTI-HAL and public test rows (scored on RTX 4090 pods); same code, seeds and data order",
       "informed_by": "nothing from B3 or AnnoCTR model scores (none exist)"
+    },
+    {
+      "id": 2,
+      "date": "2026-10-13",
+      "before": "any B3 checkpoint or AnnoCTR scoring: the first 2-epoch start was stopped about a minute into training, before its first logged step",
+      "change": "4 epochs instead of 2 (8 checkpoints, every half epoch, still selected on AnnoCTR dev); compute is a RunPod community-cloud H100 NVL ($2.59/h) instead of the secure A40 of amendment 1",
+      "reason": "the owner judged 2 epochs too few (7,088 examples, against 12,616 for B1) and asked for a faster GPU; no secure RTX 4090, L40, 5090 or cheap community GPU was free",
+      "data": "the owner allowed the CTI-HAL statements to be uploaded to the community host for the scoring run; the upload is deleted and the pod terminated after the download",
+      "deviation": "the cosine schedule now spans 4 epochs; GPU floating-point differences against B1's RTX 4090 rows as in amendment 1",
+      "informed_by": "nothing from B3 or AnnoCTR model scores (none exist)"
     }
   ]
 }
