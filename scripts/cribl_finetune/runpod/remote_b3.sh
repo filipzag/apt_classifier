@@ -29,6 +29,11 @@ if [ ! -x "$VENV/bin/python" ]; then
   "$VENV/bin/pip" install -q -r "$req"
 fi
 PY=$VENV/bin/python
+# Hopper (H100/H200): flash-linear-attention refuses Triton 3.4-3.7.0 there (wrong gated backward,
+# fla #640); torch 2.11 pins 3.6.0, so take 3.7.1 (torch only needs Triton for torch.compile)
+if nvidia-smi --query-gpu=compute_cap --format=csv,noheader | grep -q '^9\.'; then
+  "$VENV/bin/pip" install -q "triton==3.7.1"
+fi
 "$PY" -c "import torch; assert torch.cuda.is_available(); print('torch', torch.__version__, torch.cuda.get_device_name(0))" | tee -a "$A/remote_b3.log"
 "$PY" -m pip freeze > "$A/remote_b3_pip_freeze.txt"
 

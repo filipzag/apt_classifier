@@ -65,6 +65,15 @@
       "data": "the owner allowed the CTI-HAL statements to be uploaded to the community host for the scoring run; the upload is deleted and the pod terminated after the download",
       "deviation": "the cosine schedule now spans 4 epochs; GPU floating-point differences against B1's RTX 4090 rows as in amendment 1",
       "informed_by": "nothing from B3 or AnnoCTR model scores (none exist)"
+    },
+    {
+      "id": 3,
+      "date": "2026-10-13",
+      "before": "any B3 checkpoint or AnnoCTR scoring: the first H100 start failed at its first backward pass",
+      "change": "on Hopper GPUs remote_b3.sh installs triton 3.7.1 over the 3.6.0 that torch 2.11 pins",
+      "reason": "flash-linear-attention refuses Triton 3.4-3.7.0 on Hopper (incorrect gated chunk backward, fla issue #640)",
+      "deviation": "Triton kernels of a different version than the RTX 4090 runs (3.6.0); torch itself uses Triton only for torch.compile, which the experiment does not use",
+      "informed_by": "nothing from B3 or AnnoCTR model scores (none exist)"
     }
   ]
 }
