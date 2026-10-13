@@ -74,6 +74,15 @@
       "reason": "flash-linear-attention refuses Triton 3.4-3.7.0 on Hopper (incorrect gated chunk backward, fla issue #640)",
       "deviation": "Triton kernels of a different version than the RTX 4090 runs (3.6.0); torch itself uses Triton only for torch.compile, which the experiment does not use",
       "informed_by": "nothing from B3 or AnnoCTR model scores (none exist)"
+    },
+    {
+      "id": 4,
+      "date": "2026-10-13",
+      "before": "any B3 checkpoint or AnnoCTR scoring: the H100 run was stopped at optimizer step 50 of 886, before its first checkpoint",
+      "change": "compute is a RunPod community-cloud A100 SXM 80GB ($1.39/h); training restarts from scratch with the same seed",
+      "reason": "on the H100 NVL host training was CPU-bound (GPU 54-57% busy, one core at 100%): 0.58 s/example at step 50 against 0.37 on the RTX 4090; the owner asked to switch if it did not speed up",
+      "deviation": "amendment 3's Triton 3.7.1 applies only on Hopper, so the A100 runs the pinned Triton 3.6.0 like the RTX 4090 runs; GPU floating-point differences as in amendment 1",
+      "informed_by": "only the H100 training speed and loss of the first 50 steps; nothing from B3 or AnnoCTR model scores"
     }
   ]
 }
