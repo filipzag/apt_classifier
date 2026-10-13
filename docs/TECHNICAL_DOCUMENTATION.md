@@ -4519,6 +4519,73 @@ report as FIN7, a hard failure, so the clinic bundle and Elastic were not run an
 Removing the verifier needs a better decision on which pooled candidates to accept, not better
 search.
 
+#### 21.3.18 Fine-tuning cribl-decision on the Jev C1 technique question (2026-10-11/13)
+
+An experiment, not wired into the product. `cribl-ai/cribl-decision-1.0` is an open LoRA (r 16) on
+`Qwen/Qwen3.5-4B-Base`, a sibling of TypeSafe Jev. It was asked the Jev C1 question: one report
+sentence, the pipeline's top-10 candidates plus `none_of_these`, three option orders. Answers came from
+a lettered readout (fp32 hidden state × `lm_head` letter rows) in the chat format chosen on dev. The
+question text is byte-identical to Jev's (cache hashes 1977/1977 dev, 2904/2904 CTI-HAL) and the metric
+code replays Jev C1 exactly.
+
+**Arms.**
+- **B0**: the published adapter.
+- **B1**: that adapter trained further.
+- **B2**: a fresh LoRA on the plain base.
+
+**Training.** B1 and B2 were trained with 4-bit QLoRA for 2 epochs on 6,308 public train sentences
+(tram/expert/derived). Train candidates came from the pipeline with the exemplar index off, because the
+index holds the train sentences. Settings: lr 1e-4, effective batch 16. Checkpoints were taken every
+half epoch and selected on dev only.
+
+**Pre-registration.** `docs/preregistration/cribl_finetune_2026-10-11.json` has amendments 1–5.
+B2's second epoch and all pod scoring ran on a rented RTX 4090. For the pod's CTI-HAL runs, the owner
+allowed a one-off upload, deleted with the pod.
+
+**Registered rule (the answer with the highest probability, `none_of_these` = no pick = miss).** The
+trained arms learned to abstain: 27.6% of training targets were `none_of_these`, against 16.2% on dev.
+They said it on 22–23% of dev, 33% of test and 35% of CTI-HAL statements, and only about 40% of those
+had no correct candidate. Every registered success criterion on test and CTI-HAL failed except CTI-HAL
+calibration.
+
+**Never-abstain rule (amendment 4).** The pick is the most probable of the ten techniques, and
+P(`none_of_these`) stays as a flag. `rescore.py` applies it offline to the stored predictions. It was
+chosen on dev after the test result was seen, then confirmed once on CTI-HAL, which no arm had been
+scored on before.
+
+| Exact match (parent-aware) | dev 659 | public test 1,391 | CTI-HAL 968 |
+|---|---|---|---|
+| Pipeline rank-1 | 0.589 (0.669) | 0.501 (0.567) | 0.383 (0.475) |
+| Jev C1, as reported / never-abstain | 0.514 / 0.520 | n/a | 0.460 / 0.478 (0.596) |
+| B0, registered / never-abstain | 0.480 / 0.486 | 0.416 / 0.420 | 0.409 / 0.415 |
+| B1 step_9462, registered | 0.618 | 0.466 | 0.347 |
+| **B1 step_9462, never-abstain** | **0.687 (0.744)** | **0.562 (0.614)** | **0.431 (0.528)** |
+| B2 step_12616, never-abstain | 0.680 | 0.552 | 0.428 |
+
+**Amendment 4 outcome on CTI-HAL.**
+- **Against the pipeline**: B1 minus pipeline rank-1 is +0.048, 95% CI [+0.019, +0.075]. This part of
+  the headline passes. On test (not confirmatory) it is +0.061, CI [+0.038, +0.085].
+- **Against Jev C1**: B1 is −0.029 versus Jev as reported, CI [−0.059, −0.003], and −0.048 versus Jev
+  under the same rule. **The headline fails.**
+- **Calibration**: the ECE of P(pick) is 0.256, against Jev's 0.283 under the same rule. This criterion
+  passes.
+- **Cribl's adapter against a fresh LoRA**: B1 is +0.003 above B2 on CTI-HAL, CI [−0.011, +0.019]. Not
+  shown.
+- **The `none_of_these` flag** separates "gold not among the candidates" with AUROC 0.80 on test and
+  0.73 on CTI-HAL.
+
+**Conclusion.** Under the never-abstain rule, a small local judge trained on public sentences beats the
+pipeline's rank-1 on all three sets. The gain shrinks from public data to real reports (+0.10 dev,
++0.06 test, +0.05 CTI-HAL), and it stays below hosted Jev C1 on CTI-HAL. Cribl's starting adapter adds
+nothing measurable over a fresh LoRA.
+
+**Cost.** Training took 6.7 h for B1 on the laptop. B2 took 3.1 h on the laptop plus 35 min on the pod.
+Peak GPU memory was 4.1 GB. The pod sessions cost about $1.60 in total.
+
+Predictions and metrics are in `data/audits/cribl_ft/`: `<arm>_<split>.json(l)` and, for the
+never-abstain rule, `*_forced.json`. Adapters are in `data/models/cribl_ft/`. CTI-HAL rows are local
+only.
+
 ## 22. Failure modes and troubleshooting
 
 ### 22.1 “ATT&CK knowledge base has not been ingested”
@@ -4738,6 +4805,7 @@ The current ATT&CK self-consistency benchmarks are not sufficient for this purpo
 | `tests/test_presets.py` | mapping preset tests |
 | `tests/test_reranker.py` | local reranker adapter tests |
 | `tests/test_benchmarks.py` | benchmark case structure validation tests |
+| `scripts/cribl_finetune/` | cribl-decision experiment (21.3.18): `common.py` (Jev C1 question, `forced_pick`, metrics), `decision_model.py` (`Readout`), `train.py`, `evaluate.py`, `rescore.py`, `runpod/` |
 
 ---
 
