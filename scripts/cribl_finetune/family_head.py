@@ -88,7 +88,9 @@ class FamilyHead(torch.nn.Module):
 
 
 class Encoder:
-    """The decision-slot hidden state (float32) of the family prompt, one sentence at a time."""
+    """The decision-slot hidden state (float32) of the family prompt. Batches are left-padded with
+    an attention mask, so the last position is every prompt's decision slot (states match the
+    one-at-a-time ones to bf16 noise, cosine > 0.9997)."""
 
     def __init__(self, model: Any, tokenizer: Any, max_tokens: int = 1024) -> None:
         base = model.get_base_model() if hasattr(model, "get_base_model") else model
@@ -97,27 +99,42 @@ class Encoder:
         self.max_tokens = max_tokens
         self.device = next(model.parameters()).device
 
-    def encode(self, sentence: str) -> torch.Tensor:
+    def token_ids(self, sentence: str) -> list[int]:
         prompt = render_family_prompt(c1_state(sentence))
         ids = self.tokenizer.encode(prompt, add_special_tokens=False)
         if len(ids) > self.max_tokens:
             raise ValueError(f"prompt has {len(ids)} tokens (> {self.max_tokens})")
-        return torch.tensor([ids], device=self.device)
+        return ids
 
-    def hidden(self, sentence: str) -> torch.Tensor:
-        output = self.backbone(input_ids=self.encode(sentence), use_cache=False)
-        return output.last_hidden_state[0, -1].float()
+    def hidden_batch(self, id_lists: list[list[int]]) -> torch.Tensor:
+        """(len(id_lists), hidden) states at the decision slot of each prompt."""
+        width = max(len(ids) for ids in id_lists)
+        pad = self.tokenizer.pad_token_id
+        input_ids = [[pad] * (width - len(ids)) + ids for ids in id_lists]
+        mask = [[0] * (width - len(ids)) + [1] * len(ids) for ids in id_lists]
+        output = self.backbone(
+            input_ids=torch.tensor(input_ids, device=self.device),
+            attention_mask=torch.tensor(mask, device=self.device),
+            use_cache=False,
+        )
+        return output.last_hidden_state[:, -1].float()
 
 
 def initial_head(
-    encoder: Encoder, families: list[str], texts: dict[str, list[dict[str, str]]]
+    encoder: Encoder,
+    families: list[str],
+    texts: dict[str, list[dict[str, str]]],
+    batch: int = 16,
 ) -> FamilyHead:
     """Rows = mean decision-slot state of each family's technique texts; centre = their mean."""
     with torch.inference_mode():
         rows = []
         for family in families:
-            states = [encoder.hidden(f"{item['label']}: {item['what']}") for item in texts[family]]
-            rows.append(torch.stack(states).mean(dim=0))
+            ids = [encoder.token_ids(f"{item['label']}: {item['what']}") for item in texts[family]]
+            states = torch.cat(
+                [encoder.hidden_batch(ids[i : i + batch]) for i in range(0, len(ids), batch)]
+            )
+            rows.append(states.mean(dim=0))
         prototypes = torch.stack(rows)
     prototypes = prototypes.clone()  # outside inference mode: a trainable tensor
     return FamilyHead(prototypes, prototypes.mean(dim=0)).to(encoder.device)
@@ -145,20 +162,36 @@ def load_checkpoint(directory: Path) -> tuple[Any, Encoder, FamilyHead, dict[str
     )
 
 
-def predict(
-    encoder: Encoder, head: FamilyHead, families: list[str], case: dict[str, Any]
+def predict_batch(
+    encoder: Encoder, head: FamilyHead, families: list[str], cases: list[dict[str, Any]]
+) -> list[dict[str, Any]]:
+    """One row per case; a prompt over the token limit is an error row (a miss)."""
+    rows, golds, ids, scored = [], [], [], []
+    for case in cases:
+        gold = family_targets(case["gold_ids"], families)
+        row = {
+            "case_id": case["case_id"],
+            "dataset": case["dataset"],
+            "gold_ids": case["gold_ids"],
+            "gold_families": [families[index] for index in gold],
+        }
+        try:
+            ids.append(encoder.token_ids(case["text"]))
+            scored.append(len(rows))
+        except ValueError as error:
+            row = {**row, "status": "error", "error": str(error), "pick": None, "p_pick": None}
+        rows.append(row)
+        golds.append(gold)
+    if ids:
+        probabilities = torch.softmax(head(encoder.hidden_batch(ids)), dim=-1)
+        for position, index in enumerate(scored):
+            rows[index] = scored_row(rows[index], probabilities[position], golds[index], families)
+    return rows
+
+
+def scored_row(
+    row: dict[str, Any], probabilities: torch.Tensor, gold: list[int], families: list[str]
 ) -> dict[str, Any]:
-    gold = family_targets(case["gold_ids"], families)
-    row = {
-        "case_id": case["case_id"],
-        "dataset": case["dataset"],
-        "gold_ids": case["gold_ids"],
-        "gold_families": [families[index] for index in gold],
-    }
-    try:
-        probabilities = torch.softmax(head(encoder.hidden(case["text"])), dim=-1)
-    except ValueError as error:  # too long: a miss
-        return {**row, "status": "error", "error": str(error), "pick": None, "p_pick": None}
     ranked = torch.argsort(probabilities, descending=True).tolist()
     position = {index: rank for rank, index in enumerate(ranked, start=1)}
     return {
@@ -181,24 +214,24 @@ def run_split(
     cases: list[dict[str, Any]],
     path: Path,
     progress: int = 200,
+    batch: int = 16,
 ) -> list[dict[str, Any]]:
     """Predict every case not yet in ``path`` (appending, resumable); rows in case order."""
     done: dict[str, dict[str, Any]] = {}
     if path.exists():
         done = {row["case_id"]: row for row in read_jsonl(path)}
+    pending = [case for case in cases if case["case_id"] not in done]
     started, fresh = time.monotonic(), 0
     with torch.inference_mode(), path.open("a", encoding="utf-8") as handle:
-        for case in cases:
-            if case["case_id"] in done:
-                continue
-            row = predict(encoder, head, families, case)
-            handle.write(json.dumps(row, ensure_ascii=False, sort_keys=True) + "\n")
+        for start in range(0, len(pending), batch):
+            for row in predict_batch(encoder, head, families, pending[start : start + batch]):
+                handle.write(json.dumps(row, ensure_ascii=False, sort_keys=True) + "\n")
+                done[row["case_id"]] = row
+                fresh += 1
+                if progress and fresh % progress == 0:
+                    rate = (time.monotonic() - started) / fresh
+                    print(f"  {len(done)}/{len(cases)} cases, {rate:.3f} s/case", flush=True)
             handle.flush()
-            done[case["case_id"]] = row
-            fresh += 1
-            if progress and fresh % progress == 0:
-                rate = (time.monotonic() - started) / fresh
-                print(f"  {len(done)}/{len(cases)} cases, {rate:.3f} s/case", flush=True)
     return [done[case["case_id"]] for case in cases]
 
 
@@ -313,8 +346,10 @@ def train(args: argparse.Namespace) -> None:
 
     model, tokenizer, info = load_model(args.init, trainable=True)
     encoder = Encoder(model, tokenizer, args.max_tokens)
+    if args.accum % args.batch:
+        raise SystemExit("--accum must be a multiple of --batch")
     model.eval()
-    head = initial_head(encoder, families, texts)
+    head = initial_head(encoder, families, texts, args.batch)
     model.train()
     lora = [p for p in model.parameters() if p.requires_grad]
     optimizer = torch.optim.AdamW(
@@ -361,7 +396,9 @@ def train(args: argparse.Namespace) -> None:
             split = name.removeprefix("cases_").removesuffix(".jsonl")
             path = AUDITS / f"{args.arm}_step{seen}_{split}.jsonl"
             predicted = with_oom_retry(
-                lambda cases=cases, path=path: run_split(encoder, head, families, cases, path, 0),
+                lambda cases=cases, path=path: run_split(
+                    encoder, head, families, cases, path, 0, args.batch
+                ),
                 note=f"dev scoring {split}",
             )
             scores[split] = family_block(predicted)
@@ -398,33 +435,32 @@ def train(args: argparse.Namespace) -> None:
     while seen < examples_total:
         order = list(rows)
         rng.shuffle(order)
-        for row in order:
+        for start in range(0, len(order), args.batch):
             if seen >= examples_total:
                 break
-            gold = family_targets(row["gold_ids"], families)
-            try:
-                input_ids = encoder.encode(row["text"])
-            except ValueError:
-                input_ids = None
-                log["skipped_long"] += 1
-            if input_ids is not None:
+            chunk = order[start : start + args.batch][: examples_total - seen]
+            ids, golds = [], []
+            for row in chunk:
                 try:
-                    hidden = encoder.backbone(
-                        input_ids=input_ids, use_cache=False
-                    ).last_hidden_state[0, -1]
-                    logits = head(hidden)
-                    loss = -torch.log_softmax(logits, dim=-1)[gold].mean()
-                    (loss / args.accum).backward()
-                    running.append(float(loss))
+                    ids.append(encoder.token_ids(row["text"]))
+                    golds.append(family_targets(row["gold_ids"], families))
+                except ValueError:
+                    log["skipped_long"] += 1
+            if ids:
+                try:
+                    log_p = torch.log_softmax(head(encoder.hidden_batch(ids)), dim=-1)
+                    losses = torch.stack([-log_p[i, gold].mean() for i, gold in enumerate(golds)])
+                    (losses.sum() / args.accum).backward()  # per-example losses, as with batch 1
+                    running.extend(float(value) for value in losses.detach())
                 except (RuntimeError, torch.cuda.OutOfMemoryError) as error:
                     if not is_oom(error) or log["oom_skipped"] >= MAX_OOM_SKIPS:
                         raise
-                    hidden = logits = loss = None
+                    log_p = losses = None
                     log["oom_skipped"] += 1
                     optimizer.zero_grad(set_to_none=True)
-                    wait_after_oom(f"training example {seen}")
-            seen += 1
-            if seen % args.accum == 0 or seen == examples_total:
+                    wait_after_oom(f"training examples {seen}+")
+            before, seen = seen, seen + len(chunk)
+            if seen // args.accum > before // args.accum or seen == examples_total:
                 for group in optimizer.param_groups:
                     group["lr"] = peak[id(group)] * schedule(step, total_steps, warmup)
                 torch.nn.utils.clip_grad_norm_([*lora, *head.parameters()], 1.0)
@@ -448,7 +484,7 @@ def train(args: argparse.Namespace) -> None:
                         f"peak {torch.cuda.max_memory_allocated() / 2**30:.1f} GiB",
                         flush=True,
                     )
-            if seen % every == 0 or seen == examples_total:
+            if seen // every > before // every or seen == examples_total:
                 log["peak_gpu_gib"] = round(torch.cuda.max_memory_allocated() / 2**30, 2)
                 log["train_s"] = round(time.monotonic() - started, 1)
                 checkpoint(seen)
@@ -468,7 +504,10 @@ def evaluate(args: argparse.Namespace) -> None:
     stem = f"{args.name}_{args.split}"
     started = time.monotonic()
     rows = with_oom_retry(
-        lambda: run_split(encoder, head, families, cases, AUDITS / f"{stem}.jsonl"), note=stem
+        lambda: run_split(
+            encoder, head, families, cases, AUDITS / f"{stem}.jsonl", batch=args.batch
+        ),
+        note=stem,
     )
     out = {
         "generated_at": datetime.now(UTC).isoformat(timespec="seconds"),
@@ -506,7 +545,8 @@ def main() -> None:
     fit.add_argument("--epochs", type=float, default=3.0)
     fit.add_argument("--lr", type=float, default=1e-4, help="LoRA")
     fit.add_argument("--head-lr", type=float, default=1e-3)
-    fit.add_argument("--accum", type=int, default=16)
+    fit.add_argument("--accum", type=int, default=16, help="examples per optimizer step")
+    fit.add_argument("--batch", type=int, default=16, help="examples per forward pass")
     fit.add_argument("--warmup", type=float, default=0.03)
     fit.add_argument("--checkpoints-per-epoch", type=int, default=2)
     fit.add_argument("--max-tokens", type=int, default=1024)
@@ -520,6 +560,7 @@ def main() -> None:
     score.add_argument("--split", required=True, choices=SPLITS)
     score.add_argument("--cases-dir", type=Path, default=AUDITS)
     score.add_argument("--compare", nargs="*", default=[], help="NAME=<C1 predictions .jsonl>")
+    score.add_argument("--batch", type=int, default=16)
     args = parser.parse_args()
     args.func(args)
 

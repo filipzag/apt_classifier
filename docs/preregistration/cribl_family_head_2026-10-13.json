@@ -57,6 +57,15 @@
       "reason": "the owner asked for RunPod instead of the 3.5 h laptop run",
       "deviation": "GPU floating-point differences against the laptop; same code, data, seed and settings",
       "informed_by": "nothing from F1 scores (none exist)"
+    },
+    {
+      "id": 2,
+      "date": "2026-10-13",
+      "before": "any F1 training checkpoint: the pod run was stopped at optimizer step 10 of 1,456, after the untrained head's dev scores (step_0: public dev top-1 0.451, AnnoCTR dev 0.226)",
+      "change": "16 examples per forward pass (left-padded with an attention mask) instead of batch 1; still 16 examples per optimizer step and the per-example loss summed and divided by 16, so the update rule is unchanged; dev and confirmation scoring are batched the same way",
+      "reason": "on the RTX 4090 pod batch 1 was CPU-bound (GPU 11-14% busy, one core at 100%, 0.95 s/example, about 6 h); the laptop batching check had shown no gain only because its GPU is the bottleneck",
+      "deviation": "padding and batched kernels change floating-point results slightly (decision-slot states match batch 1 at cosine > 0.9997 in the check); the training data order is unchanged",
+      "informed_by": "the untrained head's dev scores and the speed of the first 10 optimizer steps; nothing from a trained F1 checkpoint"
     }
   ]
 }
