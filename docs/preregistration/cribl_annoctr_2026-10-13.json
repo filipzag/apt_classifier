@@ -46,5 +46,15 @@
   "adoption": "none: an experiment, no product wiring",
   "reporting": "every checkpoint's AnnoCTR dev curve (both rules), exact and parent-aware on every set, B1 vs B3 vs pipeline rank-1 vs Jev C1 (CTI-HAL), the none_of_these flag AUROC, explicit vs implicit AnnoCTR mentions, training time and cost",
   "informed_by": "the parent study's dev, public test and CTI-HAL results (docs 21.3.18) and AnnoCTR's statistics and dev candidate lists (gold family in the top 10 for 0.722 of dev sentences, exact id 0.436); no model has been scored on AnnoCTR",
-  "amendments": []
+  "amendments": [
+    {
+      "id": 1,
+      "date": "2026-10-13",
+      "before": "any B3 training or AnnoCTR scoring",
+      "change": "compute is a RunPod secure A40 (48 GB, Ampere, EU-SE-1, $0.59/h) instead of an RTX 4090",
+      "reason": "no secure RTX 4090 or L40 was available",
+      "deviation": "a different GPU gives floating-point differences against B1's CTI-HAL and public test rows (scored on RTX 4090 pods); same code, seeds and data order",
+      "informed_by": "nothing from B3 or AnnoCTR model scores (none exist)"
+    }
+  ]
 }
