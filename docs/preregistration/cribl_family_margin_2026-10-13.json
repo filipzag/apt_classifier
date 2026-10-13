@@ -28,5 +28,16 @@
   ],
   "confirmation_runs": "the selected checkpoint once on CTI-HAL, public test and AnnoCTR test; nothing is chosen, refit or rerun because of a confirmation result",
   "adoption": "none: an experiment, no product wiring",
-  "informed_by": "F2's dev predictions and error analysis, F2's confirmation results (docs 21.3.18), a laptop pilot (100 train rows, 30 dev cases; mechanics only). No F3 model exists."
+  "informed_by": "F2's dev predictions and error analysis, F2's confirmation results (docs 21.3.18), a laptop pilot (100 train rows, 30 dev cases; mechanics only). No F3 model exists.",
+  "amendments": [
+    {
+      "id": 1,
+      "date": "2026-10-13",
+      "before": "any F3 training",
+      "change": "compute is a RunPod secure RTX A6000 (48 GB, $0.59/h) instead of an RTX 4090",
+      "reason": "no secure or community RTX 4090 was free",
+      "deviation": "GPU floating-point differences against F2 (RTX 4090); same code, data, seed and settings",
+      "informed_by": "nothing from F3 scores (none exist)"
+    }
+  ]
 }
