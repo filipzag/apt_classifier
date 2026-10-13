@@ -4717,6 +4717,41 @@ mean F1 rose from 0.670 to 0.677. Family micro-F1 on the confirmation sets, one 
 The rule names about 1.1 families per case. The head's probabilities concentrate on its first
 answer, so most of the F1 gap is wrong first answers rather than missing second families.
 
+**With ATT&CK's procedure examples (F2, 2026-10-13, prereg `cribl_family_attack_2026-10-13.json`).**
+`export_attack_procedures.py` turns ATT&CK's active `uses` relationships into 17,033 distinct
+sentences. It drops any that overlap a held-out text of public dev or test, CTI-HAL, or AnnoCTR dev
+or test, which leaves 16,273 sentences covering 213 families:
+- 378 near duplicates;
+- 243 sentences that contain a held-out text of 6 or more tokens;
+- 132 sentences that share a 10-token run with one;
+- 7 repeats.
+
+Of the dropped, 613 matched TRAM dev or test sentences and 6 matched CTI-HAL statements. F2 is F1's
+recipe from the same starting point, with these rows added: 24,034 rows, 2 epochs, a checkpoint
+every quarter epoch. It ran on a RunPod secure RTX 4090 at 0.08 s per example, 62 minutes in all.
+The checkpoint at 1.5 epochs was selected, with dev mean 0.743 against F1's 0.727.
+
+| Family top-1 | CTI-HAL | public test | AnnoCTR test |
+|---|---|---|---|
+| F1 | 0.612 | 0.609 | 0.717 |
+| **F2** | **0.626** | **0.618** | **0.729** |
+| F2 minus F1, paired 95% CI | +0.014 [−0.006, +0.036] | +0.009 [−0.008, +0.025] | +0.012 [−0.008, +0.033] |
+
+- **Headline (CTI-HAL F2 > F1): fails.** The same holds for both secondary criteria; every delta is
+  positive, but no interval excludes 0.
+- **Contamination check: no sign of leakage.** On the public test, the gain without TRAM is +0.010
+  (CI [−0.015, +0.034]), against +0.008 on TRAM itself.
+- **Where it helps: rare families.** On the 69 CTI-HAL statements whose gold family had fewer than
+  20 rows in F1's data, family top-1 rises from 0.232 to 0.333. On the other 899 it moves from 0.641
+  to 0.648.
+- **Against the other methods (not registered).** On CTI-HAL, F2 is +0.050 over B3 and +0.059 over
+  Jev C1 as reported. It is +0.030 over Jev under never-abstain, CI [+0.002, +0.057].
+- **Family micro-F1, one family → up to three.** CTI-HAL 0.602 → 0.607; public test 0.531 →
+  0.537; AnnoCTR test 0.673 → 0.684.
+- **Calibration is worse.** CTI-HAL ECE is 0.099, against F1's 0.057.
+
+The pod cost about $1.20 (80 minutes at $0.89/h).
+
 Quirk fixed after the run: the half-epoch boundary of the last epoch fell 3 examples before the end
 (23,280 of 23,283). Two near-identical final checkpoints were saved and scored; the selection was
 not affected. Checkpoints now sit at `round(k × rows / 2)`.
@@ -4943,7 +4978,7 @@ The current ATT&CK self-consistency benchmarks are not sufficient for this purpo
 | `tests/test_presets.py` | mapping preset tests |
 | `tests/test_reranker.py` | local reranker adapter tests |
 | `tests/test_benchmarks.py` | benchmark case structure validation tests |
-| `scripts/cribl_finetune/` | cribl-decision experiment (21.3.18): `common.py` (Jev C1 question, `forced_pick`, metrics), `decision_model.py` (`Readout`), `train.py`, `evaluate.py`, `rescore.py`, `prepare_annoctr.py`, `family_head.py` (family head without retrieval), `runpod/` |
+| `scripts/cribl_finetune/` | cribl-decision experiment (21.3.18): `common.py` (Jev C1 question, `forced_pick`, metrics), `decision_model.py` (`Readout`), `train.py`, `evaluate.py`, `rescore.py`, `prepare_annoctr.py`, `family_head.py` (family head without retrieval), `multi_family.py`, `export_attack_procedures.py`, `runpod/` |
 
 ---
 
