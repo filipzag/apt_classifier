@@ -2,11 +2,12 @@
 
 AnnoCTR (Lange et al., LREC-COLING 2024; github.com/boschresearch/anno-ctr-lrec-coling-2024,
 CC-BY-SA 4.0) annotates real vendor threat reports; ``AnnoCTR/linking_mitre_only/<split>.jsonl``
-holds one record per linked mention with its sentence (``context_left + mention +
-context_right``). Every sentence with at least one technique link becomes one case whose gold ids are
+holds one record per linked mention with its sentence (``_context_left + mention +
+_context_right``, which keep the spaces next to the mention; ``context_left``/``context_right`` strip
+them and glue the mention to its neighbours, as in "installsransomware"). Every sentence with at least one technique link becomes one case whose gold ids are
 its linked techniques, remapped to the local ATT&CK release (revoked or deprecated ids follow
-``AttackIdMap``; ids that cannot be mapped are recorded as unscorable). Markdown links in the text
-keep their anchor text only. AnnoCTR's own document split (train/dev/test) is kept.
+``AttackIdMap``; ids that cannot be mapped are recorded as unscorable). Markdown links (with or
+without a title) keep their anchor text only, images their alt text. AnnoCTR's own document split (train/dev/test) is kept.
 
 Writes ``<out>/annoctr_<split>.jsonl`` in the public benchmark format (``benchmark_mapping.py
 --root <out> --datasets annoctr``) and ``<out>/MANIFEST.json``. Near duplicates of held-out texts are
@@ -38,12 +39,20 @@ SOURCE = REPO_ROOT / "data" / "benchmarks" / "annoctr" / "source"
 OUT = REPO_ROOT / "data" / "benchmarks" / "annoctr" / "normalized"
 SPLITS = ("train", "dev", "test")
 TECHNIQUE_LINK = re.compile(r"attack\.mitre\.org/techniques/(T\d{4})(?:/(\d{3}))?")
-MARKDOWN_LINK = re.compile(r"\[([^\]]*)\]\((?:[^()\s]|\([^()\s]*\))*\)")
+MARKDOWN_LINK = re.compile(r"!?\[([^\]]*)\]\((?:[^()\s]|\([^()\s]*\))*(?:\s+\"[^\"]*\")?\)")
 
 
 def clean_sentence(text: str) -> str:
     """Anchor text for markdown links, single spaces."""
     return " ".join(MARKDOWN_LINK.sub(r"\1", text).split())
+
+
+def record_sentence(record: Mapping[str, Any]) -> str:
+    """The mention in its sentence with the original spacing (``_context_*``; the stripped
+    ``context_*`` fields only when those are missing)."""
+    left = record.get("_context_left", record.get("context_left", ""))
+    right = record.get("_context_right", record.get("context_right", ""))
+    return clean_sentence(f"{left}{record.get('mention', '')}{right}")
 
 
 def technique_id(link: str) -> str | None:
@@ -63,9 +72,7 @@ def sentence_cases(records: Iterable[Mapping[str, Any]], split: str) -> list[dic
         identifier = technique_id(str(record.get("label_link") or ""))
         if identifier is None:
             continue
-        sentence = clean_sentence(
-            f"{record.get('context_left', '')}{record.get('mention', '')}{record.get('context_right', '')}"
-        )
+        sentence = record_sentence(record)
         if not sentence:
             continue
         key = (str(record["document"]), sentence)

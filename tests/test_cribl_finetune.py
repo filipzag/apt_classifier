@@ -257,14 +257,27 @@ def test_drop_near_duplicates():
 
 
 def test_annoctr_sentences_group_technique_links():
-    from scripts.cribl_finetune.prepare_annoctr import clean_sentence, sentence_cases, technique_id
+    from scripts.cribl_finetune.prepare_annoctr import (
+        clean_sentence,
+        record_sentence,
+        sentence_cases,
+        technique_id,
+    )
 
     assert clean_sentence("top vector for [ransomware](https://x.com/a_(b)) and  more") == (
         "top vector for ransomware and more"
     )
+    assert clean_sentence('follow-on [malware attacks](/us/malware "Malware").![](data:x)') == (
+        "follow-on malware attacks."
+    )
+    # AnnoCTR's context_* fields are stripped; _context_* keep the spaces around the mention
+    glued = {"context_left": "then installs", "mention": "ransomware", "context_right": "now."}
+    assert record_sentence(glued) == "then installsransomwarenow."
+    spaced = {**glued, "_context_left": "then installs ", "_context_right": " now."}
+    assert record_sentence(spaced) == "then installs ransomware now."
     assert technique_id("https://attack.mitre.org/techniques/T1566/001") == "T1566.001"
     assert technique_id("https://attack.mitre.org/software/S0332") is None
-    record = {"document": "d", "context_left": "They used ", "context_right": " to log in."}
+    record = {"document": "d", "_context_left": "They used ", "_context_right": " to log in."}
     records = [
         {
             **record,
@@ -292,3 +305,13 @@ def test_annoctr_sentences_group_technique_links():
     assert case["text"] == "They used phishing to log in."
     assert case["original_technique_ids"] == ["T1566", "T1078"]
     assert case["metadata"]["mention_classes"] == {"CE": 1, "CI": 1}
+
+
+def test_family_question_has_no_options_and_targets_gold_families():
+    prompt = common.render_family_prompt(common.c1_state("They  used PowerShell."))
+    assert prompt.endswith(f"<think>\n\n</think>\n\n{common.ANSWER_CUE}")
+    assert '"sentence": "They used PowerShell."' in prompt
+    assert "Options:" not in prompt
+    families = ["T1059", "T1566", "T1486"]
+    assert common.family_targets(["T1566.001", "T1059.001", "T1566"], families) == [1, 0]
+    assert common.family_targets(["T9999"], families) == []

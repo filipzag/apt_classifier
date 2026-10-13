@@ -112,6 +112,18 @@ def build_catalog(bundle: Mapping[str, Any], kb: Any) -> dict[str, dict[str, str
     }
 
 
+def catalog_file(catalog: Mapping[str, Mapping[str, str]], attack_version: str) -> dict[str, Any]:
+    """The catalogue for ``family_head.py``: every listed technique with its parent family, name
+    and cut description (``technique_option``), in catalogue order."""
+    return {
+        "attack_version": attack_version,
+        "techniques": [
+            {"id": item, "family": parent_of(item), **technique_option(item, **catalog[item])}
+            for item in catalog
+        ],
+    }
+
+
 def known_candidates(catalog: Mapping[str, Any], ranked: Iterable[Any]) -> list[str]:
     cleaned = (str(item).strip() for item in ranked or ())
     return list(dict.fromkeys(item for item in cleaned if item in catalog))[:FLAT_K]
@@ -228,6 +240,11 @@ def main() -> None:
     )
     parser.add_argument("--out", type=Path, default=OUT)
     parser.add_argument(
+        "--catalog-only",
+        action="store_true",
+        help="write <out>/catalog.json (every listed technique, for family_head.py) and stop",
+    )
+    parser.add_argument(
         "--splits",
         nargs="+",
         choices=SPLITS + ANNOCTR_SPLITS,
@@ -240,6 +257,12 @@ def main() -> None:
     kb = AttackKnowledgeBase.load(settings.kb_path)
     catalog = build_catalog(_load(settings.attack_bundle_path), kb)
     args.out.mkdir(parents=True, exist_ok=True)
+    if args.catalog_only:
+        path = args.out / "catalog.json"
+        path.write_text(json.dumps(catalog_file(catalog, kb.version), indent=1) + "\n", "utf-8")
+        families = sum(1 for item in catalog if "." not in item)
+        print(f"{path}: {len(catalog)} techniques, {families} families")
+        return
     manifest_path = args.out / "cases_manifest.json"
     manifest: dict[str, Any] = (
         json.loads(manifest_path.read_text(encoding="utf-8")) if manifest_path.exists() else {}

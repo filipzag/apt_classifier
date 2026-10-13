@@ -102,3 +102,25 @@ for s in dev test train; do PYTHONPATH=. .venv/bin/python scripts/benchmark_mapp
 .venv/bin/python scripts/cribl_finetune/export_cases.py --splits annoctr_dev annoctr_test annoctr_train
 bash scripts/cribl_finetune/runpod/remote_b3.sh                         # on a GPU pod
 ```
+
+AnnoCTR was rebuilt on 2026-10-13 after B3: the sentence is now `_context_left + mention +
+_context_right` (the stripped `context_*` fields glued the mention to its neighbours, e.g.
+"installsransomware"), markdown links with a title and images are stripped, and a sentence with
+several mention spans is one case (train 1,500, dev 336, test 738). The candidate files were rebuilt
+with `--max-candidate-rows 40`; B3's own inputs are kept in `data/audits/cribl_ft/b3_inputs/`.
+
+### F1: families without retrieval (prereg `cribl_family_head_2026-10-13.json`)
+
+The model reads only the sentence (no candidate options) and a cosine head scores all 222 ATT&CK
+families; each head row starts as the model's reading of that family's own ATT&CK texts, so
+`step_0` is a nearest-description classifier (F0). Trained on public train + clean AnnoCTR train
+with family targets, selected on public dev + AnnoCTR dev, confirmed once on CTI-HAL (local), public
+test and AnnoCTR test against pipeline rank-1, B1/B3 (retrieve-then-pick) and Jev C1.
+
+```bash
+PYTHONPATH=. .venv/bin/python scripts/cribl_finetune/export_cases.py --catalog-only   # catalog.json
+cd scripts/cribl_finetune
+../../.venv-cribl/bin/python family_head.py train --arm F1 --init cribl                # ~3.5 h, RTX 4060
+../../.venv-cribl/bin/python family_head.py evaluate --checkpoint <selected> --name F1 --split cti_hal \
+  --compare B1=B1_cti_hal.jsonl B3=B3_cti_hal.jsonl
+```

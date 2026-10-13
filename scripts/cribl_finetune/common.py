@@ -201,6 +201,38 @@ def render_prompt(
     return f"{body}\n{ANSWER_CUE}"
 
 
+# --- family question (family_head.py: no options, every family scored by a head) --------------
+FAMILY_INSTRUCTIONS = (
+    f"Which MITRE ATT&CK technique does the attacker action in the sentence use? {UNTRUSTED_NOTE}"
+)
+
+
+def render_family_prompt(state: Mapping[str, Any]) -> str:
+    """The chat prompt of the family question: the state and the question, no options; its last
+    position (after ``Answer:``) is the decision slot read by the family head."""
+    body = "\n".join(
+        [
+            "State:",
+            json.dumps(dict(state), ensure_ascii=False),
+            "",
+            f"Question: {FAMILY_INSTRUCTIONS}",
+            "",
+            "Reply with the technique.",
+        ]
+    )
+    return (
+        f"<|im_start|>user\n{body}<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n"
+        f"{ANSWER_CUE}"
+    )
+
+
+def family_targets(gold: Iterable[str], families: Sequence[str]) -> list[int]:
+    """Indices in ``families`` of the gold ids' families (a case's gold may span several)."""
+    index = {family: position for position, family in enumerate(families)}
+    wanted = dict.fromkeys(parent_of(str(item)) for item in gold)
+    return [index[family] for family in wanted if family in index]
+
+
 def target_distribution(options: Sequence[Mapping[str, str]], gold: Iterable[str]) -> list[float]:
     """Training target over ``options``: uniform over the gold options present, else all mass
     on ``none_of_these`` (the last option)."""
