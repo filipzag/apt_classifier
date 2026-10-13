@@ -4519,7 +4519,7 @@ report as FIN7, a hard failure, so the clinic bundle and Elastic were not run an
 Removing the verifier needs a better decision on which pooled candidates to accept, not better
 search.
 
-#### 21.3.18 Fine-tuning cribl-decision on the Jev C1 technique question (2026-10-11/13)
+#### 21.3.18 Fine-tuning cribl-decision on the Jev C1 technique question and a family head (2026-10-11/13)
 
 An experiment, not wired into the product. `cribl-ai/cribl-decision-1.0` is an open LoRA (r 16) on
 `Qwen/Qwen3.5-4B-Base`, a sibling of TypeSafe Jev. It was asked the Jev C1 question: one report
@@ -4624,6 +4624,92 @@ from 0.73 to 0.74 on CTI-HAL and from 0.68 to 0.78 on AnnoCTR test.
 **Cost.** Training took 2.4 h on the A100, and the pods cost about $5.20 in total. That includes about
 $1 of aborted starts: an A40 run stopped for the epoch change, and a CPU-bound H100 NVL that needed
 Triton 3.7.1 for flash-linear-attention on Hopper.
+
+**AnnoCTR text fix (2026-10-13, after B3).** `prepare_annoctr.py` built each sentence from AnnoCTR's
+`context_left + mention + context_right`. Those fields are stripped, so the mention was glued to its
+neighbours ("installsransomware", "theBATfile"), and the retriever never saw the word that names the
+technique. The script now uses `_context_left`/`_context_right`, which keep the spaces. It also strips
+markdown links that carry a title, and images. A sentence with several annotated mention spans is now
+one case: train 1,500, dev 336 and test 738 scorable sentences, against 1,884, 443 and 959 before.
+The candidate files were rebuilt with `--max-candidate-rows 40`. B3's own inputs are kept in
+`data/audits/cribl_ft/b3_inputs/`.
+
+On AnnoCTR dev, the gold family is now among the pipeline's top 10 for 0.875 of sentences, against
+0.722 before. B3 scores 0.693 right-family on the clean dev set, against 0.580 on the glued one, B1
+scores 0.527 and pipeline rank-1 0.470. Offering 10 distinct families instead of 10 techniques adds
+only 0.006–0.016, because the retrieval pool holds just 16–19 techniques.
+
+**Family head without retrieval (2026-10-13, prereg `cribl_family_head_2026-10-13.json`, amendments
+1–2).** The C1 arms can only pick among the pipeline's 10 candidates, so a family the retriever misses
+is lost: 15% of CTI-HAL statements and 12% of public test cases. `family_head.py` asks the model a
+family question with no options. The prompt holds only the sentence. The decision-slot state then
+goes through a scaled-cosine head with one row per family: 222 rows, one for each active parent
+technique of the C1 catalogue (`catalog.json`). Each row starts as the mean decision-slot state of
+that family's own ATT&CK texts (the parent and its sub-techniques, label and cut description), so
+the untrained head, F0, is a nearest-description classifier. F0's test rows were scored on the laptop
+from a locally rebuilt step 0 (`--epochs 0`, batch 8). Its dev scores are within 0.008 of the pod's
+step 0: public dev 0.443 against 0.451, AnnoCTR dev equal.
+
+F1 trains Cribl's adapter and the head together with cross-entropy over the gold families.
+- Data: public train (6,308 cases) plus clean AnnoCTR train (1,453).
+- Optimiser: LoRA learning rate 1e-4, head 1e-3, 16 examples per step, 3 epochs.
+- Checkpoint: selected on the mean family top-1 over public dev and AnnoCTR dev.
+
+Two amendments changed the compute, not the method:
+1. Amendment 1 moved training to a RunPod secure RTX 4090. CTI-HAL was not uploaded; the selected
+   checkpoint was downloaded and scored on CTI-HAL on the laptop.
+2. Amendment 2 batches 16 prompts per forward pass. Batch 1 was CPU-bound on the pod: the GPU was
+   11–14% busy and each example took 0.95 s. Batched, training took 0.11 s per example, 43 minutes in
+   total.
+
+| Dev family top-1 | step 0 (F0) | ½ | 1 | 1½ | **2** | 2½ | 3 epochs |
+|---|---|---|---|---|---|---|---|
+| public dev | 0.451 | 0.677 | 0.715 | 0.728 | **0.734** | 0.748 | 0.741 |
+| AnnoCTR dev | 0.220 | 0.658 | 0.705 | 0.688 | **0.720** | 0.696 | 0.696 |
+
+Family top-1 on the confirmation sets. The family question has no candidates, so every row is scored.
+The C1 arms are under never-abstain.
+
+| Family top-1 (top-5) | CTI-HAL (968) | public test (1,391) | AnnoCTR test, clean (738) |
+|---|---|---|---|
+| Pipeline rank-1 | 0.475 | 0.567 | 0.497 |
+| Jev C1 as reported / never-abstain | 0.567 / 0.596 | n/a | n/a |
+| B1 (C1) | 0.528 | 0.614 | 0.509 |
+| B3 (C1) | 0.576 | 0.609 | 0.688 |
+| F0, untrained head | 0.360 (0.660) | 0.365 (0.634) | 0.335 (0.611) |
+| **F1, family head** | **0.612 (0.882)** | **0.609 (0.854)** | **0.717 (0.900)** |
+
+Against the pre-registered criteria (paired bootstrap, 1000 samples, seed 7):
+- **Headline, CTI-HAL F1 minus B3: passes.** +0.035, CI [+0.007, +0.060].
+- **CTI-HAL F1 minus pipeline rank-1: passes.** +0.136, CI [+0.106, +0.169].
+- **AnnoCTR test F1 minus B3: fails narrowly.** +0.028, CI [−0.003, +0.058]. F1 minus B1 is +0.207.
+- **Public test F1 minus B1: fails.** −0.005, CI [−0.027, +0.017]: a tie. By source, TRAM is −0.017,
+  expert −0.013 and derived procedures +0.013, all with intervals spanning 0.
+- **CTI-HAL F1 top-5 at least the pipeline's top-10 family rate: passes.** 0.882, against 0.852.
+
+Not registered:
+- F1 also beats Jev C1 as reported on CTI-HAL, +0.044, CI [+0.017, +0.073].
+- It ties Jev under never-abstain, +0.015, CI [−0.013, +0.045].
+
+**Reading.** Without any retrieval, the 4B model names the family better than every
+retrieve-then-pick arm on CTI-HAL and on real-report text. It ties them on the public test.
+
+Part of the gain comes from statements the retriever missed. On the 143 CTI-HAL statements whose
+family is not among the pipeline's top 10, F1 is right for 15.4%; a C1 arm cannot score on those. On
+the 825 where the family is offered, F1 scores 0.691, against B3's 0.676.
+
+On AnnoCTR test, F1 is ahead most clearly on explicit mentions: 0.863 against B3's 0.798. On
+implicit mentions it scores 0.615 against 0.599.
+
+F1's confidence is well calibrated: the ECE of P(pick) against a family hit is 0.045–0.057. F1 names only the family:
+sub-techniques need a second step within the predicted family, which is not built yet.
+
+Quirk fixed after the run: the half-epoch boundary of the last epoch fell 3 examples before the end
+(23,280 of 23,283). Two near-identical final checkpoints were saved and scored; the selection was
+not affected. Checkpoints now sit at `round(k × rows / 2)`.
+
+**Cost.** The pod cost about $1.20: 81 minutes at $0.89/h, including about 20 idle minutes while the
+batching fix was made. No OpenRouter credit was used.
 
 ## 22. Failure modes and troubleshooting
 
@@ -4844,7 +4930,7 @@ The current ATT&CK self-consistency benchmarks are not sufficient for this purpo
 | `tests/test_presets.py` | mapping preset tests |
 | `tests/test_reranker.py` | local reranker adapter tests |
 | `tests/test_benchmarks.py` | benchmark case structure validation tests |
-| `scripts/cribl_finetune/` | cribl-decision experiment (21.3.18): `common.py` (Jev C1 question, `forced_pick`, metrics), `decision_model.py` (`Readout`), `train.py`, `evaluate.py`, `rescore.py`, `runpod/` |
+| `scripts/cribl_finetune/` | cribl-decision experiment (21.3.18): `common.py` (Jev C1 question, `forced_pick`, metrics), `decision_model.py` (`Readout`), `train.py`, `evaluate.py`, `rescore.py`, `prepare_annoctr.py`, `family_head.py` (family head without retrieval), `runpod/` |
 
 ---
 

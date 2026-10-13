@@ -360,7 +360,7 @@ def train(args: argparse.Namespace) -> None:
     examples_total = int(len(rows) * args.epochs)
     total_steps = math.ceil(examples_total / args.accum)
     warmup = max(1, int(total_steps * args.warmup))
-    every = max(1, len(rows) // args.checkpoints_per_epoch)
+    every = len(rows) / args.checkpoints_per_epoch  # checkpoint k at round(k * every)
     models_dir.mkdir(parents=True)
     meta = {"families": families, "attack_version": version, "init": args.init}
     log: dict[str, Any] = {
@@ -484,7 +484,10 @@ def train(args: argparse.Namespace) -> None:
                         f"peak {torch.cuda.max_memory_allocated() / 2**30:.1f} GiB",
                         flush=True,
                     )
-            if seen // every > before // every or seen == examples_total:
+            # the last boundary can fall a few examples before the end (7,761 rows: 23,280 of
+            # 23,283), which used to save two near-identical final checkpoints
+            boundary = round((math.floor(before / every) + 1) * every)
+            if seen == examples_total or (before < boundary <= seen < examples_total):
                 log["peak_gpu_gib"] = round(torch.cuda.max_memory_allocated() / 2**30, 2)
                 log["train_s"] = round(time.monotonic() - started, 1)
                 checkpoint(seen)
