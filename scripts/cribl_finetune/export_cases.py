@@ -11,6 +11,11 @@ gold_ids, candidates [{id, label, what}], gold_in_candidates, pipeline_rank1, je
   ``TECHNIQUE_EXEMPLARS_ENABLED=false`` (the exemplar index holds the train sentences, so with it
   the answer would leak into the candidates); exact and near duplicates of dev, test and CTI-HAL
   texts are dropped.
+- ``annoctr_train`` / ``annoctr_dev`` / ``annoctr_test`` (only when asked, ``--splits``): AnnoCTR
+  report sentences (``prepare_annoctr.py``) with the pipeline's top-10 from ``benchmark_mapping.py
+  --root data/benchmarks/annoctr/normalized --datasets annoctr``; the exemplar index holds only
+  public train sentences, so it stays on. Train drops near duplicates of every held-out text,
+  AnnoCTR dev and test included.
 
 Options use the Jev C1 rules (``common.py``): catalogue techniques only, deduplicated, in rank
 order, the first 10; label ``Name (Txxxx)``; ``what`` = the description cut at 400 characters.
@@ -46,6 +51,7 @@ MAIN_AUDITS = Path("/home/fzagar/apt_classifier/data/audits")
 OUT = REPO_ROOT / "data" / "audits" / "cribl_ft"
 NEAR_DUPLICATE = 0.9
 SPLITS = ("dev", "cti_hal", "test", "train")
+ANNOCTR_SPLITS = ("annoctr_dev", "annoctr_test", "annoctr_train")
 
 
 def clean_text(text: Any) -> str:
@@ -217,9 +223,16 @@ def main() -> None:
         default=MAIN_AUDITS / "refresh_2026-10-07" / "public_heldout_current.json",
     )
     parser.add_argument("--train", type=Path, default=OUT / "train_candidates.json")
+    parser.add_argument(
+        "--annoctr-dir", type=Path, default=OUT, help="annoctr_<split>_candidates.json files"
+    )
     parser.add_argument("--out", type=Path, default=OUT)
     parser.add_argument(
-        "--splits", nargs="+", choices=SPLITS, default=list(SPLITS), help="default: all four"
+        "--splits",
+        nargs="+",
+        choices=SPLITS + ANNOCTR_SPLITS,
+        default=list(SPLITS),
+        help="default: the four original splits",
     )
     args = parser.parse_args()
 
@@ -239,17 +252,22 @@ def main() -> None:
         "cti_hal": args.jev_framing / "s3_cti_hal_statements.json",
         "test": args.public_test,
         "train": args.train,
+        **{split: args.annoctr_dir / f"{split}_candidates.json" for split in ANNOCTR_SPLITS},
     }
     artifacts = {split: _load(sources[split]) for split in args.splits}
-    held_out_texts = (
-        [
+
+    def texts(splits: Sequence[str]) -> list[str]:
+        return [
             str(case.get("text") or "")
-            for split in ("dev", "cti_hal", "test")
+            for split in splits
             for case in _cases(artifacts.get(split) or _load(sources[split]))
         ]
-        if "train" in args.splits
-        else []
-    )
+
+    held_out = {
+        "train": ("dev", "cti_hal", "test"),
+        "annoctr_train": ("dev", "cti_hal", "test", "annoctr_dev", "annoctr_test"),
+    }
+    held_out_texts = {split: texts(held_out[split]) for split in held_out if split in args.splits}
     for split in args.splits:
         artifact = artifacts[split]
         info: dict[str, Any] = {
@@ -271,10 +289,10 @@ def main() -> None:
                 )
                 for case in _cases(artifact)
             ]
-        if split == "train":
+        if split in held_out_texts:
             if artifact.get("split") != "train":
                 raise SystemExit(f"{sources[split]} is not a train-split artifact")
-            rows, info["dedup"] = drop_near_duplicates(rows, held_out_texts)
+            rows, info["dedup"] = drop_near_duplicates(rows, held_out_texts[split])
         info["cases"] = write_jsonl(args.out / f"cases_{split}.jsonl", rows)
         info["gold_in_candidates"] = round(
             sum(row["gold_in_candidates"] for row in rows) / max(len(rows), 1), 6

@@ -102,7 +102,9 @@ def rescore(cases: list[dict[str, Any]], rows: list[dict[str, Any]]) -> dict[str
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__.split("\n", 1)[0])
-    parser.add_argument("--split", required=True, choices=["dev", "cti_hal", "test"])
+    parser.add_argument(
+        "--split", required=True, choices=["dev", "cti_hal", "test", "annoctr_dev", "annoctr_test"]
+    )
     parser.add_argument("predictions", nargs="+", help="prediction files (names in --dir or paths)")
     parser.add_argument("--dir", type=Path, default=OUT)
     args = parser.parse_args()

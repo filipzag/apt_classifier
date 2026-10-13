@@ -85,3 +85,20 @@ among the candidates). It also scores Jev C1 under the same rule from Jev's stor
 ```bash
 python3 scripts/cribl_finetune/rescore.py --split cti_hal B1_cti_hal.jsonl   # writes B1_cti_hal_forced.json
 ```
+
+### B3: real-report sentences (AnnoCTR, prereg `cribl_annoctr_2026-10-13.json`)
+
+AnnoCTR (github.com/boschresearch/anno-ctr-lrec-coling-2024, CC-BY-SA 4.0) links sentences of 112
+vendor reports to ATT&CK techniques, almost only at parent level. B3 continues B1 step_9462 on its
+train sentences (family targets) plus an equal public replay sample, is selected on AnnoCTR dev
+(parent-aware, never-abstain) and is confirmed once on CTI-HAL, AnnoCTR test and the public test.
+
+```bash
+git clone --depth 1 https://github.com/boschresearch/anno-ctr-lrec-coling-2024 data/benchmarks/annoctr/source
+.venv/bin/python scripts/cribl_finetune/prepare_annoctr.py            # data/benchmarks/annoctr/normalized/
+for s in dev test train; do PYTHONPATH=. .venv/bin/python scripts/benchmark_mapping.py \
+  --root data/benchmarks/annoctr/normalized --datasets annoctr --split $s --modes hybrid \
+  --max-candidate-rows 12 --output data/audits/cribl_ft/annoctr_${s}_candidates.json; done
+.venv/bin/python scripts/cribl_finetune/export_cases.py --splits annoctr_dev annoctr_test annoctr_train
+bash scripts/cribl_finetune/runpod/remote_b3.sh                         # on a GPU pod
+```

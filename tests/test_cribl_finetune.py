@@ -92,6 +92,19 @@ def test_target_distribution_gold_or_none():
     assert common.target_distribution(options, ["T9999"]) == [0.0, 0.0, 0.0, 1.0]
 
 
+def test_family_target_spreads_over_a_gold_parents_family():
+    options = common.c1_options(
+        [
+            common.technique_option(item, item, "x")
+            for item in ("T1566.001", "T1566", "T1059.001", "T1027")
+        ]
+    )
+    assert common.family_target_distribution(options, ["T1566"]) == [0.5, 0.5, 0.0, 0.0, 0.0]
+    assert common.family_target_distribution(options, ["T1059.001"]) == [0, 0, 1.0, 0, 0]
+    assert common.family_target_distribution(options, ["T1059"]) == [0, 0, 1.0, 0, 0]
+    assert common.family_target_distribution(options, ["T1105"]) == [0, 0, 0, 0, 1.0]
+
+
 def test_hits_exact_and_parent_aware():
     assert common.hits("T1059.001", ["T1059.001"]) == (True, True)
     assert common.hits("T1059", ["T1059.001"]) == (False, True)
@@ -241,3 +254,41 @@ def test_drop_near_duplicates():
     kept, counts = drop_near_duplicates(rows, ["the actor ran WHOAMI on the host"])
     assert [row["text"] for row in kept] == ["Totally different words."]
     assert counts == {"held_out_duplicates": 1, "train_repeats": 1}
+
+
+def test_annoctr_sentences_group_technique_links():
+    from scripts.cribl_finetune.prepare_annoctr import clean_sentence, sentence_cases, technique_id
+
+    assert clean_sentence("top vector for [ransomware](https://x.com/a_(b)) and  more") == (
+        "top vector for ransomware and more"
+    )
+    assert technique_id("https://attack.mitre.org/techniques/T1566/001") == "T1566.001"
+    assert technique_id("https://attack.mitre.org/software/S0332") is None
+    record = {"document": "d", "context_left": "They used ", "context_right": " to log in."}
+    records = [
+        {
+            **record,
+            "mention": "[phishing](u)",
+            "entity_type": "TECHNIQUE",
+            "entity_class": "CE",
+            "label_link": "https://attack.mitre.org/techniques/T1566",
+        },
+        {
+            **record,
+            "mention": "[phishing](u)",
+            "entity_type": "TECHNIQUE",
+            "entity_class": "CI",
+            "label_link": "https://attack.mitre.org/techniques/T1078",
+        },
+        {
+            **record,
+            "mention": "Emotet",
+            "entity_type": "MALWARE",
+            "entity_class": "CE",
+            "label_link": "https://attack.mitre.org/software/S0367",
+        },
+    ]
+    (case,) = sentence_cases(records, "train")
+    assert case["text"] == "They used phishing to log in."
+    assert case["original_technique_ids"] == ["T1566", "T1078"]
+    assert case["metadata"]["mention_classes"] == {"CE": 1, "CI": 1}

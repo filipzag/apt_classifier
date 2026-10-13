@@ -7,6 +7,12 @@ no gold is offered. The base stays frozen in 4-bit; only the LoRA trains. Checkp
 go to ``data/models/cribl_ft/<arm>/step_<n>/`` every half epoch, each scored on the full dev split;
 the log with every checkpoint's dev metrics goes to ``data/audits/cribl_ft/<arm>_train_log.json``.
 The checkpoint is chosen on dev exact (ties: the earlier one) and never on CTI-HAL or test.
+
+Options for a continued arm (B3, prereg ``cribl_annoctr_2026-10-13.json``): ``--init`` a checkpoint
+dir, ``--train-file`` another case file, ``--replay-file``/``--replay-count`` mixes a seeded sample
+of a second file in, ``--family-target-datasets`` gives those datasets' rows
+:func:`common.family_target_distribution` targets, ``--dev-file`` scores another dev split and
+``--select`` picks on the never-abstain rule (:func:`common.forced_row`).
 """
 
 from __future__ import annotations
@@ -26,7 +32,10 @@ from common import (
     FORMATS,
     c1_options,
     c1_state,
+    family_target_distribution,
+    forced_row,
     read_jsonl,
+    score_rows,
     target_distribution,
 )
 from decision_model import Readout, is_oom, load_model, wait_after_oom, with_oom_retry
@@ -45,11 +54,21 @@ def schedule(step: int, total: int, warmup: int) -> float:
     return 0.5 * (1.0 + math.cos(math.pi * min(progress, 1.0)))
 
 
-def example(row: dict[str, Any], rng: random.Random) -> tuple[list[dict[str, str]], list[float]]:
+SELECT = {  # checkpoint selection on dev: (rule, metric)
+    "exact": ("registered", "exact"),
+    "forced_exact": ("never_abstain", "exact"),
+    "forced_parent_aware": ("never_abstain", "parent_aware"),
+}
+
+
+def example(
+    row: dict[str, Any], rng: random.Random, family: frozenset[str] = frozenset()
+) -> tuple[list[dict[str, str]], list[float]]:
     candidates = list(row["candidates"])
     rng.shuffle(candidates)
     options = c1_options(candidates)
-    return options, target_distribution(options, row["gold_ids"])
+    target = family_target_distribution if row.get("dataset") in family else target_distribution
+    return options, target(options, row["gold_ids"])
 
 
 def resume_point(arm: str, directory: Path, log_path: Path) -> int:
@@ -75,7 +94,7 @@ def resume_point(arm: str, directory: Path, log_path: Path) -> int:
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__.split("\n", 1)[0])
     parser.add_argument("--arm", required=True, help="run name, e.g. B1 or B2")
-    parser.add_argument("--init", default="cribl", choices=["cribl", "fresh"])
+    parser.add_argument("--init", default="cribl", help="cribl | fresh | <checkpoint dir>")
     parser.add_argument("--format", default="plain", choices=FORMATS)
     parser.add_argument("--epochs", type=float, default=2.0)
     parser.add_argument("--lr", type=float, default=1e-4)
@@ -87,12 +106,23 @@ def main() -> None:
     parser.add_argument("--limit-train", type=int, help="first N shuffled train rows (pilot)")
     parser.add_argument("--dev-limit", type=int, help="score only the first N dev cases (pilot)")
     parser.add_argument("--cases-dir", type=Path, default=AUDITS)
+    parser.add_argument("--train-file", default="cases_train.jsonl")
+    parser.add_argument("--replay-file", help="mix a seeded sample of this case file in")
+    parser.add_argument("--replay-count", type=int, default=0)
+    parser.add_argument("--family-target-datasets", nargs="*", default=[])
+    parser.add_argument("--dev-file", default="cases_dev.jsonl")
+    parser.add_argument("--select", default="exact", choices=sorted(SELECT))
     parser.add_argument(
         "--resume-from",
         type=Path,
         help="a checkpoint dir of this arm (<models>/<arm>/step_N): continue the same run from it",
     )
     args = parser.parse_args()
+    if (
+        args.init not in ("cribl", "fresh")
+        and not (Path(args.init) / "adapter_config.json").exists()
+    ):
+        raise SystemExit(f"--init {args.init!r} is neither cribl, fresh nor a checkpoint dir")
 
     log_path = AUDITS / f"{args.arm}_train_log.json"
     start = 0
@@ -109,11 +139,20 @@ def main() -> None:
     random.seed(args.seed)
     torch.manual_seed(args.seed)
     rng = random.Random(args.seed)
-    rows = [row for row in read_jsonl(args.cases_dir / "cases_train.jsonl") if row["candidates"]]
+    rows = [row for row in read_jsonl(args.cases_dir / args.train_file) if row["candidates"]]
+    replay: list[dict[str, Any]] = []
+    if args.replay_file and args.replay_count:
+        pool = [row for row in read_jsonl(args.cases_dir / args.replay_file) if row["candidates"]]
+        replay = random.Random(f"{args.seed}:replay").sample(
+            pool, min(args.replay_count, len(pool))
+        )
+        rows += replay
+    family = frozenset(args.family_target_datasets)
     rng.shuffle(rows)
     if args.limit_train:
         rows = rows[: args.limit_train]
-    dev = read_jsonl(args.cases_dir / "cases_dev.jsonl")
+    dev = read_jsonl(args.cases_dir / args.dev_file)
+    dev_order = {case["case_id"]: [item["id"] for item in case["candidates"][:10]] for case in dev}
     if args.dev_limit:
         dev = dev[: args.dev_limit]
 
@@ -137,6 +176,13 @@ def main() -> None:
         "model": info,
         "train_rows": len(rows),
         "train_none_target": sum(1 for row in rows if not row["gold_in_candidates"]),
+        "replay_rows": len(replay),
+        "family_target_rows": sum(1 for row in rows if row.get("dataset") in family),
+        "family_none_target": sum(
+            1
+            for row in rows
+            if row.get("dataset") in family and not row.get("gold_family_in_candidates")
+        ),
         "examples_total": examples_total,
         "optimizer_steps": total_steps,
         "checkpoints": [],
@@ -177,6 +223,9 @@ def main() -> None:
         report = metrics(dev, dev_rows)
         model.train()
         pooled = report["arm"]["pooled"]
+        forced = score_rows([forced_row(row, dev_order[row["case_id"]]) for row in dev_rows])[
+            "pooled"
+        ]
         log["checkpoints"].append(
             {
                 "examples_seen": seen,
@@ -189,16 +238,20 @@ def main() -> None:
                     "no_pick": pooled["no_pick"],
                     "ece": pooled["ece"],
                 },
+                "dev_never_abstain": {key: forced[key] for key in ("exact", "parent_aware", "ece")},
                 "dev_eval_s": round(time.monotonic() - started, 1),
             }
         )
+        rule, metric = SELECT[args.select]
+        block = "dev" if rule == "registered" else "dev_never_abstain"
         best = max(
-            log["checkpoints"], key=lambda item: (item["dev"]["exact"], -item["examples_seen"])
+            log["checkpoints"], key=lambda item: (item[block][metric], -item["examples_seen"])
         )
         log["selected"] = best["dir"]
         save_log()
         print(
-            f"checkpoint {seen}: dev exact {pooled['exact']} parent-aware {pooled['parent_aware']} no-pick {pooled['no_pick']}",
+            f"checkpoint {seen}: dev exact {pooled['exact']} parent-aware {pooled['parent_aware']} no-pick {pooled['no_pick']}"
+            f" | never-abstain exact {forced['exact']} parent-aware {forced['parent_aware']}",
             flush=True,
         )
 
@@ -215,7 +268,7 @@ def main() -> None:
         for row in order:
             if seen >= examples_total:
                 break
-            options, target = example(row, rng)
+            options, target = example(row, rng, family)
             if seen < start:  # resumed: replay the order without training
                 seen += 1
                 continue

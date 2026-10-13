@@ -212,6 +212,25 @@ def target_distribution(options: Sequence[Mapping[str, str]], gold: Iterable[str
     return [value / total for value in hits] + [0.0]
 
 
+def family_target_distribution(
+    options: Sequence[Mapping[str, str]], gold: Iterable[str]
+) -> list[float]:
+    """Training target for parent-level labels (AnnoCTR links techniques almost only at parent
+    level): uniform over the offered options in a gold parent's family (the parent and its
+    sub-techniques) or equal to a gold sub-technique, else all mass on ``none_of_these``."""
+    gold = [str(item) for item in gold]
+    parents = {item for item in gold if "." not in item}
+    exact = {item for item in gold if "." in item}
+    hits = [
+        1.0 if option["id"] in exact or parent_of(option["id"]) in parents else 0.0
+        for option in options[:-1]
+    ]
+    if not any(hits):
+        return [0.0] * (len(options) - 1) + [1.0]
+    total = sum(hits)
+    return [value / total for value in hits] + [0.0]
+
+
 # --- metrics (jev_benchmark.py @ f9b452c) -----------------------------------------------------
 ECE_BINS = 10
 BOOTSTRAP_SAMPLES = 1000

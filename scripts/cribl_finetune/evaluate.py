@@ -119,7 +119,9 @@ def run_split(
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__.split("\n", 1)[0])
-    parser.add_argument("--split", required=True, choices=["dev", "cti_hal", "test"])
+    parser.add_argument(
+        "--split", required=True, choices=["dev", "cti_hal", "test", "annoctr_dev", "annoctr_test"]
+    )
     parser.add_argument("--adapter", default="cribl", help="cribl | none | <checkpoint dir>")
     parser.add_argument("--format", default="plain", choices=FORMATS)
     parser.add_argument("--name", required=True, help="arm name for the output files")
