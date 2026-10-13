@@ -4817,6 +4817,69 @@ The up-to-three rule already credits these.
 **Cost.** About $2.20 in all: about $0.95 for the stopped A6000 run (93 minutes at $0.59/h) and about
 $1.25 for the RTX 4090 rerun (85 minutes at $0.89/h). No OpenRouter credit was used.
 
+**Exact techniques without retrieval (E1, 2026-10-14, prereg `cribl_technique_head_2026-10-14.json`).**
+E1 is F2 with a second head. `family_head.py --technique-head` adds a cosine head over the 697
+listed techniques, each row starting from the technique's own text. The head is read as
+P(technique | family), a softmax within the family's parent and sub-techniques (`hierarchy.py`):
+- **Parent as an option.** A family's parent is its own option: the "family only" answer.
+- **The exact answer.** The most probable technique by P(family) × P(technique | family) among the
+  three most probable families. The owner chose three families over a hard limit to one: on F2's
+  dev, the top family is right on 0.73–0.76 and the top three on 0.87–0.91.
+- **Training.** As F2: same 24,034 rows, 2 epochs, Cribl adapter, seed 7. It adds a within-family
+  cross-entropy on the 22,581 rows with exact labels. AnnoCTR rows are left out of it, because their
+  links are parent-level by convention.
+- **Selection.** Mean of public dev exact top-1 and AnnoCTR dev family top-1. The final checkpoint was
+  selected: dev exact 0.653, AnnoCTR dev family 0.753.
+
+| Checkpoint (epochs) | 0 | 0.25 | 0.5 | 0.75 | 1 | 1.25 | 1.5 | 1.75 | **2** |
+|---|---|---|---|---|---|---|---|---|---|
+| public dev exact | 0.322 | 0.528 | 0.589 | 0.584 | 0.627 | 0.639 | 0.648 | 0.654 | **0.653** |
+| public dev family | 0.451 | 0.669 | 0.719 | 0.713 | 0.727 | 0.727 | 0.730 | 0.731 | **0.728** |
+| AnnoCTR dev family | 0.220 | 0.619 | 0.690 | 0.729 | 0.705 | 0.732 | 0.738 | 0.747 | **0.753** |
+
+| Exact top-1 | CTI-HAL | public test |
+|---|---|---|
+| pipeline rank-1 | 0.383 | 0.501 |
+| B1 (never-abstain) | 0.431 | 0.562 |
+| B3 (never-abstain) | 0.441 | 0.537 |
+| Jev C1 as reported / never-abstain | 0.460 / 0.478 | n/a |
+| **E1** | **0.504** | **0.560** |
+
+- **Headline (CTI-HAL exact, E1 > B3): passes.** +0.063, CI [+0.034, +0.094].
+- **Secondary.**
+  - CTI-HAL against Jev C1 as reported: passes, +0.044 [+0.011, +0.077].
+  - Public test against B1: fails, −0.002 [−0.027, +0.022]. B1 was trained and selected on the same
+    public sentences. E1 leads on derived procedures (+0.050 [+0.010, +0.088]) and trails on TRAM
+    (−0.034 [−0.069, 0.000]).
+- **Not registered.**
+  - Against Jev under never-abstain: +0.026 [−0.008, +0.060].
+  - Against the pipeline: +0.121 [+0.089, +0.153] on CTI-HAL and +0.059 on the public test.
+  - The retrieve-then-pick models and Jev cannot name a technique outside the pipeline's top 10,
+    which holds the exact gold on 74% of CTI-HAL.
+- **The three-family rule.**
+  - CTI-HAL: 0.504 with the top family only 0.496 and with every family 0.504.
+  - Public test: 0.560, 0.551 and 0.559.
+  - Exact top-3/5 on CTI-HAL: 0.723 / 0.803.
+- **By label kind (CTI-HAL).** 0.578 on the 431 statements labelled with a sub-technique, 0.445 on
+  the 537 labelled with a family only. Of the 131 misses where the family is right, 111 are a
+  granularity mismatch rather than a wrong sibling:
+  - a sub-technique where the label names only the family (50);
+  - the family where the label names a sub-technique (61).
+
+  Only 20 are wrong siblings. The other 349 misses are wrong families.
+- **Family accuracy is not lost.** Family top-1 against F2: CTI-HAL 0.631 (+0.005 [−0.011,
+  +0.023]), public test 0.625 (+0.007), AnnoCTR test 0.730 (+0.001). On AnnoCTR test it is 0.042
+  over B3 [+0.014, +0.075].
+- **Calibration of the exact answer.** ECE is 0.101 on CTI-HAL and 0.053 on the public test.
+  AnnoCTR's 0.154 is not meaningful, because its labels are parent-level.
+
+E1 is the first model here to name the exact technique more often than Jev on CTI-HAL. It also
+reads the sentence without the pipeline's retrieval. Its remaining errors are mostly the wrong family
+(73%) or a granularity mismatch with the label (23%).
+
+**Cost.** The pod cost about $1.10 (73 minutes at $0.89/h). Training took 62 minutes at 0.08 s per
+example. CTI-HAL was scored on the laptop. No OpenRouter credit was used.
+
 ## 22. Failure modes and troubleshooting
 
 ### 22.1 “ATT&CK knowledge base has not been ingested”

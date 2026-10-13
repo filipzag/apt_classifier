@@ -148,3 +148,15 @@ F2's recipe plus one training row per technique definition and `--margin 1 1`
 
 Result (docs 21.3.18): no gain over F2 on CTI-HAL, the public test or AnnoCTR test, and the look-alike
 pair mix-ups are unchanged; F2 stays the best family classifier.
+
+### E1: exact techniques under the family head (prereg `cribl_technique_head_2026-10-14.json`)
+
+```bash
+bash scripts/cribl_finetune/runpod/remote_e1.sh   # on a GPU pod (F2's data + --technique-head)
+cd scripts/cribl_finetune && ../../../.venv-cribl/bin/python family_head.py evaluate \
+  --checkpoint <E1 step dir> --name E1 --split cti_hal --compare F2=F2_cti_hal.jsonl B3=B3_cti_hal.jsonl
+```
+
+P(technique) = P(family) x P(technique | family) (`hierarchy.py`), answer from the three most
+probable families. Result (docs 21.3.18): CTI-HAL exact top-1 0.504, above B3 (0.441) and Jev C1
+(0.460); public test 0.560, level with B1.
