@@ -135,3 +135,13 @@ bash scripts/cribl_finetune/runpod/remote_f2.sh                                 
 `export_attack_procedures.py` turns ATT&CK's `uses` relationships into sentences and drops any that
 overlap a dev or test text (near duplicates, containment, a shared 10-token run); CTI-HAL is read
 for the filter on the laptop and never written out.
+
+### F3: ATT&CK definitions + rival margin (prereg `cribl_family_margin_2026-10-13.json`)
+
+```bash
+PYTHONPATH=. .venv/bin/python scripts/cribl_finetune/export_attack_procedures.py --descriptions  # 693 rows
+bash scripts/cribl_finetune/runpod/remote_f3.sh                                                  # on a GPU pod
+```
+
+F2's recipe plus one training row per technique definition and `--margin 1 1`
+(`losses.rival_margin`: the gold families must beat their strongest rival by 1 nat).

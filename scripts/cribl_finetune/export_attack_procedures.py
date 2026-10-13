@@ -11,6 +11,10 @@ public dev, public test, CTI-HAL, AnnoCTR dev and AnnoCTR test:
   ``MIN_CONTAINED`` tokens), which catches a short CTI-HAL statement quoted inside a procedure;
 - a shared run of ``SHARED_RUN`` tokens, which catches paraphrases that keep a long phrase.
 
+With ``--descriptions`` the rows are instead each listed technique's own ATT&CK description
+("Name: description", cut at a sentence end within 1,500 characters), filtered the same way, in
+``cases_attack_descriptions.jsonl``.
+
 Writes ``data/audits/cribl_ft/cases_attack_train.jsonl`` (dataset ``attack_procedures``, no
 candidates: for ``family_head.py`` only) and records the counts in ``cases_manifest.json``. The
 output holds ATT&CK text only; CTI-HAL is read locally for the filter and never written.
@@ -31,7 +35,7 @@ REPO_ROOT = HERE.parents[1]
 sys.path.insert(0, str(REPO_ROOT))
 sys.path.insert(0, str(HERE))
 
-from common import read_jsonl, write_jsonl  # noqa: E402
+from common import cut_description, read_jsonl, write_jsonl  # noqa: E402
 from export_cases import (  # noqa: E402
     OUT,
     _active,
@@ -49,6 +53,7 @@ HELD_OUT = ("dev", "test", "cti_hal", "annoctr_dev", "annoctr_test")
 SOURCES = ("intrusion-set", "malware", "tool", "campaign")
 MIN_CONTAINED = 6
 SHARED_RUN = 10
+DESCRIPTION_CHARS = 1500
 _TOKEN = re.compile(r"[a-z0-9]+")
 
 
@@ -140,28 +145,55 @@ def drop_overlaps(
     return kept, counts
 
 
+def description_rows(catalog: Mapping[str, Mapping[str, str]]) -> list[dict[str, Any]]:
+    """One row per listed technique: "Name: description" (cleaned, cut at a sentence end within
+    ``DESCRIPTION_CHARS``), labelled with the technique."""
+    return [
+        {
+            "case_id": f"attack_descriptions-{index:06d}",
+            "dataset": "attack_descriptions",
+            "split": "attack_train",
+            "text": f"{record['name']}: {cut_description(record['description'], DESCRIPTION_CHARS)}",
+            "gold_ids": [technique],
+            "candidates": [],
+            "gold_in_candidates": False,
+            "gold_family_in_candidates": False,
+            "pipeline_rank1": None,
+            "jev_c1": None,
+        }
+        for index, (technique, record) in enumerate(sorted(catalog.items()), start=1)
+        if record.get("description")
+    ]
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__.split("\n", 1)[0])
     parser.add_argument("--out", type=Path, default=OUT)
+    parser.add_argument(
+        "--descriptions",
+        action="store_true",
+        help="write the techniques' own descriptions (cases_attack_descriptions.jsonl) instead",
+    )
     args = parser.parse_args()
     settings = get_settings()
     kb = AttackKnowledgeBase.load(settings.kb_path)
     bundle = _load(settings.attack_bundle_path)
     catalog = build_catalog(bundle, kb)
-    rows = procedure_rows(bundle, catalog)
+    name = "attack_descriptions" if args.descriptions else "attack_train"
+    rows = description_rows(catalog) if args.descriptions else procedure_rows(bundle, catalog)
     held_out = [
         row["text"] for split in HELD_OUT for row in read_jsonl(args.out / f"cases_{split}.jsonl")
     ]
     total = len(rows)
     rows, near = drop_near_duplicates(rows, held_out)
     rows, overlaps = drop_overlaps(rows, held_out)
-    path = args.out / "cases_attack_train.jsonl"
+    path = args.out / f"cases_{name}.jsonl"
     write_jsonl(path, rows)
     families = {item.split(".")[0] for row in rows for item in row["gold_ids"]}
     info = {
         "source": str(settings.attack_bundle_path),
         "attack_version": kb.version,
-        "procedure_texts": total,
+        "source_texts": total,
         "dropped": {**near, **overlaps},
         "cases": len(rows),
         "families": len(families),
@@ -176,7 +208,7 @@ def main() -> None:
     manifest = (
         json.loads(manifest_path.read_text(encoding="utf-8")) if manifest_path.exists() else {}
     )
-    manifest.setdefault("splits", {})["attack_train"] = info
+    manifest.setdefault("splits", {})[name] = info
     manifest_path.write_text(
         json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8"
     )

@@ -47,6 +47,7 @@ from common import (
     score_rows,
 )
 from decision_model import is_oom, load_model, wait_after_oom, with_oom_retry
+from losses import rival_margin
 from train import schedule
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -366,7 +367,12 @@ def train(args: argparse.Namespace) -> None:
     warmup = max(1, int(total_steps * args.warmup))
     every = len(rows) / args.checkpoints_per_epoch  # checkpoint k at round(k * every)
     models_dir.mkdir(parents=True)
-    meta = {"families": families, "attack_version": version, "init": args.init}
+    meta = {
+        "families": families,
+        "attack_version": version,
+        "init": args.init,
+        "margin": args.margin,
+    }
     log: dict[str, Any] = {
         "arm": args.arm,
         "started_at": datetime.now(UTC).isoformat(timespec="seconds"),
@@ -453,7 +459,17 @@ def train(args: argparse.Namespace) -> None:
             if ids:
                 try:
                     log_p = torch.log_softmax(head(encoder.hidden_batch(ids)), dim=-1)
-                    losses = torch.stack([-log_p[i, gold].mean() for i, gold in enumerate(golds)])
+                    losses = torch.stack(
+                        [
+                            -log_p[i, gold].mean()
+                            + (
+                                args.margin[0] * rival_margin(log_p[i], gold, args.margin[1])
+                                if args.margin
+                                else 0.0
+                            )
+                            for i, gold in enumerate(golds)
+                        ]
+                    )
                     (losses.sum() / args.accum).backward()  # per-example losses, as with batch 1
                     running.extend(float(value) for value in losses.detach())
                 except (RuntimeError, torch.cuda.OutOfMemoryError) as error:
@@ -554,6 +570,13 @@ def main() -> None:
     fit.add_argument("--head-lr", type=float, default=1e-3)
     fit.add_argument("--accum", type=int, default=16, help="examples per optimizer step")
     fit.add_argument("--batch", type=int, default=16, help="examples per forward pass")
+    fit.add_argument(
+        "--margin",
+        nargs=2,
+        type=float,
+        metavar=("LAMBDA", "M"),
+        help="add LAMBDA * max(0, M - (log P(gold) - log P(strongest wrong family))) to the loss",
+    )
     fit.add_argument("--warmup", type=float, default=0.03)
     fit.add_argument("--checkpoints-per-epoch", type=int, default=2)
     fit.add_argument("--max-tokens", type=int, default=1024)

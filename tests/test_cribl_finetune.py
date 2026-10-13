@@ -329,3 +329,20 @@ def test_multi_family_adds_confident_families_and_scores_micro_f1():
     assert families_named(row, 0.05) == ["T1059", "T1105", "T1027"]  # at most three
     assert micro_prf([row], TOP1_ONLY)["f1"] == pytest.approx(2 / 3)
     assert micro_prf([row], 0.25)["f1"] == 1.0
+
+
+def test_rival_margin_is_zero_past_the_margin_and_pushes_gold_up():
+    torch = pytest.importorskip("torch")
+    from scripts.cribl_finetune.losses import rival_margin
+
+    logits = torch.tensor([3.0, 0.5, 0.0, -1.0], requires_grad=True)
+    log_p = torch.log_softmax(logits, dim=0)
+    assert float(rival_margin(log_p, [0], 1.0)) == 0.0  # gold beats the rival by 2.5 nats
+    close = torch.tensor([1.0, 0.8, 0.0, -1.0], requires_grad=True)
+    term = rival_margin(torch.log_softmax(close, dim=0), [0], 1.0)
+    assert float(term) == pytest.approx(0.8)
+    term.backward()
+    assert close.grad[0] < 0 < close.grad[1]  # gradient descent raises gold, lowers the rival
+    two_gold = torch.log_softmax(torch.tensor([1.0, 1.0, 2.0]), dim=0)
+    # the gold families' mass counts together: gap = log(2e) - 2 = ln 2 - 1, term = 2 - ln 2
+    assert float(rival_margin(two_gold, [0, 1], 1.0)) == pytest.approx(2 - math.log(2), abs=1e-5)
