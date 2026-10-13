@@ -4704,6 +4704,19 @@ implicit mentions it scores 0.615 against 0.599.
 F1's confidence is well calibrated: the ECE of P(pick) against a family hit is 0.045–0.057. F1 names only the family:
 sub-techniques need a second step within the predicted family, which is not built yet.
 
+**Several families per sentence (amendment 3, reported only).** `multi_family.py` names the top
+family plus any other top-3 family with probability ≥ 0.25. The threshold was chosen on dev, where
+mean F1 rose from 0.670 to 0.677. Family micro-F1 on the confirmation sets, one family → up to three:
+
+| Set | One family | Up to three |
+|---|---|---|
+| CTI-HAL | 0.588 (P 0.612, R 0.567) | 0.598 (P 0.590, R 0.606) |
+| public test | 0.523 | 0.532 |
+| AnnoCTR test | 0.662 | 0.659 |
+
+The rule names about 1.1 families per case. The head's probabilities concentrate on its first
+answer, so most of the F1 gap is wrong first answers rather than missing second families.
+
 Quirk fixed after the run: the half-epoch boundary of the last epoch fell 3 examples before the end
 (23,280 of 23,283). Two near-identical final checkpoints were saved and scored; the selection was
 not affected. Checkpoints now sit at `round(k × rows / 2)`.
