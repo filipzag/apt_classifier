@@ -4586,6 +4586,45 @@ Predictions and metrics are in `data/audits/cribl_ft/`: `<arm>_<split>.json(l)` 
 never-abstain rule, `*_forced.json`. Adapters are in `data/models/cribl_ft/`. CTI-HAL rows are local
 only.
 
+**B3: real-report sentences (2026-10-13, prereg `cribl_annoctr_2026-10-13.json`, amendments 1–4).**
+B3 continues B1 step_9462 on 1,772 AnnoCTR training sentences (CC-BY-SA 4.0; Lange et al.,
+LREC-COLING 2024), each paired with a public replay sentence. AnnoCTR links real vendor-report
+sentences to ATT&CK techniques, almost only at parent level, so its rows use family targets.
+
+Training ran for 4 epochs on a community A100, a run the owner judged needed more than the planned 2
+epochs. Checkpoints were taken every half epoch. The 2-epoch checkpoint was chosen on AnnoCTR dev
+(right family 0.580, against B1's 0.370), and dev levelled off after it.
+
+Results, never-abstain rule:
+
+| | CTI-HAL exact (right family) | AnnoCTR test right family (exact) | public test exact |
+|---|---|---|---|
+| Pipeline rank-1 | 0.383 (0.475) | 0.358 (0.227) | 0.501 |
+| Jev C1 as reported / never-abstain | 0.460 (0.567) / 0.478 (0.596) | n/a | n/a |
+| B1 | 0.431 (0.528) | 0.429 (0.285) | 0.562 |
+| **B3** | **0.441 (0.576)** | **0.580 (0.290)** | 0.537 |
+
+**Pre-registered outcome.**
+- **Headline: fails.** On CTI-HAL exact, B3 minus B1 is +0.010, CI [−0.013, +0.036].
+- **AnnoCTR test, right family: passes.** B3 minus B1 is +0.151, CI [+0.125, +0.178]. The gain is
+  largest on implicit mentions (0.375 → 0.551; explicit 0.523 → 0.630).
+- **CTI-HAL against Jev C1: fails.** B3's exact 0.441 is below 0.460. The gap narrowed, to −0.019 with
+  CI [−0.048, +0.007].
+- **Public test, forgetting check: fails.** B3 minus B1 is −0.025, against the −0.02 limit (TRAM −0.049,
+  expert −0.076).
+
+**Reading.** Real-report training teaches the technique family but not the sub-technique. On CTI-HAL,
+B3 gains +0.049 in right-family accuracy over B1 (CI [+0.025, +0.074]) and reaches Jev as reported
+(+0.009, CI [−0.015, +0.035]). Exact-id accuracy barely moves, because AnnoCTR's parent-level labels
+carry no signal for choosing between sub-techniques.
+
+Calibration improved: CTI-HAL ECE 0.181, against 0.256 for B1. The `none_of_these` flag's AUROC rose
+from 0.73 to 0.74 on CTI-HAL and from 0.68 to 0.78 on AnnoCTR test.
+
+**Cost.** Training took 2.4 h on the A100, and the pods cost about $5.20 in total. That includes about
+$1 of aborted starts: an A40 run stopped for the epoch change, and a CPU-bound H100 NVL that needed
+Triton 3.7.1 for flash-linear-attention on Hopper.
+
 ## 22. Failure modes and troubleshooting
 
 ### 22.1 “ATT&CK knowledge base has not been ingested”
