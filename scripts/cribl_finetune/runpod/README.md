@@ -67,3 +67,11 @@ confirmations of amendments 4 and 5 and B2 step_12616 on test) and writes
 `/workspace/cribl_confirm.tar.gz`. Its upload holds the code, `cases_cti_hal.jsonl`,
 `cases_test.jsonl` and the B1 step_9462, B2 step_6308 and B2 step_12616 checkpoints. CTI-HAL has no
 licence: the owner allowed this one upload; delete it and terminate the pod right after downloading.
+
+## F1 family head (prereg `cribl_family_head_2026-10-13.json`, amendment 1)
+
+`remote_f1.sh` trains F1, selects it on public dev + AnnoCTR dev, scores B1/B3 (retrieve-then-pick) and
+F1 once on clean AnnoCTR test, F1 on the public test, and writes `/workspace/cribl_f1.tar.gz` with the
+selected checkpoint. The upload holds the code, `catalog.json`, the public and AnnoCTR case files, the
+B1/B3 public test predictions and the B1 step_9462 / B3 step_7088 adapters; no CTI-HAL. CTI-HAL is
+scored on the laptop afterwards (`family_head.py evaluate --split cti_hal`).
