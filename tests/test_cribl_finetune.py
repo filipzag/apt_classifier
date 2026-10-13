@@ -315,3 +315,17 @@ def test_family_question_has_no_options_and_targets_gold_families():
     families = ["T1059", "T1566", "T1486"]
     assert common.family_targets(["T1566.001", "T1059.001", "T1566"], families) == [1, 0]
     assert common.family_targets(["T9999"], families) == []
+
+
+def test_multi_family_adds_confident_families_and_scores_micro_f1():
+    from scripts.cribl_finetune.multi_family import TOP1_ONLY, families_named, micro_prf
+
+    row = {
+        "gold_ids": ["T1059.001", "T1105"],
+        "top": [["T1059", 0.5], ["T1105", 0.3], ["T1027", 0.1], ["T1566", 0.05]],
+    }
+    assert families_named(row, TOP1_ONLY) == ["T1059"]
+    assert families_named(row, 0.25) == ["T1059", "T1105"]
+    assert families_named(row, 0.05) == ["T1059", "T1105", "T1027"]  # at most three
+    assert micro_prf([row], TOP1_ONLY)["f1"] == pytest.approx(2 / 3)
+    assert micro_prf([row], 0.25)["f1"] == 1.0

@@ -66,6 +66,15 @@
       "reason": "on the RTX 4090 pod batch 1 was CPU-bound (GPU 11-14% busy, one core at 100%, 0.95 s/example, about 6 h); the laptop batching check had shown no gain only because its GPU is the bottleneck",
       "deviation": "padding and batched kernels change floating-point results slightly (decision-slot states match batch 1 at cosine > 0.9997 in the check); the training data order is unchanged",
       "informed_by": "the untrained head's dev scores and the speed of the first 10 optimizer steps; nothing from a trained F1 checkpoint"
+    },
+    {
+      "id": 3,
+      "date": "2026-10-13",
+      "before": "any test or CTI-HAL scoring under this rule (the top-1 confirmation results were already read; the rule's test numbers were not computed)",
+      "change": "a second decision rule, reported beside top-1: name the most probable family plus every other family of the top 3 whose probability is at least 0.25; scored as family micro precision/recall/F1 (scripts/cribl_finetune/multi_family.py); the threshold was chosen on public dev + AnnoCTR dev of the selected checkpoint only (grid 0.05-0.50 and top-1 only, mean F1, ties the higher threshold; data/audits/cribl_ft/F1_multi_family_tune.json): dev mean F1 0.670 -> 0.677",
+      "reason": "the owner asked for a higher F1; 7% of CTI-HAL statements and 18% of public test cases have more than one gold family, which a single answer always misses",
+      "success": "reported only: no criterion, the top-1 results above stay the registered outcome",
+      "informed_by": "the top-1 confirmation results and the dev predictions; no test scores under the rule"
     }
   ]
 }
