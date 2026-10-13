@@ -275,7 +275,8 @@ def references(
 ) -> dict[str, list[dict[str, Any]]]:
     """Pick rows to compare against (their parent-aware score is family top-1): pipeline rank-1,
     Jev C1 as reported and under never-abstain where stored, and retrieve-then-pick arms' C1
-    prediction files under never-abstain (amendment 4 of the parent prereg)."""
+    prediction files under never-abstain (amendment 4 of the parent prereg), or another family-head
+    run's predictions as they are."""
     found = {"pipeline_rank1": reference_rows(cases, "pipeline")}
     jev = reference_rows(cases, "jev_c1")
     if jev:
@@ -289,9 +290,12 @@ def references(
         missing = [case["case_id"] for case in cases if case["case_id"] not in stored]
         if missing:
             raise SystemExit(f"{path} lacks {len(missing)} cases (first {missing[0]})")
-        found[name] = [
-            forced_row(stored[case["case_id"]], order[case["case_id"]]) for case in cases
-        ]
+        if any("top" in row for row in stored.values()):  # another family-head run: its picks
+            found[name] = [stored[case["case_id"]] for case in cases]
+        else:  # a C1 arm: never-abstain over its stored distribution
+            found[name] = [
+                forced_row(stored[case["case_id"]], order[case["case_id"]]) for case in cases
+            ]
     return found
 
 

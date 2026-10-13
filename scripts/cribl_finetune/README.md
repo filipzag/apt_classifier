@@ -124,3 +124,14 @@ cd scripts/cribl_finetune
 ../../.venv-cribl/bin/python family_head.py evaluate --checkpoint <selected> --name F1 --split cti_hal \
   --compare B1=B1_cti_hal.jsonl B3=B3_cti_hal.jsonl
 ```
+
+### F2: family head with ATT&CK procedure examples (prereg `cribl_family_attack_2026-10-13.json`)
+
+```bash
+PYTHONPATH=. .venv/bin/python scripts/cribl_finetune/export_attack_procedures.py  # cases_attack_train.jsonl
+bash scripts/cribl_finetune/runpod/remote_f2.sh                                   # on a GPU pod
+```
+
+`export_attack_procedures.py` turns ATT&CK's `uses` relationships into sentences and drops any that
+overlap a dev or test text (near duplicates, containment, a shared 10-token run); CTI-HAL is read
+for the filter on the laptop and never written out.
