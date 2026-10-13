@@ -38,6 +38,15 @@
       "reason": "no secure or community RTX 4090 was free",
       "deviation": "GPU floating-point differences against F2 (RTX 4090); same code, data, seed and settings",
       "informed_by": "nothing from F3 scores (none exist)"
+    },
+    {
+      "id": 2,
+      "date": "2026-10-13",
+      "before": "the restarted F3 training",
+      "change": "the first F3 run (RTX A6000, pod 7eosiv0hp8umf4) was stopped by RunPod at 19:19 UTC after 30,919 of 49,454 training examples (5 of 8 checkpoints); it is discarded and F3 is retrained from scratch on a RunPod secure RTX 4090, the GPU of the original registration and of F2",
+      "reason": "the pod was stopped by the platform, not by the experiment; a mid-run resume would lose the optimiser state",
+      "deviation": "none against the original registration (amendment 1's GPU change no longer applies); the discarded run's dev scores (checkpoints 0 to 30,919) were seen and are reported as such, nothing was chosen from them",
+      "informed_by": "the discarded run's dev curve only (no test or CTI-HAL score exists)"
     }
   ]
 }
