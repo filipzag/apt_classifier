@@ -4759,6 +4759,64 @@ not affected. Checkpoints now sit at `round(k × rows / 2)`.
 **Cost.** The pod cost about $1.20: 81 minutes at $0.89/h, including about 20 idle minutes while the
 batching fix was made. No OpenRouter credit was used.
 
+**ATT&CK definitions and a rival margin (F3, 2026-10-13, prereg `cribl_family_margin_2026-10-13.json`).**
+F3 targets F2's look-alike confusions. In F2's 260 dev errors the gold family was second in 38%, and
+the top two were within 0.3 in 147. F3 is F2's recipe with two changes:
+- **Definitions.** `export_attack_procedures.py --descriptions` adds one row per listed technique,
+  "Name: description" cut at a sentence end within 1,500 characters. The same overlap filter drops 4
+  rows (a shared 10-token run), leaving 693 rows over 221 families.
+- **Rival margin.** `--margin 1 1` adds `1.0 × max(0, 1 − (log P(gold families) − log P(strongest
+  non-gold family)))` to each example's cross-entropy (`losses.rival_margin`; λ and m fixed, not tuned).
+
+The first run, on an RTX A6000, was stopped by RunPod after 30,919 of 49,454 examples (amendment 2).
+It was discarded. Its dev curve (public dev / AnnoCTR dev family top-1, checkpoints 6,192 to 30,919:
+0.693/0.646, 0.707/0.682, 0.718/0.723, 0.725/0.720, 0.739/0.723) was seen, and nothing was chosen
+from it.
+
+F3 was retrained from scratch on a secure RTX 4090, the GPU of F2. Its untrained checkpoint
+reproduces F2's to the last digit. Training took 75 minutes (0.09 s per example). The selected
+checkpoint is the last one, at 2 epochs, with dev mean 0.739 against F2's 0.743:
+
+| Checkpoint (epochs) | 0.25 | 0.5 | 0.75 | 1 | 1.25 | 1.5 | 1.75 | **2** |
+|---|---|---|---|---|---|---|---|---|
+| public dev | 0.687 | 0.709 | 0.721 | 0.721 | 0.716 | 0.728 | 0.730 | **0.734** |
+| AnnoCTR dev | 0.625 | 0.685 | 0.735 | 0.735 | 0.744 | 0.747 | 0.738 | **0.744** |
+
+| Family top-1 | CTI-HAL | public test | AnnoCTR test |
+|---|---|---|---|
+| F2 | 0.626 | 0.618 | 0.729 |
+| **F3** | **0.620** | **0.618** | **0.732** |
+| F3 minus F2, paired 95% CI | −0.006 [−0.024, +0.011] | −0.001 [−0.015, +0.014] | +0.003 [−0.015, +0.019] |
+
+- **Headline (CTI-HAL F3 > F2): fails.** Both secondary criteria fail too. F3 equals F2 within
+  ±0.6 points on all three sets.
+- **Look-alike subset (gold family in T1598, T1566, T1486, T1560, T1140, T1027, T1059, T1105,
+  T1003, T1555): no gain.**
+  - CTI-HAL 0.748 → 0.735, −0.013 [−0.037, +0.010].
+  - Public test 0.620 → 0.594, −0.027 [−0.051, −0.002].
+  - AnnoCTR test 0.803 → 0.798, −0.005 [−0.029, +0.019].
+- **Pair mix-ups are unchanged.** On CTI-HAL, Command and Scripting Interpreter ↔ Ingress Tool
+  Transfer stays at 16 and Deobfuscate ↔ Obfuscate at 5. Many of these are label ambiguity, not model
+  error: statements that describe downloading and running a script carry only one of the two ids, and
+  sometimes the less obvious one. A single-answer margin cannot win both. Cases whose gold family was
+  second dropped slightly: CTI-HAL 143 → 137, public test 184 → 182, AnnoCTR test 71 → 66. Total
+  errors did not drop.
+- **Family micro-F1, one family → up to three (threshold 0.25, not re-tuned).**
+  - CTI-HAL 0.596 → 0.602 (F2 0.602 → 0.607).
+  - Public test 0.530 → 0.538.
+  - AnnoCTR test 0.675 → 0.679.
+- **Calibration is mixed.** ECE is 0.041 on CTI-HAL (F2 0.099), 0.088 on the public test (F2 0.071)
+  and 0.118 on AnnoCTR test (F2 0.046).
+- **Against the other methods (not registered).** On CTI-HAL, F3 is +0.043 over B3 [+0.017, +0.070],
+  +0.053 over Jev C1 as reported, and +0.024 over Jev under never-abstain [−0.004, +0.052].
+
+F2 remains the best family classifier. Definitions and the margin neither help nor hurt measurably.
+The look-alike errors left are mostly pairs where the data itself names one of two valid families.
+The up-to-three rule already credits these.
+
+**Cost.** About $2.20 in all: about $0.95 for the stopped A6000 run (93 minutes at $0.59/h) and about
+$1.25 for the RTX 4090 rerun (85 minutes at $0.89/h). No OpenRouter credit was used.
+
 ## 22. Failure modes and troubleshooting
 
 ### 22.1 “ATT&CK knowledge base has not been ingested”

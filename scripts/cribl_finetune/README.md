@@ -145,3 +145,6 @@ bash scripts/cribl_finetune/runpod/remote_f3.sh                                 
 
 F2's recipe plus one training row per technique definition and `--margin 1 1`
 (`losses.rival_margin`: the gold families must beat their strongest rival by 1 nat).
+
+Result (docs 21.3.18): no gain over F2 on CTI-HAL, the public test or AnnoCTR test, and the look-alike
+pair mix-ups are unchanged; F2 stays the best family classifier.
