@@ -346,3 +346,38 @@ def test_rival_margin_is_zero_past_the_margin_and_pushes_gold_up():
     two_gold = torch.log_softmax(torch.tensor([1.0, 1.0, 2.0]), dim=0)
     # the gold families' mass counts together: gap = log(2e) - 2 = ln 2 - 1, term = 2 - ln 2
     assert float(rival_margin(two_gold, [0, 1], 1.0)) == pytest.approx(2 - math.log(2), abs=1e-5)
+
+
+def test_technique_head_scores_within_family_and_picks_among_top_families():
+    torch = pytest.importorskip("torch")
+    from scripts.cribl_finetune.hierarchy import (
+        joint_log_probs,
+        pick,
+        technique_index,
+        technique_targets,
+        within_family_log_probs,
+    )
+
+    texts = {
+        "T1059": [{"id": "T1059"}, {"id": "T1059.001"}, {"id": "T1059.003"}],
+        "T1105": [{"id": "T1105"}],
+    }
+    techniques, group = technique_index(["T1059", "T1105"], texts)
+    assert techniques == ["T1059", "T1059.001", "T1059.003", "T1105"]
+    assert group == [0, 0, 0, 1]
+    assert technique_targets(["T1059.001", "T9999", "T1059.001"], techniques) == [1]
+    group = torch.tensor(group)
+    logits = torch.tensor([[0.0, 2.0, 1.0, 5.0]], requires_grad=True)
+    within = within_family_log_probs(logits, group, 2)
+    expected = torch.log_softmax(torch.tensor([0.0, 2.0, 1.0]), dim=0)
+    assert torch.allclose(within[0, :3], expected)
+    assert float(within[0, 3]) == pytest.approx(0.0)  # a family without sub-techniques: P = 1
+    (-within[0, 1]).backward()
+    assert logits.grad[0, 1] < 0 < logits.grad[0, 2]  # descent raises the gold sibling only
+    assert float(logits.grad[0, 3]) == 0.0
+    family_log_p = torch.log(torch.tensor([[0.55, 0.45]]))
+    joint = joint_log_probs(family_log_p, within.detach(), group)
+    assert float(joint.exp().sum()) == pytest.approx(1.0)
+    # P(T1105) = 0.45 beats P(T1059.001) = 0.55 * 0.665: the second family's lone technique wins
+    assert pick(joint[0], family_log_p[0], group, None) == 3
+    assert pick(joint[0], family_log_p[0], group, 1) == 1  # limited to the top family

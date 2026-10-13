@@ -18,6 +18,15 @@ the head with cross-entropy against the gold families (uniform over a case's gol
 
 A checkpoint is chosen on the mean family top-1 over the two dev sets (ties: the earlier) and never
 on CTI-HAL or a test split.
+
+With ``--technique-head`` a second cosine head scores every listed technique (rows start from each
+technique's own ATT&CK text) and is read as P(technique | family), a softmax within the family's
+parent and sub-techniques (``hierarchy.py``). The exact answer is the most probable technique by
+P(family) x P(technique | family) among the ``--families-considered`` most probable families.
+Training adds the within-family cross-entropy for rows whose labels are exact (not the
+``--family-only-datasets``, whose links are parent-level by convention); ``--exact-selection``
+names the dev sets scored on exact top-1 instead of family top-1 in the selection score (prereg
+``cribl_technique_head_2026-10-14.json``).
 """
 
 from __future__ import annotations
@@ -27,6 +36,7 @@ import json
 import math
 import random
 import time
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -47,6 +57,13 @@ from common import (
     score_rows,
 )
 from decision_model import is_oom, load_model, wait_after_oom, with_oom_retry
+from hierarchy import (
+    joint_log_probs,
+    pick,
+    technique_index,
+    technique_targets,
+    within_family_log_probs,
+)
 from losses import rival_margin
 from train import schedule
 
@@ -54,6 +71,7 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 AUDITS = REPO_ROOT / "data" / "audits" / "cribl_ft"
 MODELS = REPO_ROOT / "data" / "models" / "cribl_ft"
 HEAD_FILE = "family_head.pt"
+TECHNIQUE_HEAD_FILE = "technique_head.pt"
 DEV_FILES = ("cases_dev.jsonl", "cases_annoctr_dev.jsonl")
 TRAIN_FILES = ("cases_train.jsonl", "cases_annoctr_train.jsonl")
 SPLITS = ("dev", "annoctr_dev", "test", "annoctr_test", "cti_hal")
@@ -141,9 +159,71 @@ def initial_head(
     return FamilyHead(prototypes, prototypes.mean(dim=0)).to(encoder.device)
 
 
-def save_checkpoint(model: Any, head: FamilyHead, directory: Path, meta: dict[str, Any]) -> None:
+@dataclass
+class Techniques:
+    """The technique head (a :class:`FamilyHead` with one row per technique), the technique ids,
+    the family index of each (on the head's device) and how many families the answer may come
+    from."""
+
+    head: FamilyHead
+    ids: list[str]
+    group: torch.Tensor
+    considered: int
+
+
+def initial_technique_head(
+    encoder: Encoder,
+    families: list[str],
+    texts: dict[str, list[dict[str, str]]],
+    batch: int = 16,
+) -> FamilyHead:
+    """Rows = the decision-slot state of each technique's own text; centre = their mean."""
+    items = [item for family in families for item in texts[family]]
+    with torch.inference_mode():
+        ids = [encoder.token_ids(f"{item['label']}: {item['what']}") for item in items]
+        states = torch.cat(
+            [encoder.hidden_batch(ids[i : i + batch]) for i in range(0, len(ids), batch)]
+        )
+    prototypes = states.clone()  # outside inference mode: a trainable tensor
+    return FamilyHead(prototypes, prototypes.mean(dim=0)).to(encoder.device)
+
+
+def save_checkpoint(
+    model: Any,
+    head: FamilyHead,
+    directory: Path,
+    meta: dict[str, Any],
+    techniques: Techniques | None = None,
+) -> None:
     model.save_pretrained(str(directory))
     torch.save({"state": head.state_dict(), **meta}, directory / HEAD_FILE)
+    if techniques is not None:
+        torch.save(
+            {
+                "state": techniques.head.state_dict(),
+                "techniques": techniques.ids,
+                "group": techniques.group.tolist(),
+                "families_considered": techniques.considered,
+            },
+            directory / TECHNIQUE_HEAD_FILE,
+        )
+
+
+def load_techniques(directory: Path, device: Any) -> Techniques | None:
+    """The checkpoint's technique head, or ``None`` for a family-only checkpoint."""
+    path = directory / TECHNIQUE_HEAD_FILE
+    if not path.exists():
+        return None
+    saved = torch.load(path, map_location="cpu", weights_only=False)
+    count, hidden = saved["state"]["weight"].shape
+    head = FamilyHead(torch.zeros(count, hidden), torch.zeros(hidden))
+    head.load_state_dict(saved["state"])
+    return Techniques(
+        head.to(device).eval(),
+        list(saved["techniques"]),
+        torch.tensor(saved["group"], device=device),
+        int(saved["families_considered"]),
+    )
 
 
 def load_checkpoint(directory: Path) -> tuple[Any, Encoder, FamilyHead, dict[str, Any]]:
@@ -164,7 +244,11 @@ def load_checkpoint(directory: Path) -> tuple[Any, Encoder, FamilyHead, dict[str
 
 
 def predict_batch(
-    encoder: Encoder, head: FamilyHead, families: list[str], cases: list[dict[str, Any]]
+    encoder: Encoder,
+    head: FamilyHead,
+    families: list[str],
+    cases: list[dict[str, Any]],
+    techniques: Techniques | None = None,
 ) -> list[dict[str, Any]]:
     """One row per case; a prompt over the token limit is an error row (a miss)."""
     rows, golds, ids, scored = [], [], [], []
@@ -184,10 +268,50 @@ def predict_batch(
         rows.append(row)
         golds.append(gold)
     if ids:
-        probabilities = torch.softmax(head(encoder.hidden_batch(ids)), dim=-1)
+        hidden = encoder.hidden_batch(ids)
+        logits = head(hidden)
+        probabilities = torch.softmax(logits, dim=-1)
+        if techniques is not None:
+            family_log_p = torch.log_softmax(logits, dim=-1)
+            within = within_family_log_probs(
+                techniques.head(hidden), techniques.group, len(families)
+            )
+            joint = joint_log_probs(family_log_p, within, techniques.group)
         for position, index in enumerate(scored):
             rows[index] = scored_row(rows[index], probabilities[position], golds[index], families)
+            if techniques is not None:
+                rows[index].update(
+                    technique_fields(
+                        joint[position], family_log_p[position], rows[index]["gold_ids"], techniques
+                    )
+                )
     return rows
+
+
+def technique_fields(
+    joint: torch.Tensor,
+    family_log_p: torch.Tensor,
+    gold_ids: list[str],
+    techniques: Techniques,
+) -> dict[str, Any]:
+    """The exact answer under the registered rule, with the top family only and with every family,
+    the top techniques by joint probability and the best gold technique's rank."""
+    chosen = pick(joint, family_log_p, techniques.group, techniques.considered)
+    ranked = torch.argsort(joint, descending=True).tolist()
+    position = {index: rank for rank, index in enumerate(ranked, start=1)}
+    probabilities = joint.exp()
+    gold = technique_targets(gold_ids, techniques.ids)
+    return {
+        "technique_pick": techniques.ids[chosen],
+        "technique_p": float(probabilities[chosen]),
+        "technique_pick_k1": techniques.ids[pick(joint, family_log_p, techniques.group, 1)],
+        "technique_pick_all": techniques.ids[ranked[0]],
+        "technique_top": [
+            [techniques.ids[index], round(float(probabilities[index]), 6)]
+            for index in ranked[:TOP_KEPT]
+        ],
+        "technique_gold_rank": min((position[index] for index in gold), default=None),
+    }
 
 
 def scored_row(
@@ -216,6 +340,7 @@ def run_split(
     path: Path,
     progress: int = 200,
     batch: int = 16,
+    techniques: Techniques | None = None,
 ) -> list[dict[str, Any]]:
     """Predict every case not yet in ``path`` (appending, resumable); rows in case order."""
     done: dict[str, dict[str, Any]] = {}
@@ -225,7 +350,8 @@ def run_split(
     started, fresh = time.monotonic(), 0
     with torch.inference_mode(), path.open("a", encoding="utf-8") as handle:
         for start in range(0, len(pending), batch):
-            for row in predict_batch(encoder, head, families, pending[start : start + batch]):
+            chunk = pending[start : start + batch]
+            for row in predict_batch(encoder, head, families, chunk, techniques):
                 handle.write(json.dumps(row, ensure_ascii=False, sort_keys=True) + "\n")
                 done[row["case_id"]] = row
                 fresh += 1
@@ -259,6 +385,49 @@ def family_block(rows: list[dict[str, Any]]) -> dict[str, Any]:
         "ece": expected_calibration_error(pairs),
         "errors": sum(1 for row in rows if row.get("status") == "error"),
     }
+
+
+def technique_block(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    """Exact top-1 under the registered rule, with the top family only and with every family;
+    exact top-3/5 over every technique; exact top-1 by gold kind (a gold sub-technique, or parent
+    ids only); the calibration of P(pick) against an exact hit. Errors are misses."""
+    count = len(rows)
+
+    def exact(row: dict[str, Any], key: str = "technique_pick") -> bool:
+        return row.get(key) is not None and row[key] in row["gold_ids"]
+
+    def rate(subset: list[dict[str, Any]], key: str = "technique_pick") -> float | None:
+        return round(sum(exact(row, key) for row in subset) / len(subset), 6) if subset else None
+
+    def within(k: int) -> float | None:
+        ranks = [row.get("technique_gold_rank") for row in rows]
+        return round(sum(1 for rank in ranks if rank and rank <= k) / count, 6) if count else None
+
+    sub_technique = [row for row in rows if any("." in str(g) for g in row["gold_ids"])]
+    parent_only = [row for row in rows if not any("." in str(g) for g in row["gold_ids"])]
+    pairs = [
+        (float(row["technique_p"]), exact(row))
+        for row in rows
+        if row.get("technique_pick") is not None
+    ]
+    return {
+        "n": count,
+        "top1": rate(rows),
+        "top1_top_family_only": rate(rows, "technique_pick_k1"),
+        "top1_every_family": rate(rows, "technique_pick_all"),
+        "top3": within(3),
+        "top5": within(5),
+        "gold_sub_technique": {"n": len(sub_technique), "top1": rate(sub_technique)},
+        "gold_parent_only": {"n": len(parent_only), "top1": rate(parent_only)},
+        "ece": expected_calibration_error(pairs),
+    }
+
+
+def technique_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Rows whose ``pick`` is the exact answer (for :func:`common.score_rows` / ``paired_delta``)."""
+    return [
+        {**row, "pick": row.get("technique_pick"), "p_pick": row.get("technique_p")} for row in rows
+    ]
 
 
 def family_metrics(rows: list[dict[str, Any]]) -> dict[str, Any]:
@@ -304,7 +473,8 @@ def report(
     cases: list[dict[str, Any]], rows: list[dict[str, Any]], compare: dict[str, Path]
 ) -> dict[str, Any]:
     out: dict[str, Any] = {"arm": family_metrics(rows), "references": {}, "vs": {}}
-    for name, reference in references(cases, compare).items():
+    found = references(cases, compare)
+    for name, reference in found.items():
         scored = score_rows(reference)
         out["references"][name] = {
             "family_top1": scored["pooled"]["parent_aware"],
@@ -320,6 +490,46 @@ def report(
                     "delta": value["delta"]["parent_aware"],
                     "ci95": (value["ci95"] or {}).get("parent_aware"),
                 }
+                for key, value in delta["datasets"].items()
+            },
+        }
+    if any("technique_pick" in row for row in rows):
+        out.update(exact_report(rows, found))
+    return out
+
+
+def exact_report(
+    rows: list[dict[str, Any]], found: dict[str, list[dict[str, Any]]]
+) -> dict[str, Any]:
+    """Exact top-1 against every reference that names techniques: the pipeline, Jev, the C1 arms
+    and other technique-head runs (a family-only run names families and is left out)."""
+    datasets: dict[str, list[dict[str, Any]]] = {}
+    for row in rows:
+        datasets.setdefault(str(row.get("dataset") or "all"), []).append(row)
+    out: dict[str, Any] = {
+        "arm_exact": {
+            "pooled": technique_block(rows),
+            "datasets": {
+                name: technique_block(subset) for name, subset in sorted(datasets.items())
+            },
+        },
+        "references_exact": {},
+        "vs_exact": {},
+    }
+    mine = technique_rows(rows)
+    for name, reference in found.items():
+        if any("technique_pick" in row for row in reference):
+            reference = technique_rows(reference)
+        elif any("top" in row for row in reference):
+            continue
+        out["references_exact"][name] = score_rows(reference)["pooled"]["exact"]
+        delta = paired_delta(reference, mine)
+        out["vs_exact"][name] = {
+            "n": delta["pooled"]["n"],
+            "exact_delta": delta["pooled"]["delta"]["exact"],
+            "ci95": delta["pooled"]["ci95"]["exact"] if delta["pooled"]["ci95"] else None,
+            "datasets": {
+                key: {"delta": value["delta"]["exact"], "ci95": (value["ci95"] or {}).get("exact")}
                 for key, value in delta["datasets"].items()
             },
         }
@@ -355,10 +565,20 @@ def train(args: argparse.Namespace) -> None:
         raise SystemExit("--accum must be a multiple of --batch")
     model.eval()
     head = initial_head(encoder, families, texts, args.batch)
+    techniques = None
+    if args.technique_head:
+        ids, group = technique_index(families, texts)
+        techniques = Techniques(
+            initial_technique_head(encoder, families, texts, args.batch),
+            ids,
+            torch.tensor(group, device=encoder.device),
+            args.families_considered,
+        )
     model.train()
     lora = [p for p in model.parameters() if p.requires_grad]
+    heads = [*head.parameters(), *(techniques.head.parameters() if techniques else ())]
     optimizer = torch.optim.AdamW(
-        [{"params": lora, "lr": args.lr}, {"params": list(head.parameters()), "lr": args.head_lr}],
+        [{"params": lora, "lr": args.lr}, {"params": heads, "lr": args.head_lr}],
         weight_decay=0.0,
     )
     peak = {id(group): group["lr"] for group in optimizer.param_groups}
@@ -391,36 +611,51 @@ def train(args: argparse.Namespace) -> None:
         "skipped_long": 0,
         "oom_skipped": 0,
     }
+    if techniques:
+        log["techniques"] = len(techniques.ids)
+        log["train_rows_with_exact_targets"] = sum(
+            1
+            for row in rows
+            if row["dataset"] not in args.family_only_datasets
+            and technique_targets(row["gold_ids"], techniques.ids)
+        )
 
     def save_log() -> None:
         log_path.write_text(json.dumps(log, indent=2) + "\n", encoding="utf-8")
 
     def checkpoint(seen: int) -> None:
         directory = models_dir / f"step_{seen}"
-        save_checkpoint(model, head, directory, meta)
+        save_checkpoint(model, head, directory, meta, techniques)
         model.eval()
         head.eval()
         started = time.monotonic()
-        scores = {}
+        scores, exact = {}, {}
         for name, cases in dev.items():
             split = name.removeprefix("cases_").removesuffix(".jsonl")
             path = AUDITS / f"{args.arm}_step{seen}_{split}.jsonl"
             predicted = with_oom_retry(
                 lambda cases=cases, path=path: run_split(
-                    encoder, head, families, cases, path, 0, args.batch
+                    encoder, head, families, cases, path, 0, args.batch, techniques
                 ),
                 note=f"dev scoring {split}",
             )
             scores[split] = family_block(predicted)
+            if techniques:
+                exact[split] = technique_block(predicted)
         model.train()
         head.train()
+        selected_on = [
+            exact[split]["top1"] if split in args.exact_selection else scores[split]["top1"]
+            for split in scores
+        ]
         log["checkpoints"].append(
             {
                 "examples_seen": seen,
                 "epoch": round(seen / len(rows), 3),
                 "dir": str(directory),
                 "dev": scores,
-                "selection_score": round(sum(s["top1"] for s in scores.values()) / len(scores), 6),
+                **({"dev_exact": exact} if techniques else {}),
+                "selection_score": round(sum(selected_on) / len(selected_on), 6),
                 "scale": round(float(head.log_scale.exp()), 4),
                 "dev_eval_s": round(time.monotonic() - started, 1),
             }
@@ -432,7 +667,8 @@ def train(args: argparse.Namespace) -> None:
         save_log()
         print(
             f"checkpoint {seen}: "
-            + " ".join(f"{split} top1 {s['top1']} top5 {s['top5']}" for split, s in scores.items()),
+            + " ".join(f"{split} top1 {s['top1']} top5 {s['top5']}" for split, s in scores.items())
+            + "".join(f" {split} exact {s['top1']}" for split, s in exact.items()),
             flush=True,
         )
 
@@ -449,22 +685,40 @@ def train(args: argparse.Namespace) -> None:
             if seen >= examples_total:
                 break
             chunk = order[start : start + args.batch][: examples_total - seen]
-            ids, golds = [], []
+            ids, golds, exact_golds = [], [], []
             for row in chunk:
                 try:
                     ids.append(encoder.token_ids(row["text"]))
                     golds.append(family_targets(row["gold_ids"], families))
+                    exact_golds.append(
+                        technique_targets(row["gold_ids"], techniques.ids)
+                        if techniques and row["dataset"] not in args.family_only_datasets
+                        else []
+                    )
                 except ValueError:
                     log["skipped_long"] += 1
             if ids:
                 try:
-                    log_p = torch.log_softmax(head(encoder.hidden_batch(ids)), dim=-1)
+                    hidden = encoder.hidden_batch(ids)
+                    log_p = torch.log_softmax(head(hidden), dim=-1)
+                    within = (
+                        within_family_log_probs(
+                            techniques.head(hidden), techniques.group, len(families)
+                        )
+                        if techniques
+                        else None
+                    )
                     losses = torch.stack(
                         [
                             -log_p[i, gold].mean()
                             + (
                                 args.margin[0] * rival_margin(log_p[i], gold, args.margin[1])
                                 if args.margin
+                                else 0.0
+                            )
+                            + (
+                                -args.technique_weight * within[i, exact_golds[i]].mean()
+                                if exact_golds[i]
                                 else 0.0
                             )
                             for i, gold in enumerate(golds)
@@ -475,7 +729,7 @@ def train(args: argparse.Namespace) -> None:
                 except (RuntimeError, torch.cuda.OutOfMemoryError) as error:
                     if not is_oom(error) or log["oom_skipped"] >= MAX_OOM_SKIPS:
                         raise
-                    log_p = losses = None
+                    log_p = losses = hidden = within = None
                     log["oom_skipped"] += 1
                     optimizer.zero_grad(set_to_none=True)
                     wait_after_oom(f"training examples {seen}+")
@@ -483,7 +737,7 @@ def train(args: argparse.Namespace) -> None:
             if seen // args.accum > before // args.accum or seen == examples_total:
                 for group in optimizer.param_groups:
                     group["lr"] = peak[id(group)] * schedule(step, total_steps, warmup)
-                torch.nn.utils.clip_grad_norm_([*lora, *head.parameters()], 1.0)
+                torch.nn.utils.clip_grad_norm_([*lora, *heads], 1.0)
                 optimizer.step()
                 optimizer.zero_grad(set_to_none=True)
                 step += 1
@@ -524,11 +778,18 @@ def evaluate(args: argparse.Namespace) -> None:
         compare[name] = Path(path) if Path(path).is_absolute() else AUDITS / path
     model, encoder, head, info = load_checkpoint(args.checkpoint)
     families = info["families"]
+    techniques = load_techniques(args.checkpoint, encoder.device)
     stem = f"{args.name}_{args.split}"
     started = time.monotonic()
     rows = with_oom_retry(
         lambda: run_split(
-            encoder, head, families, cases, AUDITS / f"{stem}.jsonl", batch=args.batch
+            encoder,
+            head,
+            families,
+            cases,
+            AUDITS / f"{stem}.jsonl",
+            batch=args.batch,
+            techniques=techniques,
         ),
         note=stem,
     )
@@ -552,6 +813,17 @@ def evaluate(args: argparse.Namespace) -> None:
             f" | {name} {value['family_top1']} (delta {delta['family_top1_delta']} {delta['ci95']})"
         )
     print(line)
+    if "arm_exact" in out:
+        exact = out["arm_exact"]["pooled"]
+        line = (
+            f"{stem}: exact top1 {exact['top1']} (top family only {exact['top1_top_family_only']},"
+            f" every family {exact['top1_every_family']}) top3 {exact['top3']} top5 {exact['top5']}"
+            f" ECE {exact['ece']}"
+        )
+        for name, value in out["references_exact"].items():
+            delta = out["vs_exact"][name]
+            line += f" | {name} {value} (delta {delta['exact_delta']} {delta['ci95']})"
+        print(line)
 
 
 def main() -> None:
@@ -576,6 +848,30 @@ def main() -> None:
         type=float,
         metavar=("LAMBDA", "M"),
         help="add LAMBDA * max(0, M - (log P(gold) - log P(strongest wrong family))) to the loss",
+    )
+    fit.add_argument(
+        "--technique-head",
+        action="store_true",
+        help="add the exact-technique head: P(technique) = P(family) x P(technique | family)",
+    )
+    fit.add_argument(
+        "--families-considered",
+        type=int,
+        default=3,
+        help="the exact answer comes from this many most probable families",
+    )
+    fit.add_argument(
+        "--family-only-datasets",
+        nargs="*",
+        default=["annoctr"],
+        help="datasets whose labels are parent-level by convention: no technique loss",
+    )
+    fit.add_argument("--technique-weight", type=float, default=1.0)
+    fit.add_argument(
+        "--exact-selection",
+        nargs="*",
+        default=[],
+        help="dev splits scored on exact top-1 (not family top-1) in the selection score",
     )
     fit.add_argument("--warmup", type=float, default=0.03)
     fit.add_argument("--checkpoints-per-epoch", type=int, default=2)

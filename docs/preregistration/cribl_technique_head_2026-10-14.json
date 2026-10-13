@@ -1,0 +1,46 @@
+{
+  "schema": "cribl_finetune_prereg/1",
+  "id": "cribl_technique_head_2026-10-14",
+  "title": "E1: exact techniques without retrieval, P(technique) = P(family) x P(technique | family), answer from the top three families",
+  "registered": "2026-10-14",
+  "parent": "docs/preregistration/cribl_family_attack_2026-10-13.json (F2, the best family head; docs 21.3.18)",
+  "question": "Does the family head with a within-family technique head, trained jointly on F2's data, name the exact ATT&CK technique more often than the retrieve-then-pick models and Jev, above all on CTI-HAL?",
+  "harness": "scripts/cribl_finetune/hierarchy.py, family_head.py --technique-head, runpod/remote_e1.sh",
+  "design": {
+    "heads": "F2's family head (cosine over 222 families) plus a technique head (cosine over the 697 listed techniques, rows initialised from each technique's own 'label: cut description' state, centred on their mean). P(technique | family) is a softmax of the technique logits within the family's parent and sub-techniques; a family's parent is its own option ('family only'), and a family without sub-techniques has P = 1",
+    "answer": "the most probable technique by P(family) x P(technique | family) among the 3 most probable families (owner's choice 2026-10-14: a hard limit to the top family caps exact accuracy at family top-1, dev 0.73-0.76, while the top three cover 0.87-0.91)",
+    "loss": "per example: F2's family cross-entropy + 1.0 x the mean over gold techniques of -log P(gold technique | its family); the technique term is skipped for AnnoCTR rows (parent-level links by convention: 1% of AnnoCTR train labels are sub-techniques) and for gold ids outside the catalogue"
+  },
+  "data": {
+    "train": "F2's rows unchanged: cases_train.jsonl 6,308 + cases_annoctr_train.jsonl 1,453 + cases_attack_train.jsonl 16,273 = 24,034 rows; exact targets on every row except the 1,453 AnnoCTR rows (labels with a sub-technique: public train 42%, ATT&CK procedures 54%)",
+    "dev": "public dev (659; 32% sub-technique labels) for exact top-1; AnnoCTR dev (336; parent-level labels) for family top-1 only",
+    "confirmation": "CTI-HAL 968 (laptop), public test 1,391, AnnoCTR test 738 (family top-1 only, its labels are parent-level)"
+  },
+  "fixed": {
+    "init": "cribl-ai/cribl-decision-1.0 adapter and freshly initialised heads, as F2 (not F2's checkpoint)",
+    "training": "as F2: LoRA lr 1e-4, head lr 1e-3 for both heads, 16 examples per step and per forward pass, cosine, 3% warmup, seed 7, 2 epochs, a checkpoint every quarter epoch (8 + step 0); no definition rows, no margin",
+    "compute": "RunPod secure RTX 4090 (no CTI-HAL uploaded; the selected checkpoint is scored on CTI-HAL on the laptop)"
+  },
+  "selection": "the highest mean of public dev exact top-1 and AnnoCTR dev family top-1; ties the earlier",
+  "baselines_already_measured": {
+    "cti_hal_exact_top1": {"pipeline_rank1": 0.383, "B1": 0.431, "B3": 0.441, "jev_c1": 0.460, "jev_c1_never_abstain": 0.478},
+    "public_test_exact_top1": {"pipeline_rank1": 0.501, "B1": 0.562, "B3": 0.537},
+    "note": "B1/B3 under never-abstain (parent prereg amendment 4); the pipeline's top 10 holds the exact gold on 74.1% of CTI-HAL and 80.5% of public test, which caps the retrieve-then-pick models and Jev"
+  },
+  "success": {
+    "headline": "CTI-HAL exact top-1: E1 minus B3 (same 968 statements, B3 never-abstain), paired 95% CI lower bound above 0",
+    "secondary": [
+      "CTI-HAL exact top-1: E1 minus Jev C1 as reported, CI lower bound above 0",
+      "public test exact top-1: E1 minus B1 (never-abstain), CI lower bound above 0"
+    ],
+    "reported": "exact top-1 with the top family only and with every family; exact top-3/5; exact top-1 for gold sub-techniques and for parent-only labels; ECE of the exact answer; family top-1 against F2 on all three sets (does the technique task cost family accuracy?); against pipeline rank-1 and Jev never-abstain; every checkpoint's dev curve"
+  },
+  "stop_rules": [
+    "a checkpoint does not reload",
+    "the loss is not finite",
+    "more than 1% of a split's cases end in error"
+  ],
+  "confirmation_runs": "the selected checkpoint once on CTI-HAL, public test and AnnoCTR test; nothing is chosen, refit or rerun because of a confirmation result",
+  "adoption": "none: an experiment, no product wiring",
+  "informed_by": "F1-F3 results (docs 21.3.18); F2's dev family top-1/2/3/5 (public dev 0.730/0.821/0.866/0.906, AnnoCTR dev 0.756/0.872/0.908/0.949); the share of labels that name a sub-technique per set (counted on labels only, CTI-HAL included: 45%); the baselines above (already reported in docs 21.3.18); a laptop pilot (100 train rows, 30 dev cases; mechanics only: trains, saves, reloads, scores). No E1 model exists."
+}
