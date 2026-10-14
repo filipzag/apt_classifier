@@ -160,3 +160,16 @@ cd scripts/cribl_finetune && ../../../.venv-cribl/bin/python family_head.py eval
 P(technique) = P(family) x P(technique | family) (`hierarchy.py`), answer from the three most
 probable families. Result (docs 21.3.18): CTI-HAL exact top-1 0.504, above B3 (0.441) and Jev C1
 (0.460); public test 0.560, level with B1.
+
+### E2: advisories, Atomic Red Team and cleaned rows (prereg `cribl_family_data_2026-10-14.json`)
+
+```bash
+PYTHONPATH=. .venv/bin/python scripts/cribl_finetune/prepare_advisories.py download  # IC3 joint advisories, ~200 MB
+PYTHONPATH=. .venv/bin/python scripts/cribl_finetune/prepare_advisories.py build     # 765 rows
+PYTHONPATH=. .venv/bin/python scripts/cribl_finetune/prepare_atomic.py               # 1,874 rows from data/benchmarks/atomic/raw/index.yaml
+python3 scripts/cribl_finetune/clean_cases.py cases_train.jsonl cases_annoctr_train.jsonl cases_attack_train.jsonl
+bash scripts/cribl_finetune/runpod/remote_e2.sh                                      # on a GPU pod
+```
+
+E1's recipe on the cleaned rows plus the two new sources. Result (docs 21.3.18): about +0.01 on
+CTI-HAL family and exact, within noise; the headline fails and E1 stays the reference.

@@ -4880,6 +4880,62 @@ reads the sentence without the pipeline's retrieval. Its remaining errors are mo
 **Cost.** The pod cost about $1.10 (73 minutes at $0.89/h). Training took 62 minutes at 0.08 s per
 example. CTI-HAL was scored on the laptop. No OpenRouter credit was used.
 
+**More and cleaner training data for the family (E2, 2026-10-14, prereg
+`cribl_family_data_2026-10-14.json`).** E2 is E1's recipe with the training rows changed. 178
+CTI-HAL statements have the right family outside E1's top three, and no answer rule can reach them.
+The question was whether more real-report text and cleaner rows move them.
+- **Joint government advisories** (`prepare_advisories.py`).
+  - Source: the FBI IC3 copies of the joint cybersecurity advisories from 2021 to 2026; 213 of 218
+    PDFs were downloaded. CISA's own pages refuse automated clients, so they were not used.
+  - Rows: each sentence carrying the authors' bracketed ATT&CK tag, labelled with that tag. Tags,
+    tactic headings and update markers are removed.
+  - Advisories kept: 59. Of the rest, 141 have fewer than five tags (guidance notes, FBI-only
+    alerts). 12 name a CTI-HAL group, an alias or the group's own software. 1 overlaps a held-out
+    text.
+  - Yield: 765 rows over 155 families, far fewer than the 2–5k first estimated.
+- **Atomic Red Team** (`prepare_atomic.py`, MIT): 1,874 test descriptions ("name. description",
+  without commands), labelled with the test's technique, 151 families.
+- **Cleaning** (`clean_cases.py`, training rows only; dev and test unchanged). It drops fragments,
+  figure captions, markdown table rows, text naming a technique id and hash tables:
+  - public train: 38 of 6,308 dropped;
+  - AnnoCTR train: 282 of 1,453 dropped;
+  - ATT&CK procedures: none dropped.
+- **Training.** 26,353 rows (E1: 24,034), 2 epochs, selection as E1. The final checkpoint was
+  selected: dev exact 0.660, AnnoCTR dev family 0.741. Training took 71 minutes.
+
+| Checkpoint (epochs) | 0 | 0.25 | 0.5 | 0.75 | 1 | 1.25 | 1.5 | 1.75 | **2** |
+|---|---|---|---|---|---|---|---|---|---|
+| public dev family | 0.449 | 0.693 | 0.713 | 0.728 | 0.733 | 0.725 | 0.730 | 0.733 | **0.734** |
+| AnnoCTR dev family | 0.223 | 0.604 | 0.604 | 0.690 | 0.688 | 0.735 | 0.723 | 0.735 | **0.741** |
+| public dev exact | 0.320 | 0.528 | 0.557 | 0.622 | 0.602 | 0.636 | 0.657 | 0.656 | **0.660** |
+
+| E2 − E1 (paired, 95% CI) | E1 | E2 | difference |
+|---|---|---|---|
+| CTI-HAL family top-1 (headline) | 0.631 | 0.642 | +0.010 [−0.007, +0.029] |
+| CTI-HAL exact top-1 | 0.504 | 0.514 | +0.010 [−0.007, +0.030] |
+| AnnoCTR test family top-1 | 0.730 | 0.717 | −0.014 [−0.035, +0.005] |
+| public test family top-1 | 0.625 | 0.633 | +0.008 [−0.005, +0.022] |
+
+- **Headline: fails.** The CI includes 0. Every secondary also fails.
+- **Reported.**
+  - CTI-HAL right family in the top three: 0.824 (E1 0.816). It is outside the top three on 170
+    statements (E1: 178). E2 alone is right on 39 statements and E1 alone on 29.
+  - CTI-HAL exact top-3/5: 0.743 / 0.809 (E1 0.723 / 0.803).
+  - The expert test subset, the text closest to advisories: family 0.682 vs 0.669
+    (+0.013 [−0.032, +0.057]).
+  - Exact misses on CTI-HAL: 347 wrong family, 131 right family.
+- **Not registered.** CTI-HAL exact against Jev C1 under never-abstain: +0.036 [+0.003, +0.067],
+  the first CI above 0 against that rule (E1: +0.026 [−0.008, +0.060]). The difference from E1 is
+  itself not significant, so this is not evidence that the new data helped.
+
+About 2,300 rows of new sources moved no result beyond noise. The advisories were too few: most
+IC3 items carry no tags. Atomic tests describe lab procedures more than report prose. Cleaning
+removed broken rows without a measurable effect. E1 stays the reference; E2 is no worse anywhere
+and is slightly ahead on CTI-HAL.
+
+**Cost.** The pod cost about $1.20 (82 minutes at $0.89/h). CTI-HAL was scored on the laptop. The
+downloads were free. No OpenRouter credit was used.
+
 ## 22. Failure modes and troubleshooting
 
 ### 22.1 “ATT&CK knowledge base has not been ingested”
