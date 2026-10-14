@@ -41,9 +41,15 @@ MIN_CONTENT_WORDS = 2
 CAPTION_CONTENT_WORDS = 10
 IOC_HASHES = 3
 IOC_CONTENT_WORDS = 12
-STOP_WORDS = frozenset(
-    ["the", "and", "for", "with", "has", "have", "had", "was", "were", "are", "been", "being", "its", "their", "they", "them", "this", "that", "these", "those", "from", "into", "onto", "via", "also", "can", "could", "may", "might", "will", "would", "but", "not", "all", "any", "each", "other", "such", "than", "then", "there", "which", "who", "whom", "whose", "what", "when", "where", "while", "during", "against", "about", "after", "before", "between", "through", "within", "without", "upon", "among", "across", "over", "under", "out", "off", "own", "more", "most", "some", "only", "both", "either", "neither", "just", "very", "does", "did", "done", "his", "her", "she", "him", "our", "your", "you", "one", "two"]
-)
+_STOP_WORDS = """
+    the and for with has have had was were are been being its their they them this that
+    these those from into onto via also can could may might will would but not all any each
+    other such than then there which who whom whose what when where while during against
+    about after before between through within without upon among across over under out off
+    own more most some only both either neither just very does did done his her she him our
+    your you one two
+"""
+STOP_WORDS = frozenset(_STOP_WORDS.split())
 _WORD = re.compile(r"[A-Za-z][A-Za-z'’-]{2,}")
 _HASH = re.compile(r"\b[0-9a-fA-F]{32,64}\b")
 _FIGURE = re.compile(r"^\W*(?:figure|fig\.)\s*\d+\W*(?:[:.\-–]|$)", re.I)  # a caption label
