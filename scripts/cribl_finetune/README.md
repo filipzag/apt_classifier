@@ -187,3 +187,14 @@ Every family gets its own sigmoid (`losses.yes_no`, a missing label weighs 0.1);
 family plus up to two more above a threshold set to 1.3 answers per sentence. Result (docs 21.3.18):
 by the labels about 2 points below E2 everywhere (headline fails); in a blind check of extra answers
 64% of M1's were supported against 46% of E2's.
+
+### Paragraphs read whole or sentence by sentence (prereg `cribl_sentence_split_2026-10-14.json`)
+
+```bash
+PYTHONPATH=. .venv/bin/python scripts/cribl_finetune/sentence_split_eval.py split          # expert + derived test paragraphs
+cd scripts/cribl_finetune && ../../../.venv-cribl/bin/python sentence_split_eval.py predict --checkpoint <E2 step dir> --name E2
+python3 sentence_split_eval.py score E2 M1
+```
+
+No training. Result (docs 21.3.18): at the same number of answers per paragraph, splitting finds no
+more labelled techniques (expert −0.04 at three answers, n.s.; derived procedures 2–5 points lower).

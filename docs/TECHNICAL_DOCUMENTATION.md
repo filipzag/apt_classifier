@@ -4999,6 +4999,45 @@ reference for single answers. M1 is kept as the candidate for multi-answer outpu
 **Cost.** The pod cost about $1.25 (83 minutes at $0.89/h). CTI-HAL and the blind check ran on the
 laptop. No OpenRouter credit was used.
 
+**Expert-labelled paragraphs and reading them sentence by sentence (2026-10-14, prereg
+`cribl_sentence_split_2026-10-14.json`, no training).**
+- **The expert set read whole.** The public test's `expert` rows are 157 report paragraphs (median
+  62 words). They carry 2.7 labelled families and 3.3 techniques each, so extra answers can be
+  graded there.
+  - One answer: no model is clearly ahead. Family / exact: B1 0.688 / 0.675, E2 0.682 / 0.650,
+    E1 0.669 / 0.643, M1 0.656 / 0.605, pipeline 0.631 / 0.592.
+  - Same number of answers per paragraph: E2 and M1 are level at every count. With two answers,
+    56% and 55% of answers are labelled families.
+  - So M1's advantage in the blind check does not show on complete labels.
+  - Recall is the limit: three answers find about half of a paragraph's labelled families.
+- **The split.** Every row had been read whole (83% of expert rows hold 2+ sentences, 48% of
+  derived ones). `sentence_split_eval.py` splits the expert and derived_procedures paragraphs with
+  the product's no-LLM splitter (`local_observations`), giving 521 and 1,621 sentences.
+  - Merging: the model reads each sentence. A family's paragraph score is its highest probability
+    in any sentence.
+  - Grading: per paragraph against the paragraph's labels, with the same number of answers for
+    both readings.
+
+| E2, labelled families found (paired CI, split − whole) | whole | split | difference |
+|---|---|---|---|
+| expert, 3 answers (headline) | 0.488 | 0.465 | −0.042 [−0.084, +0.001] |
+| expert, 1 / 2 / 5 answers | 0.251 / 0.409 / 0.615 | 0.237 / 0.380 / 0.613 | all CIs span 0 |
+| expert, one answer per sentence (2.5 per paragraph) | 0.460 | 0.437 | −0.035 [−0.074, +0.005] |
+| derived_procedures, 3 answers | 0.633 | 0.604 | −0.023 [−0.051, +0.003] |
+| derived_procedures, one answer per sentence | 0.564 | 0.520 | −0.041 [−0.067, −0.014] |
+
+- **Headline fails.** Splitting finds no more labelled techniques at the same number of answers.
+  - Expert: it is level or slightly below. At three answers, 33 labelled families are found only by
+    the split and 43 only by the whole paragraph.
+  - Derived procedures: it is 2–5 points below, and significantly so at most counts and for the
+    exact technique.
+  - M1 behaves the same: expert −0.014 to +0.012, derived −0.017 to −0.074.
+- **Why.** The models were trained on such paragraphs too (half of the expert and derived training
+  rows hold several sentences), and a paragraph's labels describe the whole of it. A split sentence
+  loses its references: "Because of this, we conclude that DeathStalker is a cyber-mercenary
+  organization." Splitting does surface more distinct techniques when every sentence answers. At an
+  equal answer count, though, the whole-paragraph ranking already holds them.
+
 ## 22. Failure modes and troubleshooting
 
 ### 22.1 “ATT&CK knowledge base has not been ingested”
