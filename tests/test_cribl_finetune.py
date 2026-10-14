@@ -381,3 +381,75 @@ def test_technique_head_scores_within_family_and_picks_among_top_families():
     # P(T1105) = 0.45 beats P(T1059.001) = 0.55 * 0.665: the second family's lone technique wins
     assert pick(joint[0], family_log_p[0], group, None) == 3
     assert pick(joint[0], family_log_p[0], group, 1) == 1  # limited to the top family
+
+
+def test_advisory_sentences_keep_tagged_behaviour_and_strip_tags():
+    from scripts.cribl_finetune.prepare_advisories import (
+        listing_links,
+        names_present,
+        resolve_ids,
+        tagged_sentences,
+        technique_name_only,
+    )
+
+    text = (
+        "TLP:CLEAR\n\nBianLian group actors use PowerShell [T1059.001] and Windows Command\n"
+        "Shell [T1059.003] to disable antivirus [TA0005]. They read the registry.\n"
+        "Page 3 of 20 | Product ID: AA24-001A\n\n"
+        "End Update The actors used Cobalt Strike [S0154] for command and control (T1071.001).\n\n"
+        "Indicator Removal: File Deletion [T1070.004]\n"
+    )
+    found = tagged_sentences(text)
+    assert found[0] == (
+        "BianLian group actors use PowerShell and Windows Command Shell to disable antivirus.",
+        ["T1059.001", "T1059.003"],
+    )
+    assert found[1] == (
+        "The actors used Cobalt Strike for command and control.",
+        ["T1071.001"],
+    )
+    assert technique_name_only(found[2][0], {"indicator removal file deletion"})
+    assert len(found) == 3  # the untagged sentence is not a row
+    assert resolve_ids(["T1064", "T1059.001", "T9999"], {"T1064": "T1059"}, {"T1059"}) == [
+        "T1059",
+        "T1059.001",
+    ]
+    assert names_present("Conti actors and TrickBot", {"G0102": ["TrickBot", "Wizard Spider"]}) == [
+        "G0102: TrickBot"
+    ]
+    assert names_present("NotTrickBot-ish", {"G0102": ["TrickBot"]}) == []
+    html = '<a href="/CSA/2024/241120.pdf">x</a><a href="/CSA/2024/241120.pdf">y</a>'
+    assert listing_links(html + '<a href="/CSA/2023/230101.pdf">', 2024) == ["2024/241120"]
+
+
+def test_cleaning_rules_drop_broken_rows_and_keep_short_sentences():
+    from scripts.cribl_finetune.clean_cases import broken_reason
+
+    assert broken_reason("has utilized  during and.") == "fragment"
+    assert broken_reason("*Figure 5: Encrypted files*") == "figure"
+    assert broken_reason("| DarkSide | August 2020 | Under 5 | Exploit | Yes |") == "table_row"
+    assert broken_reason("T1020 Automated exfiltration") == "technique_id"
+    hashes = " ".join(["a" * 64, "b" * 64, "c" * 64])
+    assert broken_reason(f"Filename {hashes}") == "ioc_list"
+    for text in (
+        "uses DNS for C2.",
+        "T9000 can take screenshots of the desktop.",
+        "Figure 4 shows a PDF that pretends to be a Request for Quotation for an expansion plan.",
+    ):
+        assert broken_reason(text) is None, text
+
+
+def test_atomic_rows_are_name_and_description_without_ids_or_placeholders():
+    from scripts.cribl_finetune.prepare_atomic import atomic_tests, atomic_text
+
+    test = {
+        "name": "Dump LSASS via comsvcs",
+        "auto_generated_guid": "g1",
+        "description": "Uses `rundll32` to dump #{process} for T1003.001 testing.",
+    }
+    index = {
+        "credential-access": {"T1003.001": {"atomic_tests": [test]}},
+        "defense-evasion": {"T1003.001": {"atomic_tests": [test]}},
+    }
+    assert [(t, g) for t, g, _ in atomic_tests(index)] == [("T1003.001", "g1")]
+    assert atomic_text(test) == "Dump LSASS via comsvcs. Uses rundll32 to dump for testing."

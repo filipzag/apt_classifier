@@ -1,0 +1,48 @@
+{
+  "schema": "cribl_finetune_prereg/1",
+  "id": "cribl_family_data_2026-10-14",
+  "title": "E2: E1 retrained on cleaned rows plus joint government advisories and Atomic Red Team tests",
+  "registered": "2026-10-14",
+  "parent": "docs/preregistration/cribl_technique_head_2026-10-14.json (E1, the current best; docs 21.3.18)",
+  "question": "Do cleaner training rows plus two new labelled sources (author-tagged sentences from joint government advisories, Atomic Red Team test descriptions) raise family recognition, above all on CTI-HAL?",
+  "motivation": "E1 on CTI-HAL: right family first 0.631, in the top 3 0.816; 178 of 968 statements have the right family outside the top 3, which no answer rule can fix. On dev (not CTI-HAL) only 19 of 118 such misses are rare families; many are noisy or context-dependent labels; real-report sentences gave the largest gains so far (AnnoCTR).",
+  "harness": "scripts/cribl_finetune/prepare_advisories.py, prepare_atomic.py, clean_cases.py, runpod/remote_e2.sh; family_head.py unchanged",
+  "data": {
+    "advisories": {
+      "source": "the FBI IC3 copies of joint cybersecurity advisories, https://www.ic3.gov/CSA/2021-2026 (218 listed, 213 downloaded; CISA's own pages refuse automated clients), US government works",
+      "rows": "each sentence with a bracketed ATT&CK technique tag, labelled with those ids; tags and tactic/software/footnote brackets removed; leading tactic headings and update markers removed; technique-name list lines, fragments and rows whose family is not listed dropped",
+      "advisories_used": "59 kept; 141 with fewer than 5 tags (guidance notes, FBI-only alerts); 12 excluded because they name a CTI-HAL group (G0008, G0016, G0034, G0037, G0046, G0049, G0102), an ATT&CK alias or software linked to at most two groups including it; 1 (APT40, 2024/240708) excluded for overlapping a held-out text; 5 not downloaded",
+      "count": "765 rows, 155 families (68 repeats and 4 held-out containments dropped)"
+    },
+    "atomic": {
+      "source": "redcanaryco/atomic-red-team atomics/Indexes/index.yaml (MIT), 1,878 tests",
+      "rows": "'<name>. <description>' without commands, placeholders or technique ids, labelled with the test's technique",
+      "count": "1,874 rows, 151 families"
+    },
+    "cleaning": {
+      "rules": "clean_cases.broken_reason: fragment (< 2 content words), figure caption (caption label and < 10 content words), markdown table row, text naming a technique id, hash table (3+ hashes and < 12 content words); thresholds set by reading dropped training rows only",
+      "dropped": "public train 38 of 6,308 (30 derived procedures naming an id), AnnoCTR train 282 of 1,453 (102 captions, 153 table rows, 18 ids, 9 fragments), ATT&CK procedures 0; dev and test unchanged"
+    },
+    "train": "cases_train_clean 6,270 + cases_annoctr_train_clean 1,171 + cases_attack_train_clean 16,273 + cases_advisories_train 765 + cases_atomic_train 1,874 = 26,353 rows (E1: 24,034)",
+    "checks": "0 CTI-HAL statement texts in either new file; every new row passed the held-out overlap filter of export_attack_procedures"
+  },
+  "fixed": "E1's recipe unchanged: family + technique heads, answer from the 3 most probable families, Cribl adapter + fresh heads, 2 epochs, a checkpoint every quarter epoch, LoRA lr 1e-4, heads 1e-3, 16 per step and per forward pass, seed 7, AnnoCTR rows family loss only (advisory and Atomic rows get both losses); RunPod secure RTX 4090; CTI-HAL scored on the laptop",
+  "selection": "as E1: the highest mean of public dev exact top-1 and AnnoCTR dev family top-1; ties the earlier",
+  "success": {
+    "headline": "CTI-HAL family top-1: E2 minus E1 (same 968 statements), paired 95% CI lower bound above 0",
+    "secondary": [
+      "CTI-HAL exact top-1: E2 minus E1, CI lower bound above 0",
+      "AnnoCTR test family top-1: E2 minus E1, CI lower bound above 0",
+      "public test family top-1: E2 minus E1, CI lower bound above 0"
+    ],
+    "reported": "CTI-HAL right family in the top 3 and the count outside it; exact top-3/5; the public test's expert subset separately (advisory-like text); per-source row and drop counts; every checkpoint's dev curve"
+  },
+  "stop_rules": [
+    "a checkpoint does not reload",
+    "the loss is not finite",
+    "more than 1% of a split's cases end in error"
+  ],
+  "confirmation_runs": "the selected checkpoint once on CTI-HAL, public test and AnnoCTR test; nothing is chosen, refit or rerun because of a confirmation result",
+  "adoption": "none: an experiment, no product wiring",
+  "informed_by": "E1's results and dev predictions (docs 21.3.18); the dev analysis of misses outside the top 3; a reading of training rows for the cleaning rules and of 30 advisory rows for label quality; a 10-advisory sample; a laptop pilot (100 rows, 30 dev cases; mechanics only). No E2 model exists."
+}
