@@ -173,3 +173,17 @@ bash scripts/cribl_finetune/runpod/remote_e2.sh                                 
 
 E1's recipe on the cleaned rows plus the two new sources. Result (docs 21.3.18): about +0.01 on
 CTI-HAL family and exact, within noise; the headline fails and E1 stays the reference.
+
+### M1: a yes/no probability per family, up to three answers (prereg `cribl_yesno_2026-10-14.json`)
+
+```bash
+bash scripts/cribl_finetune/runpod/remote_m1.sh   # on a GPU pod: E2's data + --family-loss yesno
+python3 scripts/cribl_finetune/multi_answer.py --budget 1.3 E2=E2_cti_hal.jsonl M1=M1_cti_hal.jsonl --baseline E2
+python3 scripts/cribl_finetune/blind_check.py sheet --split cti_hal E2=E2_cti_hal.jsonl M1=M1_cti_hal.jsonl
+python3 scripts/cribl_finetune/blind_check.py score --split cti_hal   # after filling "supported"
+```
+
+Every family gets its own sigmoid (`losses.yes_no`, a missing label weighs 0.1); answers are the top
+family plus up to two more above a threshold set to 1.3 answers per sentence. Result (docs 21.3.18):
+by the labels about 2 points below E2 everywhere (headline fails); in a blind check of extra answers
+64% of M1's were supported against 46% of E2's.

@@ -4936,6 +4936,69 @@ and is slightly ahead on CTI-HAL.
 **Cost.** The pod cost about $1.20 (82 minutes at $0.89/h). CTI-HAL was scored on the laptop. The
 downloads were free. No OpenRouter credit was used.
 
+**A yes/no probability per family and up to three answers (M1, 2026-10-14, prereg
+`cribl_yesno_2026-10-14.json`).** The owner asked for up to three families or techniques per
+sentence when the model is confident enough. A sentence often describes two or three techniques
+but carries one label.
+- **Why the one-answer model resists this.** It shares one unit of probability among the families,
+  and training pushes it onto the single label. On E2's dev the second family scores 0.05 (median),
+  and a second labelled family only 0.03.
+- **What M1 changes.** M1 gives every family its own sigmoid: "is this family in the sentence?".
+  - Loss: `losses.yes_no` scores the labelled families as "yes" and every other family as a "no"
+    with weight 0.1, so a missing label is weak evidence.
+  - Starting bias: minus the median second-highest logit over 64 training sentences.
+  - Everything else is E2's: data, recipe, the technique head and the selection rule. The final
+    checkpoint was selected.
+- **Answers and scoring** (`multi_answer.py`).
+  - Answers: the top family, plus the second and third when they reach a threshold. Each answer
+    family names its most probable technique.
+  - The threshold is set per model from its own probabilities, without labels, to give 1.3 answers
+    per sentence. Both models are therefore compared with the same number of answers.
+  - A hit is a labelled family (or technique) among the answers.
+
+| Checkpoint (epochs), M1 | 0 | 0.25 | 0.5 | 0.75 | 1 | 1.25 | 1.5 | 1.75 | **2** |
+|---|---|---|---|---|---|---|---|---|---|
+| public dev family top-1 | 0.451 | 0.663 | 0.680 | 0.695 | 0.718 | 0.712 | 0.712 | 0.721 | **0.724** |
+| AnnoCTR dev family top-1 | 0.220 | 0.548 | 0.607 | 0.685 | 0.673 | 0.714 | 0.690 | 0.717 | **0.717** |
+| public dev exact hit, 1.3 answers | 0.326 | 0.524 | 0.563 | 0.616 | 0.643 | 0.654 | 0.675 | 0.680 | **0.689** |
+| (E2, same rule) | 0.341 | 0.564 | 0.607 | 0.657 | 0.649 | 0.680 | 0.713 | 0.712 | 0.715 |
+
+| CTI-HAL, M1 − E2 (paired, 95% CI) | E2 | M1 | difference |
+|---|---|---|---|
+| family hit, 1.3 answers (headline) | 0.716 | 0.691 | −0.025 [−0.044, −0.007] |
+| exact hit, 1.3 answers | 0.568 | 0.549 | −0.020 [−0.039, −0.001] |
+| family top-1, one answer (non-inferiority −0.02) | 0.642 | 0.623 | −0.019 [−0.037, −0.001] |
+| public test family hit, 1.3 answers | 0.702 | 0.688 | −0.014 [−0.028, +0.001] |
+| AnnoCTR test family hit, 1.3 answers | 0.790 | 0.778 | −0.012 [−0.033, +0.008] |
+
+- **Every registered criterion fails.** Scored against the labels, M1 is slightly worse than E2 at
+  every budget (1.1: −0.025; 1.5: −0.018).
+- **The number of answers follows the sentence a little more.**
+  - On the 66 CTI-HAL statements with several labelled families, M1 gives 1.38 answers against 1.29
+    on the others; E2 gives 1.32 and 1.30.
+  - All labelled families are found on 12% of those statements (E2: 8%).
+- **At a fixed threshold of 0.5** (the "clears a confidence threshold" reading), M1 gives 1.81
+  answers per sentence. Family hit is 0.758, against 0.773 for E2 with the same number of answers.
+  M1's probabilities are not calibrated as single-answer confidences: one-answer ECE is 0.29, by
+  design of the weak "no".
+- **Blind check** (reported, not a gate).
+  - Method: 99 extra answers on CTI-HAL at 1.3 (50 per model, one merged). Each was shown with the
+    sentence and technique name only, with model and label hidden. Claude judged each "supported by
+    the sentence" or not; one AI reader.
+  - Results: supported for 64% of M1's extra answers (32/50) and 46% of E2's (23/50). Among extras
+    that are not a labelled family, 61% (23/38) for M1 and 34% (12/35) for E2. With 50 per model the
+    difference is uncertain: roughly ±0.19 at 95%, unpaired.
+  - Labelled-family extras were judged supported only 73–75% of the time. Some labels or judgments
+    disagree.
+
+By the labels, a yes/no head does not beat the one-answer head with a threshold. By a blind reading,
+its extra answers are more often real techniques the annotator did not write down. The data cannot
+settle this without more independent judgments of every answer, including the first. E2 stays the
+reference for single answers. M1 is kept as the candidate for multi-answer output.
+
+**Cost.** The pod cost about $1.25 (83 minutes at $0.89/h). CTI-HAL and the blind check ran on the
+laptop. No OpenRouter credit was used.
+
 ## 22. Failure modes and troubleshooting
 
 ### 22.1 “ATT&CK knowledge base has not been ingested”
