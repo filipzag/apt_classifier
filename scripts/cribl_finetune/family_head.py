@@ -33,7 +33,9 @@ a share of one answer (softmax), trained with :func:`losses.yes_no` (a missing l
 of "no", ``--negative-weight``), so a sentence that describes several techniques can score several
 families high; ``multi_answer.py`` turns either kind into up to three answers per sentence. The
 checkpoint records the loss, and prediction reads the probabilities the same way (prereg
-``cribl_yesno_2026-10-14.json``).
+``cribl_yesno_2026-10-14.json``). ``--multi-label-weight`` multiplies the loss of every training row
+labelled with two or more families, the 4% of rows that show a text with several techniques
+(prereg ``cribl_multilabel_2026-10-14.json``).
 """
 
 from __future__ import annotations
@@ -631,6 +633,7 @@ def train(args: argparse.Namespace) -> None:
         "margin": args.margin,
         "family_loss": args.family_loss,
         "negative_weight": args.negative_weight if yesno else None,
+        "multi_label_weight": args.multi_label_weight,
         "yes_no_offset": round(float(head.bias[0]), 4) if yesno else None,
     }
     log: dict[str, Any] = {
@@ -645,6 +648,9 @@ def train(args: argparse.Namespace) -> None:
             for name in sorted({row["dataset"] for row in rows})
         },
         "skipped_no_catalog_family": skipped,
+        "train_rows_with_several_families": sum(
+            1 for row in rows if len(family_targets(row["gold_ids"], families)) > 1
+        ),
         "examples_total": examples_total,
         "optimizer_steps": total_steps,
         "checkpoints": [],
@@ -756,20 +762,23 @@ def train(args: argparse.Namespace) -> None:
                     )
                     losses = torch.stack(
                         [
-                            (
-                                yes_no(logits[i], gold, args.negative_weight)
-                                if yesno
-                                else -log_p[i, gold].mean()
-                            )
-                            + (
-                                args.margin[0] * rival_margin(log_p[i], gold, args.margin[1])
-                                if args.margin
-                                else 0.0
-                            )
-                            + (
-                                -args.technique_weight * within[i, exact_golds[i]].mean()
-                                if exact_golds[i]
-                                else 0.0
+                            (args.multi_label_weight if len(gold) > 1 else 1.0)
+                            * (
+                                (
+                                    yes_no(logits[i], gold, args.negative_weight)
+                                    if yesno
+                                    else -log_p[i, gold].mean()
+                                )
+                                + (
+                                    args.margin[0] * rival_margin(log_p[i], gold, args.margin[1])
+                                    if args.margin
+                                    else 0.0
+                                )
+                                + (
+                                    -args.technique_weight * within[i, exact_golds[i]].mean()
+                                    if exact_golds[i]
+                                    else 0.0
+                                )
                             )
                             for i, gold in enumerate(golds)
                         ]
@@ -917,6 +926,13 @@ def main() -> None:
         help="datasets whose labels are parent-level by convention: no technique loss",
     )
     fit.add_argument("--technique-weight", type=float, default=1.0)
+    fit.add_argument(
+        "--multi-label-weight",
+        type=float,
+        default=1.0,
+        help="loss weight of a training row labelled with two or more families (prereg "
+        "cribl_multilabel_2026-10-14.json)",
+    )
     fit.add_argument(
         "--family-loss",
         choices=("softmax", "yesno"),

@@ -1,0 +1,32 @@
+{
+  "schema": "cribl_finetune_prereg/1",
+  "id": "cribl_multilabel_2026-10-14",
+  "title": "M2: the yes/no head with the multi-label training rows weighted 4x",
+  "registered": "2026-10-14",
+  "parent": "docs/preregistration/cribl_yesno_2026-10-14.json (M1) and cribl_sentence_split_2026-10-14.json (docs 21.3.18)",
+  "question": "Only 4.4% of training rows (1,167 of 26,353) are labelled with two or more families, so the model learns 'one text, one technique'. If those rows weigh 4x in the loss, does the yes/no model find more of the labelled techniques in texts that hold several, at the same number of answers?",
+  "motivation": "Owner's choice (2026-10-14) after the expert-paragraph analysis: the 157 expert test paragraphs carry 2.7 labelled families each (70% several) and E2/M1 find about 42% of them with two answers; both give fewer answers to several-label paragraphs than to one-label ones (E2 1.96 vs 2.09, M1 1.92 vs 2.19 at two answers). Multi-label training rows: derived 331, tram 291, advisories 212, annoctr 196, expert 87, ATT&CK procedures 50.",
+  "harness": "family_head.py --multi-label-weight 4 (with --family-loss yesno --negative-weight 0.1); multi_answer.py --dataset (per-text recall, paired CIs); runpod/remote_m2.sh",
+  "change": "the whole loss of a training row with two or more labelled families (family and technique terms) is multiplied by 4, about 16% of the gradient instead of 4%; 4 fixed before training, not tuned",
+  "fixed": "M1 in every other respect: E2's data (26,353 rows), yes/no family head, negative weight 0.1, starting bias from 64 training sentences, technique head, selection rule (mean of public dev exact top-1 and AnnoCTR dev family top-1), 2 epochs, quarter-epoch checkpoints, seed 7; RunPod secure RTX 4090; CTI-HAL scored on the laptop",
+  "scoring": "multi_answer.py: the top family plus the next ones up to 3 above a threshold set per model and set from its own probabilities, without labels, to give a fixed average number of answers; recall = share of a text's labelled families among its answers (per text, then averaged)",
+  "success": {
+    "headline": "expert test paragraphs (157), 2 answers per paragraph on average: per-paragraph family recall, M2 minus E2, paired 95% CI lower bound above 0",
+    "secondary": [
+      "the same, M2 minus M1 (the effect of the weighting alone)",
+      "expert test, 2 answers: answers per paragraph on several-label paragraphs above those on one-label paragraphs (M2), and higher than E2's",
+      "public test (all 1,391), 1.3 answers: family recall, M2 minus E2",
+      "CTI-HAL, 1.3 answers: family hit, M2 minus E2, CI lower bound above -0.02 (no real loss on mostly one-label statements)"
+    ],
+    "reported": "expert at 1.3 and 3 answers; exact technique recall; family precision/recall/F1 at a fixed threshold of 0.5; one-answer family and exact top-1 on every set; AnnoCTR test; every checkpoint's dev numbers"
+  },
+  "limitation": "157 paragraphs: a paired CI is about +/-0.045 wide on recall, so a real gain of 2-3 points may not reach the bar",
+  "stop_rules": [
+    "a checkpoint does not reload",
+    "the loss is not finite",
+    "more than 1% of a split's cases end in error"
+  ],
+  "confirmation_runs": "the selected checkpoint once on CTI-HAL, public test and AnnoCTR test; nothing is chosen, refit or rerun because of a confirmation result",
+  "adoption": "none: an experiment, no product wiring",
+  "informed_by": "E2 and M1 confirmation predictions and the expert-paragraph and sentence-split analyses (docs 21.3.18); a laptop pilot (mechanics only). No M2 model exists."
+}

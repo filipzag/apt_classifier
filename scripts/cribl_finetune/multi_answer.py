@@ -64,6 +64,18 @@ def budget_threshold(rows: Sequence[Mapping[str, Any]], budget: float, limit: in
     )
 
 
+def recall(row: Mapping[str, Any], threshold: float) -> tuple[float, float]:
+    """(share of the labelled families among the answers, share of the labelled techniques)."""
+    found = answers(row, threshold)
+    families = {family for family, _ in found}
+    techniques = {technique for _, technique in found if technique}
+    gold_families, gold = set(row["gold_families"]), set(row["gold_ids"])
+    return (
+        len(families & gold_families) / len(gold_families) if gold_families else 0.0,
+        len(techniques & gold) / len(gold) if gold else 0.0,
+    )
+
+
 def hits(row: Mapping[str, Any], threshold: float) -> tuple[bool, bool]:
     """(a labelled family among the answers, a labelled technique among the answers)."""
     found = answers(row, threshold)
@@ -102,6 +114,8 @@ def multi_block(rows: Sequence[Mapping[str, Any]], threshold: float) -> dict[str
         "extras": len(extras),
         "extras_matching_a_label": sum(family in row["gold_families"] for row, family in extras),
         "family_micro": micro_prf(rows, threshold),
+        "family_recall_per_case": mean([recall(row, threshold)[0] for row in rows]),
+        "exact_recall_per_case": mean([recall(row, threshold)[1] for row in rows]),
     }
 
 
@@ -111,14 +125,17 @@ def compare(
     arm: Sequence[Mapping[str, Any]],
     arm_threshold: float,
 ) -> dict[str, Any]:
-    """Arm minus base, family and exact hits, on the cases both scored (paired bootstrap)."""
+    """Arm minus base on the cases both scored (paired bootstrap): family and exact hits, and the
+    per-case share of labelled families and techniques found (recall)."""
     by_id = {row["case_id"]: row for row in base}
     pairs = [(by_id[row["case_id"]], row) for row in arm if row["case_id"] in by_id]
-    columns: dict[str, list[float]] = {"family_hit": [], "exact_hit": []}
+    names = ("family_hit", "exact_hit", "family_recall", "exact_recall")
+    columns: dict[str, list[float]] = {name: [] for name in names}
     for base_row, arm_row in pairs:
-        before, after = hits(base_row, base_threshold), hits(arm_row, arm_threshold)
-        columns["family_hit"].append(float(after[0]) - float(before[0]))
-        columns["exact_hit"].append(float(after[1]) - float(before[1]))
+        before = (*hits(base_row, base_threshold), *recall(base_row, base_threshold))
+        after = (*hits(arm_row, arm_threshold), *recall(arm_row, arm_threshold))
+        for name, b, a in zip(names, before, after, strict=True):
+            columns[name].append(float(a) - float(b))
     return {
         "n": len(pairs),
         "delta": {name: round(sum(values) / len(values), 6) for name, values in columns.items()},
@@ -135,11 +152,13 @@ def main() -> None:
         "--thresholds", nargs="*", type=float, default=[], help="also report these fixed thresholds"
     )
     parser.add_argument("--output", type=Path, help="write the report as JSON")
+    parser.add_argument("--dataset", help="score only the rows of this dataset (e.g. expert)")
     args = parser.parse_args()
     runs: dict[str, list[dict[str, Any]]] = {}
     for item in args.runs:
         name, _, path = item.partition("=")
-        runs[name] = read_jsonl(Path(path) if Path(path).is_absolute() else AUDITS / path)
+        rows = read_jsonl(Path(path) if Path(path).is_absolute() else AUDITS / path)
+        runs[name] = [row for row in rows if not args.dataset or row["dataset"] == args.dataset]
     report: dict[str, Any] = {"budget": args.budget, "runs": {}, "vs": {}}
     cut = {name: budget_threshold(rows, args.budget) for name, rows in runs.items()}
     for name, rows in runs.items():

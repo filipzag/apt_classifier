@@ -508,3 +508,18 @@ def test_multi_answer_matches_the_budget_and_names_each_family_best_technique():
     assert block["family_hit"] == pytest.approx(3 / 4)
     assert block["several_labels_all_found"] == 1.0  # c: both labelled families answered
     assert (block["extras"], block["extras_matching_a_label"]) == (2, 2)
+
+
+def test_multi_answer_recall_is_the_share_of_labels_found():
+    from scripts.cribl_finetune.multi_answer import recall
+
+    row = {
+        "case_id": "p",
+        "status": "ok",
+        "top": [["T1566", 0.9], ["T1204", 0.6], ["T1059", 0.2]],
+        "technique_top": [["T1566.001", 0.8], ["T1204.002", 0.5], ["T1059.001", 0.1]],
+        "gold_ids": ["T1566.001", "T1204.002", "T1105"],
+        "gold_families": ["T1105", "T1204", "T1566"],
+    }
+    assert recall(row, 0.5) == (pytest.approx(2 / 3), pytest.approx(2 / 3))
+    assert recall(row, math.inf) == (pytest.approx(1 / 3), pytest.approx(1 / 3))
