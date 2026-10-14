@@ -453,3 +453,58 @@ def test_atomic_rows_are_name_and_description_without_ids_or_placeholders():
     }
     assert [(t, g) for t, g, _ in atomic_tests(index)] == [("T1003.001", "g1")]
     assert atomic_text(test) == "Dump LSASS via comsvcs. Uses rundll32 to dump for testing."
+
+
+def test_yes_no_loss_scores_each_family_on_its_own():
+    torch = pytest.importorskip("torch")
+    from scripts.cribl_finetune.losses import yes_no
+
+    logits = torch.tensor([2.0, 1.0, -3.0, -4.0], requires_grad=True)
+    loss = yes_no(logits, [0, 1], 0.1)
+    softplus = torch.nn.functional.softplus
+    expected = softplus(torch.tensor(-2.0)) + softplus(torch.tensor(-1.0))
+    expected += 0.1 * (softplus(torch.tensor(-3.0)) + softplus(torch.tensor(-4.0)))
+    assert float(loss) == pytest.approx(float(expected), abs=1e-6)
+    loss.backward()
+    assert logits.grad[0] < 0 and logits.grad[1] < 0  # both labelled families pushed up
+    assert logits.grad[2] > 0 and logits.grad[3] > 0  # the others pushed down, weakly
+    assert float(yes_no(torch.tensor([2.0, 5.0]), [0], 0.0)) == pytest.approx(
+        float(softplus(torch.tensor(-2.0))), abs=1e-6
+    )  # weight 0: an unlabelled family costs nothing however high it scores
+
+
+def test_multi_answer_matches_the_budget_and_names_each_family_best_technique():
+    from scripts.cribl_finetune.multi_answer import answers, budget_threshold, hits, multi_block
+
+    def row(case, top, gold, techniques=()):
+        return {
+            "case_id": case,
+            "status": "ok",
+            "top": top,
+            "technique_top": list(techniques),
+            "gold_ids": gold,
+            "gold_families": sorted({item.split(".")[0] for item in gold}),
+        }
+
+    rows = [
+        row(
+            "a",
+            [["T1566", 0.6], ["T1204", 0.3], ["T1059", 0.05]],
+            ["T1204.002"],
+            [["T1566.001", 0.5], ["T1204.002", 0.25], ["T1204", 0.05], ["T1059.001", 0.04]],
+        ),
+        row("b", [["T1105", 0.9], ["T1059", 0.06], ["T1027", 0.02]], ["T1105"], [["T1105", 0.9]]),
+        row("c", [["T1027", 0.5], ["T1140", 0.4], ["T1001", 0.08]], ["T1140", "T1027"]),
+        {"case_id": "d", "status": "error", "gold_ids": ["T1003"], "gold_families": ["T1003"]},
+    ]
+    assert budget_threshold(rows, 1.0) == math.inf
+    cut = budget_threshold(rows, 1.5)  # two extra answers over four sentences: 0.4 and 0.3
+    assert cut == 0.3
+    assert answers(rows[0], cut) == [("T1566", "T1566.001"), ("T1204", "T1204.002")]
+    assert answers(rows[3], cut) == []  # an error row answers nothing (a miss)
+    assert hits(rows[0], cut) == (True, True) and hits(rows[0], math.inf) == (False, False)
+    block = multi_block(rows, cut)
+    assert block["answers_per_sentence"] == pytest.approx(5 / 4)
+    assert block["family_hit"] == pytest.approx(3 / 4)
+    assert block["several_labels_all_found"] == 1.0  # c: both labelled families answered
+    assert (block["extras"], block["extras_matching_a_label"]) == (2, 2)

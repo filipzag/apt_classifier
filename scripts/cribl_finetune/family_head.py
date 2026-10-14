@@ -27,6 +27,13 @@ Training adds the within-family cross-entropy for rows whose labels are exact (n
 ``--family-only-datasets``, whose links are parent-level by convention); ``--exact-selection``
 names the dev sets scored on exact top-1 instead of family top-1 in the selection score (prereg
 ``cribl_technique_head_2026-10-14.json``).
+
+With ``--family-loss yesno`` every family gets its own yes/no probability, sigmoid(logit), instead of
+a share of one answer (softmax), trained with :func:`losses.yes_no` (a missing label is weak evidence
+of "no", ``--negative-weight``), so a sentence that describes several techniques can score several
+families high; ``multi_answer.py`` turns either kind into up to three answers per sentence. The
+checkpoint records the loss, and prediction reads the probabilities the same way (prereg
+``cribl_yesno_2026-10-14.json``).
 """
 
 from __future__ import annotations
@@ -64,7 +71,8 @@ from hierarchy import (
     technique_targets,
     within_family_log_probs,
 )
-from losses import rival_margin
+from losses import rival_margin, yes_no
+from multi_answer import budget_threshold, multi_block
 from train import schedule
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -78,6 +86,7 @@ SPLITS = ("dev", "annoctr_dev", "test", "annoctr_test", "cti_hal")
 INITIAL_SCALE = 16.0
 TOP_KEPT = 20
 MAX_OOM_SKIPS = 50
+REPORT_BUDGET = 1.3  # answers per sentence for the multi-answer dev numbers in the training log
 
 
 def load_catalog(path: Path) -> tuple[list[str], dict[str, list[dict[str, str]]], str]:
@@ -99,6 +108,7 @@ class FamilyHead(torch.nn.Module):
         self.weight = torch.nn.Parameter(prototypes.float() - center.float())
         self.bias = torch.nn.Parameter(torch.zeros(prototypes.shape[0]))
         self.log_scale = torch.nn.Parameter(torch.tensor(math.log(INITIAL_SCALE)))
+        self.independent = False  # True: a yes/no sigmoid per family (``--family-loss yesno``)
 
     def forward(self, hidden: torch.Tensor) -> torch.Tensor:
         state = functional.normalize(hidden.float() - self.center, dim=-1)
@@ -157,6 +167,21 @@ def initial_head(
         prototypes = torch.stack(rows)
     prototypes = prototypes.clone()  # outside inference mode: a trainable tensor
     return FamilyHead(prototypes, prototypes.mean(dim=0)).to(encoder.device)
+
+
+def yes_no_offset(
+    encoder: Encoder, head: FamilyHead, sentences: list[str], batch: int = 16
+) -> float:
+    """Minus the median second-highest logit over training sentences: a shared starting bias under
+    which a typical sentence has only its top family above P = 0.5 (with no bias, the untrained
+    cosine head puts dozens of families above 0.9)."""
+    seconds = []
+    with torch.inference_mode():
+        for start in range(0, len(sentences), batch):
+            ids = [encoder.token_ids(text) for text in sentences[start : start + batch]]
+            logits = head(encoder.hidden_batch(ids)) - head.bias
+            seconds.extend(torch.topk(logits, 2, dim=-1).values[:, 1].tolist())
+    return -sorted(seconds)[len(seconds) // 2]
 
 
 @dataclass
@@ -233,6 +258,7 @@ def load_checkpoint(directory: Path) -> tuple[Any, Encoder, FamilyHead, dict[str
     hidden = saved["state"]["center"].shape[0]
     head = FamilyHead(torch.zeros(count, hidden), torch.zeros(hidden))
     head.load_state_dict(saved["state"])
+    head.independent = saved.get("family_loss") == "yesno"
     encoder = Encoder(model, tokenizer)
     model.eval()
     return (
@@ -270,9 +296,11 @@ def predict_batch(
     if ids:
         hidden = encoder.hidden_batch(ids)
         logits = head(hidden)
-        probabilities = torch.softmax(logits, dim=-1)
+        if head.independent:
+            probabilities, family_log_p = torch.sigmoid(logits), functional.logsigmoid(logits)
+        else:
+            probabilities, family_log_p = torch.softmax(logits, -1), torch.log_softmax(logits, -1)
         if techniques is not None:
-            family_log_p = torch.log_softmax(logits, dim=-1)
             within = within_family_log_probs(
                 techniques.head(hidden), techniques.group, len(families)
             )
@@ -563,8 +591,17 @@ def train(args: argparse.Namespace) -> None:
     encoder = Encoder(model, tokenizer, args.max_tokens)
     if args.accum % args.batch:
         raise SystemExit("--accum must be a multiple of --batch")
+    yesno = args.family_loss == "yesno"
+    if yesno and args.margin:
+        raise SystemExit("--margin is defined on the softmax family distribution only")
     model.eval()
     head = initial_head(encoder, families, texts, args.batch)
+    if yesno:
+        head.independent = True
+        sample = [row["text"] for row in random.Random(args.seed).sample(rows, min(64, len(rows)))]
+        offset = yes_no_offset(encoder, head, sample, args.batch)
+        with torch.no_grad():
+            head.bias.fill_(offset)
     techniques = None
     if args.technique_head:
         ids, group = technique_index(families, texts)
@@ -592,6 +629,9 @@ def train(args: argparse.Namespace) -> None:
         "attack_version": version,
         "init": args.init,
         "margin": args.margin,
+        "family_loss": args.family_loss,
+        "negative_weight": args.negative_weight if yesno else None,
+        "yes_no_offset": round(float(head.bias[0]), 4) if yesno else None,
     }
     log: dict[str, Any] = {
         "arm": args.arm,
@@ -629,7 +669,7 @@ def train(args: argparse.Namespace) -> None:
         model.eval()
         head.eval()
         started = time.monotonic()
-        scores, exact = {}, {}
+        scores, exact, multi = {}, {}, {}
         for name, cases in dev.items():
             split = name.removeprefix("cases_").removesuffix(".jsonl")
             path = AUDITS / f"{args.arm}_step{seen}_{split}.jsonl"
@@ -642,6 +682,7 @@ def train(args: argparse.Namespace) -> None:
             scores[split] = family_block(predicted)
             if techniques:
                 exact[split] = technique_block(predicted)
+                multi[split] = multi_block(predicted, budget_threshold(predicted, REPORT_BUDGET))
         model.train()
         head.train()
         selected_on = [
@@ -654,7 +695,7 @@ def train(args: argparse.Namespace) -> None:
                 "epoch": round(seen / len(rows), 3),
                 "dir": str(directory),
                 "dev": scores,
-                **({"dev_exact": exact} if techniques else {}),
+                **({"dev_exact": exact, "dev_multi": multi} if techniques else {}),
                 "selection_score": round(sum(selected_on) / len(selected_on), 6),
                 "scale": round(float(head.log_scale.exp()), 4),
                 "dev_eval_s": round(time.monotonic() - started, 1),
@@ -668,7 +709,11 @@ def train(args: argparse.Namespace) -> None:
         print(
             f"checkpoint {seen}: "
             + " ".join(f"{split} top1 {s['top1']} top5 {s['top5']}" for split, s in scores.items())
-            + "".join(f" {split} exact {s['top1']}" for split, s in exact.items()),
+            + "".join(f" {split} exact {s['top1']}" for split, s in exact.items())
+            + "".join(
+                f" {split} up-to-3 family {m['family_hit']} exact {m['exact_hit']}"
+                for split, m in multi.items()
+            ),
             flush=True,
         )
 
@@ -700,7 +745,8 @@ def train(args: argparse.Namespace) -> None:
             if ids:
                 try:
                     hidden = encoder.hidden_batch(ids)
-                    log_p = torch.log_softmax(head(hidden), dim=-1)
+                    logits = head(hidden)
+                    log_p = None if yesno else torch.log_softmax(logits, dim=-1)
                     within = (
                         within_family_log_probs(
                             techniques.head(hidden), techniques.group, len(families)
@@ -710,7 +756,11 @@ def train(args: argparse.Namespace) -> None:
                     )
                     losses = torch.stack(
                         [
-                            -log_p[i, gold].mean()
+                            (
+                                yes_no(logits[i], gold, args.negative_weight)
+                                if yesno
+                                else -log_p[i, gold].mean()
+                            )
                             + (
                                 args.margin[0] * rival_margin(log_p[i], gold, args.margin[1])
                                 if args.margin
@@ -729,7 +779,7 @@ def train(args: argparse.Namespace) -> None:
                 except (RuntimeError, torch.cuda.OutOfMemoryError) as error:
                     if not is_oom(error) or log["oom_skipped"] >= MAX_OOM_SKIPS:
                         raise
-                    log_p = losses = hidden = within = None
+                    log_p = logits = losses = hidden = within = None
                     log["oom_skipped"] += 1
                     optimizer.zero_grad(set_to_none=True)
                     wait_after_oom(f"training examples {seen}+")
@@ -867,6 +917,18 @@ def main() -> None:
         help="datasets whose labels are parent-level by convention: no technique loss",
     )
     fit.add_argument("--technique-weight", type=float, default=1.0)
+    fit.add_argument(
+        "--family-loss",
+        choices=("softmax", "yesno"),
+        default="softmax",
+        help="softmax: one answer shared out; yesno: each family's own sigmoid (losses.yes_no)",
+    )
+    fit.add_argument(
+        "--negative-weight",
+        type=float,
+        default=0.1,
+        help="yesno: weight of the 'no' term for every family a sentence is not labelled with",
+    )
     fit.add_argument(
         "--exact-selection",
         nargs="*",
