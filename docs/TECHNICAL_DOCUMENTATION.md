@@ -5038,6 +5038,50 @@ laptop. No OpenRouter credit was used.
   organization." Splitting does surface more distinct techniques when every sentence answers. At an
   equal answer count, though, the whole-paragraph ranking already holds them.
 
+**Multi-label rows weighted 4x (M2, 2026-10-14, prereg `cribl_multilabel_2026-10-14.json`).**
+- **Why.** Training never limited the model to one technique. A row with several labels shares the
+  target among them under softmax, and every one is a "yes" under the yes/no loss. But only 4.4% of
+  training rows (1,167 of 26,353) carry two or more families. Expert training rows carry several in
+  19% of cases; the expert test paragraphs in 70%.
+- **What.** M2 is M1 (yes/no head, E2's data) with the whole loss of those 1,167 rows multiplied by
+  4, about 16% of the gradient instead of 4%. The final checkpoint was selected.
+
+| Checkpoint (epochs), M2 | 0 | 0.25 | 0.5 | 0.75 | 1 | 1.25 | 1.5 | 1.75 | **2** |
+|---|---|---|---|---|---|---|---|---|---|
+| public dev family top-1 | 0.451 | 0.666 | 0.675 | 0.697 | 0.718 | 0.718 | 0.721 | 0.716 | **0.715** |
+| AnnoCTR dev family top-1 | 0.220 | 0.577 | 0.586 | 0.685 | 0.649 | 0.696 | 0.685 | 0.711 | **0.708** |
+| public dev exact hit, 1.3 answers | 0.326 | 0.522 | 0.552 | 0.590 | 0.612 | 0.610 | 0.631 | 0.636 | **0.642** |
+
+| Share of labelled families found per text (paired CI) | E2 | M1 | M2 | M2 − E2 |
+|---|---|---|---|---|
+| expert paragraphs, 2 answers (headline) | 0.495 | 0.480 | 0.496 | +0.000 [−0.042, +0.050] |
+| expert paragraphs, 1.3 answers | 0.382 | 0.361 | 0.393 | +0.011 [−0.028, +0.052] |
+| expert paragraphs, 3 answers | 0.574 | 0.584 | 0.591 | +0.016 [−0.022, +0.061] |
+| public test (all), 1.3 answers | — | — | — | −0.018 [−0.032, −0.004] |
+| CTI-HAL family hit, 1.3 answers (non-inferiority −0.02) | 0.716 | 0.691 | 0.699 | −0.017 [−0.035, +0.001] |
+
+- **Headline fails.** On the expert paragraphs M2 finds as many labelled families as E2 at every
+  answer count.
+- **Against M1, the weighting helps a little where several labels are common.**
+  - Expert family recall: +0.016 at 2 answers [−0.020, +0.055] and +0.032 at 1.3 [−0.003, +0.071].
+  - Exact recall at 1.3: +0.038 [+0.005, +0.073].
+  - One-answer expert family top-1 recovers to 0.688 (M1 0.656, E2 0.682).
+- **It costs on one-label text.**
+  - Public test exact top-1 is 0.531, against E2's 0.561: −0.030 [−0.050, −0.012].
+  - AnnoCTR test exact is 0.421, against 0.451.
+  - CTI-HAL's non-inferiority bound fails.
+- **The number of answers still does not follow the paragraph.** At 2 answers, paragraphs with
+  several labelled families get 1.94 answers against 2.15 for one-label ones (E2: 1.96 vs 2.09).
+- **Fixed threshold of 0.5.** 2.20 answers per paragraph and family F1 0.472 (E2 at 2 answers:
+  0.478).
+
+The 1,167 multi-label rows are too few and too varied for a 4x weight to teach the model how many
+techniques a text holds. They shift it a little toward multi-label text and away from one-label
+text. More multi-label training data, not a reweighting, is what this needs. E2 stays the reference.
+
+**Cost.** The pod cost about $1.30 (87 minutes at $0.89/h). CTI-HAL was scored on the laptop. No
+OpenRouter credit was used.
+
 ## 22. Failure modes and troubleshooting
 
 ### 22.1 “ATT&CK knowledge base has not been ingested”

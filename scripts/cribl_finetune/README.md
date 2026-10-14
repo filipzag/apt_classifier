@@ -198,3 +198,13 @@ python3 sentence_split_eval.py score E2 M1
 
 No training. Result (docs 21.3.18): at the same number of answers per paragraph, splitting finds no
 more labelled techniques (expert −0.04 at three answers, n.s.; derived procedures 2–5 points lower).
+
+### M2: multi-label rows weighted 4x (prereg `cribl_multilabel_2026-10-14.json`)
+
+```bash
+bash scripts/cribl_finetune/runpod/remote_m2.sh   # on a GPU pod: M1 + --multi-label-weight 4
+python3 scripts/cribl_finetune/multi_answer.py --dataset expert --budget 2.0 E2=E2_test.jsonl M1=M1_test.jsonl M2=M2_test.jsonl --baseline E2
+```
+
+Result (docs 21.3.18): on the expert paragraphs M2 finds as many labelled families as E2 (+0.000 at
+two answers), slightly more than M1, and loses 3 points of exact top-1 on the public test.
