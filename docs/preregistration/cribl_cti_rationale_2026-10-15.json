@@ -1,0 +1,40 @@
+{
+  "schema": "cribl_finetune_prereg/1",
+  "id": "cribl_cti_rationale_2026-10-15",
+  "title": "E3: E2's recipe plus CTI-Rationale report paragraphs (train and validation reports)",
+  "registered": "2026-10-15",
+  "parent": "docs/preregistration/cribl_family_data_2026-10-14.json (E2) and cribl_multilabel_2026-10-14.json (M2; docs 21.3.18)",
+  "question": "Do 1,011 adjudicated vendor-report paragraphs (174 labelled with two or more families) added to E2's training data let the model find more of the labelled techniques in report paragraphs that hold several, at the same number of answers?",
+  "motivation": "Owner's request (2026-10-14/15) for more multi-label training data after M2: weighting the 1,167 existing multi-label rows 4x found no more labels on the 157 expert test paragraphs, so new and varied multi-label text is tried. Searched sources: Text2TTP's release holds 25 new multi-family sentences (not used); CTI-Rationale is the only released set with a useful number.",
+  "harness": "scripts/cribl_finetune/prepare_cti_rationale.py build; family_head.py (unchanged except the cti_rationale_test split name); multi_answer.py (per-text recall at a label-free answer budget, paired bootstrap); runpod/remote_e3.sh",
+  "data": {
+    "source": "huggingface.co/datasets/EbruResul/CTI-Rationale, cti_rationale_gold_v2.jsonl (sha256 55e411e7cdd536fa...), report_split.csv; gated, accepted by the owner; annotations CC BY 4.0, paragraph text the publishers' (local training only)",
+    "unit": "a paragraph labelled with the technique ids of its gold rows (two analysts, adjudicated); ATT&CK v18.1 ids remapped to 19.2, ids outside the 697-technique catalogue dropped",
+    "split": "the dataset's own report split: train (70) + validation (15) reports -> training rows; test (15) reports -> cases_cti_rationale_test.jsonl",
+    "leakage_guards": "10 reports dropped whole: 8 whose labelled paragraphs name a CTI-HAL group, an alias or its own software (SUNBURST, TEARDROP, UNC2452, NOBELIUM, AADInternals, ROADTools, Ryuk, Conti, Anchor_DNS, Bazaloader, NotPetya, Industroyer) and 2 attributed to one without naming it (ar23-243a Infamous Chisel / Sandworm; russian-targeting-gov-business CEELOADER / APT29); paragraphs overlapping public dev/test, CTI-HAL, AnnoCTR dev/test, Elastic or vendor-set statements dropped (19 train, 3 test); 8 training paragraphs repeating existing training rows dropped; 16 test paragraphs overlapping any training text dropped",
+    "training_rows": "1,011 paragraphs, 174 with 2+ families, 121 families (both losses, like advisory rows); E2's 26,353 rows unchanged",
+    "test_rows": "209 paragraphs from 15 reports, 33 with 2+ families, 75 families"
+  },
+  "fixed": "E2's recipe unchanged: softmax family head + technique head, answer from the 3 most probable families, Cribl adapter + fresh heads, 2 epochs, a checkpoint every quarter epoch, LoRA lr 1e-4, heads 1e-3, 16 per step, seed 7, AnnoCTR rows family loss only; RunPod secure RTX 4090; CTI-HAL scored on the laptop",
+  "selection": "E2's rule: the checkpoint with the best mean of public dev exact top-1 and AnnoCTR dev family top-1",
+  "scoring": "multi_answer.py: the top family plus the next ones up to 3 above a threshold set per model from its own probabilities, without labels, to give a fixed average number of answers; recall = share of a text's labelled families among its answers (per text, then averaged); paired bootstrap 95% CIs (1000, seed 7)",
+  "success": {
+    "headline": "expert test paragraphs (157), 2 answers per paragraph on average: per-paragraph family recall, E3 minus E2, paired 95% CI lower bound above 0",
+    "secondary": [
+      "CTI-Rationale test (209), 1.3 answers: per-paragraph family recall, E3 minus E2, CI lower bound above 0 (in-domain: same publishers and annotators as the new training rows, so not a generalisation claim)",
+      "CTI-HAL (968), one answer: family top-1, E3 minus E2, CI lower bound above -0.02 (no real loss)",
+      "public test (1,391), one answer: family and exact top-1, E3 minus E2",
+      "AnnoCTR test, one answer: family top-1, E3 minus E2"
+    ],
+    "reported": "expert at 1.3 and 3 answers; exact technique recall on expert and CTI-Rationale test; CTI-Rationale test's 33 multi-family paragraphs at 2 answers; answers per paragraph on one- vs several-label paragraphs; CTI-HAL exact top-1 and family top-3; every checkpoint's dev numbers"
+  },
+  "limitation": "157 expert paragraphs: a paired CI is about +/-0.045 wide on recall, so a real gain of 2-3 points may not reach the bar; 174 new multi-family rows add about 15% to the 1,167 already used, and M2's 4x weighting of those changed nothing, so a small effect is expected",
+  "stop_rules": [
+    "a checkpoint does not reload",
+    "the loss is not finite",
+    "more than 1% of a split's cases end in error"
+  ],
+  "confirmation_runs": "the selected checkpoint once on the public test, AnnoCTR test, CTI-Rationale test (pod) and CTI-HAL (laptop); E2 once on the CTI-Rationale test (laptop, after this registration); nothing is chosen, refit or rerun because of a confirmation result",
+  "adoption": "none: an experiment, no product wiring",
+  "informed_by": "dataset counts and the leakage checks only; no model has read a CTI-Rationale paragraph. E2/M1/M2 results on the other sets (docs 21.3.18)."
+}

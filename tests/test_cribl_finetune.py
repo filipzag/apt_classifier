@@ -455,6 +455,48 @@ def test_atomic_rows_are_name_and_description_without_ids_or_placeholders():
     assert atomic_text(test) == "Dump LSASS via comsvcs. Uses rundll32 to dump for testing."
 
 
+def test_cti_rationale_paragraphs_join_gold_rows_and_keep_first_order():
+    from scripts.cribl_finetune.prepare_cti_rationale import paragraphs, statement_texts
+
+    gold = [
+        {
+            "report_id": 7,
+            "chunk_id": "P1",
+            "vendor": "v",
+            "chunk_text": "A  b\nc.",
+            "technique_id": "T1059.001",
+        },
+        {
+            "report_id": 7,
+            "chunk_id": "P1",
+            "vendor": "v",
+            "chunk_text": "A  b\nc.",
+            "technique_id": "T1105",
+        },
+        {
+            "report_id": 7,
+            "chunk_id": "P1",
+            "vendor": "v",
+            "chunk_text": "A  b\nc.",
+            "technique_id": "T1059.001",
+        },
+        {
+            "report_id": 7,
+            "chunk_id": "P2",
+            "vendor": "v",
+            "chunk_text": "D.",
+            "technique_id": "T1486",
+        },
+    ]
+    found = paragraphs(gold)
+    assert [(p["report_id"], p["chunk_id"], p["text"], p["ids"]) for p in found] == [
+        ("7", "P1", "A b c.", ["T1059.001", "T1105"]),
+        ("7", "P2", "D.", ["T1486"]),
+    ]
+    rows = [{"statements": [{"text": "x"}, {"text": ""}, {"section": "s"}]}]
+    assert statement_texts(rows) == ["x"]
+
+
 def test_yes_no_loss_scores_each_family_on_its_own():
     torch = pytest.importorskip("torch")
     from scripts.cribl_finetune.losses import yes_no
