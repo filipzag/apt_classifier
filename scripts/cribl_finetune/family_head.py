@@ -151,7 +151,8 @@ class Encoder:
         self.tokenizer = tokenizer
         self.max_tokens = max_tokens
         self.template = template  # the base model's chat format (decision_model.BaseSpec)
-        self.device = next(model.parameters()).device
+        # the first GPU parameter (a lookup table may live on the CPU on a small GPU)
+        self.device = next(p.device for p in model.parameters() if p.device.type == "cuda")
 
     def token_ids(self, sentence: str) -> list[int]:
         prompt = render_family_prompt(c1_state(sentence), self.template)

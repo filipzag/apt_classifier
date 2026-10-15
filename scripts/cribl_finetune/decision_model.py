@@ -20,7 +20,12 @@ import torch
 from common import combine_rotations, letter_tokens, render_prompt, rotate, rotation_count
 from peft import LoraConfig, PeftModel, get_peft_model, get_peft_model_state_dict
 from safetensors.torch import load_file
-from transformers import AutoModelForImageTextToText, AutoTokenizer, BitsAndBytesConfig
+from transformers import (
+    AutoConfig,
+    AutoModelForImageTextToText,
+    AutoTokenizer,
+    BitsAndBytesConfig,
+)
 
 ADAPTER_ID = "cribl-ai/cribl-decision-1.0"
 ADAPTER_REVISION = "75cb0dd9d551e774664c01ba8f7b25c0087b4abf"
@@ -38,6 +43,12 @@ class BaseSpec:
     target_modules: str
     skip_modules: tuple[str, ...]
     prompt_template: str
+    # modules kept in system RAM on a small GPU (under ``SMALL_GPU_GIB``): lookup tables that
+    # 4-bit loading does not shrink (Gemma 4's per-layer embedding table, 5.2 GB in bf16)
+    cpu_modules: tuple[str, ...] = ()
+
+
+SMALL_GPU_GIB = 16
 
 
 # Cribl's adapter shape (adapter_config.json): every language-model layer's linear-attention
@@ -63,6 +74,7 @@ BASES = {
         r".*language_model\.layers\.\d+\.self_attn\.(q_proj|k_proj|v_proj|o_proj)",
         ("lm_head", "vision_tower", "audio_tower", "embed_vision", "embed_audio"),
         "gemma",
+        ("model.language_model.embed_tokens_per_layer",),
     ),
 }
 DEFAULT_BASE = "qwen3.5-4b-base"
@@ -133,15 +145,77 @@ def load_tokenizer(base: str = DEFAULT_BASE) -> Any:
     return tokenizer
 
 
+def small_gpu() -> bool:
+    return torch.cuda.get_device_properties(0).total_memory < SMALL_GPU_GIB * 2**30
+
+
+def device_map(spec: BaseSpec) -> dict[str, Any]:
+    """Everything on the GPU; on a small GPU ``spec.cpu_modules`` go to the CPU. The map then
+    names every top-level module (accelerate treats a root entry as "move everything")."""
+    if not spec.cpu_modules or not small_gpu():
+        return {"": 0}
+    config = AutoConfig.from_pretrained(spec.repo, revision=spec.revision, cache_dir=CACHE_DIR)
+    with torch.device("meta"):
+        skeleton = AutoModelForImageTextToText.from_config(config)
+    placement: dict[str, Any] = {}
+
+    def walk(module: Any, prefix: str) -> None:
+        for child_name, child in module.named_children():
+            name = f"{prefix}.{child_name}" if prefix else child_name
+            if name in spec.cpu_modules:
+                placement[name] = "cpu"
+            elif any(item.startswith(name + ".") for item in spec.cpu_modules):
+                walk(child, name)
+            else:
+                placement[name] = 0
+
+    walk(skeleton, "")
+    del skeleton
+    return placement
+
+
+def keep_on_cpu(model: Any, names: Sequence[str]) -> None:
+    """Give each offloaded lookup table its weights back on the CPU and route its forward
+    through the CPU: the rows of the batch come back on the GPU, the table never goes there
+    (accelerate's own offload would copy the whole table per forward)."""
+    from accelerate.hooks import remove_hook_from_module
+
+    for name in names:
+        module = model.get_submodule(name)
+        hook = getattr(module, "_hf_hook", None)
+        if hook is not None:
+            weights = {
+                key: hook.weights_map[key] for key, _ in module.named_parameters(recurse=False)
+            }
+            remove_hook_from_module(module)
+            for key, value in weights.items():
+                setattr(module, key, torch.nn.Parameter(value.to("cpu"), requires_grad=False))
+        module.to("cpu")
+        original = module.forward
+
+        def forward(ids: torch.Tensor, *args: Any, _original: Any = original, **kwargs: Any) -> Any:
+            return _original(ids.to("cpu"), *args, **kwargs).to(ids.device)
+
+        module.forward = forward
+    # PEFT re-dispatches a model whose placement map names the CPU (and then wants an offload
+    # directory); the tables are wired up already, so the map it sees is GPU-only
+    if names and hasattr(model, "hf_device_map"):
+        model.hf_device_map = {
+            key: value for key, value in model.hf_device_map.items() if value != "cpu"
+        }
+
+
 def load_base(*, gradient_checkpointing: bool = False, base: str = DEFAULT_BASE) -> Any:
     require_cuda()
     spec = base_spec(base)
+    placement = device_map(spec)
     quantization = BitsAndBytesConfig(
         load_in_4bit=True,
         bnb_4bit_quant_type="nf4",
         bnb_4bit_use_double_quant=True,
         bnb_4bit_compute_dtype=torch.bfloat16,
         llm_int8_skip_modules=list(spec.skip_modules),
+        llm_int8_enable_fp32_cpu_offload="cpu" in placement.values(),
     )
     model = AutoModelForImageTextToText.from_pretrained(
         spec.repo,
@@ -149,10 +223,11 @@ def load_base(*, gradient_checkpointing: bool = False, base: str = DEFAULT_BASE)
         cache_dir=CACHE_DIR,
         quantization_config=quantization,
         dtype=torch.bfloat16,
-        device_map={"": 0},
+        device_map=placement,
         trust_remote_code=False,
     )
     model.config.use_cache = False
+    keep_on_cpu(model, [name for name, device in placement.items() if device == "cpu"])
     if gradient_checkpointing:
         model.gradient_checkpointing_enable(gradient_checkpointing_kwargs={"use_reentrant": False})
         model.enable_input_require_grads()
@@ -232,8 +307,29 @@ def load_model(
         if adapter == "cribl":
             info["adapter"] = f"{ADAPTER_ID}@{ADAPTER_REVISION}"
     info["trainable_parameters"] = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    info["modules"] = module_summary(model)
     model.train(trainable)
     return model, tokenizer, info
+
+
+def module_summary(model: Any) -> dict[str, Any]:
+    """How the base was placed: 4-bit linear layers, embeddings left in bf16 (an embedding that
+    was quantised is a stop-rule failure), LoRA-wrapped modules and modules kept on the CPU."""
+    quantised = lora = 0
+    embeddings: list[str] = []
+    cpu: list[str] = []
+    for name, module in model.named_modules():
+        kind = type(module).__name__
+        if kind == "Linear4bit":
+            quantised += 1
+        if "lora_A" in dict(module.named_children()):
+            lora += 1
+        if isinstance(module, torch.nn.Embedding):
+            weight = module.weight
+            embeddings.append(f"{name}: {str(weight.dtype).removeprefix('torch.')} {weight.device}")
+            if weight.device.type == "cpu":
+                cpu.append(name)
+    return {"linear_4bit": quantised, "lora_modules": lora, "embeddings": embeddings, "cpu": cpu}
 
 
 def _adapter_base(directory: Path) -> str | None:
