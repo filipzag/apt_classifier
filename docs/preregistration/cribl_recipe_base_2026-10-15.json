@@ -1,0 +1,47 @@
+{
+  "schema": "cribl_finetune_prereg/1",
+  "id": "cribl_recipe_base_2026-10-15",
+  "title": "Parent-level scoring; a recipe sweep (R1-R3) and a second base model (G1) on E2's data",
+  "registered": "2026-10-15",
+  "parent": "docs/preregistration/cribl_family_data_2026-10-14.json (E2, the reference) and cribl_cti_rationale_2026-10-15.json (E3; docs 21.3.18)",
+  "question": "With the annotators' parent-or-sub-technique habit taken out of the score, does a longer or larger training recipe, or a different 4B base model, name the right technique family more often than E2 on real-report statements?",
+  "motivation": "Owner's decision (2026-10-15) after four data additions and two loss changes moved nothing beyond noise: (1) score at parent level, since 111 of E2's 131 right-family exact misses on CTI-HAL are granularity, not a wrong sibling; (2) vary the recipe, which has had one setting (2 epochs, LoRA r 16, LoRA lr 1e-4, head lr 1e-3) and whose last dev curve was still rising; (3) try a second base, since Cribl's adapter added nothing over a fresh LoRA (B1 vs B2 +0.003).",
+  "harness": "relabel_parents.py (cases_<split>_parents.jsonl), parent_rescore.py (parent-level, family and exact with paired CIs), family_head.py (--base, --lora-r, --selection parent; parent_level in every exact block), prepare_cti_rationale.py (validation reports as a selection set), runpod/remote_sweep.sh",
+  "metric": {
+    "parent_level": "the answered technique's parent is among the gold ids' parents (common.hits parent-aware on technique_pick); equals exact on the parent-relabelled files",
+    "informed_by_part_a": "E2 on CTI-HAL: family top-1 0.642, parent level 0.639, exact 0.514; public test 0.633 / 0.636 / 0.561; AnnoCTR test 0.717 / 0.714 / 0.451; CTI-Rationale test 0.517 / 0.517 / 0.421 (parent_rescore_*.json, 2026-10-15, before any new run)"
+  },
+  "data": {
+    "training": "E2's five files unchanged: cases_train_clean, cases_annoctr_train_clean, cases_attack_train_clean, cases_advisories_train, cases_atomic_train (26,353 rows); no CTI-Rationale rows",
+    "selection": "cases_dev (659), cases_annoctr_dev (336) and cases_cti_rationale_validation (221 paragraphs of the dataset's 15 validation reports, built with the same leakage guards, 10 paragraphs overlapping training text dropped); selection score = mean over the three of parent level (the family answer where a run has no technique head); ties: the earlier checkpoint",
+    "confirmation": "public test (1,391), clean AnnoCTR test (738), CTI-Rationale test (209) on the pod; CTI-HAL (968) on the laptop"
+  },
+  "runs": {
+    "R1": "E2's recipe for 3 epochs (init cribl, LoRA r 16, LoRA lr 1e-4, head lr 1e-3)",
+    "R2": "R1 with LoRA lr 2e-4",
+    "R3": "R1 with a fresh LoRA of rank 64 (alpha 128); Cribl's r-16 adapter cannot change rank, so this run also changes the init (B2 vs B1 showed fresh = cribl within +0.003; the confound is noted)",
+    "G1": "google/gemma-4-E4B@411aa17b (Apache 2.0; 4.5B effective parameters) with a fresh LoRA r 16 on the attention projections, E2's recipe (2 epochs, LoRA lr 1e-4, head lr 1e-3), the family prompt in Gemma's turn format with the same body; the family and technique heads start from the base's own ATT&CK-text states as always",
+    "common": "seed 7, 16 examples per step, a checkpoint every half epoch (every quarter for E2), 4-bit NF4 base, RunPod secure RTX 4090 (R1-R3 ~105 min at $0.89/h, G1 ~125 min)"
+  },
+  "success": {
+    "headline_recipe": "CTI-HAL parent level, the sweep run with the best selection score minus E2, paired 95% CI (1000 samples, seed 7) lower bound above 0",
+    "headline_base": "CTI-HAL parent level, G1 minus E2, CI lower bound above 0",
+    "secondary": [
+      "public test parent level, same run minus E2 (tram / expert / derived_procedures reported separately)",
+      "AnnoCTR test family top-1, same run minus E2",
+      "CTI-Rationale test parent level, same run minus E2",
+      "non-inferiority on public test family top-1: CI lower bound above -0.02"
+    ],
+    "reported": "every checkpoint's three dev scores; family top-1 and strict exact on every set; the other two sweep runs on every set; rare-family subset (gold family with fewer than 100 training rows); calibration (ECE); peak GPU memory and time per example; G1's Gemma module match count and quantised-module list from the laptop pilot"
+  },
+  "limitation": "three recipe runs pick one setting each on dev, so the best of three carries a small selection optimism (about half a point); G1 changes the base and the LoRA init at once, by design; CTI-HAL's two annotators agree about 65-70% of the time, so gains near the ceiling may not show",
+  "stop_rules": [
+    "a checkpoint does not reload",
+    "the loss is not finite",
+    "more than 1% of a split's cases end in error",
+    "G1: the LoRA matches no module, or a quantised module list that includes the embeddings"
+  ],
+  "confirmation_runs": "each run's selected checkpoint once on the public test, AnnoCTR test and CTI-Rationale test (pod) and CTI-HAL (laptop); nothing is chosen, refit or rerun because of a confirmation result; a combined run (best recipe on the best base) is a follow-up with its own registration",
+  "adoption": "none: experiments, no product wiring",
+  "informed_by": "Part A (parent-level rescoring of E1/E2/E3/F2/M1/M2, above) and the laptop pilots (mechanics only: rank 64 fresh LoRA on 96 rows; Gemma 4 E4B loads, trains 96 rows, saves and reloads). No sweep or Gemma model exists."
+}

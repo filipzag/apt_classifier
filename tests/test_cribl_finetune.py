@@ -565,3 +565,84 @@ def test_multi_answer_recall_is_the_share_of_labels_found():
     }
     assert recall(row, 0.5) == (pytest.approx(2 / 3), pytest.approx(2 / 3))
     assert recall(row, math.inf) == (pytest.approx(1 / 3), pytest.approx(1 / 3))
+
+
+def test_parent_relabel_keeps_order_and_drops_repeats():
+    from scripts.cribl_finetune.relabel_parents import parent_labels, relabel
+
+    assert parent_labels(["T1059.001", "T1105", "T1059.003", "T1059"]) == ["T1059", "T1105"]
+    rows, counts = relabel(
+        [
+            {"case_id": "a", "gold_ids": ["T1059.001", "T1059.003"], "text": "x"},
+            {"case_id": "b", "gold_ids": ["T1105"], "text": "y"},
+        ]
+    )
+    assert [row["gold_ids"] for row in rows] == [["T1059"], ["T1105"]]
+    assert rows[0]["text"] == "x" and rows[0]["case_id"] == "a"
+    assert counts == {"cases": 2, "labels_before": 3, "labels_after": 2, "cases_changed": 1}
+
+
+def test_parent_rescore_forgives_granularity_but_not_the_family():
+    from scripts.cribl_finetune.parent_rescore import block, compare, measures
+
+    def row(case_id, pick, technique, gold, families=None):
+        out = {
+            "case_id": case_id,
+            "dataset": "d",
+            "status": "ok",
+            "gold_ids": gold,
+            "gold_families": families or sorted({g.split(".")[0] for g in gold}),
+            "pick": pick,
+            "top": [[pick, 0.8]],
+        }
+        if technique is not None:
+            out["technique_pick"] = technique
+        return out
+
+    sub_for_parent = row("a", "T1059", "T1059.001", ["T1059"])  # granularity: forgiven
+    parent_for_sub = row("b", "T1059", "T1059", ["T1059.003"])  # granularity: forgiven
+    sibling = row("c", "T1059", "T1059.001", ["T1059.003"])  # same family, wrong sibling
+    wrong = row("d", "T1105", "T1105", ["T1059.001"])
+    assert measures(sub_for_parent) == {"family_top1": 1.0, "parent_level": 1.0, "exact": 0.0}
+    assert measures(parent_for_sub)["parent_level"] == 1.0
+    assert measures(sibling) == {"family_top1": 1.0, "parent_level": 1.0, "exact": 0.0}
+    assert measures(wrong) == {"family_top1": 0.0, "parent_level": 0.0, "exact": 0.0}
+    family_only = row("e", "T1059", None, ["T1059.001"])  # no technique head: the family answer
+    assert measures(family_only) == {"family_top1": 1.0, "parent_level": 1.0, "exact": None}
+    error = {"case_id": "f", "dataset": "d", "status": "error", "gold_ids": ["T1003"]}
+    assert measures(error) == {"family_top1": 0.0, "parent_level": 0.0, "exact": 0.0}
+    scored = block([sub_for_parent, parent_for_sub, sibling, wrong])
+    assert (scored["parent_level"], scored["exact"]) == (0.75, 0.0)
+    assert block([family_only])["exact"] is None
+    delta = compare([wrong], [row("d", "T1059", "T1059.001", ["T1059.001"])])
+    assert delta["delta"] == {"family_top1": 1.0, "parent_level": 1.0, "exact": 1.0}
+
+
+def test_family_prompt_templates_share_the_body():
+    from scripts.cribl_finetune.common import ANSWER_CUE, c1_state, render_family_prompt
+
+    state = c1_state("The actor ran PowerShell.")
+    qwen, gemma = render_family_prompt(state), render_family_prompt(state, "gemma")
+    assert qwen == render_family_prompt(state, "qwen")
+    assert qwen.startswith("<|im_start|>user\n") and qwen.endswith(f"</think>\n\n{ANSWER_CUE}")
+    assert gemma.startswith("<bos><start_of_turn>user\n")
+    assert gemma.endswith(f"<end_of_turn>\n<start_of_turn>model\n{ANSWER_CUE}")
+    body = qwen.split("<|im_start|>user\n", 1)[1].split("<|im_end|>", 1)[0]
+    assert body in gemma and "The actor ran PowerShell." in body
+    with pytest.raises(ValueError):
+        render_family_prompt(state, "llama")
+
+
+def test_lora_shape_and_base_registry():
+    pytest.importorskip("peft")
+    from scripts.cribl_finetune.decision_model import BASES, DEFAULT_BASE, base_spec, lora_shape
+
+    assert lora_shape() == {"r": 16, "lora_alpha": 32, "lora_dropout": 0.05, "bias": "none"}
+    assert lora_shape(64)["lora_alpha"] == 128 and lora_shape(8, 8)["lora_alpha"] == 8
+    with pytest.raises(ValueError):
+        lora_shape(0)
+    assert base_spec(DEFAULT_BASE).prompt_template == "qwen"
+    assert base_spec("gemma-4-e4b").prompt_template == "gemma"
+    assert {spec.repo for spec in BASES.values()} == {"Qwen/Qwen3.5-4B-Base", "google/gemma-4-E4B"}
+    with pytest.raises(ValueError):
+        base_spec("llama")

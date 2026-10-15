@@ -58,6 +58,7 @@ from common import (
     expected_calibration_error,
     family_targets,
     forced_row,
+    hits,
     paired_delta,
     parent_of,
     read_jsonl,
@@ -65,7 +66,15 @@ from common import (
     render_family_prompt,
     score_rows,
 )
-from decision_model import is_oom, load_model, wait_after_oom, with_oom_retry
+from decision_model import (
+    BASES,
+    DEFAULT_BASE,
+    LORA_R,
+    is_oom,
+    load_model,
+    wait_after_oom,
+    with_oom_retry,
+)
 from hierarchy import (
     joint_log_probs,
     pick,
@@ -84,7 +93,18 @@ HEAD_FILE = "family_head.pt"
 TECHNIQUE_HEAD_FILE = "technique_head.pt"
 DEV_FILES = ("cases_dev.jsonl", "cases_annoctr_dev.jsonl")
 TRAIN_FILES = ("cases_train.jsonl", "cases_annoctr_train.jsonl")
-SPLITS = ("dev", "annoctr_dev", "test", "annoctr_test", "cti_hal", "cti_rationale_test")
+SPLITS = (
+    "dev",
+    "annoctr_dev",
+    "test",
+    "annoctr_test",
+    "cti_hal",
+    "cti_rationale_test",
+    "cti_rationale_validation",
+)
+# every split also has a parent-relabelled copy (relabel_parents.py: cases_<split>_parents.jsonl)
+EVAL_SPLITS = (*SPLITS, *(f"{split}_parents" for split in SPLITS))
+SELECTION_RULES = ("legacy", "parent")
 INITIAL_SCALE = 16.0
 TOP_KEPT = 20
 MAX_OOM_SKIPS = 50
@@ -123,15 +143,18 @@ class Encoder:
     an attention mask, so the last position is every prompt's decision slot (states match the
     one-at-a-time ones to bf16 noise, cosine > 0.9997)."""
 
-    def __init__(self, model: Any, tokenizer: Any, max_tokens: int = 1024) -> None:
+    def __init__(
+        self, model: Any, tokenizer: Any, max_tokens: int = 1024, template: str = "qwen"
+    ) -> None:
         base = model.get_base_model() if hasattr(model, "get_base_model") else model
         self.backbone = base.model
         self.tokenizer = tokenizer
         self.max_tokens = max_tokens
+        self.template = template  # the base model's chat format (decision_model.BaseSpec)
         self.device = next(model.parameters()).device
 
     def token_ids(self, sentence: str) -> list[int]:
-        prompt = render_family_prompt(c1_state(sentence))
+        prompt = render_family_prompt(c1_state(sentence), self.template)
         ids = self.tokenizer.encode(prompt, add_special_tokens=False)
         if len(ids) > self.max_tokens:
             raise ValueError(f"prompt has {len(ids)} tokens (> {self.max_tokens})")
@@ -254,14 +277,15 @@ def load_techniques(directory: Path, device: Any) -> Techniques | None:
 
 
 def load_checkpoint(directory: Path) -> tuple[Any, Encoder, FamilyHead, dict[str, Any]]:
-    model, tokenizer, info = load_model(str(directory))
     saved = torch.load(directory / HEAD_FILE, map_location="cpu", weights_only=False)
+    base = saved.get("base", DEFAULT_BASE)  # checkpoints before the registry are Qwen's
+    model, tokenizer, info = load_model(str(directory), base=base)
     count = len(saved["families"])
     hidden = saved["state"]["center"].shape[0]
     head = FamilyHead(torch.zeros(count, hidden), torch.zeros(hidden))
     head.load_state_dict(saved["state"])
     head.independent = saved.get("family_loss") == "yesno"
-    encoder = Encoder(model, tokenizer)
+    encoder = Encoder(model, tokenizer, template=info["prompt_template"])
     model.eval()
     return (
         model,
@@ -440,9 +464,12 @@ def technique_block(rows: list[dict[str, Any]]) -> dict[str, Any]:
         for row in rows
         if row.get("technique_pick") is not None
     ]
+    # the answered technique's parent among the gold ids' parents: granularity forgiven
+    parent_level = sum(hits(row.get("technique_pick"), row["gold_ids"])[1] for row in rows)
     return {
         "n": count,
         "top1": rate(rows),
+        "parent_level": round(parent_level / count, 6) if count else None,
         "top1_top_family_only": rate(rows, "technique_pick_k1"),
         "top1_every_family": rate(rows, "technique_pick_all"),
         "top3": within(3),
@@ -536,6 +563,8 @@ def exact_report(
     datasets: dict[str, list[dict[str, Any]]] = {}
     for row in rows:
         datasets.setdefault(str(row.get("dataset") or "all"), []).append(row)
+    mine = technique_rows(rows)
+    parent_scores = score_rows(mine)
     out: dict[str, Any] = {
         "arm_exact": {
             "pooled": technique_block(rows),
@@ -543,23 +572,41 @@ def exact_report(
                 name: technique_block(subset) for name, subset in sorted(datasets.items())
             },
         },
+        # the answered technique scored at parent level (sub-technique vs parent of the same
+        # family forgiven; prereg cribl_recipe_base_2026-10-15.json)
+        "arm_parent_level": {
+            "pooled": parent_scores["pooled"]["parent_aware"],
+            "datasets": {
+                name: value["parent_aware"] for name, value in parent_scores["datasets"].items()
+            },
+        },
         "references_exact": {},
+        "references_parent_level": {},
         "vs_exact": {},
     }
-    mine = technique_rows(rows)
     for name, reference in found.items():
         if any("technique_pick" in row for row in reference):
             reference = technique_rows(reference)
         elif any("top" in row for row in reference):
             continue
-        out["references_exact"][name] = score_rows(reference)["pooled"]["exact"]
+        scored = score_rows(reference)["pooled"]
+        out["references_exact"][name] = scored["exact"]
+        out["references_parent_level"][name] = scored["parent_aware"]
         delta = paired_delta(reference, mine)
+        ci = delta["pooled"]["ci95"] or {}
         out["vs_exact"][name] = {
             "n": delta["pooled"]["n"],
             "exact_delta": delta["pooled"]["delta"]["exact"],
-            "ci95": delta["pooled"]["ci95"]["exact"] if delta["pooled"]["ci95"] else None,
+            "ci95": ci.get("exact"),
+            "parent_level_delta": delta["pooled"]["delta"]["parent_aware"],
+            "parent_level_ci95": ci.get("parent_aware"),
             "datasets": {
-                key: {"delta": value["delta"]["exact"], "ci95": (value["ci95"] or {}).get("exact")}
+                key: {
+                    "delta": value["delta"]["exact"],
+                    "ci95": (value["ci95"] or {}).get("exact"),
+                    "parent_level_delta": value["delta"]["parent_aware"],
+                    "parent_level_ci95": (value["ci95"] or {}).get("parent_aware"),
+                }
                 for key, value in delta["datasets"].items()
             },
         }
@@ -589,8 +636,14 @@ def train(args: argparse.Namespace) -> None:
     if args.dev_limit:
         dev = {name: cases[: args.dev_limit] for name, cases in dev.items()}
 
-    model, tokenizer, info = load_model(args.init, trainable=True)
-    encoder = Encoder(model, tokenizer, args.max_tokens)
+    model, tokenizer, info = load_model(
+        args.init,
+        trainable=True,
+        base=args.base,
+        lora_r=args.lora_r,
+        lora_alpha=args.lora_alpha,
+    )
+    encoder = Encoder(model, tokenizer, args.max_tokens, template=info["prompt_template"])
     if args.accum % args.batch:
         raise SystemExit("--accum must be a multiple of --batch")
     yesno = args.family_loss == "yesno"
@@ -630,6 +683,9 @@ def train(args: argparse.Namespace) -> None:
         "families": families,
         "attack_version": version,
         "init": args.init,
+        "base": args.base,
+        "lora": info.get("lora"),
+        "selection": args.selection,
         "margin": args.margin,
         "family_loss": args.family_loss,
         "negative_weight": args.negative_weight if yesno else None,
@@ -691,10 +747,18 @@ def train(args: argparse.Namespace) -> None:
                 multi[split] = multi_block(predicted, budget_threshold(predicted, REPORT_BUDGET))
         model.train()
         head.train()
-        selected_on = [
-            exact[split]["top1"] if split in args.exact_selection else scores[split]["top1"]
-            for split in scores
-        ]
+        if args.selection == "parent":
+            # parent-level accuracy of the answered technique (the family answer when there is
+            # no technique head), averaged over the dev files
+            selected_on = [
+                exact[split]["parent_level"] if techniques else scores[split]["top1"]
+                for split in scores
+            ]
+        else:
+            selected_on = [
+                exact[split]["top1"] if split in args.exact_selection else scores[split]["top1"]
+                for split in scores
+            ]
         log["checkpoints"].append(
             {
                 "examples_seen": seen,
@@ -715,7 +779,10 @@ def train(args: argparse.Namespace) -> None:
         print(
             f"checkpoint {seen}: "
             + " ".join(f"{split} top1 {s['top1']} top5 {s['top5']}" for split, s in scores.items())
-            + "".join(f" {split} exact {s['top1']}" for split, s in exact.items())
+            + "".join(
+                f" {split} exact {s['top1']} parent {s['parent_level']}"
+                for split, s in exact.items()
+            )
             + "".join(
                 f" {split} up-to-3 family {m['family_hit']} exact {m['exact_hit']}"
                 for split, m in multi.items()
@@ -883,6 +950,14 @@ def evaluate(args: argparse.Namespace) -> None:
             delta = out["vs_exact"][name]
             line += f" | {name} {value} (delta {delta['exact_delta']} {delta['ci95']})"
         print(line)
+        line = f"{stem}: parent level {out['arm_parent_level']['pooled']}"
+        for name, value in out["references_parent_level"].items():
+            delta = out["vs_exact"][name]
+            line += (
+                f" | {name} {value} (delta {delta['parent_level_delta']}"
+                f" {delta['parent_level_ci95']})"
+            )
+        print(line)
 
 
 def main() -> None:
@@ -892,6 +967,21 @@ def main() -> None:
     fit.set_defaults(func=train)
     fit.add_argument("--arm", required=True)
     fit.add_argument("--init", default="cribl", help="cribl | fresh | <adapter checkpoint dir>")
+    fit.add_argument(
+        "--base",
+        choices=sorted(BASES),
+        default=DEFAULT_BASE,
+        help="the base model (decision_model.BASES); Cribl's adapter needs the default",
+    )
+    fit.add_argument("--lora-r", type=int, default=LORA_R, help="LoRA rank (--init fresh)")
+    fit.add_argument("--lora-alpha", type=int, help="LoRA alpha (default 2 x rank)")
+    fit.add_argument(
+        "--selection",
+        choices=SELECTION_RULES,
+        default="legacy",
+        help="legacy: family top-1, or exact top-1 on the --exact-selection splits; parent: the "
+        "answered technique's parent-level accuracy on every dev file",
+    )
     fit.add_argument("--catalog", type=Path, default=AUDITS / "catalog.json")
     fit.add_argument("--cases-dir", type=Path, default=AUDITS)
     fit.add_argument("--train-files", nargs="+", default=list(TRAIN_FILES))
@@ -961,7 +1051,7 @@ def main() -> None:
     score.set_defaults(func=evaluate)
     score.add_argument("--checkpoint", type=Path, required=True)
     score.add_argument("--name", required=True)
-    score.add_argument("--split", required=True, choices=SPLITS)
+    score.add_argument("--split", required=True, choices=EVAL_SPLITS)
     score.add_argument("--cases-dir", type=Path, default=AUDITS)
     score.add_argument("--compare", nargs="*", default=[], help="NAME=<C1 predictions .jsonl>")
     score.add_argument("--batch", type=int, default=16)

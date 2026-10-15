@@ -8,9 +8,11 @@ of the option letters `` A`` … , softmaxed over the offered options only.
 
 from __future__ import annotations
 
+import json
 import os
 import time
 from collections.abc import Callable, Mapping, Sequence
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -20,11 +22,24 @@ from peft import LoraConfig, PeftModel, get_peft_model, get_peft_model_state_dic
 from safetensors.torch import load_file
 from transformers import AutoModelForImageTextToText, AutoTokenizer, BitsAndBytesConfig
 
-BASE_ID = "Qwen/Qwen3.5-4B-Base"
-BASE_REVISION = "1001bb4d826a52d1f399e183466143f4da7b741b"
 ADAPTER_ID = "cribl-ai/cribl-decision-1.0"
 ADAPTER_REVISION = "75cb0dd9d551e774664c01ba8f7b25c0087b4abf"
 CACHE_DIR = Path(os.environ.get("CRIBL_HF_CACHE", "/home/fzagar/apt_classifier/.huggingface"))
+
+
+@dataclass(frozen=True)
+class BaseSpec:
+    """A base model the heads can sit on: the pinned checkpoint, the LoRA target modules, the
+    modules kept out of 4-bit quantisation and the chat format of the family prompt
+    (``common.render_family_prompt``)."""
+
+    repo: str
+    revision: str
+    target_modules: str
+    skip_modules: tuple[str, ...]
+    prompt_template: str
+
+
 # Cribl's adapter shape (adapter_config.json): every language-model layer's linear-attention
 # projections and full-attention q/k/v/o; nothing in the vision tower or the MTP head.
 TARGET_MODULES = (
@@ -32,7 +47,42 @@ TARGET_MODULES = (
     r"(linear_attn\.(in_proj_qkv|in_proj_z|in_proj_a|in_proj_b|out_proj)"
     r"|self_attn\.(q_proj|k_proj|v_proj|o_proj))"
 )
-LORA_SHAPE = {"r": 16, "lora_alpha": 32, "lora_dropout": 0.05, "bias": "none"}
+BASES = {
+    "qwen3.5-4b-base": BaseSpec(
+        "Qwen/Qwen3.5-4B-Base",
+        "1001bb4d826a52d1f399e183466143f4da7b741b",
+        TARGET_MODULES,
+        ("lm_head", "visual", "mtp"),
+        "qwen",
+    ),
+    # Gemma 4 E4B (prereg cribl_recipe_base_2026-10-15.json): every text layer's attention
+    # projections (k/v only where the layer has its own; the kv-shared layers have none).
+    "gemma-4-e4b": BaseSpec(
+        "google/gemma-4-E4B",
+        "411aa17b749aa952df1359d2dcea73917a544d9a",
+        r".*language_model\.layers\.\d+\.self_attn\.(q_proj|k_proj|v_proj|o_proj)",
+        ("lm_head", "vision_tower", "audio_tower", "embed_vision", "embed_audio"),
+        "gemma",
+    ),
+}
+DEFAULT_BASE = "qwen3.5-4b-base"
+BASE_ID = BASES[DEFAULT_BASE].repo
+BASE_REVISION = BASES[DEFAULT_BASE].revision
+LORA_R = 16
+LORA_SHAPE = {"r": LORA_R, "lora_alpha": 2 * LORA_R, "lora_dropout": 0.05, "bias": "none"}
+
+
+def base_spec(base: str) -> BaseSpec:
+    if base not in BASES:
+        raise ValueError(f"unknown base {base!r} (one of {sorted(BASES)})")
+    return BASES[base]
+
+
+def lora_shape(r: int = LORA_R, alpha: int | None = None) -> dict[str, Any]:
+    """Cribl's LoRA shape at rank ``r`` (alpha defaults to 2r, Cribl's ratio)."""
+    if r < 1:
+        raise ValueError("LoRA rank must be positive")
+    return {**LORA_SHAPE, "r": int(r), "lora_alpha": int(2 * r if alpha is None else alpha)}
 
 
 OOM_WAIT_S = 60
@@ -74,26 +124,28 @@ def require_cuda() -> torch.device:
     return torch.device("cuda")
 
 
-def load_tokenizer() -> Any:
+def load_tokenizer(base: str = DEFAULT_BASE) -> Any:
+    spec = base_spec(base)
     tokenizer = AutoTokenizer.from_pretrained(
-        BASE_ID, revision=BASE_REVISION, cache_dir=CACHE_DIR, trust_remote_code=False
+        spec.repo, revision=spec.revision, cache_dir=CACHE_DIR, trust_remote_code=False
     )
     tokenizer.padding_side = "left"
     return tokenizer
 
 
-def load_base(*, gradient_checkpointing: bool = False) -> Any:
+def load_base(*, gradient_checkpointing: bool = False, base: str = DEFAULT_BASE) -> Any:
     require_cuda()
+    spec = base_spec(base)
     quantization = BitsAndBytesConfig(
         load_in_4bit=True,
         bnb_4bit_quant_type="nf4",
         bnb_4bit_use_double_quant=True,
         bnb_4bit_compute_dtype=torch.bfloat16,
-        llm_int8_skip_modules=["lm_head", "visual", "mtp"],
+        llm_int8_skip_modules=list(spec.skip_modules),
     )
     model = AutoModelForImageTextToText.from_pretrained(
-        BASE_ID,
-        revision=BASE_REVISION,
+        spec.repo,
+        revision=spec.revision,
         cache_dir=CACHE_DIR,
         quantization_config=quantization,
         dtype=torch.bfloat16,
@@ -138,29 +190,58 @@ def verify_adapter(model: Any, adapter_dir: Path) -> dict[str, Any]:
 
 
 def load_model(
-    adapter: str | None = "cribl", *, trainable: bool = False
+    adapter: str | None = "cribl",
+    *,
+    trainable: bool = False,
+    base: str = DEFAULT_BASE,
+    lora_r: int = LORA_R,
+    lora_alpha: int | None = None,
 ) -> tuple[Any, Any, dict[str, Any]]:
-    """``adapter``: ``cribl`` (published), ``none`` (plain base), ``fresh`` (new LoRA with Cribl's
-    shape, for training) or a checkpoint directory. Returns (model, tokenizer, info)."""
-    tokenizer = load_tokenizer()
-    model = load_base(gradient_checkpointing=trainable)
-    info: dict[str, Any] = {"base": f"{BASE_ID}@{BASE_REVISION}", "adapter": adapter}
+    """``adapter``: ``cribl`` (published, Qwen only), ``none`` (plain base), ``fresh`` (new LoRA
+    of Cribl's shape at ``lora_r``, for training) or a checkpoint directory. ``base`` names the
+    base model (``BASES``). Returns (model, tokenizer, info)."""
+    spec = base_spec(base)
+    if adapter == "cribl" and base != DEFAULT_BASE:
+        raise ValueError(f"Cribl's adapter fits {DEFAULT_BASE} only; use --init fresh on {base}")
+    tokenizer = load_tokenizer(base)
+    model = load_base(gradient_checkpointing=trainable, base=base)
+    info: dict[str, Any] = {
+        "base": f"{spec.repo}@{spec.revision}",
+        "base_key": base,
+        "prompt_template": spec.prompt_template,
+        "adapter": adapter,
+    }
     if adapter in (None, "none"):
         model.eval()
         return model, tokenizer, info
     if adapter == "fresh":
-        config = LoraConfig(target_modules=TARGET_MODULES, task_type="CAUSAL_LM", **LORA_SHAPE)
+        shape = lora_shape(lora_r, lora_alpha)
+        config = LoraConfig(target_modules=spec.target_modules, task_type="CAUSAL_LM", **shape)
         model = get_peft_model(model, config)
+        info["lora"] = {"r": shape["r"], "alpha": shape["lora_alpha"]}
     else:
         directory = cribl_adapter_dir() if adapter == "cribl" else Path(adapter)
+        saved_base = _adapter_base(directory)
+        if saved_base and saved_base != spec.repo:
+            raise ValueError(f"adapter {directory} was trained on {saved_base}, not {spec.repo}")
         model = PeftModel.from_pretrained(model, str(directory), is_trainable=trainable)
         info["adapter_dir"] = str(directory)
         info["adapter_check"] = verify_adapter(model, directory)
+        peft_config = model.peft_config["default"]
+        info["lora"] = {"r": int(peft_config.r), "alpha": int(peft_config.lora_alpha)}
         if adapter == "cribl":
             info["adapter"] = f"{ADAPTER_ID}@{ADAPTER_REVISION}"
     info["trainable_parameters"] = sum(p.numel() for p in model.parameters() if p.requires_grad)
     model.train(trainable)
     return model, tokenizer, info
+
+
+def _adapter_base(directory: Path) -> str | None:
+    """The base model an adapter directory records (``adapter_config.json``), if any."""
+    path = directory / "adapter_config.json"
+    if not path.is_file():
+        return None
+    return json.loads(path.read_text(encoding="utf-8")).get("base_model_name_or_path") or None
 
 
 class Readout:

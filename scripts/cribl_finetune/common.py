@@ -207,9 +207,14 @@ FAMILY_INSTRUCTIONS = (
 )
 
 
-def render_family_prompt(state: Mapping[str, Any]) -> str:
+PROMPT_TEMPLATES = ("qwen", "gemma")
+
+
+def render_family_prompt(state: Mapping[str, Any], template: str = "qwen") -> str:
     """The chat prompt of the family question: the state and the question, no options; its last
-    position (after ``Answer:``) is the decision slot read by the family head."""
+    position (after ``Answer:``) is the decision slot read by the family head. ``template`` is
+    the base model's chat format (``qwen``: Qwen3.5 with an empty think block; ``gemma``: Gemma's
+    turn markers); the body is the same."""
     body = "\n".join(
         [
             "State:",
@@ -220,10 +225,14 @@ def render_family_prompt(state: Mapping[str, Any]) -> str:
             "Reply with the technique.",
         ]
     )
-    return (
-        f"<|im_start|>user\n{body}<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n"
-        f"{ANSWER_CUE}"
-    )
+    if template == "qwen":
+        return (
+            f"<|im_start|>user\n{body}<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n"
+            f"{ANSWER_CUE}"
+        )
+    if template == "gemma":
+        return f"<bos><start_of_turn>user\n{body}<end_of_turn>\n<start_of_turn>model\n{ANSWER_CUE}"
+    raise ValueError(f"unknown prompt template {template!r} (one of {PROMPT_TEMPLATES})")
 
 
 def family_targets(gold: Iterable[str], families: Sequence[str]) -> list[int]:

@@ -4,8 +4,10 @@
 CTI-Rationale (Hugging Face ``EbruResul/CTI-Rationale``, gated; annotations CC BY 4.0, paragraph text
 the publishers') labels 1,394 paragraphs of 100 public reports from 8 publishers with ATT&CK v18.1
 techniques: two analysts each, adjudicated gold rows. A paragraph's labels are the techniques of its
-gold rows. The dataset's report split is kept: train and validation reports become training rows,
-test reports a held-out paragraph test set (about one in six labelled with two or more families).
+gold rows. The dataset's report split is kept: train reports become training rows, validation
+reports a checkpoint-selection set (``cases_cti_rationale_validation.jsonl``; with
+``--merge-validation`` they join the training rows instead, E3's data) and test reports a held-out
+paragraph test set (about one in six labelled with two or more families).
 
   download (the owner accepts the gate and runs ``hf auth login`` first):
     hf download EbruResul/CTI-Rationale cti_rationale_gold_v2.jsonl report_split.csv LICENSE \\
@@ -99,7 +101,7 @@ def case(record: Mapping[str, Any], gold: Sequence[str], split: str) -> dict[str
     }
 
 
-def build(raw: Path = RAW) -> None:
+def build(raw: Path = RAW, merge_validation: bool = False) -> None:
     from clean_cases import broken_reason
     from common import read_jsonl, write_jsonl
     from export_attack_procedures import HELD_OUT, drop_overlaps
@@ -133,10 +135,14 @@ def build(raw: Path = RAW) -> None:
         elif report_id in ATTRIBUTED:
             excluded[report_id] = [ATTRIBUTED[report_id]]
 
-    parts: dict[str, list[dict[str, Any]]] = {"train": [], "test": []}
-    drops: dict[str, Counter] = {"train": Counter(), "test": Counter()}
+    train_reports = TRAIN_REPORTS if merge_validation else ("train",)
+    parts: dict[str, list[dict[str, Any]]] = {"train": [], "validation": [], "test": []}
+    drops: dict[str, Counter] = {part: Counter() for part in parts}
     for record in records:
-        part = "train" if report_split[record["report_id"]] in TRAIN_REPORTS else "test"
+        split = report_split[record["report_id"]]
+        part = (
+            "train" if split in train_reports else "validation" if split == "validation" else "test"
+        )
         gold = resolve_ids(record["ids"], revoked, families)
         if record["report_id"] in excluded:
             drops[part]["cti_hal_group_report"] += 1
@@ -165,30 +171,38 @@ def build(raw: Path = RAW) -> None:
         parts[part] = rows
     parts["train"], repeats = drop_near_duplicates(parts["train"], training)
     overlaps["train"]["repeats_existing_training"] = repeats["held_out_duplicates"]
+    # validation (a selection set) and test may not overlap any training text either
     seen = training + [row["text"] for row in parts["train"]]
-    rows, near = drop_near_duplicates(parts["test"], seen)
-    parts["test"], contained = drop_overlaps(rows, seen)
-    overlaps["test"]["overlaps_training"] = near["held_out_duplicates"] + sum(contained.values())
+    for part in ("validation", "test"):
+        rows, near = drop_near_duplicates(parts[part], seen)
+        parts[part], contained = drop_overlaps(rows, seen)
+        overlaps[part]["overlaps_training"] = near["held_out_duplicates"] + sum(contained.values())
+
+    def part_of(split: str) -> str:
+        return (
+            "train" if split in train_reports else "validation" if split == "validation" else "test"
+        )
 
     manifest_path = OUT / "cases_manifest.json"
     manifest = (
         json.loads(manifest_path.read_text(encoding="utf-8")) if manifest_path.exists() else {}
     )
+    manifest.setdefault("splits", {}).pop("cti_rationale_validation", None)
     for part, rows in parts.items():
         path = OUT / f"cases_cti_rationale_{part}.jsonl"
+        if part == "validation" and merge_validation:
+            path.unlink(missing_ok=True)
+            continue
         write_jsonl(path, rows)
         several = sum(len({item.split(".")[0] for item in row["gold_ids"]}) > 1 for row in rows)
         info = {
             "source": "huggingface.co/datasets/EbruResul/CTI-Rationale (gold v2; annotations "
             "CC BY 4.0, paragraph text the publishers')",
             "attack_version": kb.version,
-            "reports": sorted(
-                {r for r, s in report_split.items() if (s in TRAIN_REPORTS) == (part == "train")}
-            ),
+            "validation_merged_into_train": merge_validation,
+            "reports": sorted(r for r, s in report_split.items() if part_of(s) == part),
             "excluded_reports": {
-                r: h
-                for r, h in excluded.items()
-                if (report_split[r] in TRAIN_REPORTS) == (part == "train")
+                r: h for r, h in excluded.items() if part_of(report_split[r]) == part
             },
             "excluded_groups": cti_hal_groups,
             "drops": dict(sorted(drops[part].items())),
@@ -212,8 +226,14 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__.split("\n", 1)[0])
     parser.add_argument("command", choices=("build",))
     parser.add_argument("--raw", type=Path, default=RAW)
+    parser.add_argument(
+        "--merge-validation",
+        action="store_true",
+        help="the validation reports join the training rows (E3's data) instead of forming "
+        "cases_cti_rationale_validation.jsonl, a checkpoint-selection set",
+    )
     args = parser.parse_args()
-    build(args.raw)
+    build(args.raw, merge_validation=args.merge_validation)
 
 
 if __name__ == "__main__":
