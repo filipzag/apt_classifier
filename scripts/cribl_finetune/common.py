@@ -213,7 +213,11 @@ GROUP_INSTRUCTIONS = (
     "Which MITRE ATT&CK threat group's documented behaviour do these observed techniques match? "
     f"{UNTRUSTED_NOTE}"
 )
-TASKS = ("technique", "group")
+ACTOR_INSTRUCTIONS = (
+    "Which MITRE ATT&CK threat group's documented behaviour does this report sentence describe? "
+    f"Actor and operation names have been replaced. {UNTRUSTED_NOTE}"
+)
+TASKS = ("technique", "group", "actor")
 
 
 def group_state(techniques_text: str) -> dict[str, str]:
@@ -231,11 +235,14 @@ def render_family_prompt(
     position (after ``Answer:``) is the decision slot read by the family head. ``template`` is
     the base model's chat format (``qwen``: Qwen3.5 with an empty think block; ``gemma``: Gemma's
     turn markers; ``llama3``: Llama 3 headers); the body is the same. ``task`` ``group`` asks for
-    the threat group behind a list of extracted techniques instead (the group head)."""
+    the threat group behind a list of extracted techniques instead (the group head); ``actor`` asks
+    for the group behind one report sentence (the actor head)."""
     if task not in TASKS:
         raise ValueError(f"unknown task {task!r} (one of {TASKS})")
-    question = GROUP_INSTRUCTIONS if task == "group" else FAMILY_INSTRUCTIONS
-    answer = "group" if task == "group" else "technique"
+    question = {"group": GROUP_INSTRUCTIONS, "actor": ACTOR_INSTRUCTIONS}.get(
+        task, FAMILY_INSTRUCTIONS
+    )
+    answer = "technique" if task == "technique" else "group"
     body = "\n".join(
         [
             "State:",

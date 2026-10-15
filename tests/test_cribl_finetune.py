@@ -674,7 +674,7 @@ def test_group_prompt_and_state():
     assert GROUP_INSTRUCTIONS in prompt and prompt.endswith(ANSWER_CUE)
     assert "Reply with the group." in prompt and "T1105 Ingress Tool Transfer" in prompt
     with pytest.raises(ValueError):
-        render_family_prompt(state, "qwen", "actor")
+        render_family_prompt(state, "qwen", "malware")
 
 
 def test_group_cases_draw_and_text():
@@ -779,3 +779,54 @@ def test_group_mlp_noise_measure_and_draw_params():
         }
     )
     assert params == {"size_min": 4, "size_max": 15, "precision_min": 0.3, "precision_max": 0.8}
+
+
+def test_actor_prompt_and_report_aggregation():
+    from scripts.cribl_finetune.common import ACTOR_INSTRUCTIONS, c1_state, render_family_prompt
+    from scripts.cribl_finetune.export_actor_cases import dev_subsample, training_rows
+    from scripts.cribl_finetune.group_text_eval import aggregate_reports
+
+    prompt = render_family_prompt(c1_state("The adversary used PowerShell."), "qwen", "actor")
+    assert ACTOR_INSTRUCTIONS in prompt and "Reply with the group." in prompt
+    records = [
+        {
+            "text": "the adversary used PowerShell",
+            "groups": ["G0001"],
+            "source": "group",
+            "owner": "G0001",
+        },
+        {
+            "text": "shared tool text",
+            "groups": ["G0001", "G0002", "G0003", "G0004"],
+            "source": "software",
+            "owner": "S1",
+        },
+        {"text": "unlisted group text", "groups": ["G0009"], "source": "group", "owner": "G0009"},
+        {"text": "two groups", "groups": ["G0001", "G0002"], "source": "campaign", "owner": "C1"},
+    ]
+    rows = training_rows(records, {"G0001", "G0002", "G0003"})
+    assert [row["gold_ids"] for row in rows] == [["G0001"], ["G0001", "G0002"]]
+    statements = [
+        {"case_id": f"v-r{r}-{i}", "report_id": f"r{r}", "gold_ids": ["G0001"]}
+        for r in (1, 2)
+        for i in range(4)
+    ]
+    dev = dev_subsample(statements, 2, 1)
+    assert len(dev) == 4 and {row["report_id"] for row in dev} == {"r1", "r2"}
+    cases = [
+        {"case_id": "a", "report_id": "r1", "gold_ids": ["G0002"]},
+        {"case_id": "b", "report_id": "r1", "gold_ids": ["G0002"]},
+        {"case_id": "c", "report_id": "r2", "gold_ids": ["G0001"]},
+    ]
+    predictions = [
+        {"case_id": "a", "status": "ok", "top": [["G0001", 0.6], ["G0002", 0.4]]},
+        {"case_id": "b", "status": "ok", "top": [["G0002", 0.9]]},
+        {"case_id": "c", "status": "error"},
+    ]
+    out = aggregate_reports(cases, predictions, ["G0001", "G0002", "G0003"])
+    assert len(out) == 1 and out[0]["case_id"] == "r1"
+    assert (
+        out[0]["pick"] == "G0002"
+        and out[0]["top"][0] == ["G0002", 0.65]
+        and out[0]["gold_rank"] == 1
+    )

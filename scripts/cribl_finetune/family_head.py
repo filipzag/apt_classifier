@@ -110,6 +110,11 @@ SPLITS = (
     "group_cti_hal_extracted",
     "group_cti_hal_accepted",
     "group_elastic",
+    # the actor head's sets (export_actor_cases.py): anonymised report statements per report
+    "actor_vendor",
+    "actor_vendor_dev",
+    "actor_cti_hal",
+    "actor_elastic",
 )
 # every split also has a parent-relabelled copy (relabel_parents.py: cases_<split>_parents.jsonl)
 EVAL_SPLITS = (*SPLITS, *(f"{split}_parents" for split in SPLITS))
@@ -165,7 +170,8 @@ class Encoder:
         self.tokenizer = tokenizer
         self.max_tokens = max_tokens
         self.template = template  # the base model's chat format (decision_model.BaseSpec)
-        self.task = task  # technique (a sentence) or group (a technique list), common.TASKS
+        # technique or actor (a sentence), group (a technique list): common.TASKS
+        self.task = task
         # the first GPU parameter (a lookup table may live on the CPU on a small GPU)
         self.device = next(p.device for p in model.parameters() if p.device.type == "cuda")
 
@@ -924,6 +930,8 @@ def evaluate(args: argparse.Namespace) -> None:
     for item in args.compare:
         name, _, path = item.partition("=")
         compare[name] = Path(path) if Path(path).is_absolute() else AUDITS / path
+    global TOP_KEPT
+    TOP_KEPT = int(args.top_kept)  # families kept per row (the actor head aggregates over them)
     model, encoder, head, info = load_checkpoint(args.checkpoint)
     families = info["families"]
     techniques = load_techniques(args.checkpoint, encoder.device)
@@ -1084,6 +1092,9 @@ def main() -> None:
     score.add_argument("--cases-dir", type=Path, default=AUDITS)
     score.add_argument("--compare", nargs="*", default=[], help="NAME=<C1 predictions .jsonl>")
     score.add_argument("--batch", type=int, default=16)
+    score.add_argument(
+        "--top-kept", type=int, default=TOP_KEPT, help="families and techniques kept per row"
+    )
     args = parser.parse_args()
     args.func(args)
 

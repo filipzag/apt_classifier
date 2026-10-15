@@ -1,0 +1,42 @@
+{
+  "schema": "cribl_finetune_prereg/1",
+  "id": "cribl_actor_head_2026-10-16",
+  "title": "An actor head: the threat group from a report's sentences (T1, Qwen3.5-4B-Base), trained on ATT&CK's anonymised per-group texts",
+  "registered": "2026-10-16",
+  "parent": "docs/preregistration/cribl_group_head_2026-10-15.json and cribl_group_mlp_refit_2026-10-16.json (group prediction from technique lists: 2-18% top-1 for every model; docs 21.3.18); the free-text group study (docs 21.3.16, TF-IDF over the same corpus)",
+  "question": "Reading each statement of a report with actor and operation names removed, and averaging its group probabilities over the report, does a base LLM with a fresh LoRA and a cosine head over the ATT&CK groups name the right group more often than the product's TF-IDF text-group model on the same anonymised statements?",
+  "motivation": "Owner's choice (2026-10-16) after technique-list inputs capped at 13-18%: the group signal is in how a technique is done, not which. ATT&CK documents that per group in procedure sentences; the TF-IDF study showed those texts carry group identity (0 wrong names). This is the LLM reading of the same texts.",
+  "harness": "export_actor_cases.py (corpus via apt_classifier.text_group.build_corpus, statement sets, overlap filters), family_head.py --task actor over group_catalog.json (unchanged head code; evaluate --top-kept 160), group_text_eval.py (per-report mean-probability aggregation; TF-IDF baseline), parent_rescore.py (paired comparison), runpod/remote_sweep.sh with TRAIN_ARGS",
+  "model": {
+    "catalogue": "the 153 ATT&CK 19.2 groups with 5+ documented techniques; head rows start from the base's state of 'Name (Gxxxx): description'",
+    "input": "one report sentence, ATT&CK group names and aliases replaced by 'the adversary' and campaign names by 'the operation' (the text-group corpus's patterns); software names are kept, as in the CTI-HAL headline benchmark",
+    "recipe": "Qwen3.5-4B-Base, fresh LoRA r 16, LoRA lr 1e-4, head lr 1e-3, 16 per step, 2 epochs, a checkpoint every half epoch, seed 7, softmax over gold groups (uniform over 2-3 groups for shared software or campaign texts); RunPod secure RTX 4090, ~35 min, ~$0.60",
+    "aggregation": "a report's score for a group = mean of the group's probability over the report's statements (the 160 kept per statement; absent = 0); reported too: statement-level top-1"
+  },
+  "data": {
+    "training": "ATT&CK's per-group texts from build_corpus with the raw STIX bundle: group procedure examples and description sentences, single-group software and campaign procedure examples (records with 1-3 listed groups); minus texts that are near copies of, contain, or share a 10-token run with any CTI-HAL, Elastic or vendor statement (counts in cases_manifest.json['actor'])",
+    "selection": "cases_actor_vendor_dev: up to 25 anonymised statements per vendor report (34 reports); selection = statement-level group top-1 (the family-head rule); the earlier checkpoint on ties",
+    "test": "CTI-HAL: 55 reports, 968 statements (headline); Elastic: 8 attributed reports, ~850 statements; both scored on the laptop; the full vendor set (3,821 statements) as report-level dev",
+    "leakage_note": "ATT&CK cites some CTI-HAL, Elastic and vendor reports; the overlap filter removes the paraphrased sentences it can find, as the technique heads' filter did (the TF-IDF baseline was fitted on the unfiltered corpus, so it is the one with the exposure)"
+  },
+  "success": {
+    "headline": "CTI-HAL, report level: group top-1 over the 153 groups, T1 minus the TF-IDF text-group model on the same anonymised statements, paired 95% CI (1000 samples, seed 7) lower bound above 0",
+    "secondary": [
+      "the same against the group network on E2's extracted techniques (MLP_group_cti_hal_extracted, 0.127)",
+      "top-3, top-5 and MRR on CTI-HAL against both baselines",
+      "Elastic (8 reports): top-1 / top-5 with counts, against TF-IDF",
+      "vendor reports (dev, report level): top-1 / MRR against TF-IDF"
+    ],
+    "reported": "statement-level accuracy; per-group counts on CTI-HAL; the product's attribution stage's 0.455 (techniques + software) for context, not compared; every checkpoint's dev score"
+  },
+  "limitation": "55 reports: a paired interval is about +/-12 points; the 6 test groups are well documented in ATT&CK, which favours every model equally; the training texts are ATT&CK's paraphrases of vendor reports, not reports",
+  "stop_rules": [
+    "a checkpoint does not reload",
+    "the loss is not finite",
+    "more than 1% of a split's cases end in error",
+    "an actor name left in any case text (checked with the corpus's own pattern)"
+  ],
+  "confirmation_runs": "the selected checkpoint once on CTI-HAL, Elastic and the vendor set; the TF-IDF baseline once on each; nothing chosen, refit or rerun because of a result",
+  "adoption": "none: an experiment; the attribution stage is unchanged",
+  "informed_by": "the group-head and refit results, the free-text study; a laptop pilot (mechanics only). No actor head exists."
+}
