@@ -1,0 +1,30 @@
+{
+  "schema": "cribl_finetune_prereg/1",
+  "id": "cribl_group_mlp_refit_2026-10-16",
+  "title": "Refit of the product's group network for extracted-technique inputs: measured extraction noise and real vendor reports",
+  "registered": "2026-10-16",
+  "parent": "docs/preregistration/cribl_group_head_2026-10-15.json (the group head lost to this network; docs 21.3.18) and the network's own fit (docs 21.3.9/21.3.11, make fit-mlp)",
+  "question": "Does the group network name the right group more often from the techniques the reference technique model extracts when (1) its synthetic training draws match the measured size and precision of that extraction and (2) the 34 vendor reports, with the techniques extracted from them, are added as real cases?",
+  "motivation": "Owner's request (2026-10-16). The network is trained on hand-set draws (3-20 true techniques, 40-95% precision); the extractor's real output differs in size and precision. Training it on CTI-HAL itself (cti_hal_split_eval.py, 2026-10) looked like +14 points but was mostly the closed-set shortcut, and such a model can never be shipped; the vendor reports (34 groups, one report each) carry no such shortcut for the 6 CTI-HAL groups.",
+  "harness": "scripts/cribl_finetune/refit_group_mlp.py (measure, fit); apt_classifier.group_mlp.fit_group_mlp through its existing options (size_min/size_max, precision_min/precision_max, real_weight, real_cases); group_baseline.ranked_row; cases_group_*.jsonl from export_group_cases.py",
+  "noise_measurement": "on the 85 CTI-Rationale train and validation reports (labelled paragraphs, not a test set here): per report the extracted set's size, precision at exact and parent level, recall, and the false-positive kinds (granularity, sibling, other); the draw parameters are the extracted-size 10th-90th percentiles scaled by the median parent-level precision (true-technique count) and that precision's 10th-90th band; recorded in group_mlp_noise.json before any fit is judged",
+  "grid": "draws: current (3-20, 0.40-0.95) and measured; real_weight: 0, 3, 10, 30 (real cases = the 34 vendor reports, techniques only); everything else the network's defaults (software_rate 0.7, prominence prior 2, 20 epochs, seed 7); 8 fits, about 40 s each on the laptop GPU",
+  "selection": "the 20 single-group ATT&CK campaigns with their documented techniques, software block empty: MRR (ties: the earlier trial); the current artifact scored on the same set for reference",
+  "success": {
+    "headline": "CTI-HAL, the techniques extracted by E2 (55 reports, techniques only, software block empty): group top-1 over the network's 171 groups, chosen refit minus the current artifact, paired 95% CI (1000 samples, seed 7) lower bound above 0",
+    "secondary": [
+      "the same on the gold techniques and on the pipeline's accepted techniques (54), and top-5 on all three",
+      "Elastic (6 reports): top-1 and top-5, reported with counts",
+      "the selected trial's campaigns MRR against the current artifact's (no loss beyond -0.02)"
+    ],
+    "reported": "every trial's dev score; the measured noise; per-group counts; MRR on every set"
+  },
+  "limitation": "55 test reports: a paired interval is about +/-12 points; one epoch budget per trial as the product fit; the vendor reports are 34 groups with one report each, so their effect on the 6 CTI-HAL groups is indirect",
+  "stop_rules": [
+    "a fit fails or its artifact does not reload",
+    "the chosen trial loses more than 0.02 MRR on the campaigns against the current artifact"
+  ],
+  "confirmation_runs": "the chosen trial once on the four test inputs; nothing refit because of a test result",
+  "adoption": "none: the model is written to a new file (group_mlp_extracted.npz); the product keeps data/models/mlp/group_mlp.npz at weight 0; adopting any group network still needs the attribution naming gate (docs 21.3.15)",
+  "informed_by": "the group-head runs and baselines of 2026-10-15 (the current artifact: extracted 0.127, gold 0.182, accepted 0.111 top-1); cti_hal_split_eval.py (2026-10). No refit exists."
+}

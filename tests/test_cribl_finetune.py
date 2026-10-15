@@ -741,3 +741,41 @@ def test_group_baseline_rows_rank_by_score():
     profiles = {"G0001": frozenset({"T1059", "T1105"}), "G0002": frozenset({"T1003", "T1003.001"})}
     scores = jaccard_scores(["T1003.001"], profiles, {"T1003.001": "T1003"})
     assert scores["G0002"] == 1.0 and scores["G0001"] == 0.0
+
+
+def test_group_mlp_noise_measure_and_draw_params():
+    from scripts.cribl_finetune.refit_group_mlp import (
+        draw_params,
+        false_positive_kind,
+        measure_noise,
+        report_sets,
+    )
+
+    cases = [
+        {"case_id": "cti_rationale-r1-P1", "gold_ids": ["T1059.001", "T1105"]},
+        {"case_id": "cti_rationale-r1-P2", "gold_ids": ["T1566"]},
+        {"case_id": "cti_rationale-r2-P1", "gold_ids": ["T1003"]},
+    ]
+    predictions = [
+        {"case_id": "cti_rationale-r1-P1", "status": "ok", "technique_pick": "T1059"},
+        {"case_id": "cti_rationale-r1-P2", "status": "ok", "technique_pick": "T1566.001"},
+        {"case_id": "cti_rationale-r2-P1", "status": "error"},
+    ]
+    sets = report_sets(cases, predictions)
+    assert sets["r1"] == ({"T1059.001", "T1105", "T1566"}, {"T1059", "T1566.001"})
+    assert sets["r2"] == ({"T1003"}, set())
+    gold = {"T1059.001", "T1105", "T1566"}
+    assert false_positive_kind("T1059", gold) == "granularity"
+    assert false_positive_kind("T1566.001", gold) == "granularity"
+    assert false_positive_kind("T1059.003", gold) == "sibling"
+    assert false_positive_kind("T1003", gold) == "other"
+    noise = measure_noise(sets)
+    assert noise["reports"] == 1 and noise["precision_exact"]["median"] == 0.0
+    assert noise["precision_parent"]["median"] == 1.0
+    params = draw_params(
+        {
+            "extracted_size": {"q10": 8, "q90": 30},
+            "precision_parent": {"median": 0.5, "q10": 0.3, "q90": 0.8},
+        }
+    )
+    assert params == {"size_min": 4, "size_max": 15, "precision_min": 0.3, "precision_max": 0.8}
