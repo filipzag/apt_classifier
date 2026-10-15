@@ -22,6 +22,7 @@ from peft import LoraConfig, PeftModel, get_peft_model, get_peft_model_state_dic
 from safetensors.torch import load_file
 from transformers import (
     AutoConfig,
+    AutoModelForCausalLM,
     AutoModelForImageTextToText,
     AutoTokenizer,
     BitsAndBytesConfig,
@@ -43,6 +44,9 @@ class BaseSpec:
     target_modules: str
     skip_modules: tuple[str, ...]
     prompt_template: str
+    # the auto class that loads the checkpoint: multimodal bases through image-text-to-text,
+    # text-only ones (Llama) through causal LM; both expose ``.model`` as the backbone
+    loader: str = "image_text_to_text"
     # modules kept in system RAM on a small GPU (under ``SMALL_GPU_GIB``): lookup tables that
     # 4-bit loading does not shrink (Gemma 4's per-layer embedding table, 5.2 GB in bf16)
     cpu_modules: tuple[str, ...] = ()
@@ -75,6 +79,16 @@ BASES = {
         ("lm_head", "vision_tower", "audio_tower", "embed_vision", "embed_audio"),
         "gemma",
         ("model.language_model.embed_tokens_per_layer",),
+    ),
+    # Cisco's Foundation-Sec-8B (Llama 3.1 8B continued on 5.1B tokens of security text, Apache
+    # 2.0; prereg cribl_recipe_base_2026-10-15.json amendment 1): every layer's attention projections
+    "foundation-sec-8b": BaseSpec(
+        "fdtn-ai/Foundation-Sec-8B",
+        "9e6bb1f70b402e55bbf68cfd7abf88458daf09b3",
+        r".*layers\.\d+\.self_attn\.(q_proj|k_proj|v_proj|o_proj)",
+        ("lm_head",),
+        "llama3",
+        loader="causal_lm",
     ),
 }
 DEFAULT_BASE = "qwen3.5-4b-base"
@@ -145,6 +159,14 @@ def load_tokenizer(base: str = DEFAULT_BASE) -> Any:
     return tokenizer
 
 
+def auto_class(spec: BaseSpec) -> Any:
+    if spec.loader == "causal_lm":
+        return AutoModelForCausalLM
+    if spec.loader == "image_text_to_text":
+        return AutoModelForImageTextToText
+    raise ValueError(f"unknown loader {spec.loader!r}")
+
+
 def small_gpu() -> bool:
     return torch.cuda.get_device_properties(0).total_memory < SMALL_GPU_GIB * 2**30
 
@@ -156,7 +178,7 @@ def device_map(spec: BaseSpec) -> dict[str, Any]:
         return {"": 0}
     config = AutoConfig.from_pretrained(spec.repo, revision=spec.revision, cache_dir=CACHE_DIR)
     with torch.device("meta"):
-        skeleton = AutoModelForImageTextToText.from_config(config)
+        skeleton = auto_class(spec).from_config(config)
     placement: dict[str, Any] = {}
 
     def walk(module: Any, prefix: str) -> None:
@@ -217,7 +239,7 @@ def load_base(*, gradient_checkpointing: bool = False, base: str = DEFAULT_BASE)
         llm_int8_skip_modules=list(spec.skip_modules),
         llm_int8_enable_fp32_cpu_offload="cpu" in placement.values(),
     )
-    model = AutoModelForImageTextToText.from_pretrained(
+    model = auto_class(spec).from_pretrained(
         spec.repo,
         revision=spec.revision,
         cache_dir=CACHE_DIR,

@@ -629,6 +629,10 @@ def test_family_prompt_templates_share_the_body():
     assert gemma.endswith(f"<end_of_turn>\n<start_of_turn>model\n{ANSWER_CUE}")
     body = qwen.split("<|im_start|>user\n", 1)[1].split("<|im_end|>", 1)[0]
     assert body in gemma and "The actor ran PowerShell." in body
+    llama = render_family_prompt(state, "llama3")
+    assert llama.startswith("<|begin_of_text|><|start_header_id|>user<|end_header_id|>\n\n")
+    assert llama.endswith(f"<|start_header_id|>assistant<|end_header_id|>\n\n{ANSWER_CUE}")
+    assert body in llama
     with pytest.raises(ValueError):
         render_family_prompt(state, "llama")
 
@@ -643,6 +647,12 @@ def test_lora_shape_and_base_registry():
         lora_shape(0)
     assert base_spec(DEFAULT_BASE).prompt_template == "qwen"
     assert base_spec("gemma-4-e4b").prompt_template == "gemma"
-    assert {spec.repo for spec in BASES.values()} == {"Qwen/Qwen3.5-4B-Base", "google/gemma-4-E4B"}
+    assert {spec.repo for spec in BASES.values()} == {
+        "Qwen/Qwen3.5-4B-Base",
+        "google/gemma-4-E4B",
+        "fdtn-ai/Foundation-Sec-8B",
+    }
+    assert base_spec("foundation-sec-8b").loader == "causal_lm"
+    assert base_spec("foundation-sec-8b").prompt_template == "llama3"
     with pytest.raises(ValueError):
         base_spec("llama")

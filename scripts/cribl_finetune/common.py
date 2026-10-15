@@ -207,14 +207,14 @@ FAMILY_INSTRUCTIONS = (
 )
 
 
-PROMPT_TEMPLATES = ("qwen", "gemma")
+PROMPT_TEMPLATES = ("qwen", "gemma", "llama3")
 
 
 def render_family_prompt(state: Mapping[str, Any], template: str = "qwen") -> str:
     """The chat prompt of the family question: the state and the question, no options; its last
     position (after ``Answer:``) is the decision slot read by the family head. ``template`` is
     the base model's chat format (``qwen``: Qwen3.5 with an empty think block; ``gemma``: Gemma's
-    turn markers); the body is the same."""
+    turn markers; ``llama3``: Llama 3 headers); the body is the same."""
     body = "\n".join(
         [
             "State:",
@@ -232,6 +232,11 @@ def render_family_prompt(state: Mapping[str, Any], template: str = "qwen") -> st
         )
     if template == "gemma":
         return f"<bos><start_of_turn>user\n{body}<end_of_turn>\n<start_of_turn>model\n{ANSWER_CUE}"
+    if template == "llama3":
+        return (
+            f"<|begin_of_text|><|start_header_id|>user<|end_header_id|>\n\n{body}<|eot_id|>"
+            f"<|start_header_id|>assistant<|end_header_id|>\n\n{ANSWER_CUE}"
+        )
     raise ValueError(f"unknown prompt template {template!r} (one of {PROMPT_TEMPLATES})")
 
 
