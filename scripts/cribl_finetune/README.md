@@ -261,3 +261,14 @@ cd scripts/cribl_finetune && ../../../.venv-cribl/bin/python family_head.py eval
 Result (docs 21.3.18): both heads (Qwen3.5-4B, Foundation-Sec-8B) name the group first on 2–4% of
 CTI-HAL reports from the extracted techniques, against 12.7% for the product's group network on the
 same input; technique lists are not fingerprints. The attribution stage is unchanged.
+
+### Refitting the group network for extracted inputs (prereg `cribl_group_mlp_refit_2026-10-16.json`)
+
+```bash
+PYTHONPATH=. .venv/bin/python scripts/cribl_finetune/refit_group_mlp.py measure        # E2's extraction noise on CTI-Rationale train+validation -> group_mlp_noise.json
+PYTHONPATH=. .venv/bin/python scripts/cribl_finetune/refit_group_mlp.py fit --save     # 8 fits, selection on the campaigns, test vs the current artifact -> group_mlp_refit.json
+```
+
+Result (docs 21.3.18): the vendor reports as real cases lift the campaigns dev MRR 0.41 → 0.49 but
+not CTI-HAL (top-1 0.127 both; top-5 0.27 → 0.35, n.s.); the measured draws change nothing. The
+chosen model is `data/models/mlp/group_mlp_extracted.npz`; the product's artifact is untouched.

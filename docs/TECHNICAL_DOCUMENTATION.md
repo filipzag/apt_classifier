@@ -5286,6 +5286,40 @@ the extracted list. The product's attribution stage is unchanged.
 **Cost.** Two pods, about $5.05 (A1 175 min, A2 165 min at $0.89/h). The vendor extraction, the
 baselines and all test scoring ran on the laptop. No OpenRouter credit was used.
 
+**Refitting the group network for extracted inputs (2026-10-16, prereg
+`cribl_group_mlp_refit_2026-10-16.json`).** The owner asked whether the network itself can be made
+better. Two changes through the fitter's own options (`refit_group_mlp.py`):
+- **Measured draws.** How E2 actually extracts, measured on the 85 CTI-Rationale train and
+  validation reports: about 10 techniques per report (mean 10.1), precision 0.62 exact and 0.71 at
+  parent level (10th–90th percentile 0.50–1.00), recall 0.50; of the wrong ones 67% are unrelated
+  techniques, 24% a parent or sub-technique of a labelled one, 9% a sibling. The derived draw
+  range is 3–11 true techniques at precision 0.50–1.00 (the hand-set range: 3–20 at 0.40–0.95).
+- **Real cases.** The 34 vendor reports with the techniques E2 names on them, repeated
+  `real_weight` times per draw (0, 3, 10, 30).
+- Grid of 8 fits (~40 s each on the laptop GPU), selected on the 20 single-group ATT&CK campaigns
+  with techniques only (MRR): the vendor reports help on dev (MRR 0.413 → 0.487 at weight 30,
+  top-1 0.30 → 0.40); the measured draws do not (0.411 at weight 0). Selected: current draws with
+  the vendor reports at weight 30, written to `data/models/mlp/group_mlp_extracted.npz` (the
+  product's artifact is untouched).
+
+| Group top-1 (top-5), software block empty | CTI-HAL extracted (55, headline) | CTI-HAL gold (55) | CTI-HAL accepted (54) | Elastic (6) |
+|---|---|---|---|---|
+| current artifact | 0.127 (0.273) | 0.182 (0.364) | 0.111 (0.333) | 0 (0.167) |
+| refit (vendor reports, weight 30) | 0.127 (0.345) | 0.145 (0.309) | 0.130 (0.370) | 0 (0.333) |
+| refit − current, top-1 (paired CI) | +0.000 [−0.091, +0.109] | −0.036 [−0.109, +0.036] | +0.019 [−0.037, +0.074] | 0 |
+
+- **Headline fails:** the same 7 of 55 reports right at top-1. Top-5 rises on the extracted input
+  (+0.073, CI [−0.018, +0.164]) and MRR from 0.224 to 0.232, within noise.
+- The dev gain (ATT&CK campaigns) did not carry to CTI-HAL: the vendor reports cover 34 groups
+  with one report each and none of the 6 test groups' habits.
+
+Reading: the network's limit is its input, not its training. From technique sets alone, 13–18% is
+where three different models (this network, its refit, the LLM heads) land on these reports, and
+the group signal the product uses comes from the named tools. No adoption; the attribution stage is
+unchanged.
+
+**Cost.** None: eight fits and all scoring on the laptop.
+
 ## 22. Failure modes and troubleshooting
 
 ### 22.1 “ATT&CK knowledge base has not been ingested”
