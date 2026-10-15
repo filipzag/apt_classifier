@@ -89,6 +89,9 @@ BASES = {
         ("lm_head",),
         "llama3",
         loader="causal_lm",
+        # on a small GPU the 1 GB token table is looked up on the CPU and the (unused) 1 GB
+        # output head stays there too
+        cpu_modules=("model.embed_tokens", "lm_head"),
     ),
 }
 DEFAULT_BASE = "qwen3.5-4b-base"
@@ -309,6 +312,7 @@ def load_model(
         "adapter": adapter,
     }
     if adapter in (None, "none"):
+        info["modules"] = module_summary(model)
         model.eval()
         return model, tokenizer, info
     if adapter == "fresh":
