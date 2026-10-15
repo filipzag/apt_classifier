@@ -247,3 +247,17 @@ ties E2 (−0.3) from a fresh LoRA. E2 stays the reference.
 Amendment 1, `--base foundation-sec-8b` (Cisco's security-pretrained Llama 3.1 8B, Apache 2.0): −1.2
 on CTI-HAL (n.s.), +1 to +5 on the public, AnnoCTR and CTI-Rationale tests (n.s.). On a small GPU its
 token table and output head stay in RAM; scoring takes 7.0 GB at batch 4.
+
+### Group head: the threat group from extracted technique lists (prereg `cribl_group_head_2026-10-15.json`)
+
+```bash
+PYTHONPATH=. .venv/bin/python scripts/cribl_finetune/export_group_cases.py build   # group_catalog.json + cases_group_*.jsonl (vendor dev needs E2_vendor_statements.jsonl)
+PYTHONPATH=. .venv/bin/python scripts/cribl_finetune/group_baseline.py            # MLP_* and JACCARD_* predictions on the same inputs
+TRAIN_ARGS="--task group --catalog ../../data/audits/cribl_ft/group_catalog.json --train-files cases_group_train.jsonl --dev-files cases_group_campaigns.jsonl cases_group_vendor.jsonl" \
+  SCORE_SPLITS="" COMPARE_WITH="" bash scripts/cribl_finetune/runpod/remote_sweep.sh A1 "--epochs 1 --init fresh --checkpoints-per-epoch 4"
+cd scripts/cribl_finetune && ../../../.venv-cribl/bin/python family_head.py evaluate --checkpoint <dir> --name A1 --split group_cti_hal_extracted --compare MLP=MLP_group_cti_hal_extracted.jsonl
+```
+
+Result (docs 21.3.18): both heads (Qwen3.5-4B, Foundation-Sec-8B) name the group first on 2–4% of
+CTI-HAL reports from the extracted techniques, against 12.7% for the product's group network on the
+same input; technique lists are not fingerprints. The attribution stage is unchanged.

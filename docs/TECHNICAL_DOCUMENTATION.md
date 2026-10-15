@@ -5239,6 +5239,53 @@ is available.
 **Cost.** One pod, about $1.35 (91 minutes at $0.89/h). CTI-HAL was scored on the laptop. No
 OpenRouter credit was used.
 
+**A group head: the threat group from the extracted techniques (A1/A2, 2026-10-15, prereg
+`cribl_group_head_2026-10-15.json`).** The owner asked for a model built the same way (base LLM,
+fresh LoRA, cosine head) that reads only the techniques previously extracted from a report and names
+the group. `export_group_cases.py` builds a 153-group catalogue (groups with 5+ documented
+techniques, each its own family, rows initialised from "Name (Gxxxx): description") and the case
+files; `family_head.py --task group` trains it with the family-head code unchanged (the prompt
+asks for the group; the state is the technique list, "Txxxx Parent name: name" entries joined by
+"; ", no prose, no actor or tool names). Training rows: 45,900 synthetic draws from the ATT&CK
+profiles, mirroring the group network's generator without software and context (3–20 true
+techniques, false positives by popularity at precision 0.4–0.95, a sub-technique swapped for its
+parent with p 0.2). Selection on the 20 single-group ATT&CK campaigns and the 34 vendor reports
+(those carry no technique labels: their input is what E2 names on their statements). Baselines on
+the same inputs (`group_baseline.py`): the product's group network with the software block empty,
+and a Jaccard match to the documented profiles. A1 = Qwen3.5-4B-Base, A2 = Foundation-Sec-8B,
+fresh LoRA r 16, one epoch, a checkpoint every quarter; the technique lists are five times longer
+than sentences, so a run took ~2.7 h (0.18–0.20 s per example) and the two pods about $5.05
+instead of the planned $2.10.
+
+| Group top-1 (top-5), 153 groups ranked | CTI-HAL extracted (55, headline) | CTI-HAL gold (55) | CTI-HAL accepted (54) | Elastic (6) | campaigns dev (20) | vendor dev (34) |
+|---|---|---|---|---|---|---|
+| group network, techniques only | **0.127** (0.273) | **0.182** (0.364) | **0.111** (0.333) | 0 (0.167) | 0.300 (0.500) | 0.294 (0.382) |
+| Jaccard to profile | 0.018 (0.018) | 0.000 (0.036) | 0.000 (0.019) | 0 (0) | 0.150 (0.200) | 0.294 (0.471) |
+| A1, Qwen3.5-4B group head | 0.018 (0.073) | 0.073 (0.091) | 0.000 (0.074) | 0 (0.333) | 0.150 (0.250) | 0.265 (0.471) |
+| A2, Foundation-Sec-8B group head | 0.036 (0.145) | 0.018 (0.145) | 0.037 (0.093) | 0 (0) | 0.100 (0.250) | 0.235 (0.412) |
+
+- **Both headlines fail**, and not narrowly: A1 is −0.109 [−0.200, −0.036] against the group
+  network on the extracted input, A2 −0.091 [−0.182, 0.000]. The right group's median rank is
+  40–48 of 153 for the heads against 17–23 for the network. Sandworm is found (A2 gold: ranks 1–7
+  on all five reports); the financially motivated groups, whose technique sets are generic, are not.
+- **On the dev sets the heads come close** (vendor: A1 0.265 vs 0.294) and were still rising
+  (A1 vendor 0.15 → 0.26 → 0.24 across the quarter-epoch checkpoints), so one epoch over one draw
+  of the synthetic rows is too little for 153 classes; the network sees 400 draws per group
+  redrawn every 4 of its 20 epochs, and adds a prominence prior at prediction, which favours the
+  well-known CTI-HAL groups.
+- **The product's full attribution stage** (techniques plus software, the combiner) reaches 0.455
+  on the same reports, quoted for context: the group signal is in the named tools, not in the
+  technique mix, for every model here.
+
+Reading: a language model reading a bag of technique names is a worse group classifier than a
+small network over the same bag, at 50 times the compute. The technique list is not a fingerprint,
+and the LLM's strength (reading prose) is unused on it. If the group question is to be pursued, the
+input should be the report text (the free-text group study, docs 21.3.16, is the comparison), not
+the extracted list. The product's attribution stage is unchanged.
+
+**Cost.** Two pods, about $5.05 (A1 175 min, A2 165 min at $0.89/h). The vendor extraction, the
+baselines and all test scoring ran on the laptop. No OpenRouter credit was used.
+
 ## 22. Failure modes and troubleshooting
 
 ### 22.1 “ATT&CK knowledge base has not been ingested”
