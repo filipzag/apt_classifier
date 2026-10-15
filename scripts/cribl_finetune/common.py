@@ -205,24 +205,45 @@ def render_prompt(
 FAMILY_INSTRUCTIONS = (
     f"Which MITRE ATT&CK technique does the attacker action in the sentence use? {UNTRUSTED_NOTE}"
 )
+GROUP_SOURCE_TEXT = (
+    "The MITRE ATT&CK techniques extracted from one threat-intelligence report, as ids with "
+    "names. Some may be wrong; the report's prose and any actor or tool names are not given."
+)
+GROUP_INSTRUCTIONS = (
+    "Which MITRE ATT&CK threat group's documented behaviour do these observed techniques match? "
+    f"{UNTRUSTED_NOTE}"
+)
+TASKS = ("technique", "group")
+
+
+def group_state(techniques_text: str) -> dict[str, str]:
+    """The state of the group question: the technique list stands where the sentence would."""
+    return {"techniques": clean_sentence(techniques_text), "source": GROUP_SOURCE_TEXT}
 
 
 PROMPT_TEMPLATES = ("qwen", "gemma", "llama3")
 
 
-def render_family_prompt(state: Mapping[str, Any], template: str = "qwen") -> str:
+def render_family_prompt(
+    state: Mapping[str, Any], template: str = "qwen", task: str = "technique"
+) -> str:
     """The chat prompt of the family question: the state and the question, no options; its last
     position (after ``Answer:``) is the decision slot read by the family head. ``template`` is
     the base model's chat format (``qwen``: Qwen3.5 with an empty think block; ``gemma``: Gemma's
-    turn markers; ``llama3``: Llama 3 headers); the body is the same."""
+    turn markers; ``llama3``: Llama 3 headers); the body is the same. ``task`` ``group`` asks for
+    the threat group behind a list of extracted techniques instead (the group head)."""
+    if task not in TASKS:
+        raise ValueError(f"unknown task {task!r} (one of {TASKS})")
+    question = GROUP_INSTRUCTIONS if task == "group" else FAMILY_INSTRUCTIONS
+    answer = "group" if task == "group" else "technique"
     body = "\n".join(
         [
             "State:",
             json.dumps(dict(state), ensure_ascii=False),
             "",
-            f"Question: {FAMILY_INSTRUCTIONS}",
+            f"Question: {question}",
             "",
-            "Reply with the technique.",
+            f"Reply with the {answer}.",
         ]
     )
     if template == "qwen":

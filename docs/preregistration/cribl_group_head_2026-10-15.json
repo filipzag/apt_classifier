@@ -1,0 +1,43 @@
+{
+  "schema": "cribl_finetune_prereg/1",
+  "id": "cribl_group_head_2026-10-15",
+  "title": "A group head: the threat group from the techniques extracted from a report (A1 Qwen3.5-4B-Base, A2 Foundation-Sec-8B)",
+  "registered": "2026-10-15",
+  "parent": "docs/preregistration/cribl_recipe_base_2026-10-15.json (the technique heads and bases; docs 21.3.18)",
+  "question": "Reading only the list of ATT&CK techniques extracted from a report (ids and names, no prose, no actor or tool names), does a base LLM with a fresh LoRA and a cosine head over the ATT&CK groups name the right group more often than the product's group network given the same techniques?",
+  "motivation": "Owner's request (2026-10-15). The product's attribution stage reaches 45% top-1 on CTI-HAL with techniques and software names; with techniques only, 17%; the group network alone on the gold techniques, 18%. Technique sets are weak fingerprints (about 160 groups share a few dozen common techniques), so the expectation is modest; the result is indicative on 55 reports.",
+  "harness": "export_group_cases.py (catalogue + cases), family_head.py --task group (unchanged head code; the prompt asks for the group), group_baseline.py (the group network and a Jaccard profile match on the same inputs), parent_rescore.py (paired comparison), runpod/remote_sweep.sh with TRAIN_ARGS",
+  "model": {
+    "catalogue": "153 ATT&CK 19.2 groups with 5+ documented techniques, each its own family; head rows start from the base's state of 'Name (Gxxxx): description'",
+    "input": "the technique list as 'Txxxx Parent name: name' entries joined by '; ', order shuffled in training, sorted at test; no software, no actor names (checked against every group name, alias and own software name: 1 technique label, 'Outlook Home Page', matches a tool alias and is kept)",
+    "recipe": "fresh LoRA r 16 on the attention projections, LoRA lr 1e-4, head lr 1e-3, 16 per step, 1 epoch over the synthetic rows, a checkpoint every quarter epoch, seed 7; no technique head",
+    "A1": "Qwen3.5-4B-Base (RunPod secure RTX 4090, ~65 min, ~$1.00)",
+    "A2": "fdtn-ai/Foundation-Sec-8B (same, ~70 min, ~$1.10)"
+  },
+  "data": {
+    "training": "45,900 synthetic draws (300 per group) mirroring group_mlp.training_cases without software and context: 3-20 of the group's documented techniques, false positives by technique popularity at precision 0.4-0.95, a sub-technique replaced by its parent with p 0.2; from the ATT&CK knowledge base alone, no benchmark or case data",
+    "selection": "cases_group_campaigns (20 ATT&CK campaigns attributed to one listed group, 3+ techniques, the group network's dev set) and cases_group_vendor (the 34 vendor reports with the techniques the reference technique model E2 names on their statements; the reports carry no technique labels); selection score = mean group top-1 over the two files; ties: the earlier checkpoint",
+    "test": "CTI-HAL, 55 reports / 6 groups, three inputs: extracted (E2's technique answers on the report's statements, union per report; the headline), gold (the labelled technique ids), accepted (the pipeline's accepted techniques, software dropped; 54 reports); Elastic, 6 reports with labelled techniques; all ranked over the 153 groups; scored on the laptop (CTI-HAL never uploaded)",
+    "leakage_note": "ATT&CK's group profiles cite some CTI-HAL and vendor reports, so gold-input numbers flatter every model alike (the group network has the same exposure); the extracted and accepted inputs come from the technique stage, not from the labels"
+  },
+  "success": {
+    "headline": "CTI-HAL, extracted input: group top-1 over the 153 groups, A1 minus the group network on the same input, paired 95% CI (1000 samples, seed 7) lower bound above 0; the same for A2",
+    "secondary": [
+      "the same with the gold input and with the accepted input",
+      "top-3, top-5 and MRR on every input, against the group network and the Jaccard match",
+      "Elastic (6 reports): top-1 and top-5, reported with counts",
+      "per-group counts on CTI-HAL (Carbanak, FIN6, FIN7, OilRig, Sandworm, Wizard Spider)"
+    ],
+    "reported": "every checkpoint's two dev scores; the full attribution stage's 45% (techniques + software) quoted for context, not compared; where the gold and extracted inputs disagree"
+  },
+  "limitation": "55 reports from 6 groups: a paired interval is about +/-12 points wide; the 153-group ranking avoids the closed-set shortcut but the 6 test groups are all well documented; A1 and A2 are read at the same bar, so two chances at one headline",
+  "stop_rules": [
+    "a checkpoint does not reload",
+    "the loss is not finite",
+    "more than 1% of a split's cases end in error",
+    "an actor name in any case text"
+  ],
+  "confirmation_runs": "each selected checkpoint once on the four test inputs (laptop); the baselines once; nothing chosen, refit or rerun because of a result",
+  "adoption": "none: an experiment, no product wiring",
+  "informed_by": "the attribution and group-network benchmarks (docs 21.3.5, 21.3.9, 21.3.11), the technique-head runs; a laptop pilot (mechanics only, 96 rows). No group head exists."
+}

@@ -54,10 +54,12 @@ import torch
 import torch.nn.functional as functional
 from common import (
     FLAT_K,
+    TASKS,
     c1_state,
     expected_calibration_error,
     family_targets,
     forced_row,
+    group_state,
     hits,
     paired_delta,
     parent_of,
@@ -101,6 +103,13 @@ SPLITS = (
     "cti_hal",
     "cti_rationale_test",
     "cti_rationale_validation",
+    # the group head's sets (export_group_cases.py): technique lists per campaign or report
+    "group_campaigns",
+    "group_vendor",
+    "group_cti_hal_gold",
+    "group_cti_hal_extracted",
+    "group_cti_hal_accepted",
+    "group_elastic",
 )
 # every split also has a parent-relabelled copy (relabel_parents.py: cases_<split>_parents.jsonl)
 EVAL_SPLITS = (*SPLITS, *(f"{split}_parents" for split in SPLITS))
@@ -144,18 +153,25 @@ class Encoder:
     one-at-a-time ones to bf16 noise, cosine > 0.9997)."""
 
     def __init__(
-        self, model: Any, tokenizer: Any, max_tokens: int = 1024, template: str = "qwen"
+        self,
+        model: Any,
+        tokenizer: Any,
+        max_tokens: int = 1024,
+        template: str = "qwen",
+        task: str = "technique",
     ) -> None:
         base = model.get_base_model() if hasattr(model, "get_base_model") else model
         self.backbone = base.model
         self.tokenizer = tokenizer
         self.max_tokens = max_tokens
         self.template = template  # the base model's chat format (decision_model.BaseSpec)
+        self.task = task  # technique (a sentence) or group (a technique list), common.TASKS
         # the first GPU parameter (a lookup table may live on the CPU on a small GPU)
         self.device = next(p.device for p in model.parameters() if p.device.type == "cuda")
 
     def token_ids(self, sentence: str) -> list[int]:
-        prompt = render_family_prompt(c1_state(sentence), self.template)
+        state = group_state(sentence) if self.task == "group" else c1_state(sentence)
+        prompt = render_family_prompt(state, self.template, self.task)
         ids = self.tokenizer.encode(prompt, add_special_tokens=False)
         if len(ids) > self.max_tokens:
             raise ValueError(f"prompt has {len(ids)} tokens (> {self.max_tokens})")
@@ -286,7 +302,9 @@ def load_checkpoint(directory: Path) -> tuple[Any, Encoder, FamilyHead, dict[str
     head = FamilyHead(torch.zeros(count, hidden), torch.zeros(hidden))
     head.load_state_dict(saved["state"])
     head.independent = saved.get("family_loss") == "yesno"
-    encoder = Encoder(model, tokenizer, template=info["prompt_template"])
+    encoder = Encoder(
+        model, tokenizer, template=info["prompt_template"], task=saved.get("task", "technique")
+    )
     model.eval()
     return (
         model,
@@ -644,7 +662,9 @@ def train(args: argparse.Namespace) -> None:
         lora_r=args.lora_r,
         lora_alpha=args.lora_alpha,
     )
-    encoder = Encoder(model, tokenizer, args.max_tokens, template=info["prompt_template"])
+    encoder = Encoder(
+        model, tokenizer, args.max_tokens, template=info["prompt_template"], task=args.task
+    )
     if args.accum % args.batch:
         raise SystemExit("--accum must be a multiple of --batch")
     yesno = args.family_loss == "yesno"
@@ -684,6 +704,7 @@ def train(args: argparse.Namespace) -> None:
         "families": families,
         "attack_version": version,
         "init": args.init,
+        "task": args.task,
         "base": args.base,
         "lora": info.get("lora"),
         "selection": args.selection,
@@ -973,6 +994,13 @@ def main() -> None:
         choices=sorted(BASES),
         default=DEFAULT_BASE,
         help="the base model (decision_model.BASES); Cribl's adapter needs the default",
+    )
+    fit.add_argument(
+        "--task",
+        choices=TASKS,
+        default="technique",
+        help="technique: a sentence -> its technique family; group: a technique list -> the "
+        "threat group (catalogue = group_catalog.json, no technique head)",
     )
     fit.add_argument("--lora-r", type=int, default=LORA_R, help="LoRA rank (--init fresh)")
     fit.add_argument("--lora-alpha", type=int, help="LoRA alpha (default 2 x rank)")

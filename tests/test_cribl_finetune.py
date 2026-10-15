@@ -656,3 +656,88 @@ def test_lora_shape_and_base_registry():
     assert base_spec("foundation-sec-8b").prompt_template == "llama3"
     with pytest.raises(ValueError):
         base_spec("llama")
+
+
+def test_group_prompt_and_state():
+    from scripts.cribl_finetune.common import (
+        ANSWER_CUE,
+        GROUP_INSTRUCTIONS,
+        group_state,
+        render_family_prompt,
+    )
+
+    state = group_state(
+        "T1059.001 Command and Scripting Interpreter: PowerShell; T1105 Ingress Tool Transfer"
+    )
+    assert set(state) == {"techniques", "source"}
+    prompt = render_family_prompt(state, "qwen", "group")
+    assert GROUP_INSTRUCTIONS in prompt and prompt.endswith(ANSWER_CUE)
+    assert "Reply with the group." in prompt and "T1105 Ingress Tool Transfer" in prompt
+    with pytest.raises(ValueError):
+        render_family_prompt(state, "qwen", "actor")
+
+
+def test_group_cases_draw_and_text():
+    from scripts.cribl_finetune.export_group_cases import (
+        case_text,
+        draw_cases,
+        extracted_per_report,
+    )
+
+    profiles = {
+        "G0001": ["T1059", "T1059.001", "T1105", "T1566", "T1566.001", "T1027"],
+        "G0002": ["T1003", "T1003.001", "T1021", "T1021.002", "T1105", "T1047", "T1053.005"],
+    }
+    parents = {
+        "T1059.001": "T1059",
+        "T1566.001": "T1566",
+        "T1003.001": "T1003",
+        "T1021.002": "T1021",
+        "T1053.005": "T1053",
+    }
+    draws = draw_cases(
+        profiles, parents, {"samples_per_group": 50, "size_min": 3, "size_max": 5, "seed": 1}
+    )
+    assert len(draws) == 100 and {g for g, _ in draws} == set(profiles)
+    for group_id, techniques in draws:
+        assert len(techniques) == len(set(techniques))
+        own = set(profiles[group_id]) | {parents[t] for t in profiles[group_id] if t in parents}
+        true = [t for t in techniques if t in own]
+        assert 1 <= len(true) <= 5  # 3-5 drawn, a parent swap can merge two
+        assert len(techniques) - len(true) <= 8  # precision >= 0.4 on 5 true techniques
+    labels = {
+        "T1105": "T1105 Ingress Tool Transfer",
+        "T1059.001": "T1059.001 Command and Scripting Interpreter: PowerShell",
+    }
+    assert case_text(["T1105", "T1059.001", "T9999"], labels) == (
+        "T1105 Ingress Tool Transfer; T1059.001 Command and Scripting Interpreter: PowerShell; T9999"
+    )
+    reports = [
+        {
+            "report_id": "r1",
+            "statements": [{"text": "A  ran  PowerShell."}, {"text": "B dumped LSASS."}],
+        },
+        {"report_id": "r2", "statements": [{"text": "C sent phishing mail."}]},
+    ]
+    cases = [
+        {"case_id": "a", "text": "A ran PowerShell."},
+        {"case_id": "b", "text": "B dumped LSASS."},
+        {"case_id": "c", "text": "C sent phishing mail."},
+    ]
+    predictions = [
+        {"case_id": "a", "status": "ok", "technique_pick": "T1059.001"},
+        {"case_id": "b", "status": "ok", "technique_pick": "T1003.001"},
+        {"case_id": "c", "status": "error"},
+    ]
+    assert extracted_per_report(reports, cases, predictions) == {"r1": ["T1003.001", "T1059.001"]}
+
+
+def test_group_baseline_rows_rank_by_score():
+    from scripts.cribl_finetune.group_baseline import jaccard_scores, ranked_row
+
+    row = {"case_id": "x", "dataset": "group_vendor", "gold_ids": ["G0002"]}
+    out = ranked_row(row, {"G0001": 0.2, "G0002": 0.5, "G0003": 0.3})
+    assert out["pick"] == "G0002" and out["gold_rank"] == 1 and out["top"][0] == ["G0002", 0.5]
+    profiles = {"G0001": frozenset({"T1059", "T1105"}), "G0002": frozenset({"T1003", "T1003.001"})}
+    scores = jaccard_scores(["T1003.001"], profiles, {"T1003.001": "T1003"})
+    assert scores["G0002"] == 1.0 and scores["G0001"] == 0.0
