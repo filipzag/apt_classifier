@@ -5082,6 +5082,61 @@ text. More multi-label training data, not a reweighting, is what this needs. E2 
 **Cost.** The pod cost about $1.30 (87 minutes at $0.89/h). CTI-HAL was scored on the laptop. No
 OpenRouter credit was used.
 
+**More multi-label data: CTI-Rationale paragraphs (E3, 2026-10-15, prereg `cribl_cti_rationale_2026-10-15.json`).**
+- **Search.** Released ATT&CK-labelled text with several techniques per unit is scarce.
+  - Text2TTP (QCRI, GPL-3.0): its public `sentences.csv` holds only the hand-labelled (2,017) and TRAM
+    (1,522) rows; the CISA and WeLiveSecurity parts of the paper are not released. After the overlap
+    and CTI-HAL-group checks, 25 new sentences carry two or more families, so it was not used.
+  - The DFIR Report sentence set (arXiv 2606.18166, 40% multi-label) and CTI2TTP-Bench / TRAM-Clean
+    (arXiv 2605.25836) are not released.
+  - CTI-Rationale (Hugging Face `EbruResul/CTI-Rationale`, gated, accepted by the owner) is used:
+    1,394 paragraphs of 100 reports from 8 publishers, two analysts each with adjudicated gold rows,
+    ATT&CK v18.1; annotations CC BY 4.0, paragraph text the publishers' (local training only).
+- **Data** (`prepare_cti_rationale.py`). The dataset's report split is kept: train + validation
+  reports become 1,011 training paragraphs (174 with 2+ families, 121 families), test reports a
+  209-paragraph test set (33 with 2+ families).
+  - 10 reports are dropped whole. 8 name a CTI-HAL group, an alias or its own software (SUNBURST,
+    NOBELIUM, Ryuk, Conti, Industroyer, NotPetya and others). 2 are attributed to one without naming
+    it, found by reading the kept report list: CISA's Infamous Chisel report (Sandworm) and Mandiant's
+    CEELOADER report (APT29).
+  - Paragraphs overlapping held-out, Elastic or vendor-set text are dropped (19 train, 3 test), as are
+    8 repeats of existing training rows and 16 test paragraphs overlapping any training text.
+- **What.** E3 is E2's recipe with these rows added (both losses): 27,364 rows, 1,341 with 2+ families
+  (E2: 1,167). The pre-registered rule selected step 41,060 (1.5 epochs).
+
+| Checkpoint (epochs), E3 | 0 | 0.25 | 0.5 | 0.75 | 1 | 1.25 | **1.5** | 1.75 | 2 |
+|---|---|---|---|---|---|---|---|---|---|
+| public dev family top-1 | 0.449 | 0.709 | 0.718 | 0.722 | 0.715 | 0.728 | **0.731** | 0.734 | 0.737 |
+| AnnoCTR dev family top-1 | 0.223 | 0.643 | 0.667 | 0.699 | 0.676 | 0.699 | **0.729** | 0.714 | 0.714 |
+| public dev exact top-1 | 0.320 | 0.543 | 0.566 | 0.595 | 0.602 | 0.631 | **0.637** | 0.648 | 0.648 |
+
+| Paired, E3 − E2 | E2 | E3 | E3 − E2 [95% CI] |
+|---|---|---|---|
+| expert paragraphs (157), 2 answers: share of labelled families found (headline) | 0.495 | 0.482 | −0.013 [−0.046, +0.019] |
+| expert paragraphs, 1.3 / 3 answers | 0.382 / 0.574 | 0.393 / 0.583 | +0.011 [−0.012, +0.033] / +0.008 [−0.021, +0.041] |
+| CTI-Rationale test (209), 1.3 answers: share found (in-domain) | 0.559 | 0.586 | +0.027 [−0.013, +0.070] |
+| CTI-Rationale test, one answer: family top-1 | 0.517 | 0.560 | +0.043 [+0.005, +0.086] |
+| CTI-Rationale test, 33 multi-family paragraphs, 2 answers: share found | 0.518 | 0.528 | +0.010 [−0.058, +0.066] |
+| CTI-HAL family top-1 (non-inferiority −0.02) | 0.642 | 0.636 | −0.005 [−0.023, +0.011] |
+| CTI-HAL exact top-1 / family top-3 | 0.514 / 0.824 | 0.513 / 0.841 | −0.001 [−0.018, +0.014] / — |
+| public test family / exact top-1 | 0.633 / 0.561 | 0.625 / 0.559 | −0.008 [−0.020, +0.005] / −0.003 [−0.017, +0.012] |
+| AnnoCTR test family / exact top-1 | 0.717 / 0.451 | 0.726 / 0.440 | +0.009 [−0.008, +0.027] / −0.011 [−0.030, +0.008] |
+
+- **Headline fails.** On the expert paragraphs E3 finds as many labelled families as E2 at every
+  answer count.
+- **The new rows help on their own kind of text, not elsewhere.** On the CTI-Rationale test reports
+  (same publishers and annotators) the one-answer family top-1 rises 4.3 points (exact, top family
+  only, 0.421 → 0.464), and at two answers E3 gives multi-family paragraphs more answers than
+  one-family ones (2.30 vs 1.94; E2 2.03 vs 1.99). On expert paragraphs the answer count still does not
+  follow the label count (1.98 vs 2.04; E2 1.96 vs 2.09).
+- **CTI-HAL.** No real change (−0.5 point), but the non-inferiority bound misses by 0.003.
+
+About 170 more multi-label rows do not teach the model how many techniques an expert paragraph
+holds. They help only on text like their own. E2 stays the reference.
+
+**Cost.** The pod cost about $1.32 (89 minutes at $0.89/h). E2 on the CTI-Rationale test and E3 on
+CTI-HAL were scored on the laptop. No OpenRouter credit was used.
+
 ## 22. Failure modes and troubleshooting
 
 ### 22.1 “ATT&CK knowledge base has not been ingested”

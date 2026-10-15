@@ -208,3 +208,18 @@ python3 scripts/cribl_finetune/multi_answer.py --dataset expert --budget 2.0 E2=
 
 Result (docs 21.3.18): on the expert paragraphs M2 finds as many labelled families as E2 (+0.000 at
 two answers), slightly more than M1, and loses 3 points of exact top-1 on the public test.
+
+### E3: CTI-Rationale paragraphs added (prereg `cribl_cti_rationale_2026-10-15.json`)
+
+```bash
+.venv/bin/hf download EbruResul/CTI-Rationale cti_rationale_gold_v2.jsonl report_split.csv LICENSE README.md \
+  --repo-type dataset --local-dir data/benchmarks/cti_rationale/raw   # gated: accept the terms, hf auth login
+PYTHONPATH=. .venv/bin/python scripts/cribl_finetune/prepare_cti_rationale.py build   # 1,011 train + 209 test paragraphs
+bash scripts/cribl_finetune/runpod/remote_e3.sh   # on a GPU pod: E2's recipe + cases_cti_rationale_train.jsonl
+python3 scripts/cribl_finetune/multi_answer.py --dataset expert --budget 2.0 E2=E2_test.jsonl E3=E3_test.jsonl --baseline E2
+python3 scripts/cribl_finetune/multi_answer.py --budget 1.3 E2=E2_cti_rationale_test.jsonl E3=E3_cti_rationale_test.jsonl --baseline E2
+```
+
+Result (docs 21.3.18): on the expert paragraphs E3 finds as many labelled families as E2 (−0.013 at
+two answers, n.s.); on the CTI-Rationale test reports (same publishers) family top-1 rises 4.3 points;
+CTI-HAL, public and AnnoCTR test unchanged. E2 stays the reference.
