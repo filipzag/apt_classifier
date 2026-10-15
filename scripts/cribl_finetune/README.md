@@ -244,3 +244,6 @@ Gemma's 5.2 GB per-layer embedding table stays in system RAM (`BaseSpec.cpu_modu
 Result (docs 21.3.18): no recipe or base beats E2 on real reports. The best-on-dev recipe (LoRA lr
 2e-4) is 3.4 points worse on CTI-HAL at parent level; 3 epochs and rank 64 are level; Gemma 4 E4B
 ties E2 (−0.3) from a fresh LoRA. E2 stays the reference.
+Amendment 1, `--base foundation-sec-8b` (Cisco's security-pretrained Llama 3.1 8B, Apache 2.0): −1.2
+on CTI-HAL (n.s.), +1 to +5 on the public, AnnoCTR and CTI-Rationale tests (n.s.). On a small GPU its
+token table and output head stay in RAM; scoring takes 7.0 GB at batch 4.

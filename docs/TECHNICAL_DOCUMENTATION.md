@@ -5205,6 +5205,40 @@ base family are not what limits this; the labels are. E2 stays the reference.
 **Cost.** Four pods, about $6.85 (R1 111 min, R2 124 min, R3 118 min, G1 110 min at $0.89/h). The
 laptop scored CTI-HAL for all four and ran the two pilots. No OpenRouter credit was used.
 
+**Amendment 1: a security-pretrained 8B base (S1, 2026-10-15).** After the four results above the
+owner asked for one larger base. S1 is `fdtn-ai/Foundation-Sec-8B@9e6bb1f7` (Cisco: Llama 3.1 8B
+continued on 5.1B tokens of security text; Apache 2.0; text-only, so `decision_model` loads it
+through the causal-LM class; the family prompt in Llama 3's header format, same body), a fresh LoRA
+r 16 on the attention projections (128 modules, 13.6M parameters), E2's recipe for 2 epochs with
+the widened selection set. Registered as amendment 1 with the same bar before training. Training
+took 74 min at 0.084 s per example (13.7 GB peak), the same speed as the 4B models; the pod cost
+about $1.35. On the laptop the 1 GB token table and the unused 1 GB output head stay in RAM
+(`cpu_modules`), leaving 7.0 GB of GPU use for scoring at batch 4.
+
+| Parent level, S1 − E2 (paired 95% CI) | CTI-HAL | public test | AnnoCTR test | CTI-Rationale test |
+|---|---|---|---|---|
+| E2 (reference) | 0.639 | 0.636 | 0.714 | 0.517 |
+| **S1, Foundation-Sec-8B (headline)** | **0.627 (−0.012 [−0.034, +0.009])** | 0.647 (+0.011 [−0.006, +0.028]) | 0.736 (+0.022 [−0.003, +0.045]) | 0.565 (+0.048 [−0.010, +0.105]) |
+| strict exact, S1 − E2 | 0.503 (−0.011) | 0.580 (+0.019 [0.000, +0.037]) | 0.466 (+0.015) | 0.469 (+0.048) |
+
+- **Headline fails.** On CTI-HAL the 8B security model is 1.2 points below E2 at parent level and
+  1.1 below on exact; family top-3 0.822 against 0.824; the 89 rare-family statements are at the
+  same 0.393. Its calibration matches E2's (family ECE 0.064).
+- **Elsewhere it is the first run slightly ahead of E2 on every set**, each within noise: public
+  test exact +1.9 (TRAM +4.3 [+1.5, +6.9], derived procedures −1.2, expert +0.6), AnnoCTR +2.2,
+  CTI-Rationale +4.8. The untrained head starts at 0.21 on dev (Qwen 0.45, Gemma 0.04) and the dev
+  curves end above every Qwen run (public dev parent level 0.762, exact 0.709).
+- **Sub-techniques:** within the right family S1 picks the exact id 80% of the time (487 of 607),
+  as E2 does (498 of 619), with 13 wrong siblings against 18.
+
+Reading: twice the parameters and 5 billion tokens of security pretraining buy a better fit to the
+public sentences and nothing on CTI-HAL. Three base models of two sizes now sit at 63–64% there.
+E2 stays the reference; S1 is the strongest alternative when the public sets matter and the memory
+is available.
+
+**Cost.** One pod, about $1.35 (91 minutes at $0.89/h). CTI-HAL was scored on the laptop. No
+OpenRouter credit was used.
+
 ## 22. Failure modes and troubleshooting
 
 ### 22.1 “ATT&CK knowledge base has not been ingested”
