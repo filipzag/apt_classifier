@@ -223,3 +223,24 @@ python3 scripts/cribl_finetune/multi_answer.py --budget 1.3 E2=E2_cti_rationale_
 Result (docs 21.3.18): on the expert paragraphs E3 finds as many labelled families as E2 (−0.013 at
 two answers, n.s.); on the CTI-Rationale test reports (same publishers) family top-1 rises 4.3 points;
 CTI-HAL, public and AnnoCTR test unchanged. E2 stays the reference.
+
+### Parent-level scoring, recipe sweep, Gemma 4 E4B (prereg `cribl_recipe_base_2026-10-15.json`)
+
+```bash
+python3 scripts/cribl_finetune/relabel_parents.py                       # cases_<split>_parents.jsonl (sub-techniques -> parents)
+python3 scripts/cribl_finetune/parent_rescore.py E1=E1_cti_hal.jsonl E2=E2_cti_hal.jsonl --baseline E2   # parent level / family / exact, paired CIs
+PYTHONPATH=. .venv/bin/python scripts/cribl_finetune/prepare_cti_rationale.py build     # + cases_cti_rationale_validation.jsonl (selection set)
+bash scripts/cribl_finetune/runpod/remote_sweep.sh R3 "--epochs 3 --init fresh --lora-r 64"              # on a GPU pod
+bash scripts/cribl_finetune/runpod/remote_sweep.sh G1 "--epochs 2 --init fresh --base gemma-4-e4b"       # Gemma 4 E4B (16 GB download on the pod)
+cd scripts/cribl_finetune && ../../../.venv-cribl/bin/python family_head.py evaluate --checkpoint <dir> --name G1 --split cti_hal --compare E2=E2_cti_hal.jsonl
+```
+
+Parent level = the answered technique's parent is a gold id's parent (E2 on CTI-HAL: family 0.642,
+parent level 0.639, exact 0.514). `--selection parent` picks checkpoints on the mean parent level over
+public dev, AnnoCTR dev and CTI-Rationale validation; `--base` names a base of `decision_model.BASES`
+(Cribl's adapter needs the default Qwen base; other bases start a fresh LoRA). On a GPU under 16 GB
+Gemma's 5.2 GB per-layer embedding table stays in system RAM (`BaseSpec.cpu_modules`).
+
+Result (docs 21.3.18): no recipe or base beats E2 on real reports. The best-on-dev recipe (LoRA lr
+2e-4) is 3.4 points worse on CTI-HAL at parent level; 3 epochs and rank 64 are level; Gemma 4 E4B
+ties E2 (−0.3) from a fresh LoRA. E2 stays the reference.

@@ -5137,6 +5137,74 @@ holds. They help only on text like their own. E2 stays the reference.
 **Cost.** The pod cost about $1.32 (89 minutes at $0.89/h). E2 on the CTI-Rationale test and E3 on
 CTI-HAL were scored on the laptop. No OpenRouter credit was used.
 
+**Parent-level scoring, a recipe sweep and a second base model (2026-10-15, prereg
+`cribl_recipe_base_2026-10-15.json`).** The owner's three questions after the data runs: score
+without the annotators' parent-or-sub-technique habit; vary the one recipe ever used; try a second
+base model.
+
+- **Parent-level accuracy** (`relabel_parents.py`, `parent_rescore.py`): the answered technique's
+  parent is among the gold ids' parents. Every evaluation split has a parent-relabelled copy
+  (`cases_<split>_parents.jsonl`); `family_head.py evaluate` accepts them and reports
+  `parent_level` beside exact. On CTI-HAL E2 scores family 0.642, parent level 0.639, exact 0.514:
+  the exact answer's family is right as often as the first family, so "exact" was 12 points lower
+  only through granularity (111 statements) and about 20 wrong siblings. No earlier run beats E2 at
+  parent level either (E1 0.639, E3 0.637, F2 0.626; the yes/no heads M1/M2 0.597/0.593, their exact
+  pick often leaving the first family). Training labels were not relabelled.
+- **Selection set widened.** `prepare_cti_rationale.py` now keeps the dataset's 15 validation
+  reports as `cases_cti_rationale_validation.jsonl` (221 paragraphs; E3 had merged them into its
+  training rows, `--merge-validation`). The sweep selects on the mean parent-level accuracy over
+  public dev, AnnoCTR dev and these paragraphs (`--selection parent`), checkpoints every half epoch.
+- **Runs**, all on E2's 26,353 training rows (names in docs only):
+  - R1: E2's recipe for 3 epochs (selected: 2 epochs).
+  - R2: 3 epochs, LoRA lr 2e-4 (selected: 2.5 epochs; the best selection score, 0.710).
+  - R3: 3 epochs, a fresh LoRA of rank 64 / alpha 128 (`--lora-r`; selected: 2 epochs).
+  - G1: `google/gemma-4-E4B@411aa17b` (Apache 2.0, 4.5B effective / 8B with embeddings) with a
+    fresh LoRA r 16 on the attention projections (`--base gemma-4-e4b`, `decision_model.BASES`;
+    the family prompt in Gemma's turn format, same body), E2's recipe for 2 epochs (selected: the
+    last). 132 LoRA modules, 724 4-bit linear layers, both embedding tables left in bf16; 17 GB peak
+    on the pod. Untrained, the nearest-description head scores 0.04 on dev (Qwen 0.45): Gemma's
+    decision-slot states carry little before training, and the gap closes within half an epoch.
+  - Each run ~100 min on a secure RTX 4090; the four pods about $6.85 in all. CTI-HAL was scored on
+    the laptop, Gemma included: on an 8 GB GPU `decision_model` keeps Gemma's 5.2 GB per-layer
+    embedding table in system RAM and looks rows up on the CPU (`BaseSpec.cpu_modules`,
+    `keep_on_cpu`; 4.4 GB of GPU memory, 0.23 s per statement).
+
+| Parent level, run − E2 (paired 95% CI) | CTI-HAL (968) | public test (1,391) | AnnoCTR test (738) | CTI-Rationale test (209) |
+|---|---|---|---|---|
+| E2 (reference) | 0.639 | 0.636 | 0.714 | 0.517 |
+| R1, 3 epochs | 0.630 (−0.009 [−0.026, +0.007]) | 0.635 (−0.001) | 0.729 (+0.015 [−0.005, +0.035]) | 0.531 (+0.014) |
+| **R2, lr 2e-4 (best on dev, headline)** | **0.605 (−0.034 [−0.057, −0.011])** | 0.649 (+0.013 [−0.005, +0.030]) | 0.702 (−0.012) | 0.531 (+0.014) |
+| R3, rank 64 | 0.624 (−0.015 [−0.037, +0.006]) | 0.636 (+0.000) | 0.725 (+0.011) | 0.517 (+0.000) |
+| **G1, Gemma 4 E4B (headline)** | **0.636 (−0.003 [−0.025, +0.020])** | 0.627 (−0.009 [−0.028, +0.011]) | 0.701 (−0.014) | 0.512 (−0.005) |
+
+- **Both headlines fail.** The best-on-dev recipe (R2) is 3.4 points *worse* on CTI-HAL, and the
+  interval excludes 0; Gemma ties E2 (−0.3).
+- **Strict exact on CTI-HAL:** E2 0.514, R1 0.503, R2 0.469 (−0.045 [−0.067, −0.022]), R3 0.483
+  (−0.031 [−0.054, −0.008]), G1 0.527 (+0.012 [−0.011, +0.037]). Family top-3: E2 0.824, G1 0.827,
+  R2 0.811, R3 0.803.
+- **Where the higher learning rate "won":** public dev exact rose to 0.71 (E2 0.66), and that
+  carried to the public test's TRAM split (parent level +0.036 [+0.013, +0.059]; exact +0.032
+  [+0.012, +0.051] pooled), not to real reports: derived procedures −0.013, expert −0.006, CTI-HAL
+  −0.034. Rank 64 behaves the same (TRAM +0.035, derived −0.036 [−0.067, −0.004]). Both are worse
+  calibrated (CTI-HAL family ECE 0.144 and 0.100 against E2's 0.067; Gemma 0.060). The wider
+  selection set did not catch this: the three dev sets agreed on R2.
+- **Non-inferiority on public test family (−0.02):** R2 and R3 pass; R1 (−0.010 [−0.023, +0.003])
+  and G1 (−0.016 [−0.033, +0.004]) miss the bound by a fraction of a point.
+- **Rare families** (gold family under 100 training rows; CTI-HAL 89 statements, public test 209):
+  no run moves them (CTI-HAL E2 0.393, R1 0.382, R2 0.382, R3 0.416, G1 0.404, every interval
+  spanning 0).
+- **Longer training alone** (R1) changes nothing: the selection rule stopped at 2 epochs, exactly
+  E2's recipe, and the three dev curves are flat from 1.5 epochs on.
+
+Reading: at parent level the model sits at about 64% on CTI-HAL under every recipe and both base
+models, which is the agreement rate of CTI-HAL's own annotators. A faster learning rate or more
+LoRA capacity buys TRAM-style sentences at the cost of real-report statements and calibration.
+Gemma 4 E4B reaches the same point from a fresh LoRA with no Cribl adapter, so the adapter and the
+base family are not what limits this; the labels are. E2 stays the reference.
+
+**Cost.** Four pods, about $6.85 (R1 111 min, R2 124 min, R3 118 min, G1 110 min at $0.89/h). The
+laptop scored CTI-HAL for all four and ran the two pilots. No OpenRouter credit was used.
+
 ## 22. Failure modes and troubleshooting
 
 ### 22.1 “ATT&CK knowledge base has not been ingested”
