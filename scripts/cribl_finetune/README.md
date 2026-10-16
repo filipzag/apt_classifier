@@ -272,3 +272,18 @@ PYTHONPATH=. .venv/bin/python scripts/cribl_finetune/refit_group_mlp.py fit --sa
 Result (docs 21.3.18): the vendor reports as real cases lift the campaigns dev MRR 0.41 → 0.49 but
 not CTI-HAL (top-1 0.127 both; top-5 0.27 → 0.35, n.s.); the measured draws change nothing. The
 chosen model is `data/models/mlp/group_mlp_extracted.npz`; the product's artifact is untouched.
+
+### Actor head: the group from anonymised report sentences (prereg `cribl_actor_head_2026-10-16.json`)
+
+```bash
+PYTHONPATH=. .venv/bin/python scripts/cribl_finetune/export_actor_cases.py build   # ATT&CK per-group texts (anonymised) + statement sets
+TRAIN_ARGS="--task actor --catalog ../../data/audits/cribl_ft/group_catalog.json --train-files cases_actor_train.jsonl --dev-files cases_actor_vendor_dev.jsonl" \
+  SCORE_SPLITS="" COMPARE_WITH="" bash scripts/cribl_finetune/runpod/remote_sweep.sh T1 "--epochs 2 --init fresh --checkpoints-per-epoch 2"
+cd scripts/cribl_finetune && ../../../.venv-cribl/bin/python family_head.py evaluate --checkpoint <dir> --name T1 --split actor_cti_hal --top-kept 160
+python3 scripts/cribl_finetune/group_text_eval.py aggregate --name T1 --split actor_cti_hal      # per-report mean probability
+PYTHONPATH=. .venv/bin/python scripts/cribl_finetune/group_text_eval.py tfidf --split actor_cti_hal   # the product's text-group model on the same statements
+```
+
+Result (docs 21.3.18): report-level top-1 on CTI-HAL 0.255 against 0.491 for the TF-IDF text-group
+model (−0.24, significant) and 0.127 for the group network on extracted techniques; Elastic 3 of 8
+vs 1 of 8. Text beats technique lists; the bag of words still beats the LLM head.

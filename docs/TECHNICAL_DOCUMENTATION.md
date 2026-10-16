@@ -5320,6 +5320,45 @@ unchanged.
 
 **Cost.** None: eight fits and all scoring on the laptop.
 
+**An actor head: the group from the report's sentences (T1, 2026-10-16, prereg
+`cribl_actor_head_2026-10-16.json`).** The owner's pick after the technique-list results: let the
+LLM read the statements, since the group signal is in how a technique is done. `export_actor_cases.py`
+builds the training texts from `text_group.build_corpus` (ATT&CK's per-group procedure examples and
+descriptions, single-group software and campaign procedure examples; group names → "the adversary",
+campaign names → "the operation"; 12,675 sentences over the 153 catalogue groups, 892 with 2–3
+groups) minus 49 that overlap a CTI-HAL, Elastic or vendor statement, and the report sets as one row
+per anonymised statement (CTI-HAL 922, Elastic 848, vendor 3,821; 850 of the vendor ones as the
+selection set). `family_head.py --task actor` trains the same head (Qwen3.5-4B-Base, fresh LoRA
+r 16, 2 epochs, 21 min, ~$0.45); `group_text_eval.py` averages each group's probability over a
+report's statements and scores the product's TF-IDF text-group model on the same statements.
+
+| Group top-1 (top-3 / top-5), 153 groups | CTI-HAL (55, headline) | Elastic (8) | vendor (34, dev) |
+|---|---|---|---|
+| TF-IDF text-group model (`text_group.py`) | **0.491** (0.618 / 0.691) | 0.125 (0.500 / 0.625) | 0.853 (0.882 / 0.912) |
+| T1, actor head, per-report mean probability | 0.255 (0.436 / 0.491) | 0.375 (0.500 / 0.625) | 0.353 (0.441 / 0.500) |
+| group network, E2's extracted techniques | 0.127 (0.236 / 0.273) | 0 (0.167 / 0.167) | — |
+| T1 − TF-IDF, paired 95% CI | top-1 −0.236 [−0.382, −0.109]; MRR −0.211 [−0.323, −0.102] | +0.25 [−0.25, +0.75] | −0.50 [−0.68, −0.29] |
+| T1 − group network | top-1 +0.127 [0.000, +0.255]; top-5 +0.218 [+0.073, +0.382] | | |
+
+- **Headline fails:** the TF-IDF model is 24 points ahead on CTI-HAL (median gold rank 2 against
+  7). Per group (T1 / TF-IDF right of n): Carbanak 0/2 of 10, Sandworm 4/4 of 5, FIN6 3/6 of 11,
+  FIN7 2/8 of 18, OilRig 2/4 of 8, Wizard Spider 3/3 of 3.
+- **Reading text beats reading technique lists:** the same head doubles the group network's
+  top-1 on the same reports (+12.7 points, CI touching 0) and nearly doubles its top-5.
+- **One caveat for the TF-IDF side:** its corpus is unfiltered, and ATT&CK paraphrases some of
+  these reports; on the vendor reports, which ATT&CK cites heavily, it scores 85% where the
+  overlap-filtered head scores 35%. The CTI-HAL gap is too wide to be that alone. On Elastic
+  (reports after the ATT&CK snapshot) the head leads 3 to 1 of 8.
+- Statement-level top-1 is 11–13% everywhere: most single sentences carry no group identity;
+  the report-level average does the work.
+
+Reading: given the same anonymised text, a bag of words matched against the groups' documented
+procedures still beats a 4B model with a cosine head trained on 12,675 sentences. The LLM's gain
+over technique lists is real, but it does not reach the simple text model, which is already in the
+product (weight 0, docs 21.3.16). No adoption.
+
+**Cost.** One pod, about $0.45 (30 minutes at $0.89/h). Scoring on the laptop. No OpenRouter credit.
+
 ## 22. Failure modes and troubleshooting
 
 ### 22.1 “ATT&CK knowledge base has not been ingested”
