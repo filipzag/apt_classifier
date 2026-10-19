@@ -25,6 +25,8 @@ export interface SystemInfo {
   exemplars?: string
   /** where the exemplar library is served from: "npz", "chroma (exact)", "chroma (hnsw)" or "off" */
   exemplar_backend?: string
+  /** the fine-tuned technique head's local service: "active", "active (unpinned)", "disabled" or "unavailable: ..." */
+  technique_head?: string
   /** random-forest group and source-country models, e.g. "active (cuda)" */
   profile_forest?: string
   group_mlp?: string

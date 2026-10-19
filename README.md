@@ -398,10 +398,10 @@ needs its own environment (`make cribl-venv`, transformers 5) and the reference 
 make technique-head-serve
 ```
 
-(about 3.5 GB of GPU memory, `http://localhost:8102`). The app uses it only with
-`TECHNIQUE_HEAD_ENABLED=true` in `.env`; pin `TECHNIQUE_HEAD_EXPECTED_FINGERPRINT` to the
-fingerprint the service prints. When the service is not running the pipeline runs exactly as
-without it and the status strip says so. The acceptance model that reads the head's evidence is
+(about 3.5 GB of GPU memory, `http://localhost:8102`). The app uses it by default
+(`TECHNIQUE_HEAD_ENABLED=true`, since 2026-10-20) whenever the service answers with the pinned
+checkpoint (`TECHNIQUE_HEAD_EXPECTED_FINGERPRINT`); when the service is not running, or serves
+another checkpoint, the pipeline runs exactly as without it and the status strip says so. The acceptance model that reads the head's evidence is
 fitted with the service up (`TECHNIQUE_HEAD_ENABLED=true` + `make fit-acceptance` to a new path)
 and runs only on that checkpoint.
 
@@ -433,7 +433,7 @@ All settings are environment variables documented in `.env.example`. Important v
 - `REVIEW_MODEL=anthropic/claude-sonnet-5`
 - `LOCAL_LLM_ENABLED=true` (local LLM via Ollama, `qwen3.5:4b-text` by default, GPU only, used when Ollama answers with `LOCAL_LLM_FALLBACK_MODEL` pulled: without an OpenRouter key it verifies ambiguous techniques, rewrites report prose sentence by sentence and runs the review; with a key only `local/` model ids use it; `make llm-pull`, `make llm-check`; docs 16.4a)
 - `ATTRIBUTION_CLUSTER_MAX_TECHNIQUES=30` (a documented-overlap cluster is held when a report carries more accepted techniques than this and names no group-exclusive software: long commodity malware write-ups otherwise clear the cluster bars on volume alone; docs 10.11)
-- `TECHNIQUE_HEAD_ENABLED=false` (the fine-tuned technique head's local service, `make technique-head-serve`; off until its pre-registered gate passes, docs 21.3.18)
+- `TECHNIQUE_HEAD_ENABLED=true` (the fine-tuned technique head's local service, `make technique-head-serve`; on by default since 2026-10-20, used only while the service answers with the pinned checkpoint; docs 8.2, 21.3.18)
 - `SIMILARITY_THRESHOLD=0.45`
 - `BEHAVIOR_SIMILARITY_THRESHOLD=0.55`
 - `THREAT_INTEL_DAYS=30`

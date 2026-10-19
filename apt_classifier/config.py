@@ -135,17 +135,20 @@ class Settings(BaseSettings):
     # A local service (`make technique-head-serve`, scripts/cribl_finetune/serve.py, its own
     # .venv-cribl and about 3.5 GB of GPU memory) scoring every observation with the 4B technique
     # model: evidence on every candidate (acceptance feature schema 4) and up to
-    # TECHNIQUE_HEAD_NEW_CANDIDATES proposals retrieval missed. Off by default until the
-    # pre-registered gate passes (docs/preregistration/cribl_product_integration_2026-10-19.json).
+    # TECHNIQUE_HEAD_NEW_CANDIDATES proposals retrieval missed. On by default since 2026-10-20
+    # (product owner; the mapping gate of cribl_product_integration_2026-10-19 passed and the
+    # cluster volume guard settled the open-set naming): it is used only while the service
+    # answers with the pinned checkpoint, otherwise the pipeline runs exactly as without it.
     # Prose only, for now: log-derived observations (the telemetry sources of cyberre.
     # is_telemetry_source) are not scored. Fail closed: unavailable, wrong ATT&CK version or a
     # fingerprint other than the pinned one leaves the pipeline exactly as without it; an
     # acceptance model fitted with the head runs only on that head.
-    technique_head_enabled: bool = False
+    technique_head_enabled: bool = True
     technique_head_url: str = "http://localhost:8102"
     technique_head_timeout: float = 120.0
-    # SHA-256 of the served checkpoint (its /health "fingerprint"); empty accepts any checkpoint
-    technique_head_expected_fingerprint: str = ""
+    # SHA-256 of the served checkpoint (its /health "fingerprint"); pinned to E2 step_52706
+    # (the registered head); empty accepts any checkpoint
+    technique_head_expected_fingerprint: str = "5b5d015d8766dd27cdeceaf0ea1aaa0ea7c613f397d2bf0fecb07eea41fcea01"
     technique_head_top_families: int = 3
     technique_head_new_candidates: int = 3
     technique_head_batch: int = 16
