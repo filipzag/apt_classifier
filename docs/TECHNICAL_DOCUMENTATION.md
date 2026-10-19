@@ -5564,6 +5564,76 @@ stored rows, keeping only the most probable acceptance per statement would read 
 estimate from test rows, not a result: a single-answer cap (or a much higher threshold for a second
 acceptance) is the next pre-registrable change, with the choice made on public dev.
 
+**Single-answer cap (2026-10-19, declined on dev).** Pre-registered in
+`docs/preregistration/cribl_single_answer_cap_2026-10-19.json`: at most one probability-only
+acceptance per observation, a second one only above a bar, with the bar chosen on public dev by
+the fit's out-of-fold runtime rule from {none, 0.5 … 1.0} (`fit_acceptance_model.py
+--single-answer-cap`; the artifact carries the choice as `metadata.gate`, the runtime follows it
+through `TECHNIQUE_SINGLE_ANSWER_CAP=model`, `off` ignores it and a number forces a bar for an
+ablation). Both fits declined the cap: on dev the uncapped gate scores out-of-fold F1 0.435
+(shipped recipe) and 0.488 (head recipe), every bar 0.429–0.431 and 0.472–0.476, i.e. +2.5 points
+of precision for −4 of recall. The dev split's second acceptances are right often enough to keep;
+the CTI-HAL rows that motivated the cap (7 right / 100 wrong extras) are not representative of
+dev. The "cap" artifacts are therefore uncapped refits and serve as same-code controls: the
+head-free refit (threshold 0.23 against the shipped 0.21) reads F1 −0.003 [−0.008, +0.002] on the
+public test and +0.002 [−0.006, +0.008] on CTI-HAL against the shipped model; the head-recipe
+refit reproduces the schema-4 pair to the last digit. Forced-cap diagnostics (report only, since
+dev chose against them) are listed at the end of this subsection.
+
+**Agreement filter: keep only what both the head and the pipeline pick (2026-10-19).**
+Product owner's request; pre-registered in `docs/preregistration/cribl_head_agreement_2026-10-19.json`.
+A post-gate rule (`TECHNIQUE_HEAD_AGREEMENT`, off by default): an accepted technique of an
+observation the head scored stays accepted only when the head picks it too, at one of three
+levels (its most probable technique; its most probable family; one of its three most probable
+families); verifier verdicts and observations the head did not score are left alone. No refit.
+Arms on the shipped gate (the head present only for the filter) and on the schema-4 pair:
+
+| Arm | Public test: P / R / F1 | CTI-HAL: P / R / F1 | Paired F1 vs its baseline: public; CTI-HAL |
+|---|---|---|---|
+| off (shipped) | 0.516 / 0.349 / 0.417 | 0.425 / 0.341 / 0.378 | |
+| shipped gate ∩ head technique | 0.738 / 0.263 / 0.388 | 0.675 / 0.276 / 0.392 | −0.029 [−0.044, −0.015]; +0.013 [−0.006, +0.030] |
+| **shipped gate ∩ head family (registered)** | 0.677 / 0.277 / 0.393 | 0.640 / 0.299 / 0.407 | −0.024 [−0.038, −0.011]; **+0.029 [+0.014, +0.043]** |
+| shipped gate ∩ head top-3 families | 0.586 / 0.328 / 0.421 | 0.501 / 0.333 / 0.400 | +0.004 [−0.004, +0.011]; +0.022 [+0.015, +0.028] |
+| head pair (schema 4) | 0.553 / 0.398 / 0.463 | 0.553 / 0.463 / 0.504 | |
+| head pair ∩ head family | 0.603 / 0.344 / 0.438 | 0.601 / 0.435 / 0.505 | vs pair −0.025 [−0.035, −0.016]; +0.001 [−0.010, +0.010] |
+
+- The registered arm passes its CTI-HAL headline (+0.029) but fails the public-test constraint
+  (−0.024 beyond its interval): on the public sentences the shipped gate's acceptances that the
+  head disagrees with are right far more often than on CTI-HAL. It is a precision/recall trade
+  (precision +0.16 / +0.22, recall −0.07 / −0.04), not adopted.
+- Top-3 agreement is the one level that costs nothing on the public test (+0.004 n.s.) while
+  gaining +0.022 on CTI-HAL with +0.07 precision on both; it is a secondary arm here, so it is a
+  candidate for its own registration (as an opt-in precision setting), not an adoption.
+- Filtering the pair with the head's family adds precision (+0.05) at a recall cost that leaves
+  CTI-HAL flat and the public test lower: the head's evidence is already in the gate, and the
+  second vote only removes recall.
+- Against the shipped pipeline the pair alone remains the best extraction setting by F1 on both
+  sets; the filters are for a user who wants fewer, surer techniques.
+
+*Attribution with the filters (local pipeline, one run each).*
+
+| Arm | CTI-HAL (55): top-1 / top-5 / MRR / named correct / wrong / technique recall | Elastic strict (8 + 22): top-1 / named / wrong / technique recall; open-set named |
+|---|---|---|
+| off (shipped) | 0.455 / 0.600 / 0.512 / 10 / 0 / 0.405 | 4/8 / 1 / 0 / 0.759; 1 |
+| head-free refit control | 0.455 / 0.600 / 0.515 / 10 / 0 / 0.394 | 4/8 / 1 / 0 / 0.745; 1 |
+| head pair | 0.473 / 0.636 / 0.540 / 9 / 0 / 0.491 | 4/8 / 1 / 0 / 0.832; 2 |
+| shipped gate ∩ head family (registered) | 0.473 / 0.618 / 0.520 / **15** / 0 / 0.363 | 4/8 / 1 / 0 / 0.722; 2 |
+| head pair ∩ head family | 0.473 / 0.618 / 0.538 / **15** / 0 / 0.467 | 4/8 / 1 / 0 / 0.832; 2 |
+
+- Fewer, surer techniques help the naming gate more than more techniques do: with the family
+  filter 15 of the 55 CTI-HAL reports are named correctly (coverage 27%) against 10 shipped and 9
+  with the pair, with no wrong name, although technique recall falls to 0.36. The pair with the
+  filter keeps most of the recall (0.47) and the same 15 names.
+- The open-set finding of the parent registration repeats: every arm that cleans the accepted set
+  names the GoSar commodity post as "Lazarus Group / APT38" (cluster probability 0.99 with 51 to 60
+  accepted techniques), the shipped pipeline does not. It is not a head artifact but a cluster-gate
+  weakness on a cleaner technique set; the registered arm fails its open-set constraint on it, as
+  the pair did. The fix belongs in the cluster gate (8.2, 10.11), designed on the vendor set and the
+  campaigns, never on Elastic.
+- Decision: nothing adopted. The filters stay opt-in (`TECHNIQUE_HEAD_AGREEMENT`), the head stays
+  off by default, and the one lever both experiments point at is the cluster gate's behaviour on
+  commodity reports with clean technique sets.
+
 ## 22. Failure modes and troubleshooting
 
 ### 22.1 “ATT&CK knowledge base has not been ingested”
