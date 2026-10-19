@@ -140,6 +140,13 @@ class Settings(BaseSettings):
     technique_head_new_candidates: int = 3
     technique_head_batch: int = 16
     technique_head_cache_size: int = 2048
+    # The acceptance model fitted with the head's features (schema 4; `fit_acceptance_model.py
+    # --require-technique-head`). Read only while the head is active: it then judges the
+    # observations the head scored and ACCEPTANCE_MODEL_PATH the rest (acceptance.
+    # HeadAwareAcceptance); with the service stopped the shipped gate runs unchanged.
+    acceptance_model_head_path: Path | None = (
+        PROJECT_ROOT / "data" / "models" / "acceptance" / "acceptance_model_technique_head.json"
+    )
     max_questions: int = 10
     # Interview questions about malware only one top-three group uses (software_questions.py,
     # docs 21.3.15 C): asked first while the case is not named, with fixed wording and the answers

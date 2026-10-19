@@ -893,8 +893,16 @@ reports at `/health`); an acceptance model fitted with the head active records t
 its metadata and retrieval contract and refuses to run on another head or without one; a request
 the service fails mid-run leaves its observations without head evidence and is counted in
 `diagnostics["technique_head_errors"]`, and the benchmarks refuse to write such a run under
-`--require-technique-head`. The pre-registered gate and its result are in 21.3.18 ("Product
-integration").
+`--require-technique-head`. **Two models behind one gate.** The schema-4 model
+(`ACCEPTANCE_MODEL_HEAD_PATH`, `acceptance_model_technique_head.json`) is fitted on rows that
+always carry head evidence, so it must never judge a candidate without it (every `th_*` feature at
+0 is a value it has not seen: on the EvidenceForge clinic bundle that cost 0.12 F1 on eCAR
+windows). While the head is active the loader therefore pairs it with the shipped model in
+`acceptance.HeadAwareAcceptance`: the head model judges the candidates of observations the head
+scored, the shipped model (`ACCEPTANCE_MODEL_PATH`) the rest (log-derived observations, failed
+requests); the pair is refused when the two were fitted on different exemplar libraries or
+retrieval settings, and with the service stopped the head path is never read, so the shipped gate
+runs unchanged. The pre-registered gate and its result are in 21.3.18 ("Product integration").
 
 **Per-sentence judgement for long observations (optional, off by default).** With
 `TECHNIQUE_SEGMENT_ACCEPTANCE=true` each sentence of a long observation also gets its *own*
@@ -2709,12 +2717,15 @@ TECHNIQUE_HEAD_EXPECTED_FINGERPRINT=
 TECHNIQUE_HEAD_TOP_FAMILIES=3
 TECHNIQUE_HEAD_NEW_CANDIDATES=3
 TECHNIQUE_HEAD_TIMEOUT=120
+ACCEPTANCE_MODEL_HEAD_PATH=data/models/acceptance/acceptance_model_technique_head.json
 ```
 
 The `TECHNIQUE_HEAD_*` settings drive the fine-tuned technique head's local service (8.2,
 21.3.18): the URL of `make technique-head-serve`, the checkpoint fingerprint the client requires
 (empty accepts any), how many of the head's top families propose a candidate and how many
-proposals may join the pool.
+proposals may join the pool. `ACCEPTANCE_MODEL_HEAD_PATH` is the acceptance model fitted with the
+head's features; it is read only while the head is active and then judges the observations the
+head scored, `ACCEPTANCE_MODEL_PATH` the rest.
 
 ### 18.3 Interview and fusion
 
@@ -5450,6 +5461,52 @@ answer, plausible when connected through related groups, combined 1 / 0.5 / 0.
   stricter, so compare the correct column.
 
 **Cost.** None: all scoring on the laptop (about 12 minutes).
+
+**Product integration: the technique head as mapping evidence (2026-10-19).** Pre-registered
+in `docs/preregistration/cribl_product_integration_2026-10-19.json` before any run; the wiring
+is described in 8.2. The reference head (E2, `data/models/cribl_ft/E2/step_52706`, checkpoint
+fingerprint `5b5d015d…`) runs as a local service (`make technique-head-serve`); with
+`TECHNIQUE_HEAD_ENABLED=true` every prose observation is scored once, each candidate gets the
+head's probabilities as evidence (acceptance feature schema 4) and up to three head proposals that
+retrieval missed join the pool with fused score 0. Log-derived observations are not scored (prose
+only, for now). Three arms, each one run per test set, the acceptance model of the registered arm
+refitted once on public dev with the head active (`acceptance_model_technique_head.json`, schema
+4, threshold 0.23, dev F1 0.488 against 0.468 for the shipped model; it records the head's
+fingerprint and runs only on that head). Accepted-set metrics, one statement per case:
+
+| Arm | Public test (1,391): P / R / F1 / parent-aware F1 / hit@1 | CTI-HAL (968): P / R / F1 / parent-aware F1 / hit@1 |
+|---|---|---|
+| off: the shipped pipeline rerun under this code (reproduces the committed artifacts exactly) | 0.516 / 0.349 / 0.417 / 0.451 / 0.501 | 0.425 / 0.341 / 0.378 / 0.425 / 0.383 |
+| proposer: head on, shipped schema-3 model | 0.518 / 0.349 / 0.417 / 0.452 / 0.501 | 0.428 / 0.341 / 0.379 / 0.426 / 0.383 |
+| **head**: head on, schema-4 model (registered) | **0.553 / 0.398 / 0.463 / 0.500 / 0.556** | **0.553 / 0.463 / 0.504 / 0.564 / 0.509** |
+
+- **Headline (CTI-HAL, head minus off, paired case bootstrap, 1,000 resamples, seed 7):** F1
+  **+0.126 [+0.101, +0.149]**, precision +0.128 [+0.098, +0.156], recall +0.122 [+0.099, +0.146].
+  Public test: F1 +0.046 [+0.031, +0.061], precision +0.037 [+0.016, +0.057], recall +0.049
+  [+0.035, +0.063]; every dataset gains (tram 0.555 → 0.597, derived procedures 0.311 → 0.372,
+  expert 0.263 → 0.308). The precision constraints (no drop beyond 0.02) are met with precision
+  rising on both sets.
+- **Where it comes from (CTI-HAL).** Accepted techniques 840 → 877, of which right 357 → 485;
+  statements with nothing accepted 305 → 198. Of the 305 statements the shipped pipeline accepted
+  nothing for, 75 now get a right technique (92 a wrong one, 138 still nothing); of the 312 it
+  accepted only wrong techniques for, 73 now get a right one and 54 nothing; of the 351 it got
+  right, 330 stay right (15 slip to wrong only, 6 to nothing). Multi-technique acceptances fall
+  from 164 to 102 statements: the model trades spread for one confident answer. The head's own
+  proposals matter little: within the stored top-12 rows the head arm accepts 41 head-only
+  candidates on CTI-HAL, 16 of them right (33 / 15 on the public test); the gain is the
+  re-scoring of retrieved candidates with the head's opinion.
+- **The proposer arm** (head on, shipped model) changes almost nothing (+0.001 F1 on both sets):
+  the shipped model judges head-only candidates on no retrieval evidence, so they stay in review.
+  This is the arm a user gets by starting the service without the refit.
+- **Weights (standardised).** `th_family_p` +0.37, `th_technique_rank` +0.31, `th_technique_p`
+  +0.23, `th_top_p` −0.32 (a head confident about *its* family lowers every other candidate),
+  `th_proposed` +0.08, `th_only` +0.07; the exemplar vote features keep the largest weights.
+- **Runtime.** One request per statement: +0.17 s per public case (546 s against 316 s for 1,391)
+  and +0.07 s per CTI-HAL statement; the service holds about 3.6 GB of GPU memory. No API credit.
+- **Honesty.** The head's checkpoint was selected on public dev + AnnoCTR dev and the acceptance
+  model is fitted on public dev, so the dev operating point is flattering; the public test splits
+  and CTI-HAL were never used to train or choose anything on either side. 55% precision is still
+  the ceiling the CTI-HAL labels allow a one-answer gate (21.3.18 above).
 
 ## 22. Failure modes and troubleshooting
 

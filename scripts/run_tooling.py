@@ -159,6 +159,9 @@ def acceptance_identity(
     if model is not None:
         loaded = fallback if str(status).startswith("fallback") else primary
     threshold = getattr(model, "threshold", None) if model is not None else None
+    # a head-aware pair (acceptance.HeadAwareAcceptance): the head model's artifact beside it
+    head_model = getattr(model, "head_model", None) if model is not None else None
+    head_path = getattr(settings, "acceptance_model_head_path", None) if head_model else None
     return {
         "status": status,
         "path": repo_relative(loaded, repo_root),
@@ -169,6 +172,18 @@ def acceptance_identity(
         if model is not None
         else None,
         "sha256": file_sha256(loaded),
+        **(
+            {
+                "technique_head_model_path": repo_relative(head_path, repo_root),
+                "technique_head_model_sha256": file_sha256(head_path),
+                "technique_head_fingerprint": getattr(
+                    head_model, "technique_head_fingerprint", None
+                ),
+                "plain_threshold": float(model.plain_model.threshold),
+            }
+            if head_model is not None
+            else {}
+        ),
     }
 
 

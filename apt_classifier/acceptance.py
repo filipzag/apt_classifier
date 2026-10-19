@@ -715,6 +715,110 @@ class AcceptanceModel:
         )
 
 
+@dataclass
+class HeadAwareAcceptance:
+    """Two acceptance models behind one gate: the schema-4 model fitted with the technique head
+    judges the candidates of an observation the head scored (they carry ``technique_head``
+    evidence), the shipped model everything else (log-derived observations, which the head does
+    not read, and observations whose request failed). Built by :func:`load_acceptance_model`
+    when the head is active and ``acceptance_model_head_path`` loads; ``retrieve_techniques``
+    picks the sub-model per candidate through :meth:`model_for`. The identity it reports (the
+    contract, fingerprints, threshold, metadata) is the head model's, so the runtime checks hold
+    the pair to the head it was fitted with."""
+
+    head_model: AcceptanceModel
+    plain_model: AcceptanceModel
+
+    def model_for(self, candidate: Any) -> AcceptanceModel:
+        evidence = getattr(candidate, "evidence_for", None)
+        if callable(evidence) and evidence(TECHNIQUE_HEAD_EVIDENCE_SOURCE) is not None:
+            return self.head_model
+        return self.plain_model
+
+    @property
+    def threshold(self) -> float:
+        return self.head_model.threshold
+
+    @property
+    def metadata(self) -> dict[str, Any]:
+        return {
+            **self.head_model.metadata,
+            "plain_model": {
+                "threshold": self.plain_model.threshold,
+                "feature_schema_version": self.plain_model.feature_schema_version,
+                "pipeline_fingerprint": self.plain_model.metadata.get("pipeline_fingerprint"),
+            },
+        }
+
+    @property
+    def contract(self) -> dict[str, Any] | None:
+        return self.head_model.contract
+
+    @property
+    def contract_origin(self) -> str | None:
+        return self.head_model.contract_origin
+
+    @property
+    def feature_schema_version(self) -> int:
+        return self.head_model.feature_schema_version
+
+    @property
+    def requires_exemplars(self) -> bool:
+        return self.head_model.requires_exemplars or self.plain_model.requires_exemplars
+
+    @property
+    def exemplar_fingerprint(self) -> str | None:
+        return self.head_model.exemplar_fingerprint or self.plain_model.exemplar_fingerprint
+
+    @property
+    def requires_technique_head(self) -> bool:
+        return True
+
+    @property
+    def technique_head_fingerprint(self) -> str | None:
+        return self.head_model.technique_head_fingerprint
+
+    def prior_features(self, technique_id: str) -> dict[str, float]:
+        return self.head_model.prior_features(technique_id)
+
+    def probability(self, features: dict[str, float]) -> float:
+        return self.head_model.probability(features)
+
+    def accepts(self, features: dict[str, float]) -> bool:
+        return self.head_model.accepts(features)
+
+    def compatible_with(self, *args: Any, **kwargs: Any) -> tuple[bool, str]:
+        return self.head_model.compatible_with(*args, **kwargs)
+
+
+def composite_problems(head_model: AcceptanceModel, plain_model: AcceptanceModel) -> list[str]:
+    """Why ``head_model`` and ``plain_model`` may not share a gate (empty when they may): the
+    head model must be fitted with the head, the plain one without, on the same exemplar library
+    and under the same retrieval settings apart from the head's."""
+    problems: list[str] = []
+    if not head_model.requires_technique_head:
+        problems.append("the technique head model was not fitted with the head")
+    if plain_model.requires_technique_head:
+        problems.append("the plain model was fitted with the technique head")
+    if (
+        head_model.requires_exemplars
+        and plain_model.requires_exemplars
+        and head_model.exemplar_fingerprint != plain_model.exemplar_fingerprint
+    ):
+        problems.append("the two models were fitted on different exemplar libraries")
+    if head_model.contract is not None and plain_model.contract is not None:
+        problems.extend(
+            f"retrieval contract: {problem}"
+            for problem in contract_mismatches(
+                plain_model.contract,
+                head_model.contract,
+                exemplars=plain_model.requires_exemplars,
+                technique_head=False,
+            )
+        )
+    return problems
+
+
 def choose_threshold(
     probabilities: Sequence[float],
     labels: Sequence[int],
@@ -866,6 +970,14 @@ def load_acceptance_model(
     in for a primary that stores one (a refit) must also meet the serving defaults it ran under
     (:data:`LEGACY_CONTRACT`, non-exemplar keys): the refit's tuned settings never reach a model
     fitted before them. Without a stored contract on either side nothing changes.
+
+    When the runtime contract carries an active technique head (``technique_head_fingerprint``)
+    and ``acceptance_model_head_path`` names a model fitted with that head, the loaded model is
+    paired with it in a :class:`HeadAwareAcceptance`: the head model judges the observations the
+    head scored, the loaded one the rest. The pair is refused (the loaded model alone stays)
+    when the head model does not load, was fitted on another head or library, or under other
+    retrieval settings (:func:`composite_problems`); without an active head the head path is
+    never read, so a stopped service restores the shipped gate exactly.
     """
     if not bool(getattr(settings, "acceptance_model_enabled", False)):
         return None, "disabled"
@@ -873,17 +985,43 @@ def load_acceptance_model(
     if not path:
         return None, "no path configured"
     model, status = _load_compatible(path, kb, exemplar_index, contract)
-    if model is not None:
+    if model is None:
+        fallback = getattr(settings, "acceptance_model_fallback_path", None)
+        if fallback and Path(fallback) != Path(path):
+            alternative, _ = _load_compatible(fallback, kb, None, contract)
+            if alternative is not None and not alternative.requires_exemplars:
+                problems = _legacy_stand_in_problems(path, alternative, contract)
+                if problems:
+                    return None, f"{status}; fallback refused: " + "; ".join(problems)
+                model, status = alternative, f"fallback without exemplars ({status})"
+    if model is None:
+        return None, status
+    return _with_head_model(settings, kb, exemplar_index, contract, model, status)
+
+
+def _with_head_model(
+    settings: Any,
+    kb: Any,
+    exemplar_index: Any,
+    contract: Mapping[str, Any] | None,
+    model: AcceptanceModel,
+    status: str,
+) -> tuple[AcceptanceModel | HeadAwareAcceptance, str]:
+    """``model`` paired with the technique head model when the head is active and the pair is
+    sound (:class:`HeadAwareAcceptance`), else ``model`` with the reason appended."""
+    head_path = getattr(settings, "acceptance_model_head_path", None)
+    runtime_head = dict(contract or {}).get("technique_head_fingerprint")
+    if not head_path or not runtime_head or model.requires_technique_head:
         return model, status
-    fallback = getattr(settings, "acceptance_model_fallback_path", None)
-    if fallback and Path(fallback) != Path(path):
-        alternative, _ = _load_compatible(fallback, kb, None, contract)
-        if alternative is not None and not alternative.requires_exemplars:
-            problems = _legacy_stand_in_problems(path, alternative, contract)
-            if problems:
-                return None, f"{status}; fallback refused: " + "; ".join(problems)
-            return alternative, f"fallback without exemplars ({status})"
-    return None, status
+    if Path(head_path) == Path(getattr(settings, "acceptance_model_path", "") or ""):
+        return model, status
+    head_model, head_status = _load_compatible(head_path, kb, exemplar_index, contract)
+    if head_model is None:
+        return model, f"{status}; technique head model not used: {head_status}"
+    problems = composite_problems(head_model, model)
+    if problems:
+        return model, f"{status}; technique head model refused: " + "; ".join(problems)
+    return HeadAwareAcceptance(head_model, model), f"{status} + technique head model"
 
 
 def _legacy_stand_in_problems(

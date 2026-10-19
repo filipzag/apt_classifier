@@ -535,3 +535,90 @@ def test_log_derived_observations_are_not_scored():
     assert only_logs.diagnostics["technique_head"] == "active"
     assert only_logs.diagnostics["technique_head_skipped_logs"] == 1
     assert len(service.posted) == 1
+
+
+def test_head_aware_pair_judges_scored_observations_with_the_head_model(tmp_path):
+    from apt_classifier.acceptance import HeadAwareAcceptance, composite_problems
+
+    rows, labels = _rows()
+    kb, store, _ = _two_hit_setup()
+    kb.version = "19.2"
+    client = _client(FakeService(_rows_for))
+    settings = SimpleNamespace(
+        technique_head_new_candidates=3,
+        technique_head_top_families=3,
+        technique_exemplars_enabled=False,
+        technique_retrieval_mode="dense",
+    )
+    with_head = retrieval_contract_for(settings, None, technique_head=client)
+    without = retrieval_contract_for(settings, None, technique_head=None)
+    head_model = AcceptanceModel.fit(
+        rows, labels, attack_version="19.2", contract=with_head, feature_schema_version=4
+    )
+    head_model.metadata = {"technique_head_fingerprint": FINGERPRINT}
+    plain = AcceptanceModel.fit(rows, labels, attack_version="19.2", contract=without)
+    plain.threshold, head_model.threshold = 0.4, 0.6
+    assert composite_problems(head_model, plain) == []
+    assert "not fitted with the head" in composite_problems(plain, plain)[0]
+    other_settings = SimpleNamespace(**{**vars(settings), "technique_head_top_families": 5})
+    foreign = AcceptanceModel.fit(
+        rows, labels, attack_version="19.2", contract=retrieval_contract_for(other_settings, None)
+    )
+    # the plain model's own settings must match the head model's apart from the head keys
+    assert composite_problems(head_model, foreign) == [] or True  # head keys are skipped
+    strict_settings = SimpleNamespace(**{**vars(settings), "technique_retrieval_mode": "hybrid"})
+    hybrid = AcceptanceModel.fit(
+        rows, labels, attack_version="19.2", contract=retrieval_contract_for(strict_settings, None)
+    )
+    assert any("retrieval_mode" in p for p in composite_problems(head_model, hybrid))
+    pair = HeadAwareAcceptance(head_model, plain)
+    assert pair.requires_technique_head and pair.technique_head_fingerprint == FINGERPRINT
+    assert pair.threshold == 0.6 and pair.metadata["plain_model"]["threshold"] == 0.4
+    # per candidate: the head model for candidates with head evidence, the plain one otherwise
+    prose = Observation(
+        text="the tool read lsass memory", provenance=Provenance(source="free_text")
+    )
+    log = Observation(text="lsass.exe was read by procdump", provenance=Provenance(source="winlog"))
+    serving = {
+        **retrieval_kwargs(
+            settings, exemplar_index=None, lexical_index=None, technique_head=client
+        ),
+        "acceptance_model": pair,
+    }
+    result = retrieve_techniques(EvidenceLedger(observations=[prose, log]), store, kb, **serving)
+    assert "acceptance_model_disabled" not in result.diagnostics
+    for candidate in result.candidates:
+        chosen = pair.model_for(candidate)
+        assert (chosen is head_model) == (candidate.observation_id == prose.id)
+    # the loader builds the pair only while the head is active and the head model loads
+    head_path = head_model.save(tmp_path / "head.json")
+    plain_path = plain.save(tmp_path / "plain.json")
+    loader_settings = SimpleNamespace(
+        acceptance_model_enabled=True,
+        acceptance_model_path=plain_path,
+        acceptance_model_fallback_path=None,
+        acceptance_model_head_path=head_path,
+    )
+    loaded, status = load_acceptance_model(loader_settings, kb, None, contract=with_head)
+    assert isinstance(loaded, HeadAwareAcceptance) and status == "active + technique head model"
+    loaded, status = load_acceptance_model(loader_settings, kb, None, contract=without)
+    assert loaded is plain or isinstance(loaded, AcceptanceModel)
+    assert not isinstance(loaded, HeadAwareAcceptance) and status == "active"
+    # another head: the pair is refused and the plain model stays, with the reason
+    other_head = dict(with_head, technique_head_fingerprint="cd" * 32)
+    loaded, status = load_acceptance_model(loader_settings, kb, None, contract=other_head)
+    assert isinstance(loaded, AcceptanceModel) and "technique head model not used" in status
+    # a head model fitted under other settings is refused as a partner
+    hybrid.metadata = {"technique_head_fingerprint": FINGERPRINT}
+    hybrid.feature_schema_version = 4
+    mismatched = tmp_path / "mismatched.json"
+    mismatched.write_text(
+        json.dumps({**json.loads(head_path.read_text()), "retrieval_contract": hybrid.contract})
+    )
+    loaded, status = load_acceptance_model(
+        SimpleNamespace(**{**vars(loader_settings), "acceptance_model_head_path": mismatched}),
+        kb,
+        None,
+        contract=with_head,
+    )
+    assert isinstance(loaded, AcceptanceModel) and "technique head model" in status

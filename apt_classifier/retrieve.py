@@ -1955,6 +1955,11 @@ def _acceptance_probability(
     reordered by probability, judges exactly the same number: features such as the
     fused rank and margins are only meaningful in the fusion order they were fitted on.
     """
+    picker = getattr(model, "model_for", None)
+    if callable(picker):
+        # a head-aware pair (acceptance.HeadAwareAcceptance): the model fitted with the
+        # technique head for candidates that carry its evidence, the plain one for the rest
+        model = picker(candidate)
     threshold = getattr(model, "threshold", None)
     if hasattr(model, "prior_features"):
         features = {**features, **model.prior_features(candidate.technique_id)}
