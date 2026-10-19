@@ -830,3 +830,53 @@ def test_actor_prompt_and_report_aggregation():
         and out[0]["top"][0] == ["G0002", 0.65]
         and out[0]["gold_rank"] == 1
     )
+
+
+def test_external_bench_scoring_rules():
+    from scripts.cribl_finetune.external_bench import (
+        ate_scores,
+        ate_sets,
+        bullets,
+        connected,
+        taa_score,
+    )
+
+    assert bullets("- Targeted X - Used hardcoded names - C2 via SharePoint") == [
+        "Used hardcoded names",
+        "C2 via SharePoint",
+    ]  # a two-word bullet is dropped
+    cases = [
+        {"case_id": "a-1", "report_id": "a", "gold_ids": ["T1059", "T1105"]},
+        {"case_id": "a-2", "report_id": "a", "gold_ids": ["T1059", "T1105"]},
+        {"case_id": "b-1", "report_id": "b", "gold_ids": ["T1003"]},
+    ]
+    predictions = [
+        {
+            "case_id": "a-1",
+            "status": "ok",
+            "top": [["T1059", 0.9]],
+            "technique_top": [["T1059.001", 0.8]],
+        },
+        {
+            "case_id": "a-2",
+            "status": "ok",
+            "top": [["T1566", 0.7]],
+            "technique_top": [["T1566.001", 0.6]],
+        },
+        {"case_id": "b-1", "status": "error"},
+    ]
+    import math
+
+    sets = ate_sets(cases, predictions, math.inf)
+    assert sets == {"a": ({"T1059", "T1105"}, {"T1059", "T1566"}), "b": ({"T1003"}, set())}
+    scored = ate_scores(sets)
+    assert scored["micro_f1"] == 0.4 and scored["mean_f1"] == 0.25  # a: P 0.5 R 0.5; b: 0
+    aliases = {"apt41": {"winnti group"}, "winnti group": {"apt41"}}
+    related = {"apt41": {"apt17"}, "apt17": {"apt41"}}
+    assert connected("APT41", "Winnti Group", aliases)
+    assert not connected("APT41", "APT17", aliases) and connected(
+        "APT41", "APT17", aliases, related
+    )
+    assert taa_score("APT41", "Winnti Group", aliases, related)["combined"] == 1.0
+    assert taa_score("APT41", "APT17", aliases, related)["combined"] == 0.5
+    assert taa_score("APT41", "Lazarus", aliases, related)["combined"] == 0.0
