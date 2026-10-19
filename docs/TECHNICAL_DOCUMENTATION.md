@@ -5539,6 +5539,31 @@ flip, for instance by holding the cluster gate to its own separation floor on he
 measured on a fresh fold seed, never on the Elastic set. Artifacts: `data/audits/cribl_ft/
 integration/` (gitignored; `integration_report.py` composes `integration_report.json`).
 
+**Multi-answer acceptance (2026-10-19, rejected).** Pre-registered in
+`docs/preregistration/cribl_multi_answer_acceptance_2026-10-19.json`. Motivation: multi-technique
+statements are under-recovered (CTI-HAL: 68 statements with two or more labels, 45 get one right,
+6 get all; of the 96 missed labels 53 sit in the top-12 rows at a median acceptance probability of
+0.05, and for 40% of them the head gives the label's family at least a quarter of its top family's
+probability). Feature schema 5 adds the head's second answer as relative evidence
+(`th_rel_family`, `th_rel_technique`, a `th_second` flag for the head's second or third family at
+≥ 25% of the top one, the statement length and their product); one refit on public dev
+(`--feature-schema 5`; dev F1 0.489 against 0.488, threshold 0.25), one run per set through the
+head-aware pair. Result against the schema-4 pair (paired, 1,000 resamples): CTI-HAL F1 −0.004
+[−0.014, +0.005] with precision +0.014 and recall −0.016; public test F1 −0.006 [−0.012, −0.001];
+multi-label recall 0.351 → 0.338 (CTI-HAL) and 0.207 → 0.200 (public); the expert split is
+unchanged (0.308 → 0.306). The fit used the new features to raise the threshold, not to admit second
+answers: the relative family probability took a negative weight that offsets the absolute one. The
+headline rule (no loss) fails on the point estimate and the multi-label constraint fails, so
+schema 4 stays the `ACCEPTANCE_MODEL_HEAD_PATH` model; schema 5 remains loadable.
+
+What the breakdown says instead: acceptances beyond the first on a statement are almost always
+wrong. With the schema-4 pair, CTI-HAL has 102 statements with more than one accepted technique
+and the extra acceptances are 7 right / 100 wrong; on the public test 17 right / 235 wrong. From the
+stored rows, keeping only the most probable acceptance per statement would read as precision 0.553
+→ 0.62 and F1 0.504 → about 0.53 on CTI-HAL (0.463 → about 0.49 on the public test). That is an
+estimate from test rows, not a result: a single-answer cap (or a much higher threshold for a second
+acceptance) is the next pre-registrable change, with the choice made on public dev.
+
 ## 22. Failure modes and troubleshooting
 
 ### 22.1 “ATT&CK knowledge base has not been ingested”

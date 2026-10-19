@@ -309,6 +309,7 @@ TECHNIQUE_HEAD_ENABLED=true PYTHONPATH=. .venv/bin/python scripts/fit_acceptance
 TECHNIQUE_HEAD_ENABLED=true ACCEPTANCE_MODEL_PATH=data/models/acceptance/acceptance_model_technique_head.json \
   PYTHONPATH=. .venv/bin/python scripts/benchmark_mapping.py --split test --require-technique-head --output <file>
 PYTHONPATH=. .venv/bin/python scripts/cribl_finetune/integration_report.py    # arms, paired bootstraps, checks -> integration_report.json
+# multi-answer acceptance (schema 5, rejected: prereg cribl_multi_answer_acceptance_2026-10-19.json): add --feature-schema 5 to the fit
 ```
 
 The product side is `apt_classifier/technique_head.py` (client, fail closed), the hooks in
