@@ -5359,6 +5359,55 @@ product (weight 0, docs 21.3.16). No adoption.
 
 **Cost.** One pod, about $0.45 (30 minutes at $0.89/h). Scoring on the laptop. No OpenRouter credit.
 
+**CTIBench and AthenaBench (2026-10-19, prereg `cribl_external_bench_2026-10-19.json`, evaluation
+only).** The owner asked for the public CTI benchmarks. Both are non-commercial (CTIBench CC BY-NC-SA
+4.0; AthenaBench's academic research licence): local evaluation, nothing trained on them, raw files
+under `data/benchmarks/` (gitignored). Only their extraction and attribution tasks fit models that
+do not generate text; the knowledge, CVE→CWE, CVSS and mitigation tasks were not run.
+`external_bench.py` prepares the cases, runs the heads and scores under the benchmarks' rules.
+
+*Technique extraction.* CTI-ATE (CTIBench): 60 ATT&CK software descriptions (47 Enterprise, 13
+Mobile), 6.6 parent techniques each, F1. E2 reads the sentences the product's splitter makes (398)
+and answers one technique per sentence (or up to three at 1.3 per sentence); the union at parent
+level is scored. AthenaBench ATE: 500 GPT-written scenarios, one answer each, accuracy at parent
+level (the benchmark's rule; 352 answers are sub-techniques).
+
+| Technique extraction | E2 (this work) | published models (same metric) |
+|---|---|---|
+| CTI-ATE, all 60 texts, F1 (micro / mean per text) | 0.575 / 0.583; up to 3 per sentence 0.578 / 0.599 | ChatGPT-4 0.639, Llama3-70B 0.472, Gemini-1.5 0.461, ChatGPT-3.5 0.311, Llama3-8B 0.156 (macro-F1 as the paper labels it) |
+| CTI-ATE, the 47 Enterprise texts | 0.746 / 0.745; up to 3: 0.755 / 0.765 | not reported separately |
+| AthenaBench ATE, accuracy (top-1 at parent level) | **0.736** (top-3 0.910, top-5 0.942; exact id 0.600) | Gemini-2.5-Pro 76.2, GPT-5 76.0, GPT-4o 51.6, Gemini-2.5-Flash 51.6, GPT-4 35.8, Llama-Primus 33.8, Llama 3.3-70B 30.4, Qwen3-14B 19.4, Qwen3-8B 11.8, Qwen3-4B 5.6 |
+
+- On AthenaBench the 4B head sits 2.5 points under the two frontier models and far above every open
+  model the authors ran, including its own base family (Qwen3-4B 5.6%, which had to generate an id
+  from a prompt). Scenarios whose answer is a sub-technique score 0.719, parent-only ones 0.777.
+- On CTI-ATE the catalogue is Enterprise only, so the 13 Mobile texts score 0 and pull the
+  all-rows F1 to 0.58, second to ChatGPT-4's 0.64; on the Enterprise rows it reaches 0.75. These
+  texts are ATT&CK's software descriptions and E2 trained on ATT&CK's procedure sentences about the
+  same software, so the CTI-ATE numbers are flattering; the AthenaBench ones are not.
+
+*Threat-actor attribution.* CTI-TAA: 50 anonymised reports (answers from the authors' key);
+AthenaBench TAA: 100 bullet profiles. Both models here name an ATT&CK group: the actor head
+(mean probability over the report's sentences or bullets) and the product's TF-IDF text-group
+model (whole text). Scored with AthenaBench's rule and lists: correct when alias-connected to the
+answer, plausible when connected through related groups, combined 1 / 0.5 / 0.
+
+| Attribution | actor head (T1) | TF-IDF text-group model | published |
+|---|---|---|---|
+| CTI-TAA (50; 48 answers map to an ATT&CK group): correct / plausible / combined | 0.38 / 0.96 / 0.67 | 0.38 / 0.98 / 0.68 | correct / plausible: ChatGPT-4 52 / 86, Llama3-70B 52 / 80, ChatGPT-3.5 44 / 62, Gemini-1.5 38 / 74, Llama3-8B 28 / 36 |
+| AthenaBench TAA (100; 75 map to an ATT&CK group): correct / plausible / combined | 0.16 / 0.84 / 0.50 | 0.23 / 0.79 / 0.51 | accuracy: GPT-5 39, GPT-4o 35, GPT-4 31, Gemini-2.5-Pro 31, Llama 3.1-8B 24, Qwen3-14B 17, Qwen3-4B 15 |
+
+- Correct attributions match Gemini-1.5 on CTI-TAA and sit below the frontier models on both;
+  a quarter of AthenaBench's answers are actors ATT&CK does not list (TraderTraitor, WageMole,
+  Cleaver), which no model here can name. The two models agree on 13 of 50 and 18 of 100 picks
+  and are right together on 12 and 11; either is right on 26 and 28. The actor head leans on a few
+  prominent groups (Lazarus on 17 of 50 CTI-TAA reports).
+- "Plausible" follows the authors' transitive related-group walk, which connects most known
+  actors; the CTIBench paper's plausible numbers came from the authors' own notebook and may be
+  stricter, so compare the correct column.
+
+**Cost.** None: all scoring on the laptop (about 12 minutes).
+
 ## 22. Failure modes and troubleshooting
 
 ### 22.1 “ATT&CK knowledge base has not been ingested”

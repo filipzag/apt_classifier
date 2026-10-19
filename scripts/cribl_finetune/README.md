@@ -287,3 +287,15 @@ PYTHONPATH=. .venv/bin/python scripts/cribl_finetune/group_text_eval.py tfidf --
 Result (docs 21.3.18): report-level top-1 on CTI-HAL 0.255 against 0.491 for the TF-IDF text-group
 model (−0.24, significant) and 0.127 for the group network on extracted techniques; Elastic 3 of 8
 vs 1 of 8. Text beats technique lists; the bag of words still beats the LLM head.
+
+### CTIBench and AthenaBench (prereg `cribl_external_bench_2026-10-19.json`, evaluation only)
+
+```bash
+PYTHONPATH=. .venv/bin/python scripts/cribl_finetune/external_bench.py prepare    # raw files under data/benchmarks/{cti_bench,athenabench}/raw (non-commercial licences)
+cd scripts/cribl_finetune && ../../../.venv-cribl/bin/python external_bench.py predict --technique <E2 dir> --actor <T1 dir>
+PYTHONPATH=. .venv/bin/python scripts/cribl_finetune/external_bench.py score      # -> data/audits/cribl_ft/external_bench.json
+```
+
+Result (docs 21.3.18): AthenaBench ATE accuracy 0.736 (published: Gemini-2.5-Pro 76.2, GPT-5 76.0,
+Qwen3-4B 5.6); CTI-ATE F1 0.58 on all 60 texts (ChatGPT-4 0.64), 0.75 on the 47 Enterprise ones;
+TAA correct 0.38 (CTIBench, both group models) and 0.16-0.23 (AthenaBench).
