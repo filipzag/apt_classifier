@@ -113,6 +113,15 @@ class Settings(BaseSettings):
     # Default since 2026-10-01: neutral on every benchmark (public held-out F1 0.416 -> 0.417,
     # attribution unchanged, docs 21.3.12), which rarely describe non-Windows hosts.
     technique_platform_from_text: bool = True
+    # Single-answer cap (2026-10-19, prereg cribl_single_answer_cap_2026-10-19): "model" follows
+    # the acceptance artifact's own gate record (at most one probability-only acceptance per
+    # observation, a second one above the artifact's bar; artifacts without a record run
+    # uncapped), "off" ignores it for an ablation.
+    technique_single_answer_cap: str = "model"
+    # Agreement filter (2026-10-19, prereg cribl_head_agreement): "technique" / "family" /
+    # "top3" keep an accepted technique only when the technique head picks it too (its top
+    # technique, its top family, one of its top-3 families); "off" (default) no filter.
+    technique_head_agreement: str = "off"
     acceptance_model_path: Path = (
         PROJECT_ROOT / "data" / "models" / "acceptance" / "acceptance_model.json"
     )

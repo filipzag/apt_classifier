@@ -680,3 +680,129 @@ def test_second_answer_features_and_schema_5(tmp_path):
     assert loaded is not None and loaded.feature_schema_version == 5
     assert loaded.compatible_with("19.2") == (True, "ok")
     assert loaded.probability(rows[3]) == pytest.approx(five.probability(rows[3]))
+
+
+def test_single_answer_cap_in_the_threshold_rule_and_the_gate():
+    import numpy as np
+
+    from apt_classifier.acceptance import _SingleAnswerCap, choose_threshold_runtime
+    from apt_classifier.retrieve import CAP_REVIEW_REASON, MODEL_ACCEPT_REASON
+
+    probs = np.asarray([0.9, 0.6, 0.3, 0.8, 0.85, 0.2])
+    cases = ["a", "a", "a", "b", "b", "c"]
+    accepted = probs >= 0.25
+    kept = _SingleAnswerCap(cases, probs, 0.7).keep(accepted)
+    # a: 0.9 stays, 0.6 and 0.3 are capped; b: 0.85 stays and 0.8 clears the bar; c: untouched
+    assert kept.tolist() == [True, False, False, True, True, False]
+    strict = _SingleAnswerCap(cases, probs, 1.0).keep(accepted)
+    assert strict.tolist() == [True, False, False, False, True, False]
+    labels = [1, 0, 0, 1, 1, 0]
+    common = {
+        "blocked": [False] * 6,
+        "forced": [False] * 6,
+        "technique_ids": ["T1", "T2", "T3", "T4", "T5", "T6"],
+        "min_precision": 0.0,
+        "grid": [0.25],
+    }
+    plain = choose_threshold_runtime(probs, labels, cases, {"a": 1, "b": 2, "c": 1}, **common)
+    capped = choose_threshold_runtime(
+        probs, labels, cases, {"a": 1, "b": 2, "c": 1}, second_min_probability=0.7, **common
+    )
+    assert plain["accepted"] == 5 and plain["second_min_probability"] is None
+    assert capped["accepted"] == 3 and capped["precision"] == 1.0
+    assert capped["second_min_probability"] == 0.7
+    # the gate: with a model carrying a gate record, the second probability-only acceptance
+    # of an observation goes back to review unless it clears the bar
+    rows, labels = _rows()
+    kb, store, ledger = _two_hit_setup()
+    model = AcceptanceModel.fit(rows, labels, attack_version="")
+    model.threshold = 0.0  # accepts every candidate on probability
+    without = retrieve_techniques(ledger, store, kb, retrieval_mode="dense", acceptance_model=model)
+    accepted_before = [c for c in without.candidates if str(c.state).endswith("auto_accepted")]
+    assert len(accepted_before) >= 2 and model.second_min_probability is None
+    model.metadata["gate"] = {"single_answer": True, "second_min_probability": 1.0}
+    assert model.second_min_probability == 1.0
+    capped_result = retrieve_techniques(
+        ledger, store, kb, retrieval_mode="dense", acceptance_model=model
+    )
+    accepted_after = [c for c in capped_result.candidates if str(c.state).endswith("auto_accepted")]
+    reviewed = [c for c in capped_result.candidates if c.state_reason == CAP_REVIEW_REASON]
+    assert len(accepted_after) == 1 and len(reviewed) == len(accepted_before) - 1
+    assert accepted_after[0].state_reason == MODEL_ACCEPT_REASON
+    # the most probable one is the keeper
+    best = max(accepted_before, key=lambda c: c.evidence_for("acceptance_model").score)
+    assert accepted_after[0].technique_id == best.technique_id
+    # the ablation switch ignores the model's cap
+    off = retrieve_techniques(
+        ledger, store, kb, retrieval_mode="dense", acceptance_model=model, single_answer_cap="off"
+    )
+    assert len([c for c in off.candidates if str(c.state).endswith("auto_accepted")]) == len(
+        accepted_before
+    )
+    with pytest.raises(ValueError):
+        retrieve_techniques(ledger, store, kb, retrieval_mode="dense", single_answer_cap="maybe")
+
+
+def test_head_agreement_filter_keeps_only_what_the_head_picks():
+    from apt_classifier.retrieve import AGREEMENT_REVIEW_REASON, head_agrees
+
+    kb, store, _ = _two_hit_setup()
+    rows, labels = _rows()
+    model = AcceptanceModel.fit(rows, labels, attack_version="")
+    model.threshold = 0.0  # the gate accepts both retrieved candidates
+    prose = Observation(
+        text="the tool read lsass memory", provenance=Provenance(source="free_text")
+    )
+    log = Observation(text="lsass read by procdump", provenance=Provenance(source="winlog"))
+    client = _client(FakeService(_rows_for))
+    # lsass rows: top family T1003 (T1003.001 the top technique), T1059 second
+    for level, expected_kept in (
+        ("technique", {"T1003.001"}),
+        ("family", {"T1003.001"}),
+        ("top3", {"T1003.001", "T1059.001"}),
+    ):
+        result = retrieve_techniques(
+            EvidenceLedger(observations=[prose, log]),
+            store,
+            kb,
+            retrieval_mode="dense",
+            acceptance_model=model,
+            technique_head=client,
+            technique_head_new_candidates=0,
+            technique_head_agreement=level,
+        )
+        kept = {
+            c.technique_id
+            for c in result.candidates
+            if c.observation_id == prose.id and str(c.state).endswith("auto_accepted")
+        }
+        assert kept == expected_kept, level
+        reviewed = [c for c in result.candidates if c.state_reason == AGREEMENT_REVIEW_REASON]
+        assert all(c.observation_id == prose.id for c in reviewed)
+        # the log observation (no head evidence) keeps every acceptance
+        assert all(
+            str(c.state).endswith("auto_accepted")
+            for c in result.candidates
+            if c.observation_id == log.id
+        )
+    plain = retrieve_techniques(
+        EvidenceLedger(observations=[prose]),
+        store,
+        kb,
+        retrieval_mode="dense",
+        acceptance_model=model,
+        technique_head=client,
+    )
+    assert {c.technique_id for c in plain.candidates if str(c.state).endswith("auto_accepted")} == {
+        "T1003.001",
+        "T1059.001",
+    }
+    assert head_agrees(plain.candidates[0], "family") in (True, False)
+    with pytest.raises(ValueError):
+        retrieve_techniques(
+            EvidenceLedger(observations=[prose]),
+            store,
+            kb,
+            retrieval_mode="dense",
+            technique_head_agreement="all",
+        )

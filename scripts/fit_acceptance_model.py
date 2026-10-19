@@ -145,6 +145,8 @@ def exemplar_fit_metadata(settings: Any, exemplar_index: Any) -> dict[str, Any]:
 
 
 DEFAULT_OUTPUT = REPO_ROOT / "data" / "models" / "acceptance" / "acceptance_model.json"
+# the single-answer cap's bars for a second acceptance (None: no cap; 1.0: strictly one)
+CAP_BARS: tuple[float | None, ...] = (None, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0)
 # an out-of-fold threshold this far from the in-sample runtime one is flagged in the metadata
 THRESHOLD_GAP_FLAG = 0.03
 
@@ -259,6 +261,7 @@ def select_threshold(
     group_similarity: float = DEFAULT_GROUP_SIMILARITY,
     hierarchy_parent_mode: str = "off",
     feature_schema_version: int = 3,
+    cap_bars: Sequence[float | None] = (None,),
 ) -> ThresholdSelection:
     """The acceptance threshold by ``method`` (``oof_runtime`` or ``in_sample``), with both
     in-sample operating points recorded beside it; ``probabilities`` are the in-sample ones of
@@ -312,13 +315,31 @@ def select_threshold(
         l2=l2,
         feature_schema_version=feature_schema_version,
     )
-    operating_point = choose_threshold_runtime(
-        out_of_fold.tolist(), labels, case_ids, fitted.expected_counts, **runtime_scoring
-    )
+    # the single-answer cap: every bar on the grid (None = no cap) scored with the runtime
+    # rule on the out-of-fold probabilities; the best F1 at the precision floor wins
+    cap_grid: list[dict[str, Any]] = []
+    operating_point: dict[str, Any] | None = None
+    for bar in cap_bars:
+        point = choose_threshold_runtime(
+            out_of_fold.tolist(),
+            labels,
+            case_ids,
+            fitted.expected_counts,
+            second_min_probability=bar,
+            **runtime_scoring,
+        )
+        cap_grid.append(point)
+        if operating_point is None or (
+            point["precision_floor_met"],
+            point["micro_f1"],
+        ) > (operating_point["precision_floor_met"], operating_point["micro_f1"]):
+            operating_point = point
+    assert operating_point is not None
     gap = abs(float(operating_point["threshold"]) - float(in_sample_runtime["threshold"]))
     selection.update(
         {
             "out_of_fold_runtime": operating_point,
+            **({"cap_grid": cap_grid} if len(cap_grid) > 1 else {}),
             "cv": {
                 "folds": cv_folds,
                 "seed": cv_seed,
@@ -447,6 +468,12 @@ def main(argv: list[str] | None = None) -> int:
         "--require-technique-head",
         action="store_true",
         help="exit 2 unless the technique head service scored every case (TECHNIQUE_HEAD_ENABLED)",
+    )
+    parser.add_argument(
+        "--single-answer-cap",
+        action="store_true",
+        help="choose a single-answer cap on dev: at most one probability-only acceptance per "
+        "observation, a second above a bar from {0.5..1.0}; 'no cap' competes on the same grid",
     )
     parser.add_argument(
         "--feature-schema",
@@ -595,10 +622,18 @@ def main(argv: list[str] | None = None) -> int:
         group_similarity=args.group_similarity,
         hierarchy_parent_mode=str(getattr(settings, "technique_hierarchy_parent_mode", "off")),
         feature_schema_version=schema,
+        cap_bars=CAP_BARS if args.single_answer_cap else (None,),
     )
     operating_point, selection = selected.operating_point, selected.selection
     model.threshold = float(operating_point["threshold"])
+    chosen_bar = operating_point.get("second_min_probability")
+    gate = {
+        "single_answer": chosen_bar is not None,
+        "second_min_probability": chosen_bar,
+        "chosen_on": "public dev, out-of-fold" if args.single_answer_cap else None,
+    }
     model.metadata = {
+        **({"gate": gate} if args.single_answer_cap else {}),
         **exemplar_fit_metadata(settings, exemplar_index),
         # the head the schema-4 features came from; the runtime refuses the model on any other
         "technique_head_fingerprint": technique_head.fingerprint if technique_head else None,
@@ -665,6 +700,13 @@ def main(argv: list[str] | None = None) -> int:
         zip(model.to_dict()["feature_names"], model.weights.tolist(), strict=True)
     )
     print("dev operating point:", operating_point)
+    if args.single_answer_cap:
+        print("single-answer cap:", gate)
+        for point in selection.get("cap_grid", []):
+            print(
+                f"  bar {point['second_min_probability']}: threshold {point['threshold']:.2f} "
+                f"P {point['precision']:.3f} R {point['recall']:.3f} F1 {point['micro_f1']:.4f}"
+            )
     print("standardized weights (top by |w|):")
     for name, value in sorted(weights.items(), key=lambda item: -abs(item[1]))[:12]:
         print(f"  {name:26s} {value:+.3f}")

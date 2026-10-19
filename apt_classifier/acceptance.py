@@ -565,6 +565,19 @@ class AcceptanceModel:
         """Fitted with the technique head's features active: runs only on that head."""
         return self.technique_head_fingerprint is not None
 
+    @property
+    def second_min_probability(self) -> float | None:
+        """The single-answer cap's bar for a second calibrated acceptance per observation
+        (``metadata["gate"]``, chosen by the fit on dev); ``None`` when the model has no cap
+        (every artifact fitted before 2026-10-19)."""
+        gate = self.metadata.get("gate")
+        if not isinstance(gate, Mapping) or not gate.get("single_answer"):
+            return None
+        try:
+            return float(gate.get("second_min_probability", 1.0))
+        except (TypeError, ValueError):
+            return None
+
     def compatible_with(
         self,
         attack_version: str | None,
@@ -786,6 +799,10 @@ class HeadAwareAcceptance:
     def technique_head_fingerprint(self) -> str | None:
         return self.head_model.technique_head_fingerprint
 
+    @property
+    def second_min_probability(self) -> float | None:
+        return self.head_model.second_min_probability
+
     def prior_features(self, technique_id: str) -> dict[str, float]:
         return self.head_model.prior_features(technique_id)
 
@@ -883,8 +900,13 @@ def choose_threshold_runtime(
     technique_ids: Sequence[str],
     min_precision: float = 0.5,
     grid: Iterable[float] | None = None,
+    second_min_probability: float | None = None,
 ) -> dict[str, Any]:
     """:func:`choose_threshold` scored on the accepted sets the runtime gate produces.
+
+    ``second_min_probability`` emulates the single-answer cap (``retrieve.
+    _assign_states_for_group``): per case only the most probable row accepted on probability
+    stays, another only when its probability reaches the bar; forced rows are never capped.
 
     Per candidate row, ``forced`` rows are accepted at any threshold (cue-supported) and
     ``blocked`` rows never on probability alone (benign or sparse context, a hierarchy parent,
@@ -924,8 +946,16 @@ def choose_threshold_runtime(
     candidates = sorted(set(grid if grid is not None else np.round(np.arange(0.05, 0.96, 0.01), 2)))
     best: dict[str, Any] | None = None
     fallback: dict[str, Any] | None = None
+    capper = (
+        _SingleAnswerCap(case_ids, probs, float(second_min_probability))
+        if second_min_probability is not None
+        else None
+    )
     for threshold in candidates:
-        accepted_rows = forced_mask | (eligible & (probs >= threshold))
+        on_probability = eligible & (probs >= threshold)
+        if capper is not None:
+            on_probability = capper.keep(on_probability)
+        accepted_rows = forced_mask | on_probability
         accepted = np.zeros(len(pair_index), dtype=bool)
         accepted[pairs[accepted_rows]] = True
         tp = int((accepted & pair_truth).sum())
@@ -951,7 +981,42 @@ def choose_threshold_runtime(
     chosen["rule"] = "runtime"
     chosen["forced_rows"] = int(forced_mask.sum())
     chosen["blocked_rows"] = int(blocked_mask.sum())
+    chosen["second_min_probability"] = (
+        float(second_min_probability) if second_min_probability is not None else None
+    )
     return chosen
+
+
+class _SingleAnswerCap:
+    """Per case, keep the most probable row accepted on probability plus the rows at or above
+    the bar (the runtime cap of ``_assign_states_for_group``), for any accepted mask."""
+
+    def __init__(self, case_ids: Sequence[str], probs: np.ndarray, bar: float) -> None:
+        index: dict[str, int] = {}
+        self.case = np.asarray([index.setdefault(str(c), len(index)) for c in case_ids])
+        self.probs = probs
+        self.bar = bar
+        # rows ordered by case, most probable first; the start of each case in that order
+        self.order = np.lexsort((-probs, self.case))
+        sorted_cases = self.case[self.order]
+        starts = np.zeros(len(index), dtype=np.int64)
+        if len(sorted_cases):
+            first = np.r_[True, sorted_cases[1:] != sorted_cases[:-1]]
+            starts[sorted_cases[first]] = np.flatnonzero(first)
+        self.starts = starts
+
+    def keep(self, accepted: np.ndarray) -> np.ndarray:
+        if not len(accepted):
+            return accepted
+        acc_sorted = accepted[self.order]
+        before = np.r_[0, np.cumsum(acc_sorted)[:-1]]
+        case_sorted = self.case[self.order]
+        # the first accepted row of its case: no accepted row between the case start and it
+        first = acc_sorted & (before - before[self.starts[case_sorted]] == 0)
+        kept_sorted = first | (acc_sorted & (self.probs[self.order] >= self.bar))
+        kept = np.zeros_like(accepted)
+        kept[self.order] = kept_sorted
+        return kept
 
 
 def load_acceptance_model(

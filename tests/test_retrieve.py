@@ -1985,6 +1985,10 @@ NEW_RETRIEVAL_KNOBS = {
     "technique_head",
     "technique_head_new_candidates",
     "technique_head_top_families",
+    # the single-answer cap (2026-10-19): "model" follows the artifact's gate record
+    "single_answer_cap",
+    # the technique head agreement filter (2026-10-19): off unless asked
+    "technique_head_agreement",
 }
 
 

@@ -469,6 +469,12 @@ class AttributionEngine:
             hierarchy_parent_mode=str(
                 getattr(self.settings, "technique_hierarchy_parent_mode", "off")
             ),
+            single_answer_cap=str(
+                getattr(self.settings, "technique_single_answer_cap", "model") or "model"
+            ),
+            technique_head_agreement=str(
+                getattr(self.settings, "technique_head_agreement", "off") or "off"
+            ),
         )
 
     def analyze(

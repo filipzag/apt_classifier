@@ -458,6 +458,18 @@ RERANKER_PROMOTE_THRESHOLD = 0.8
 RERANKER_DEMOTE_THRESHOLD = 0.2
 # dense hits within this similarity of an observation's best hit become candidates
 DENSE_RELATIVE_MARGIN = 0.12
+# the single-answer cap of the calibrated gate (2026-10-19): follow the artifact's gate record, or off
+SINGLE_ANSWER_CAP = "model"
+SINGLE_ANSWER_CAP_MODES = ("model", "off")
+# the agreement filter (2026-10-19, prereg cribl_head_agreement): an accepted technique stays
+# accepted only when the technique head picks it too (off: no filter)
+HEAD_AGREEMENT = "off"
+HEAD_AGREEMENT_MODES = ("off", "technique", "family", "top3")
+AGREEMENT_REVIEW_REASON = "the technique head does not pick this technique; requires review"
+MODEL_ACCEPT_REASON = "calibrated acceptance model score passed the dev-selected threshold"
+CAP_REVIEW_REASON = (
+    "single-answer cap: a more probable mapping was accepted for this observation; requires review"
+)
 
 
 def default_lexical_fields(*, include_synthetic: bool, include_detection: bool) -> tuple[str, ...]:
@@ -522,6 +534,12 @@ def retrieval_kwargs(
         "dense_overfetch": int(getattr(settings, "technique_dense_overfetch", 0) or 0),
         **exemplar_kwargs(settings, exemplar_index),
         **technique_head_kwargs(settings, technique_head),
+        "single_answer_cap": str(
+            getattr(settings, "technique_single_answer_cap", SINGLE_ANSWER_CAP) or SINGLE_ANSWER_CAP
+        ),
+        "technique_head_agreement": str(
+            getattr(settings, "technique_head_agreement", HEAD_AGREEMENT) or HEAD_AGREEMENT
+        ),
     }
 
 
@@ -598,6 +616,8 @@ def retrieve_techniques(
     technique_head: Any = None,
     technique_head_new_candidates: int = HEAD_NEW_CANDIDATES,
     technique_head_top_families: int = HEAD_TOP_FAMILIES,
+    single_answer_cap: str = SINGLE_ANSWER_CAP,
+    technique_head_agreement: str = HEAD_AGREEMENT,
 ) -> RetrievalResult:
     """Retrieve ATT&CK technique candidates for the positive observations in a ledger.
 
@@ -630,6 +650,16 @@ def retrieve_techniques(
     (counted in ``diagnostics["technique_head_errors"]``). An acceptance model fitted with the
     head is not used on another head or without one.
 
+    ``technique_head_agreement`` (``off``, the default; ``technique``, ``family`` or ``top3``):
+    keep an accepted technique of an observation the head scored only when the head picks it
+    too (its most probable technique, its most probable family, or one of its three most
+    probable families); the others return to review.
+
+    ``single_answer_cap`` (``model``, the default, or ``off``): whether the calibrated gate
+    keeps at most one probability-only acceptance per observation when the acceptance model
+    carries a cap (``AcceptanceModel.second_min_probability``; a second one stays only above
+    that bar); ``off`` ignores the model's cap for an ablation.
+
     ``dense_relative_margin`` is how far below an observation's best dense hit a technique's
     hit may lie and still become a candidate; ``dense_overfetch`` is the number of sentence
     hits fetched per query (0: ``max(3 * top_k, 4 * candidate_pool)``).
@@ -656,6 +686,10 @@ def retrieve_techniques(
         raise ValueError("unsupported parent policy")
     if exemplar_segment_votes not in SEGMENT_VOTE_MODES:
         raise ValueError(f"unsupported exemplar segment votes {exemplar_segment_votes!r}")
+    if single_answer_cap not in SINGLE_ANSWER_CAP_MODES:
+        raise ValueError(f"unsupported single-answer cap {single_answer_cap!r}")
+    if technique_head_agreement not in HEAD_AGREEMENT_MODES:
+        raise ValueError(f"unsupported technique head agreement {technique_head_agreement!r}")
     observations = [
         observation
         for observation in ledger.observations
@@ -1030,6 +1064,8 @@ def retrieve_techniques(
         rank_by_acceptance=rank_by_acceptance,
         corroboration_accept_observations=corroboration_accept_observations,
         corroboration_accept_min_probability=corroboration_accept_min_probability,
+        single_answer_cap=single_answer_cap,
+        technique_head_agreement=technique_head_agreement,
     )
 
 
@@ -1546,6 +1582,8 @@ def finalize_retrieval_candidates(
     rank_by_acceptance: bool = False,
     corroboration_accept_observations: int = 0,
     corroboration_accept_min_probability: float = 0.2,
+    single_answer_cap: str = SINGLE_ANSWER_CAP,
+    technique_head_agreement: str = HEAD_AGREEMENT,
 ) -> RetrievalResult:
     """Assign mapping states only after all candidate evidence is available.
 
@@ -1577,6 +1615,8 @@ def finalize_retrieval_candidates(
                 acceptance_model=acceptance_model,
                 segment_acceptance=segment_acceptance,
                 hierarchy_parent_mode=hierarchy_parent_mode,
+                single_answer_cap=single_answer_cap,
+                technique_head_agreement=technique_head_agreement,
             )
         )
     corroborated = 0
@@ -2085,6 +2125,8 @@ def _assign_candidate_states(
     acceptance_model: Any = None,
     segment_acceptance: bool = False,
     hierarchy_parent_mode: str = "off",
+    single_answer_cap: str = SINGLE_ANSWER_CAP,
+    technique_head_agreement: str = HEAD_AGREEMENT,
 ) -> list[TechniqueCandidate]:
     """Assign AUTO_ACCEPTED / NEEDS_REVIEW / AUTO_REJECTED per candidate.
 
@@ -2104,6 +2146,8 @@ def _assign_candidate_states(
             reranker=reranker,
             acceptance_model=acceptance_model,
             hierarchy_parent_mode=hierarchy_parent_mode,
+            single_answer_cap=single_answer_cap,
+            technique_head_agreement=technique_head_agreement,
         )
     decided: dict[str, TechniqueCandidate] = {}
     for view, views, group in judged:
@@ -2117,6 +2161,8 @@ def _assign_candidate_states(
             reranker=reranker,
             acceptance_model=acceptance_model,
             hierarchy_parent_mode=hierarchy_parent_mode,
+            single_answer_cap=single_answer_cap,
+            technique_head_agreement=technique_head_agreement,
         )
         for original, result in zip(group, results, strict=True):
             decided[original.technique_id] = original.model_copy(
@@ -2140,6 +2186,8 @@ def _assign_states_for_group(
     reranker: Any = None,
     acceptance_model: Any = None,
     hierarchy_parent_mode: str = "off",
+    single_answer_cap: str = SINGLE_ANSWER_CAP,
+    technique_head_agreement: str = HEAD_AGREEMENT,
 ) -> list[TechniqueCandidate]:
     dense_scores = sorted(
         (
@@ -2333,6 +2381,10 @@ def _assign_states_for_group(
         if extra_evidence:
             update["evidence"] = [*candidate.evidence, *extra_evidence]
         output.append(candidate.model_copy(update=update))
+    if acceptance_model is not None and single_answer_cap == "model":
+        output = _apply_single_answer_cap(output, acceptance_model)
+    if technique_head_agreement != "off":
+        output = _apply_head_agreement(output, technique_head_agreement)
     if hierarchy_parent_mode == "off":
         return output
     return _apply_hierarchy_consistency(
@@ -2341,6 +2393,108 @@ def _assign_states_for_group(
         relative_margin=relative_margin,
         fill_unaccepted=hierarchy_parent_mode == "swap_and_fill",
     )
+
+
+def _second_answer_bar(model: Any, candidates: Sequence[TechniqueCandidate]) -> float | None:
+    """The cap's bar of the model judging these candidates (a head-aware pair answers per
+    observation through ``model_for``); ``None`` when the model carries no cap."""
+    picker = getattr(model, "model_for", None)
+    if callable(picker) and candidates:
+        model = picker(candidates[0])
+    bar = getattr(model, "second_min_probability", None)
+    return float(bar) if bar is not None else None
+
+
+def _apply_single_answer_cap(
+    candidates: list[TechniqueCandidate], model: Any
+) -> list[TechniqueCandidate]:
+    """At most one acceptance on probability alone per observation: the most probable stays,
+    another only at or above the model's bar; cue-supported, verifier and reranker decisions
+    are untouched. The capped ones return to review with the reason recorded."""
+    bar = _second_answer_bar(model, candidates)
+    if bar is None:
+        return candidates
+    scored: list[tuple[float, int]] = []
+    for index, candidate in enumerate(candidates):
+        if (
+            candidate.state is TechniqueCandidateState.AUTO_ACCEPTED
+            and candidate.state_reason == MODEL_ACCEPT_REASON
+        ):
+            evidence = candidate.evidence_for(ACCEPTANCE_EVIDENCE_SOURCE)
+            probability = (
+                float(evidence.score)
+                if evidence is not None and evidence.score is not None
+                else 0.0
+            )
+            scored.append((probability, index))
+    if len(scored) < 2:
+        return candidates
+    scored.sort(key=lambda item: (-item[0], candidates[item[1]].technique_id))
+    capped = {index for probability, index in scored[1:] if probability < bar}
+    if not capped:
+        return candidates
+    return [
+        candidate.model_copy(
+            update={
+                "state": TechniqueCandidateState.NEEDS_REVIEW,
+                "state_reason": CAP_REVIEW_REASON,
+            }
+        )
+        if index in capped
+        else candidate
+        for index, candidate in enumerate(candidates)
+    ]
+
+
+def head_agrees(candidate: TechniqueCandidate, level: str) -> bool | None:
+    """Whether the technique head picks this candidate at ``level`` (``technique``: its most
+    probable technique; ``family``: its most probable family; ``top3``: one of its three most
+    probable families); ``None`` when the candidate carries no head evidence."""
+    evidence = candidate.evidence_for(TECHNIQUE_HEAD_SOURCE)
+    if evidence is None:
+        return None
+    features = dict((evidence.metadata or {}).get("features") or {})
+    try:
+        technique_rank = float(features.get("th_technique_rank", 0.0))
+        family_rank = float(features.get("th_family_rank", 0.0))
+    except (TypeError, ValueError):
+        return False
+    if level == "technique":
+        return technique_rank >= 1.0
+    if level == "family":
+        return family_rank >= 1.0
+    if level == "top3":
+        return family_rank >= 1.0 / 3 - 1e-9
+    raise ValueError(f"unsupported technique head agreement {level!r}")
+
+
+def _apply_head_agreement(
+    candidates: list[TechniqueCandidate], level: str
+) -> list[TechniqueCandidate]:
+    """Keep an accepted technique only when the head agrees (prereg cribl_head_agreement):
+    verifier verdicts and candidates without head evidence (observations the head did not
+    score) are left alone; the rest return to review with the reason recorded."""
+    output = []
+    for candidate in candidates:
+        if (
+            candidate.state is not TechniqueCandidateState.AUTO_ACCEPTED
+            or candidate.verification.verdict is TechniqueVerificationVerdict.SUPPORTED
+        ):
+            output.append(candidate)
+            continue
+        agrees = head_agrees(candidate, level)
+        if agrees is None or agrees:
+            output.append(candidate)
+            continue
+        output.append(
+            candidate.model_copy(
+                update={
+                    "state": TechniqueCandidateState.NEEDS_REVIEW,
+                    "state_reason": AGREEMENT_REVIEW_REASON,
+                }
+            )
+        )
+    return output
 
 
 def _plausible(candidate: TechniqueCandidate, dense_floor: float) -> bool:
