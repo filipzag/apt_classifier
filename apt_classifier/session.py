@@ -375,6 +375,9 @@ class AttributionEngine:
                 getattr(self.settings, "attribution_cluster_min_discriminative", 3.5)
             ),
             cluster_scope=str(getattr(self.settings, "attribution_cluster_scope", "documented")),
+            cluster_max_techniques=int(
+                getattr(self.settings, "attribution_cluster_max_techniques", 0) or 0
+            ),
         )
 
     def map_techniques(

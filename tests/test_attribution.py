@@ -1052,3 +1052,39 @@ def test_software_answers_and_documented_clusters_compose_in_a_fixed_order():
     )
     assert decision.stage is AttributionStage.KNOWN_GROUP_SHORTLIST
     assert "documents none of the found malware" in decision.rationale
+
+
+def test_cluster_volume_guard_holds_long_cases_without_decisive_software():
+    from apt_classifier.attribution import MaturityThresholds, _cluster_step, volume_guard_holds
+
+    candidate = {
+        "members": ["G0032", "G0082"],
+        "link": "same_activity",
+        "nested": False,
+        "probability": 0.99,
+        "separation": 0.63,
+        "discriminative": 19.1,
+    }
+    combiner = {"cluster": candidate}
+    base = MaturityThresholds(gate_mode="separation", cluster_naming=True)
+    assert _cluster_step(base, combiner, "G0032", False, technique_count=60)[0] == "cluster"
+    guarded = MaturityThresholds(
+        gate_mode="separation", cluster_naming=True, cluster_max_techniques=30
+    )
+    # above the bar without decisive software: held, with the reason recorded
+    step, used = _cluster_step(guarded, combiner, "G0032", False, technique_count=60)
+    assert step == "" and used["volume_guard"]["technique_count"] == 60
+    assert used["volume_guard"]["limit"] == 30 and used["members"] == candidate["members"]
+    # at or below the bar, or with decisive software, the cluster clears as before
+    assert _cluster_step(guarded, combiner, "G0032", False, technique_count=30)[0] == "cluster"
+    assert (
+        _cluster_step(guarded, combiner, "G0032", False, technique_count=60, decisive_factor=3.0)[0]
+        == "cluster"
+    )
+    # an unknown count never holds; a candidate that fails its own bars is not "held"
+    assert _cluster_step(guarded, combiner, "G0032", False)[0] == "cluster"
+    weak = {**candidate, "probability": 0.5}
+    step, used = _cluster_step(guarded, {"cluster": weak}, "G0032", False, technique_count=60)
+    assert step == "" and "volume_guard" not in used
+    assert volume_guard_holds(base, 60, 1.0) is None
+    assert volume_guard_holds(guarded, 31, 1.0)["limit"] == 30

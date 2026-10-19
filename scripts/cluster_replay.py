@@ -50,6 +50,7 @@ def thresholds_for(args: argparse.Namespace, scope: str | None = None) -> Maturi
         cluster_min_probability=args.min_probability,
         cluster_min_discriminative=args.cluster_min_discriminative,
         cluster_scope=scope or args.scope or "full",
+        cluster_max_techniques=int(getattr(args, "max_techniques", 0) or 0),
     )
 
 
@@ -61,8 +62,17 @@ def replay_row(row: dict[str, Any], thresholds: MaturityThresholds) -> dict[str,
     if stage not in (HYPOTHESIS, SHORTLIST) or not leader:
         return out
     candidate = row.get("cluster_candidate")
+    decisive = row.get("decisive_software")
     step, used = _cluster_step(
-        thresholds, {"cluster": candidate}, leader, bool(row.get("leader_guard_fired"))
+        thresholds,
+        {"cluster": candidate},
+        leader,
+        bool(row.get("leader_guard_fired")),
+        # the evidence-volume guard (prereg cribl_cluster_volume_guard_2026-10-19)
+        technique_count=len(row.get("accepted_techniques") or []),
+        decisive_factor=float((decisive or {}).get("factor", 1.0) or 1.0)
+        if isinstance(decisive, dict)
+        else 1.0,
     )
     if step == "cluster" and used is not None:
         return {"stage": CLUSTER, "named_cluster": list(used["members"])}
@@ -169,6 +179,13 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--min-discriminative", type=float, default=3.0)
     parser.add_argument("--cluster-min-discriminative", type=float, default=3.5)
     parser.add_argument("--min-probability", type=float, default=0.8)
+    parser.add_argument(
+        "--max-techniques",
+        type=int,
+        default=0,
+        help="evidence-volume guard: hold a cluster on more accepted techniques than this unless "
+        "decisive software supports the leader (0: off)",
+    )
     parser.add_argument(
         "--scope",
         choices=("documented", "full", "nested"),

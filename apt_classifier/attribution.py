@@ -146,6 +146,11 @@ class MaturityThresholds:
     cluster_min_probability: float = 0.8
     cluster_min_discriminative: float = 3.5
     cluster_scope: str = "documented"
+    # Evidence-volume guard (2026-10-19, prereg cribl_cluster_volume_guard): a cluster is held at
+    # shortlist when the case's accepted technique count exceeds this (0: no guard), unless
+    # decisive software supports the leader. The bars above were set on 3-23 techniques; a
+    # commodity malware write-up with 50-95 accepted techniques clears them on mass alone.
+    cluster_max_techniques: int = 0
 
 
 SUPPORT_RANK_LIMIT = 10
@@ -408,7 +413,18 @@ def assess_attribution(
     if guard is not None:
         failed.extend(_found_failures(kb, guard, (leading.group_id,), cluster=False))
     # (2) the cluster step, on the discrimination before any "not found" answer
-    cluster_step, candidate = _cluster_step(thresholds, combiner, leading.group_id, guard_fired)
+    decisive = getattr(context, "decisive_software", None)
+    decisive_factor = (
+        float(decisive.get("factor", 1.0) or 1.0) if isinstance(decisive, dict) else 1.0
+    )
+    cluster_step, candidate = _cluster_step(
+        thresholds,
+        combiner,
+        leading.group_id,
+        guard_fired,
+        technique_count=technique_count,
+        decisive_factor=decisive_factor,
+    )
     cluster_blocked: list[str] = []
     if cluster_step == "cluster" and candidate is not None and guard is not None:
         members = tuple(str(gid) for gid in candidate["members"])
@@ -531,12 +547,23 @@ def assess_attribution(
 
 
 def _cluster_step(
-    thresholds: MaturityThresholds, combiner: Any, leader_id: str, guard_fired: bool
+    thresholds: MaturityThresholds,
+    combiner: Any,
+    leader_id: str,
+    guard_fired: bool,
+    *,
+    technique_count: int | None = None,
+    decisive_factor: float = 1.0,
 ) -> tuple[str, dict[str, Any] | None]:
     """("cluster", candidate) when the leader's documented-overlap cluster clears its bars,
     ("", candidate) when a candidate exists but does not, ("", None) otherwise. The candidate is
     computed by the engine (overlap_cluster.cluster_candidate) and recorded on the combiner
-    state; without an active combiner there is no probability and so no cluster."""
+    state; without an active combiner there is no probability and so no cluster.
+
+    ``technique_count`` (the case's accepted techniques) and ``decisive_factor`` (the
+    decisive-software factor, > 1 when group-exclusive malware is named) feed the evidence-volume
+    guard: with ``cluster_max_techniques`` set, a cluster on more techniques than that is held
+    unless decisive software supports the leader; the held candidate records ``volume_guard``."""
     if not thresholds.cluster_naming or thresholds.gate_mode == "maturity" or guard_fired:
         return "", None
     candidate = combiner.get("cluster") if isinstance(combiner, dict) else None
@@ -567,7 +594,28 @@ def _cluster_step(
         and float(candidate.get("separation", 0.0)) >= thresholds.hypothesis_separation
         and float(candidate.get("discriminative", 0.0)) >= bar
     )
+    held = volume_guard_holds(thresholds, technique_count, decisive_factor)
+    if passes and held is not None:
+        return "", {**candidate, "volume_guard": held}
     return ("cluster" if passes else ""), candidate
+
+
+def volume_guard_holds(
+    thresholds: MaturityThresholds, technique_count: int | None, decisive_factor: float
+) -> dict[str, Any] | None:
+    """Why the evidence-volume guard holds a cluster (``None`` when it does not): more accepted
+    techniques than ``cluster_max_techniques`` and no decisive software for the leader."""
+    limit = int(getattr(thresholds, "cluster_max_techniques", 0) or 0)
+    if limit <= 0 or technique_count is None or int(technique_count) <= limit:
+        return None
+    if float(decisive_factor or 1.0) > 1.0:
+        return None
+    return {
+        "reason": "evidence volume above the cluster gate's validated range, no decisive software",
+        "technique_count": int(technique_count),
+        "limit": limit,
+        "decisive_factor": float(decisive_factor or 1.0),
+    }
 
 
 def _cluster_decision(

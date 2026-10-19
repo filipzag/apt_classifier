@@ -1,0 +1,30 @@
+{
+  "schema": "cribl_finetune_prereg/1",
+  "id": "cribl_cluster_volume_guard_2026-10-19",
+  "title": "Cluster gate: an evidence-volume guard for commodity malware write-ups",
+  "registered": "2026-10-19",
+  "parent": "docs/preregistration/cribl_product_integration_2026-10-19.json and cribl_head_agreement_2026-10-19.json (the open-set finding); docs 10.11 and 21.3.18",
+  "problem": "On the Elastic open set (22 posts with no ATT&CK group) the documented-cluster step names commodity malware write-ups: the shipped pipeline names one ('Kimsuky / Lazarus Group' on the banking browser-extension post, 95 accepted techniques), and every setting that cleans the accepted technique set also names the GoSar RAT post ('Lazarus Group / APT38', cluster probability 0.99, 51 to 60 accepted techniques). These are long capability enumerations of one malware family: the merged cluster's mass (19 to 22) and combined probability (0.82 to 0.99) clear bars that were set on reports with far less evidence, and the pair of giant profiles contains most of any long technique list (profile coverage 0.68 to 0.76, no better than correct names). Rarity of the matched techniques does not separate them either (the long lists hold more rare matches, not fewer). Evidence volume does.",
+  "design_data": {
+    "vendor set (34 dev reports, 16 named correctly, 2 wrong)": "accepted techniques per report 7 to 20; the correctly named ones carry 7 to 18, of which 3 have no decisive software",
+    "ATT&CK design fold seeds 41 and 53 (72 correct names)": "accepted techniques up to 17",
+    "seed-7 folds and CTI-HAL (test, read for context only)": "correct names carry up to 17 and up to 23",
+    "the wrong open-set clusters": "51, 60, 83, 84 and 95 accepted techniques; decisive-software factor 1.0 (no group-exclusive software named)",
+    "note": "the problem was identified on the Elastic open set, which is never tuned on; the guard's bar is set from the design sets above, with a margin, and the Elastic set is read once for confirmation"
+  },
+  "rule": {
+    "guard": "the cluster step (attribution._cluster_step) holds a cluster at shortlist when the case's accepted technique count exceeds ATTRIBUTION_CLUSTER_MAX_TECHNIQUES, unless decisive software supports the leader (decisive_software.factor > 1: group-exclusive malware named in the report). The single-name gate, the bars and the scope are unchanged; the held candidate is recorded with the reason",
+    "bar": "30 accepted techniques: at least 10 above every correctly named design report and 20 below the smallest wrongly named open-set post; registered here before any run",
+    "rationale": "the cluster bars (separation 0.5, mass 3.5, probability 0.8) were set and validated on evidence volumes of 3 to 23 techniques; beyond that regime the merged mass of two giant profiles grows with the list and the probability saturates, so the bars stop meaning what they were set to mean"
+  },
+  "arms": "guard off (the existing off and head-pair artifacts, reused) against guard on, head off and head on: Elastic strict (8 + 22), CTI-HAL anonymised (55), the vendor set (34, dev), the ATT&CK folds seed 7 (head off only; the head saw the fold sentences)",
+  "headline": "with the guard on, no correct name is lost on CTI-HAL, the vendor set or the folds (named correct unchanged, top-1 unchanged), and the Elastic open set names no cluster with the head off and with the head on, the attributed posts unchanged",
+  "secondary": [
+    "how many cluster candidates the guard holds per set and which (volume, decisive factor), via scripts/cluster_replay.py --max-techniques on the existing cluster-off artifacts",
+    "the ATT&CK fold cases are all below the bar, so the guard is inert there by construction; this is reported, not counted as evidence",
+    "what the same guard would do to single names, offline from the stored rows (the single gate named no open-set post, so no change is proposed)"
+  ],
+  "selection": "none: one bar, one run per arm per set",
+  "adoption": "if the headline holds, ATTRIBUTION_CLUSTER_MAX_TECHNIQUES defaults to 30 (the guard is a hold, never a name) and the current attribution artifacts are regenerated on the main branch; otherwise the guard stays at 0 (off) and the result is documented",
+  "cost": "laptop only, about 50 minutes; no API credit"
+}
