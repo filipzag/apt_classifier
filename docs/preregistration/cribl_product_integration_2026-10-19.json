@@ -1,0 +1,47 @@
+{
+  "schema": "cribl_finetune_prereg/1",
+  "id": "cribl_product_integration_2026-10-19",
+  "title": "Product integration of the 4B technique head: evidence for the acceptance model and head-proposed candidates",
+  "registered": "2026-10-19",
+  "parent": "docs/preregistration/cribl_family_data_2026-10-14.json (E2, the reference technique head); docs 21.3.18",
+  "question": "Does wiring the fine-tuned technique head (E2: Qwen3.5-4B-Base + LoRA + family and technique cosine heads, served locally) into the product's mapping pipeline raise the accepted-set quality on real reports, under the product's own gate, without lowering precision or regressing attribution?",
+  "wiring": {
+    "service": "scripts/cribl_finetune/serve.py (.venv-cribl, GPU) serves data/models/cribl_ft/E2/step_52706 on http://localhost:8102 (head_service.py); the product's client is apt_classifier/technique_head.py (TECHNIQUE_HEAD_ENABLED, off by default, fail closed on an unreachable service, another ATT&CK version or a checkpoint other than the pinned fingerprint)",
+    "checkpoint_fingerprint": "5b5d015d8766dd27cdeceaf0ea1aaa0ea7c613f397d2bf0fecb07eea41fcea01",
+    "evidence": "every candidate of an observation gets `technique_head` evidence: P(family of the candidate), P(candidate) = P(family) x P(technique | family), inverse ranks, P(the head's top family), whether the candidate is one of the head's proposals, whether it exists only because of the head (acceptance feature schema 4, apt_classifier/acceptance.py; a schema-3 model ignores them)",
+    "proposals": "the head's best technique in each of its TECHNIQUE_HEAD_TOP_FAMILIES (3) most probable families; up to TECHNIQUE_HEAD_NEW_CANDIDATES (3) of them that retrieval did not produce are appended after the pool with fused score 0 (as exemplar-only candidates are), platform scope applied; nothing retrieved is displaced",
+    "segmented_observations": "a long observation is scored sentence by sentence and pooled by the largest probability per family and technique",
+    "acceptance_model": "scripts/fit_acceptance_model.py --priors-split none with the head active writes a schema-4 artifact (data/models/acceptance/acceptance_model_technique_head.json) that records the head's fingerprint in its metadata and retrieval contract and runs only on that head; the shipped schema-3 artifact (acceptance_model.json) is untouched and is the baseline",
+    "unchanged": "retrieval, cues, hierarchy rules, the verifier, the review, attribution: the head adds evidence and candidates only; no hard override of the calibrated threshold"
+  },
+  "arms": {
+    "off": "the pipeline as shipped (TECHNIQUE_HEAD_ENABLED=false, acceptance_model.json), rerun under this code: the same-code baseline",
+    "proposer": "head on with the shipped schema-3 acceptance model: the head's proposals enter the pool but the model judges them on retrieval evidence alone (fused score 0, no dense or lexical hit), so this arm measures what reaches review, not the gate; reported, not gated",
+    "head": "head on with the schema-4 acceptance model refitted with the head's features (the registered arm)"
+  },
+  "data": {
+    "fit": "public dev splits (tram, expert, derived_procedures), as every acceptance fit; the head's checkpoint (E2) was itself selected on public dev + AnnoCTR dev, so the fit sees slightly flattering head confidences (noted, not corrected)",
+    "test": "public test splits (tram 713, expert 157, derived 521; scripts/benchmark_mapping.py --split test), the 968 CTI-HAL statements (local only; --root data/benchmarks/cti_hal --datasets cti_hal), the untouched EvidenceForge clinic bundle (scripts/evidenceforge_eval.py --pipeline local), the ATT&CK attribution folds (seed 7) and the CTI-HAL attribution run (anonymised headline)",
+    "never": "no test split, CTI-HAL or Elastic text is used to fit or choose anything; the head's training data (public train, AnnoCTR train, advisories, Atomic) is disjoint from every test set (docs 21.3.18)"
+  },
+  "headline": "CTI-HAL statement-level accepted-set micro-F1, arm head minus arm off, paired case bootstrap (1000 resamples, seed 7): the 95% interval's lower bound is above 0",
+  "constraints": [
+    "accepted-set micro-precision on CTI-HAL and on the pooled public test must not fall more than 0.02 below arm off",
+    "public test pooled micro-F1 (head minus off) must not be negative beyond its paired 95% interval",
+    "scripts/check_regression.py against data/audits/public_heldout_baseline.json passes for arm head",
+    "the EvidenceForge clinic bundle (local pipeline) accepted-technique F1 must not fall more than 0.02",
+    "attribution: top-1 on the ATT&CK folds (seed 7) and on the CTI-HAL headline must not fall, and the naming gate must stay clean (no wrong name on the folds)"
+  ],
+  "secondary": [
+    "accepted-set micro precision/recall, parent-aware F1, hit@1/3/10 per public dataset and pooled, with paired intervals",
+    "arm proposer: how many head-only candidates are appended, how many are accepted, how many are correct",
+    "where the gain comes from on CTI-HAL: statements the shipped pipeline accepted nothing for, statements where it accepted only a wrong family (docs 21.3.18 table), candidates that exist only because of the head",
+    "the schema-4 model's dev operating point and the standardised weights of the head features",
+    "runtime: seconds per 100 statements added by the head on the laptop GPU; GPU memory with the head loaded"
+  ],
+  "selection": "none: one refit (the fit script's own out-of-fold threshold rule), one run per arm per test set; nothing is rerun because of a result. The three knobs (top families 3, new candidates 3, pooling by max) are fixed here before any test run",
+  "adoption": "only if the headline holds and every constraint passes: TECHNIQUE_HEAD_ENABLED defaults to true, TECHNIQUE_HEAD_EXPECTED_FINGERPRINT is pinned to the checkpoint above and ACCEPTANCE_MODEL_PATH points at the schema-4 artifact, with the shipped schema-3 artifact as the fallback when the service is not running; otherwise everything stays off and the result is documented",
+  "stop_rules": "a service failure during a run voids the run (the benchmark refuses to write under --require-technique-head); CTI-HAL never leaves the laptop",
+  "cost": "no API credit; laptop GPU only (about 3.5 GB for the head next to the embedder)",
+  "informed_by": "the error analysis of 2026-10-15 on the shipped CTI-HAL run (305 statements with nothing accepted, of which the head names the right family on 164; 132 statements whose right family is not in the pool, 51 recoverable from the head's top 3); no test run with the head wired in has been made before this registration"
+}

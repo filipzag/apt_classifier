@@ -1981,6 +1981,10 @@ NEW_RETRIEVAL_KNOBS = {
     "dense_overfetch",
     "exemplar_vote_norm",
     "exemplar_segment_votes",
+    # the technique head (2026-10-19): off (None) unless a client is passed
+    "technique_head",
+    "technique_head_new_candidates",
+    "technique_head_top_families",
 }
 
 

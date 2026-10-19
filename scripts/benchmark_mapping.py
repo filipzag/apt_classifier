@@ -64,6 +64,9 @@ from apt_classifier.retrieve import (
     retrieval_kwargs,
     retrieve_techniques,
 )
+from apt_classifier.technique_head import EVIDENCE_SOURCE as TECHNIQUE_HEAD_EVIDENCE_SOURCE
+from apt_classifier.technique_head import FEATURE_NAMES as TECHNIQUE_HEAD_FEATURE_NAMES
+from apt_classifier.technique_head import load_technique_head
 from apt_classifier.vectorstore import (
     ChromaVectorStore,
     normalize_procedure_text,
@@ -91,6 +94,7 @@ FINGERPRINTED_SOURCES = (
     REPO_ROOT / "apt_classifier" / "exemplars.py",
     REPO_ROOT / "apt_classifier" / "exemplar_store.py",
     REPO_ROOT / "apt_classifier" / "platforms.py",
+    REPO_ROOT / "apt_classifier" / "technique_head.py",
 )
 SUMMARY_METRICS = (
     "micro_precision",
@@ -192,6 +196,20 @@ def _exemplar_columns(evidence: Any) -> dict[str, Any]:
     return columns
 
 
+def _technique_head_columns(evidence: Any) -> dict[str, Any]:
+    """The technique head's features as the acceptance model saw them; ``None`` without head
+    evidence (the head off or its request failed)."""
+    metadata = dict(getattr(evidence, "metadata", {}) or {}) if evidence is not None else {}
+    values = metadata.get("features") if isinstance(metadata.get("features"), dict) else None
+    columns: dict[str, Any] = {
+        name: (round(float(values[name]), 6) if values and name in values else None)
+        for name in TECHNIQUE_HEAD_FEATURE_NAMES
+        if name != "th_only"
+    }
+    columns["th_only"] = bool(metadata.get("head_only", False))
+    return columns
+
+
 def candidate_row(candidate: Any, flags: dict[str, bool] | None = None) -> dict[str, Any]:
     dense = candidate.evidence_for("dense")
     lexical = candidate.evidence_for("lexical")
@@ -224,6 +242,7 @@ def candidate_row(candidate: Any, flags: dict[str, bool] | None = None) -> dict[
             else None
         ),
         **_exemplar_columns(candidate.evidence_for(EXEMPLAR_EVIDENCE_SOURCE)),
+        **_technique_head_columns(candidate.evidence_for(TECHNIQUE_HEAD_EVIDENCE_SOURCE)),
         **(flags or {"benign": None, "sparse": None, "cue_supported": None}),
     }
 
@@ -255,8 +274,10 @@ def run(
     bootstrap_samples: int = 300,
     bootstrap_seed: int = 7,
     max_candidate_rows: int = 12,
+    technique_head: Any = None,
 ) -> dict[str, Any]:
     started = time.time()
+    head_errors_before = int(getattr(technique_head, "errors", 0) or 0)
     predictions: list[TechniquePrediction] = []
     rows: list[dict[str, Any]] = []
     # why retrieve_techniques refused the model in a case (its retrieval contract, or the
@@ -278,7 +299,10 @@ def run(
             kb,
             **{
                 **retrieval_kwargs(
-                    settings, exemplar_index=exemplar_index, lexical_index=lexical_index
+                    settings,
+                    exemplar_index=exemplar_index,
+                    lexical_index=lexical_index,
+                    technique_head=technique_head,
                 ),
                 "retrieval_mode": mode,
                 "cues_enabled": cues_enabled,
@@ -390,11 +414,22 @@ def run(
             if exemplar_index is not None
             else None
         ),
+        "technique_head": (
+            {
+                "fingerprint": technique_head.fingerprint,
+                "top_families": technique_head.config.top_families,
+                "new_candidates": technique_head.config.new_candidates,
+            }
+            if technique_head is not None
+            else None
+        ),
         "source_fingerprint": source_fingerprint(FINGERPRINTED_SOURCES),
     }
+    head_errors = int(getattr(technique_head, "errors", 0) or 0) - head_errors_before
     return {
         "mode": mode,
         "cues_enabled": cues_enabled,
+        **({"technique_head_errors": head_errors} if technique_head is not None else {}),
         # True only when the model scored every case (not refused per call in any)
         "acceptance_model_active": acceptance_model is not None and not disabled_cases,
         **(
@@ -511,6 +546,12 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--max-candidate-rows", type=int, default=12)
     parser.add_argument("--output", type=Path)
     parser.add_argument("--quiet", action="store_true")
+    parser.add_argument(
+        "--require-technique-head",
+        action="store_true",
+        help="exit 2 unless the technique head service (TECHNIQUE_HEAD_ENABLED) scored every "
+        "case of every run",
+    )
     add_exemplar_backend_arguments(parser)
     args = parser.parse_args(argv)
 
@@ -538,6 +579,9 @@ def main(argv: list[str] | None = None) -> int:
     problem = exemplar_backend_problem(exemplar_index, args.require_exemplar_backend)
     if problem:
         parser.error(f"{problem} ({exemplar_status})")
+    technique_head, head_status = load_technique_head(settings, kb)
+    if args.require_technique_head and technique_head is None:
+        parser.error(f"--require-technique-head: the technique head is {head_status}")
     model, model_status = (
         (None, "disabled by --no-acceptance-model")
         if args.no_acceptance_model
@@ -548,7 +592,9 @@ def main(argv: list[str] | None = None) -> int:
             settings,
             kb,
             exemplar_index,
-            contract=retrieval_contract_for(settings, exemplar_index, store=store),
+            contract=retrieval_contract_for(
+                settings, exemplar_index, store=store, technique_head=technique_head
+            ),
         )
     )
     model_settings = (model, None) if args.ablate_acceptance_model and model else (model,)
@@ -558,6 +604,7 @@ def main(argv: list[str] | None = None) -> int:
     reranker_settings = (reranker, None) if args.ablate_reranker and reranker else (reranker,)
     if not args.quiet:
         print(f"exemplars: {exemplar_status}")
+        print(f"technique head: {head_status}")
         print(f"acceptance model: {model_status}")
         print(f"reranker: {'active' if reranker is not None else 'off'}")
     results: dict[str, Any] = {}
@@ -584,6 +631,7 @@ def main(argv: list[str] | None = None) -> int:
                         bootstrap_samples=args.bootstrap_samples,
                         bootstrap_seed=args.seed,
                         max_candidate_rows=args.max_candidate_rows,
+                        technique_head=technique_head,
                     )
                     refused = results[key].get("acceptance_model_disabled")
                     if refused:
@@ -612,9 +660,13 @@ def main(argv: list[str] | None = None) -> int:
         "attack_version": kb.version,
         "acceptance_model_status": model_status,
         "exemplar_status": exemplar_status,
+        "technique_head_status": head_status,
         # the artifacts actually loaded (path, threshold, file hash, required exemplar index)
         "acceptance_model": acceptance_identity(settings, model, model_status),
         "exemplars": exemplar_identity(settings, exemplar_index, exemplar_status),
+        "technique_head": technique_head.identity()
+        if technique_head is not None
+        else {"status": head_status},
         "results": results,
     }
     if args.output:
@@ -627,6 +679,13 @@ def main(argv: list[str] | None = None) -> int:
     if problem:
         # the artifact is written (its exemplar header carries the counters) but the run fails
         print(problem, file=sys.stderr)
+        return 2
+    if args.require_technique_head and technique_head is not None and technique_head.errors:
+        print(
+            f"--require-technique-head: the service failed {technique_head.errors} requests "
+            f"({technique_head.last_error})",
+            file=sys.stderr,
+        )
         return 2
     return 0
 

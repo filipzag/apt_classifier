@@ -7,7 +7,7 @@ EVIDENCEFORGE_CLINIC_DIR ?= ../evidenceforge_clinic
 PUBLIC_BASELINE ?= data/audits/public_heldout_baseline.json
 PUBLIC_CURRENT ?= data/audits/public_heldout_current.json
 
-.PHONY: llm-pull llm-check cribl-venv cribl-export cribl-probe cribl-train cribl-eval exemplars exemplars-chroma exemplars-chroma-verify exemplar-equivalence fit-forest fit-mlp fit-text-group fit-combiner fit-confidence-labels api api-dev api-local api-auth-demo web-install web-dev web-build web-check run-next setup up down ingest run run-local test lint evidenceforge-eval evidenceforge-eval-all benchmark-public benchmark-curated verify-results check-regression fit-acceptance benchmark-attribution train-reranker generate-synthetic benchmark-cti-hal benchmark-cti-hal-production benchmark-attribution-production prepare-elastic benchmark-elastic benchmark-elastic-production
+.PHONY: llm-pull llm-check cribl-venv cribl-export cribl-probe cribl-train cribl-eval technique-head-serve exemplars exemplars-chroma exemplars-chroma-verify exemplar-equivalence fit-forest fit-mlp fit-text-group fit-combiner fit-confidence-labels api api-dev api-local api-auth-demo web-install web-dev web-build web-check run-next setup up down ingest run run-local test lint evidenceforge-eval evidenceforge-eval-all benchmark-public benchmark-curated verify-results check-regression fit-acceptance benchmark-attribution train-reranker generate-synthetic benchmark-cti-hal benchmark-cti-hal-production benchmark-attribution-production prepare-elastic benchmark-elastic benchmark-elastic-production
 
 setup:
 	python3 -m venv --system-site-packages .venv
@@ -176,6 +176,14 @@ cribl-train:
 cribl-eval:
 	$(CRIBL_PYTHON) scripts/cribl_finetune/evaluate.py --split $(CRIBL_SPLIT) --adapter $(CRIBL_ADAPTER) \
 		--name $(CRIBL_ARM) --format $(CRIBL_FORMAT)
+
+# The technique head as a local service for the product (apt_classifier/technique_head.py, docs
+# 21.3.18): the reference checkpoint on the GPU (about 3.5 GB), http://localhost:8102. The app
+# and the benchmarks use it only with TECHNIQUE_HEAD_ENABLED=true (off by default).
+TECHNIQUE_HEAD_CHECKPOINT ?= data/models/cribl_ft/E2/step_52706
+TECHNIQUE_HEAD_PORT ?= 8102
+technique-head-serve:
+	$(CRIBL_PYTHON) scripts/cribl_finetune/serve.py --checkpoint $(TECHNIQUE_HEAD_CHECKPOINT) --port $(TECHNIQUE_HEAD_PORT)
 
 # LLM-generated observation sentences for sparsely documented techniques (indexed as the
 # 'synthetic' field; re-run `make ingest` afterwards). Resumable; about $2 for ~575 techniques.

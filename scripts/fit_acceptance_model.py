@@ -47,6 +47,7 @@ import json
 import sys
 import time
 from collections import Counter
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -85,6 +86,7 @@ from apt_classifier.retrieve import (
     runtime_gate_masks,
     suppressed_parent_flags,
 )
+from apt_classifier.technique_head import load_technique_head
 from apt_classifier.vectorstore import ChromaVectorStore, procedure_sentence_texts
 from scripts.benchmark_mapping import DEFAULT_ROOT, FINGERPRINTED_SOURCES, dataset_of, load_cases
 from scripts.retrieval_cache import (
@@ -173,10 +175,16 @@ def extract_rows(
     lexical_index: LexicalTechniqueIndex,
     priors: dict[str, list[float]] | None = None,
     exemplar_index: Any = None,
+    technique_head: Any = None,
 ) -> FitRows:
     # the serving arguments, so the rows are the candidates the runtime later judges
     kwargs = {
-        **retrieval_kwargs(settings, exemplar_index=exemplar_index, lexical_index=lexical_index),
+        **retrieval_kwargs(
+            settings,
+            exemplar_index=exemplar_index,
+            lexical_index=lexical_index,
+            technique_head=technique_head,
+        ),
         "acceptance_model": None,
     }
     output = FitRows()
@@ -250,6 +258,7 @@ def select_threshold(
     cv_seed: int = DEFAULT_CV_SEED,
     group_similarity: float = DEFAULT_GROUP_SIMILARITY,
     hierarchy_parent_mode: str = "off",
+    feature_schema_version: int = 3,
 ) -> ThresholdSelection:
     """The acceptance threshold by ``method`` (``oof_runtime`` or ``in_sample``), with both
     in-sample operating points recorded beside it; ``probabilities`` are the in-sample ones of
@@ -301,6 +310,7 @@ def select_threshold(
         [folds[case_id] for case_id in case_ids],
         attack_version=attack_version,
         l2=l2,
+        feature_schema_version=feature_schema_version,
     )
     operating_point = choose_threshold_runtime(
         out_of_fold.tolist(), labels, case_ids, fitted.expected_counts, **runtime_scoring
@@ -339,16 +349,18 @@ def dump_rows(
     folds: dict[str, int] | None,
     groups: dict[str, int] | None,
     summary: dict[str, Any],
+    feature_names: Sequence[str] = FEATURE_NAMES,
 ) -> Path:
-    """The fit's rows as ``.npz`` (no pickles): features in ``feature_names`` order, labels,
-    guards, per-row case/technique/dataset/fold/group and both probabilities."""
+    """The fit's rows as ``.npz`` (no pickles): features in ``feature_names`` order (the fitted
+    model's schema), labels, guards, per-row case/technique/dataset/fold/group and both
+    probabilities."""
     blocked, forced = fitted.masks()
     flag_names = ("benign", "sparse", "hierarchy_parent", "cue_supported", "parent_suppressed")
     payload: dict[str, Any] = {
-        "feature_names": np.asarray(FEATURE_NAMES),
-        "features": np.vstack([feature_vector(row) for row in fitted.rows])
+        "feature_names": np.asarray(list(feature_names)),
+        "features": np.vstack([feature_vector(row, feature_names) for row in fitted.rows])
         if fitted.rows
-        else np.zeros((0, len(FEATURE_NAMES))),
+        else np.zeros((0, len(feature_names))),
         "labels": np.asarray(fitted.labels, dtype=np.int8),
         "case_ids": np.asarray(fitted.case_ids),
         "technique_ids": np.asarray(fitted.technique_ids),
@@ -431,6 +443,11 @@ def main(argv: list[str] | None = None) -> int:
         help="additional case files (TechniqueEvaluationCase rows) to fit on, e.g. the CTI-HAL "
         "statements; they become development data and must not be quoted as held-out",
     )
+    parser.add_argument(
+        "--require-technique-head",
+        action="store_true",
+        help="exit 2 unless the technique head service scored every case (TECHNIQUE_HEAD_ENABLED)",
+    )
     add_output_guard_arguments(parser)
     add_exemplar_backend_arguments(parser)
     args = parser.parse_args(argv)
@@ -498,6 +515,12 @@ def main(argv: list[str] | None = None) -> int:
         if problem:
             parser.error(f"{problem} ({exemplar_status})")
     print(f"exemplars: {exemplar_status}")
+    # the technique head (off by default): a fit with it active reads schema 4 and binds the
+    # artifact to the served checkpoint
+    technique_head, head_status = load_technique_head(settings, kb)
+    if args.require_technique_head and technique_head is None:
+        parser.error(f"--require-technique-head: the technique head is {head_status}")
+    print(f"technique head: {head_status}")
     if exemplar_index is not None:
         print(
             f"exemplar library: backend {exemplar_library_backend(exemplar_index)}, fingerprint "
@@ -517,13 +540,24 @@ def main(argv: list[str] | None = None) -> int:
         lexical_index=lexical_index,
         priors=priors,
         exemplar_index=exemplar_index,
+        technique_head=technique_head,
     )
+    if technique_head is not None and technique_head.errors:
+        print(
+            f"refusing to fit: the technique head failed {technique_head.errors} requests "
+            f"({technique_head.last_error})",
+            file=sys.stderr,
+        )
+        return 2
     rows, labels = fitted.rows, fitted.labels
     print(
         f"extracted {len(rows)} candidate rows from {len(cases)} cases in {time.time() - started:.0f}s"
     )
     # what the runtime must meet for this model to run (stored in the artifact)
-    contract = retrieval_contract_for(settings, exemplar_index, store=store)
+    contract = retrieval_contract_for(
+        settings, exemplar_index, store=store, technique_head=technique_head
+    )
+    schema = 4 if technique_head is not None else 3
     model = AcceptanceModel.fit(
         rows,
         labels,
@@ -531,6 +565,7 @@ def main(argv: list[str] | None = None) -> int:
         l2=args.l2,
         technique_priors=priors or {},
         contract=contract,
+        feature_schema_version=schema,
     )
     probabilities = [model.probability(row) for row in rows]
     datasets = {case.case_id: dataset_of(case) for case in cases}
@@ -548,11 +583,15 @@ def main(argv: list[str] | None = None) -> int:
         cv_seed=args.cv_seed,
         group_similarity=args.group_similarity,
         hierarchy_parent_mode=str(getattr(settings, "technique_hierarchy_parent_mode", "off")),
+        feature_schema_version=schema,
     )
     operating_point, selection = selected.operating_point, selected.selection
     model.threshold = float(operating_point["threshold"])
     model.metadata = {
         **exemplar_fit_metadata(settings, exemplar_index),
+        # the head the schema-4 features came from; the runtime refuses the model on any other
+        "technique_head_fingerprint": technique_head.fingerprint if technique_head else None,
+        "technique_head": technique_head.identity() if technique_head else None,
         "split": args.split,
         "datasets": sorted(set(args.datasets)),
         "case_count": len(cases),
@@ -607,6 +646,7 @@ def main(argv: list[str] | None = None) -> int:
                 "threshold_selection": selection,
                 "retrieval_contract": contract,
             },
+            feature_names=model.feature_names,
         )
         print(f"wrote {written}")
     destination = model.save(args.output)

@@ -44,6 +44,15 @@ from apt_classifier.exemplars import (
 )
 from apt_classifier.exemplars import parent_map as exemplar_parent_map
 from apt_classifier.platforms import PlatformScope, ledger_platforms, observation_scope
+from apt_classifier.technique_head import DEFAULT_NEW_CANDIDATES as HEAD_NEW_CANDIDATES
+from apt_classifier.technique_head import DEFAULT_TOP_FAMILIES as HEAD_TOP_FAMILIES
+from apt_classifier.technique_head import EVIDENCE_SOURCE as TECHNIQUE_HEAD_SOURCE
+from apt_classifier.technique_head import (
+    TechniqueHeadScores,
+    describe_head_scores,
+    pool_scores,
+    technique_head_kwargs,
+)
 from apt_classifier.technique_signals import find_signals
 from apt_classifier.vectorstore import (
     ChromaVectorStore,
@@ -469,7 +478,9 @@ def lexical_fields(settings: Any) -> tuple[str, ...]:
     )
 
 
-def retrieval_kwargs(settings: Any, *, exemplar_index: Any, lexical_index: Any) -> dict[str, Any]:
+def retrieval_kwargs(
+    settings: Any, *, exemplar_index: Any, lexical_index: Any, technique_head: Any = None
+) -> dict[str, Any]:
     """The settings-driven keyword arguments of ``retrieve_techniques``.
 
     ``AttributionEngine.map_techniques``, ``scripts/benchmark_mapping.py``,
@@ -477,7 +488,8 @@ def retrieval_kwargs(settings: Any, *, exemplar_index: Any, lexical_index: Any) 
     acceptance model is fitted on exactly the candidates it later judges. Call sites add what is
     theirs alone (store, reranker, acceptance model, ``finalize``, ``cues_enabled``, a mode
     override). The fallbacks for settings objects that lack a field are those the serving call
-    always used."""
+    always used. ``technique_head`` is the loaded :class:`apt_classifier.technique_head.
+    TechniqueHeadClient` (``None``: off)."""
     return {
         "threshold": getattr(settings, "similarity_threshold", 0.45),
         "top_k": getattr(settings, "retrieval_top_k", 30),
@@ -508,6 +520,7 @@ def retrieval_kwargs(settings: Any, *, exemplar_index: Any, lexical_index: Any) 
         ),
         "dense_overfetch": int(getattr(settings, "technique_dense_overfetch", 0) or 0),
         **exemplar_kwargs(settings, exemplar_index),
+        **technique_head_kwargs(settings, technique_head),
     }
 
 
@@ -518,21 +531,28 @@ def _dense_collection(store: Any) -> str:
 
 
 def retrieval_contract_for(
-    settings: Any, exemplar_index: Any, *, store: Any = None
+    settings: Any, exemplar_index: Any, *, store: Any = None, technique_head: Any = None
 ) -> dict[str, Any]:
     """The retrieval contract a run with these settings meets, for
     :func:`apt_classifier.acceptance.load_acceptance_model` (``contract=``): the arguments of
-    :func:`retrieval_kwargs`, the serving lexical fields and the store's technique collection."""
+    :func:`retrieval_kwargs`, the serving lexical fields, the store's technique collection and
+    the technique head (its checkpoint fingerprint) when one is loaded."""
     collection = (
         _dense_collection(store)
         if store is not None
         else str(getattr(settings, "technique_collection_name", "") or DEFAULT_DENSE_COLLECTION)
     )
     return retrieval_contract(
-        retrieval_kwargs(settings, exemplar_index=exemplar_index, lexical_index=None),
+        retrieval_kwargs(
+            settings,
+            exemplar_index=exemplar_index,
+            lexical_index=None,
+            technique_head=technique_head,
+        ),
         exemplar_index,
         lexical_fields=lexical_fields(settings),
         dense_collection=collection,
+        technique_head=technique_head,
     )
 
 
@@ -574,6 +594,9 @@ def retrieve_techniques(
     dense_overfetch: int = 0,
     exemplar_vote_norm: str = EXEMPLAR_VOTE_NORM,
     exemplar_segment_votes: str = EXEMPLAR_SEGMENT_VOTES,
+    technique_head: Any = None,
+    technique_head_new_candidates: int = HEAD_NEW_CANDIDATES,
+    technique_head_top_families: int = HEAD_TOP_FAMILIES,
 ) -> RetrievalResult:
     """Retrieve ATT&CK technique candidates for the positive observations in a ledger.
 
@@ -595,6 +618,16 @@ def retrieve_techniques(
     segmented observation, pooling the votes per technique (:func:`apt_classifier.exemplars.
     pool_votes`); exemplar-only candidates then come from the pooled ranking. The defaults are
     the shipped behaviour.
+
+    ``technique_head`` (:class:`apt_classifier.technique_head.TechniqueHeadClient`) scores every
+    observation (each sentence of a segmented one, pooled by the largest probability) with the
+    fine-tuned technique head: every candidate gets ``technique_head`` evidence (the acceptance
+    model's schema-4 features) and up to ``technique_head_new_candidates`` of the head's proposals
+    (its best technique in each of the ``technique_head_top_families`` most probable families)
+    that retrieval missed are appended after the pool with fused score 0, like exemplar-only
+    candidates. A request the service fails leaves its observations without head evidence
+    (counted in ``diagnostics["technique_head_errors"]``). An acceptance model fitted with the
+    head is not used on another head or without one.
 
     ``dense_relative_margin`` is how far below an observation's best dense hit a technique's
     hit may lie and still become a candidate; ``dense_overfetch`` is the number of sentence
@@ -683,6 +716,10 @@ def retrieve_techniques(
         segment_votes=exemplar_segment_votes,
         segments=segments,
     )
+    head_scores, head_status, head_errors = _technique_head_scores(
+        observations, segments, technique_head, top_families=technique_head_top_families
+    )
+    head_active = technique_head is not None and head_status.startswith("active")
     acceptance_disabled: str | None = None
     if acceptance_model is not None and getattr(acceptance_model, "requires_exemplars", False):
         runtime = (
@@ -693,6 +730,15 @@ def retrieve_techniques(
                 "acceptance model needs exemplar index "
                 f"{getattr(acceptance_model, 'exemplar_fingerprint', None)}, runtime has "
                 f"{runtime or exemplar_status}"
+            )
+            acceptance_model = None
+    if acceptance_model is not None and getattr(acceptance_model, "requires_technique_head", False):
+        runtime = getattr(technique_head, "fingerprint", None) if head_active else None
+        if runtime != getattr(acceptance_model, "technique_head_fingerprint", None):
+            acceptance_disabled = (
+                "acceptance model needs technique head "
+                f"{getattr(acceptance_model, 'technique_head_fingerprint', None)}, runtime has "
+                f"{runtime or head_status}"
             )
             acceptance_model = None
     contract = getattr(acceptance_model, "contract", None) if acceptance_model is not None else None
@@ -719,6 +765,8 @@ def retrieve_techniques(
                 "exemplar_new_candidates": exemplar_new_candidates,
                 "exemplar_vote_norm": exemplar_vote_norm,
                 "exemplar_segment_votes": exemplar_segment_votes,
+                "technique_head_new_candidates": technique_head_new_candidates,
+                "technique_head_top_families": technique_head_top_families,
             },
             exemplar_index if exemplar_status == "active" else None,
             lexical_fields=getattr(lexical_index, "fields", None)
@@ -726,11 +774,13 @@ def retrieve_techniques(
                 include_synthetic=include_synthetic, include_detection=include_detection
             ),
             dense_collection=_dense_collection(store),
+            technique_head=technique_head if head_active else None,
         )
         problems = contract_mismatches(
             contract,
             runtime_contract,
             exemplars=bool(getattr(acceptance_model, "requires_exemplars", False)),
+            technique_head=bool(getattr(acceptance_model, "requires_technique_head", False)),
         )
         if problems:
             acceptance_disabled = "acceptance model retrieval contract not met: " + "; ".join(
@@ -738,6 +788,7 @@ def retrieve_techniques(
             )
             acceptance_model = None
     exemplar_added = 0
+    head_added = 0
     candidates: list[TechniqueCandidate] = []
     segmented_observations = 0
     case_platforms = ledger_platforms(ledger)
@@ -825,19 +876,36 @@ def retrieve_techniques(
             observation, kb, observation_candidates
         )
         votes = exemplar_votes[observation_index]
-        if votes is not None:
+        scores = head_scores[observation_index]
+        if scores is not None and not scores.ok:
+            scores = None
+        whole_view = segment_count <= 1 or not segment_acceptance
+        if votes is not None and exemplar_new_candidates > 0 and whole_view:
             before = len(observation_candidates)
-            if exemplar_new_candidates > 0 and (segment_count <= 1 or not segment_acceptance):
-                observation_candidates = _append_exemplar_candidates(
-                    observation,
-                    kb,
-                    observation_candidates,
-                    votes,
-                    limit=int(exemplar_new_candidates),
-                    platform_scope=platform_scope,
-                )
+            observation_candidates = _append_exemplar_candidates(
+                observation,
+                kb,
+                observation_candidates,
+                votes,
+                limit=int(exemplar_new_candidates),
+                platform_scope=platform_scope,
+            )
             exemplar_added += len(observation_candidates) - before
+        if scores is not None and technique_head_new_candidates > 0 and whole_view:
+            before = len(observation_candidates)
+            observation_candidates = _append_technique_head_candidates(
+                observation,
+                kb,
+                observation_candidates,
+                scores,
+                limit=int(technique_head_new_candidates),
+                platform_scope=platform_scope,
+            )
+            head_added += len(observation_candidates) - before
+        if votes is not None:
             observation_candidates = _attach_exemplar_evidence(observation_candidates, votes)
+        if scores is not None:
+            observation_candidates = _attach_technique_head_evidence(observation_candidates, scores)
         candidates.extend(observation_candidates)
     behavior_query = getattr(store, "query_group_behaviors", None)
     behavior_hits = (
@@ -921,6 +989,17 @@ def retrieve_techniques(
                 else {}
             ),
             **({"dense_overfetch": dense_depth} if int(dense_overfetch) > 0 else {}),
+            # the technique head (apt_classifier.technique_head), only when one is configured
+            **(
+                {
+                    "technique_head": head_status,
+                    "technique_head_candidates_added": head_added,
+                    "technique_head_errors": head_errors,
+                    "technique_head_fingerprint": getattr(technique_head, "fingerprint", None),
+                }
+                if technique_head is not None
+                else {}
+            ),
             "target_platforms": case_platforms,
             "platform_from_text": platform_from_text,
             "platform_scopes": platform_scopes,
@@ -1102,6 +1181,121 @@ def _attach_exemplar_evidence(
             output.append(candidate)
             continue
         evidence = _exemplar_evidence(votes, candidate.technique_id, exemplar_only=False)
+        output.append(candidate.model_copy(update={"evidence": [*candidate.evidence, evidence]}))
+    return output
+
+
+def _technique_head_scores(
+    observations: list[Any],
+    segments: list[list[str]],
+    technique_head: Any,
+    *,
+    top_families: int,
+) -> tuple[list[TechniqueHeadScores | None], str, int]:
+    """The technique head's scores per observation (``None`` entries when the head is off or the
+    request failed), the status and how many requests failed in this call. A segmented
+    observation is scored sentence by sentence and pooled (the head reads one sentence)."""
+    empty: list[TechniqueHeadScores | None] = [None] * len(observations)
+    if technique_head is None:
+        return empty, "off", 0
+    if not getattr(technique_head, "available", False):
+        return empty, str(getattr(technique_head, "status", "unavailable")), 0
+    if not observations:
+        return empty, "active", 0
+    texts: list[str] = []
+    spans: list[tuple[int, int]] = []
+    for observation, group in zip(observations, segments, strict=True):
+        parts = [str(text) for text in group if str(text).strip()] or [str(observation.text)]
+        spans.append((len(texts), len(parts)))
+        texts.extend(parts)
+    failed_before = int(getattr(technique_head, "errors", 0))
+    scored = list(technique_head.score(texts))
+    failed = int(getattr(technique_head, "errors", 0)) - failed_before
+    output: list[TechniqueHeadScores | None] = []
+    for start, count in spans:
+        parts = [item for item in scored[start : start + count] if item is not None]
+        if not parts:
+            output.append(None)
+        elif count == 1:
+            output.append(parts[0])
+        else:
+            output.append(pool_scores(parts, top_families=top_families))
+    status = "active" if not failed else f"active ({failed} requests failed)"
+    return output, status, failed
+
+
+def _technique_head_evidence(
+    scores: TechniqueHeadScores, technique_id: str, *, head_only: bool
+) -> TechniqueRetrievalEvidence:
+    features = scores.features(technique_id, head_only=head_only)
+    rank = scores.technique_ranks.get(technique_id)
+    return TechniqueRetrievalEvidence(
+        source=TECHNIQUE_HEAD_SOURCE,
+        field="sentence",
+        score=features["th_technique_p"],
+        rank=rank,
+        rationale=describe_head_scores(scores, technique_id),
+        metadata={
+            "features": features,
+            "head_only": head_only,
+            "top_family": scores.top_family,
+            "proposals": list(scores.proposals),
+        },
+    )
+
+
+def _append_technique_head_candidates(
+    observation: Any,
+    kb: Any,
+    candidates: list[TechniqueCandidate],
+    scores: TechniqueHeadScores,
+    *,
+    limit: int,
+    platform_scope: PlatformScope | None,
+) -> list[TechniqueCandidate]:
+    """The head's proposals that retrieval did not produce, appended after the pool (fused score
+    0, never displacing a retrieved candidate); the acceptance model judges them on the head's
+    evidence (and the exemplar votes attached afterwards)."""
+    techniques = getattr(kb, "techniques", {}) or {}
+    present = {candidate.technique_id for candidate in candidates}
+    output = list(candidates)
+    next_rank = len(candidates) + 1
+    for technique_id in scores.proposals:
+        if len(output) - len(candidates) >= limit:
+            break
+        if technique_id in present or technique_id not in techniques:
+            continue
+        technique = techniques[technique_id]
+        if not _platform_matches(_record_value(technique, "platforms", ()), platform_scope):
+            continue
+        output.append(
+            TechniqueCandidate(
+                observation_id=observation.id,
+                technique_id=technique_id,
+                technique_name=_technique_name(kb, technique_id),
+                parent_technique_id=str(_record_value(technique, "parent_id", "") or "") or None,
+                is_subtechnique=bool(_record_value(technique, "is_subtechnique", False)),
+                fused_score=0.0,
+                fused_rank=next_rank,
+                evidence=[_technique_head_evidence(scores, technique_id, head_only=True)],
+                state=TechniqueCandidateState.NEEDS_REVIEW,
+                state_reason="technique head proposal; acceptance not yet evaluated",
+            )
+        )
+        present.add(technique_id)
+        next_rank += 1
+    return output
+
+
+def _attach_technique_head_evidence(
+    candidates: list[TechniqueCandidate], scores: TechniqueHeadScores
+) -> list[TechniqueCandidate]:
+    output = []
+    for candidate in candidates:
+        if candidate.evidence_for(TECHNIQUE_HEAD_SOURCE) is not None:
+            output.append(candidate)
+            continue
+        evidence = _technique_head_evidence(scores, candidate.technique_id, head_only=False)
         output.append(candidate.model_copy(update={"evidence": [*candidate.evidence, evidence]}))
     return output
 

@@ -13,6 +13,7 @@ from apt_classifier.acceptance import (
     CONTRACT_RECORD_KEYS,
     EXEMPLAR_CONTRACT_KEYS,
     FEATURE_NAMES,
+    FEATURE_NAMES_V4,
     FEATURE_SCHEMA_VERSION,
     LEGACY_CONTRACT,
     PRIOR_FEATURE_NAMES,
@@ -67,8 +68,10 @@ def test_candidate_features_cover_schema_and_margins():
     third = _candidate("T1021.002", 3, 0.016, None, lexical_rank=7)
     siblings = [second, third, top]
     features = candidate_features(second, siblings, benign_context=False, sparse_context=True)
-    # candidate features plus the per-technique priors (looked up by id) cover the schema
-    assert set(features) | set(PRIOR_FEATURE_NAMES) == set(FEATURE_NAMES)
+    # candidate features plus the per-technique priors (looked up by id) cover the schema (4:
+    # the technique head's features too; a schema-3 model reads its own prefix)
+    assert set(features) | set(PRIOR_FEATURE_NAMES) == set(FEATURE_NAMES_V4)
+    assert set(FEATURE_NAMES) < set(FEATURE_NAMES_V4)
     assert features["is_rank_one"] == 0.0
     assert features["fused_margin_to_top"] == pytest.approx(0.023)
     assert features["fused_margin_to_next"] == pytest.approx(0.001)

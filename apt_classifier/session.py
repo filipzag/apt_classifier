@@ -94,6 +94,7 @@ from apt_classifier.software_questions import (
     software_question_pool,
     software_selected_question,
 )
+from apt_classifier.technique_head import load_technique_head
 from apt_classifier.text_group import (
     TEXT_GROUP_NAME,
     TextGroupClassifier,
@@ -316,13 +317,22 @@ class AttributionEngine:
         self.exemplar_index, self.exemplar_status = load_exemplar_index(
             self.settings, client=getattr(vector_store, "client", None)
         )
+        # the fine-tuned technique head's local service (off by default; fail closed)
+        self.technique_head, self.technique_head_status = load_technique_head(
+            self.settings, knowledge_base
+        )
         # refused (fallback, else the rule-based gate) unless these settings meet the retrieval
         # contract the model was fitted under (acceptance.legacy_contract for older artifacts)
         self.acceptance_model, self.acceptance_model_status = load_acceptance_model(
             self.settings,
             knowledge_base,
             self.exemplar_index,
-            contract=retrieval_contract_for(self.settings, self.exemplar_index, store=vector_store),
+            contract=retrieval_contract_for(
+                self.settings,
+                self.exemplar_index,
+                store=vector_store,
+                technique_head=self.technique_head,
+            ),
         )
         self.combiner_fingerprint = pipeline_fingerprint(
             rrf_k=int(self.settings.rrf_k),
@@ -404,7 +414,10 @@ class AttributionEngine:
             self.store,
             self.kb,
             **retrieval_kwargs(
-                self.settings, exemplar_index=self.exemplar_index, lexical_index=self.lexical_index
+                self.settings,
+                exemplar_index=self.exemplar_index,
+                lexical_index=self.lexical_index,
+                technique_head=self.technique_head,
             ),
             reranker=self.reranker if self.reranker.available else None,
             finalize=False,

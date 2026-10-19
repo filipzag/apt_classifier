@@ -142,10 +142,11 @@ def out_of_fold_probabilities(
     *,
     attack_version: str,
     l2: float = 1.0,
+    feature_schema_version: int = 3,
 ) -> np.ndarray:
     """Acceptance probability of every row from a model fitted on the other folds' rows (the
-    same :meth:`AcceptanceModel.fit` as the final model; prior features are already in the
-    rows)."""
+    same :meth:`AcceptanceModel.fit` as the final model, on the same feature schema; prior
+    features are already in the rows)."""
     folds = np.asarray(row_folds, dtype=np.int64)
     truth = np.asarray(labels, dtype=np.int64)
     if not (len(rows) == len(truth) == len(folds)):
@@ -161,6 +162,7 @@ def out_of_fold_probabilities(
             truth[train].tolist(),
             attack_version=attack_version,
             l2=l2,
+            feature_schema_version=feature_schema_version,
         )
         for index in np.flatnonzero(held_out).tolist():
             output[index] = model.probability(dict(rows[index]))

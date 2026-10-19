@@ -121,6 +121,24 @@ class Settings(BaseSettings):
     acceptance_model_fallback_path: Path | None = (
         PROJECT_ROOT / "data" / "models" / "acceptance" / "acceptance_model_no_exemplars.json"
     )
+    # ----- the fine-tuned technique head (apt_classifier/technique_head.py, docs 21.3.18) -----
+    # A local service (`make technique-head-serve`, scripts/cribl_finetune/serve.py, its own
+    # .venv-cribl and about 3.5 GB of GPU memory) scoring every observation with the 4B technique
+    # model: evidence on every candidate (acceptance feature schema 4) and up to
+    # TECHNIQUE_HEAD_NEW_CANDIDATES proposals retrieval missed. Off by default until the
+    # pre-registered gate passes (docs/preregistration/cribl_product_integration_2026-10-19.json).
+    # Fail closed: unavailable, wrong ATT&CK version or a fingerprint other than the pinned one
+    # leaves the pipeline exactly as without it; an acceptance model fitted with the head runs
+    # only on that head.
+    technique_head_enabled: bool = False
+    technique_head_url: str = "http://localhost:8102"
+    technique_head_timeout: float = 120.0
+    # SHA-256 of the served checkpoint (its /health "fingerprint"); empty accepts any checkpoint
+    technique_head_expected_fingerprint: str = ""
+    technique_head_top_families: int = 3
+    technique_head_new_candidates: int = 3
+    technique_head_batch: int = 16
+    technique_head_cache_size: int = 2048
     max_questions: int = 10
     # Interview questions about malware only one top-three group uses (software_questions.py,
     # docs 21.3.15 C): asked first while the case is not named, with fixed wording and the answers

@@ -240,6 +240,7 @@ class CaseService:
             "confidence_labels": str(self.confidence_labels_status),
             "exemplars": str(getattr(self.engine, "exemplar_status", "unavailable")),
             "exemplar_backend": _exemplar_backend(getattr(self.engine, "exemplar_index", None)),
+            "technique_head": str(getattr(self.engine, "technique_head_status", "disabled")),
             "profile_forest": forest_status,
             "group_mlp": str(getattr(self.engine, "group_mlp_status", "unavailable")),
             "text_group": str(getattr(self.engine, "text_group_status", "unavailable")),

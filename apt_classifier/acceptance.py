@@ -43,11 +43,21 @@ from apt_classifier.exemplars import DEFAULT_SEGMENT_VOTES, DEFAULT_VOTE_NORM
 from apt_classifier.exemplars import EVIDENCE_SOURCE as EXEMPLAR_EVIDENCE_SOURCE
 from apt_classifier.exemplars import FEATURE_NAMES as EXEMPLAR_FEATURE_NAMES
 from apt_classifier.exemplars import features_from_evidence as exemplar_features_from_evidence
+from apt_classifier.technique_head import DEFAULT_NEW_CANDIDATES as HEAD_NEW_CANDIDATES
+from apt_classifier.technique_head import DEFAULT_TOP_FAMILIES as HEAD_TOP_FAMILIES
+from apt_classifier.technique_head import EVIDENCE_SOURCE as TECHNIQUE_HEAD_EVIDENCE_SOURCE
+from apt_classifier.technique_head import FEATURE_NAMES as TECHNIQUE_HEAD_FEATURE_NAMES
+from apt_classifier.technique_head import features_from_evidence as head_features_from_evidence
 
 # Schema 3 (2026-09-30): exemplar features, i.e. what the nearest labelled real-report
 # sentences say about the candidate (``apt_classifier.exemplars``). A model fitted with them
 # records the exemplar index fingerprint and refuses to run without that index.
-FEATURE_SCHEMA_VERSION = 3
+# Schema 4 (2026-10-19): schema 3 plus the technique head's features
+# (``apt_classifier.technique_head``). A model fitted with the head records the head's
+# checkpoint fingerprint and refuses to run on another head or without one. Schema-3 artifacts
+# keep loading unchanged (their feature vector is the schema-3 prefix): ``feature_names_for``.
+FEATURE_SCHEMA_VERSION = 4
+SUPPORTED_FEATURE_SCHEMAS: tuple[int, ...] = (3, 4)
 
 # Per-technique priors (schema 2): how often the technique is labelled in the public *train*
 # splits, how many ATT&CK procedure sentences it has, and how many groups document it. They
@@ -86,6 +96,17 @@ FEATURE_NAMES: tuple[str, ...] = (
     *PRIOR_FEATURE_NAMES,
     *EXEMPLAR_FEATURE_NAMES,
 )
+# schema 4 = schema 3 followed by the technique head's features
+FEATURE_NAMES_V4: tuple[str, ...] = (*FEATURE_NAMES, *TECHNIQUE_HEAD_FEATURE_NAMES)
+
+
+def feature_names_for(schema_version: int) -> tuple[str, ...]:
+    """The feature vector of a schema version (``ValueError`` for an unknown one)."""
+    if int(schema_version) == 3:
+        return FEATURE_NAMES
+    if int(schema_version) == 4:
+        return FEATURE_NAMES_V4
+    raise ValueError(f"unknown acceptance feature schema {schema_version!r}")
 
 
 # ----- retrieval contract -----
@@ -107,6 +128,13 @@ EXEMPLAR_CONTRACT_KEYS: tuple[str, ...] = (
     "exemplar_segment_votes",
     "exemplar_search_class",
 )
+# Compared only for a model fitted with the technique head (``requires_technique_head``), as the
+# exemplar keys are for a model fitted with exemplars; the fingerprint is the head checkpoint's.
+TECHNIQUE_HEAD_CONTRACT_KEYS: tuple[str, ...] = (
+    "technique_head_fingerprint",
+    "technique_head_new_candidates",
+    "technique_head_top_families",
+)
 RETRIEVAL_CONTRACT_KEYS: tuple[str, ...] = (
     "similarity_threshold",
     "top_k",
@@ -124,6 +152,7 @@ RETRIEVAL_CONTRACT_KEYS: tuple[str, ...] = (
     "dense_overfetch",
     "dense_collection",
     *EXEMPLAR_CONTRACT_KEYS,
+    *TECHNIQUE_HEAD_CONTRACT_KEYS,
 )
 # Recorded in a contract but never compared: where the exemplar library was read from ("npz" or
 # "chroma"). The library's identity is ``exemplar_fingerprint`` (recomputed from the vectors), so
@@ -139,7 +168,16 @@ _FLOAT_KEYS = frozenset(
     }
 )
 _INT_KEYS = frozenset(
-    {"top_k", "candidate_pool", "rrf_k", "dense_overfetch", "exemplar_k", "exemplar_new_candidates"}
+    {
+        "top_k",
+        "candidate_pool",
+        "rrf_k",
+        "dense_overfetch",
+        "exemplar_k",
+        "exemplar_new_candidates",
+        "technique_head_new_candidates",
+        "technique_head_top_families",
+    }
 )
 _BOOL_KEYS = frozenset(
     {
@@ -198,6 +236,10 @@ LEGACY_CONTRACT: dict[str, Any] = {
     "exemplar_segment_votes": DEFAULT_SEGMENT_VOTES,
     "exemplar_search_class": "exact",
     "exemplar_backend": "npz",
+    # the technique head (2026-10-19): off before it existed
+    "technique_head_fingerprint": None,
+    "technique_head_new_candidates": HEAD_NEW_CANDIDATES,
+    "technique_head_top_families": HEAD_TOP_FAMILIES,
 }
 
 
@@ -222,6 +264,7 @@ def retrieval_contract(
     *,
     lexical_fields: Sequence[str] | None = None,
     dense_collection: str | None = None,
+    technique_head: Any = None,
 ) -> dict[str, Any]:
     """The retrieval settings the acceptance features depend on.
 
@@ -230,7 +273,9 @@ def retrieval_contract(
     votes the candidates carry (``None`` when exemplars are off or unavailable): its
     fingerprint is compared, its backend only recorded (:data:`CONTRACT_RECORD_KEYS`). The
     lexical fields are those of ``lexical_fields``, else of ``kwargs["lexical_index"]``, else
-    the fields ``retrieve_techniques`` builds its own index with."""
+    the fields ``retrieve_techniques`` builds its own index with. ``technique_head`` is the
+    active head client (``None`` when the head is off or unavailable): its checkpoint
+    fingerprint is compared for a model fitted with the head."""
     if lexical_fields is None:
         lexical_fields = getattr(kwargs.get("lexical_index"), "fields", None) or None
     if lexical_fields is None:
@@ -267,6 +312,15 @@ def retrieval_contract(
         "exemplar_vote_norm": kwargs.get("exemplar_vote_norm", DEFAULT_VOTE_NORM),
         "exemplar_segment_votes": kwargs.get("exemplar_segment_votes", DEFAULT_SEGMENT_VOTES),
         "exemplar_search_class": search_class,
+        "technique_head_fingerprint": (
+            str(getattr(technique_head, "fingerprint", "") or "") or None
+            if technique_head is not None
+            else None
+        ),
+        "technique_head_new_candidates": kwargs.get(
+            "technique_head_new_candidates", HEAD_NEW_CANDIDATES
+        ),
+        "technique_head_top_families": kwargs.get("technique_head_top_families", HEAD_TOP_FAMILIES),
     }
     return {
         "contract_version": RETRIEVAL_CONTRACT_VERSION,
@@ -289,10 +343,15 @@ def legacy_contract(metadata: Mapping[str, Any] | None) -> dict[str, Any]:
 
 
 def contract_mismatches(
-    fitted: Mapping[str, Any], runtime: Mapping[str, Any], *, exemplars: bool
+    fitted: Mapping[str, Any],
+    runtime: Mapping[str, Any],
+    *,
+    exemplars: bool,
+    technique_head: bool = False,
 ) -> list[str]:
     """How ``runtime`` departs from the contract a model was fitted under (empty when it meets
-    it). ``exemplars=False`` (a model fitted without exemplars) skips the exemplar keys; a
+    it). ``exemplars=False`` (a model fitted without exemplars) skips the exemplar keys and
+    ``technique_head=False`` (a model fitted without the technique head) the head keys; a
     version-0 contract (:func:`legacy_contract`) is compared on :data:`CONTRACT_1_KEYS` only."""
     try:
         # strict: a missing or malformed version must never read as the looser version 0
@@ -307,6 +366,8 @@ def contract_mismatches(
     problems: list[str] = []
     for key in keys:
         if not exemplars and key in EXEMPLAR_CONTRACT_KEYS:
+            continue
+        if not technique_head and key in TECHNIQUE_HEAD_CONTRACT_KEYS:
             continue
         try:
             expected = _contract_value(key, fitted.get(key, LEGACY_CONTRACT.get(key)))
@@ -410,11 +471,13 @@ def candidate_features(
         "sparse_context": 1.0 if sparse_context else 0.0,
         "candidate_count": float(len(ordered)),
         **exemplar_features_from_evidence(candidate.evidence_for(EXEMPLAR_EVIDENCE_SOURCE)),
+        # schema 4; a schema-3 model reads its own prefix (feature_vector with its names)
+        **head_features_from_evidence(candidate.evidence_for(TECHNIQUE_HEAD_EVIDENCE_SOURCE)),
     }
 
 
-def feature_vector(features: dict[str, float]) -> np.ndarray:
-    return np.asarray([float(features.get(name, 0.0)) for name in FEATURE_NAMES], dtype=float)
+def feature_vector(features: dict[str, float], names: Sequence[str] = FEATURE_NAMES) -> np.ndarray:
+    return np.asarray([float(features.get(name, 0.0)) for name in names], dtype=float)
 
 
 def fit_logistic(
@@ -462,8 +525,13 @@ class AcceptanceModel:
     def prior_features(self, technique_id: str) -> dict[str, float]:
         return prior_features(self.technique_priors, technique_id)
 
+    @property
+    def feature_names(self) -> tuple[str, ...]:
+        """The feature vector this model reads (its schema's names)."""
+        return feature_names_for(self.feature_schema_version)
+
     def probability(self, features: dict[str, float]) -> float:
-        x = (feature_vector(features) - self.means) / self.scales
+        x = (feature_vector(features, self.feature_names) - self.means) / self.scales
         z = float(np.clip(x @ self.weights + self.intercept, -30.0, 30.0))
         return 1.0 / (1.0 + math.exp(-z))
 
@@ -479,6 +547,16 @@ class AcceptanceModel:
     def requires_exemplars(self) -> bool:
         return self.exemplar_fingerprint is not None
 
+    @property
+    def technique_head_fingerprint(self) -> str | None:
+        value = self.metadata.get("technique_head_fingerprint")
+        return str(value) if value else None
+
+    @property
+    def requires_technique_head(self) -> bool:
+        """Fitted with the technique head's features active: runs only on that head."""
+        return self.technique_head_fingerprint is not None
+
     def compatible_with(
         self,
         attack_version: str | None,
@@ -487,11 +565,14 @@ class AcceptanceModel:
     ) -> tuple[bool, str]:
         """Whether the model may run here. ``contract`` is the runtime's retrieval contract
         (:func:`retrieval_contract`); without it, or for a model without one, only the schema,
-        the ATT&CK version and the exemplar fingerprint are checked."""
-        if self.feature_schema_version != FEATURE_SCHEMA_VERSION:
+        the ATT&CK version and the exemplar fingerprint are checked (the technique head a model
+        was fitted with is part of its contract; ``retrieve_techniques`` checks it as well)."""
+        if self.feature_schema_version not in SUPPORTED_FEATURE_SCHEMAS:
             return False, (
-                f"feature schema {self.feature_schema_version} != {FEATURE_SCHEMA_VERSION}"
+                f"feature schema {self.feature_schema_version} not in {SUPPORTED_FEATURE_SCHEMAS}"
             )
+        if self.requires_technique_head and self.feature_schema_version < 4:
+            return False, "fitted with the technique head but without its features (schema < 4)"
         if attack_version and self.attack_version and attack_version != self.attack_version:
             return False, f"ATT&CK version {self.attack_version} != {attack_version}"
         if self.requires_exemplars and exemplar_fingerprint != self.exemplar_fingerprint:
@@ -502,10 +583,20 @@ class AcceptanceModel:
             )
         if contract is not None and self.contract is not None:
             problems = contract_mismatches(
-                self.contract, contract, exemplars=self.requires_exemplars
+                self.contract,
+                contract,
+                exemplars=self.requires_exemplars,
+                technique_head=self.requires_technique_head,
             )
             if problems:
                 return False, "retrieval contract not met: " + "; ".join(problems)
+        elif self.requires_technique_head and contract is not None:
+            runtime_head = contract.get("technique_head_fingerprint")
+            if runtime_head != self.technique_head_fingerprint:
+                return False, (
+                    f"fitted with technique head {self.technique_head_fingerprint}, runtime has "
+                    f"{runtime_head or 'none'} (start the head service, or use another model)"
+                )
         return True, "ok"
 
     def to_dict(self) -> dict[str, Any]:
@@ -513,7 +604,7 @@ class AcceptanceModel:
             "kind": "technique_acceptance_logistic",
             "created_at": datetime.now(UTC).isoformat(),
             "feature_schema_version": self.feature_schema_version,
-            "feature_names": list(FEATURE_NAMES),
+            "feature_names": list(self.feature_names),
             "weights": [float(value) for value in self.weights],
             "intercept": self.intercept,
             "means": [float(value) for value in self.means],
@@ -541,8 +632,12 @@ class AcceptanceModel:
         if payload.get("kind") != "technique_acceptance_logistic":
             raise ValueError("not an acceptance model artifact")
         names = tuple(payload.get("feature_names", ()))
-        if names != FEATURE_NAMES:
-            raise ValueError("feature names do not match the current schema")
+        try:
+            expected = feature_names_for(int(payload.get("feature_schema_version", 0)))
+        except (TypeError, ValueError) as error:
+            raise ValueError(str(error)) from error
+        if names != expected:
+            raise ValueError("feature names do not match the artifact's feature schema")
         metadata = dict(payload.get("metadata") or {})
         stored = payload.get("retrieval_contract")
         if stored is not None and not isinstance(stored, Mapping):
@@ -591,8 +686,13 @@ class AcceptanceModel:
         metadata: dict[str, Any] | None = None,
         technique_priors: Mapping[str, Sequence[float]] | None = None,
         contract: Mapping[str, Any] | None = None,
+        feature_schema_version: int = 3,
     ) -> AcceptanceModel:
-        X = np.vstack([feature_vector(row) for row in rows])
+        """Fit on feature rows. ``feature_schema_version`` picks the feature vector: 3 (the
+        default, the shipped artifacts' shape) ignores the technique head's features, 4 reads
+        them (a fit with the head active, ``scripts/fit_acceptance_model.py``)."""
+        names = feature_names_for(feature_schema_version)
+        X = np.vstack([feature_vector(row, names) for row in rows])
         y = np.asarray(labels, dtype=float)
         means = X.mean(axis=0)
         scales = X.std(axis=0)
@@ -605,6 +705,7 @@ class AcceptanceModel:
             scales=scales,
             threshold=threshold,
             attack_version=attack_version,
+            feature_schema_version=int(feature_schema_version),
             metadata=dict(metadata or {}),
             technique_priors={
                 k: [float(v) for v in vals] for k, vals in (technique_priors or {}).items()
