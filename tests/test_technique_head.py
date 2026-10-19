@@ -502,3 +502,36 @@ def test_head_service_scores_validates_and_fingerprints(tmp_path):
     # the handler answers over HTTP like the client expects
     handler = head_service.make_handler(service)
     assert handler.do_GET and handler.do_POST
+
+
+def test_log_derived_observations_are_not_scored():
+    from apt_classifier.technique_head import scores_prose
+
+    kb, store, _ = _two_hit_setup()
+    prose = Observation(
+        text="the tool read lsass memory", provenance=Provenance(source="free_text")
+    )
+    for source in ("winlog", "sysmon", "ecar", "elasticsearch", "evidenceforge_narrative"):
+        assert not scores_prose(Observation(text="x", provenance=Provenance(source=source)))
+    for source in ("free_text", "report", "public_benchmark", "cti_hal", "alert", "interview"):
+        assert scores_prose(Observation(text="x", provenance=Provenance(source=source)))
+    log = Observation(
+        text="powershell.exe -enc ... spawned by winword.exe",
+        provenance=Provenance(source="winlog"),
+    )
+    ledger = EvidenceLedger(observations=[log, prose])
+    service = FakeService(_rows_for)
+    client = _client(service)
+    result = retrieve_techniques(ledger, store, kb, retrieval_mode="dense", technique_head=client)
+    # only the prose observation was posted; the log observation has no head evidence
+    assert service.posted == [["the tool read lsass memory"]]
+    assert result.diagnostics["technique_head_skipped_logs"] == 1
+    for candidate in result.candidates:
+        has_head = candidate.evidence_for(EVIDENCE_SOURCE) is not None
+        assert has_head == (candidate.observation_id == prose.id)
+    only_logs = retrieve_techniques(
+        EvidenceLedger(observations=[log]), store, kb, retrieval_mode="dense", technique_head=client
+    )
+    assert only_logs.diagnostics["technique_head"] == "active"
+    assert only_logs.diagnostics["technique_head_skipped_logs"] == 1
+    assert len(service.posted) == 1

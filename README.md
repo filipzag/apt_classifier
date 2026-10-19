@@ -386,6 +386,25 @@ What it then does:
 - **Off:** `LOCAL_LLM_ENABLED=false` in `.env`, or `make api-local` / `make run-local` for no LLM
   at all.
 
+### Optional technique head service
+
+The fine-tuned 4B technique model (`scripts/cribl_finetune/README.md`, docs 21.3.18) can score
+every observation for the mapping pipeline: its opinion of each candidate becomes acceptance-model
+evidence and up to three techniques it proposes that retrieval missed join the candidate pool. It
+needs its own environment (`make cribl-venv`, transformers 5) and the reference checkpoint under
+`data/models/cribl_ft/E2/step_52706`, so it runs as a separate local service:
+
+```bash
+make technique-head-serve
+```
+
+(about 3.5 GB of GPU memory, `http://localhost:8102`). The app uses it only with
+`TECHNIQUE_HEAD_ENABLED=true` in `.env`; pin `TECHNIQUE_HEAD_EXPECTED_FINGERPRINT` to the
+fingerprint the service prints. When the service is not running the pipeline runs exactly as
+without it and the status strip says so. The acceptance model that reads the head's evidence is
+fitted with the service up (`TECHNIQUE_HEAD_ENABLED=true` + `make fit-acceptance` to a new path)
+and runs only on that checkpoint.
+
 ### Optional Elastic Agent Builder MCP
 
 The supported connector targets Elastic Agent Builder MCP on Elasticsearch 9.2+/9.3+ or Elastic Serverless, not the deprecated standalone Elasticsearch MCP server. Create an API key restricted to intended security indices with `read` and `view_index_metadata`, plus Kibana `feature_agentBuilder.read` access, then configure:
@@ -413,6 +432,7 @@ All settings are environment variables documented in `.env.example`. Important v
 - `EXTRACT_MODEL=openai/gpt-5.6-sol`
 - `REVIEW_MODEL=anthropic/claude-sonnet-5`
 - `LOCAL_LLM_ENABLED=true` (local LLM via Ollama, `qwen3.5:4b-text` by default, GPU only, used when Ollama answers with `LOCAL_LLM_FALLBACK_MODEL` pulled: without an OpenRouter key it verifies ambiguous techniques, rewrites report prose sentence by sentence and runs the review; with a key only `local/` model ids use it; `make llm-pull`, `make llm-check`; docs 16.4a)
+- `TECHNIQUE_HEAD_ENABLED=false` (the fine-tuned technique head's local service, `make technique-head-serve`; off until its pre-registered gate passes, docs 21.3.18)
 - `SIMILARITY_THRESHOLD=0.45`
 - `BEHAVIOR_SIMILARITY_THRESHOLD=0.55`
 - `THREAT_INTEL_DAYS=30`

@@ -19,6 +19,8 @@ What the pipeline gets from it, per observation (:class:`TechniqueHeadScores`):
   appended after the retrieved pool with fused score 0, like exemplar-only candidates, so nothing
   retrieved is displaced.
 
+Prose only, for now: observations that come from logs (:func:`scores_prose`) are left alone.
+
 Fail closed: the client is built only when ``TECHNIQUE_HEAD_ENABLED`` is set, is ``None`` (the
 pipeline runs exactly as without it, the status says why) when the service does not answer, was
 built for another ATT&CK version, or does not carry the pinned
@@ -37,6 +39,8 @@ from dataclasses import dataclass, field
 from typing import Any
 
 import httpx
+
+from apt_classifier.cyberre import is_telemetry_source
 
 EVIDENCE_SOURCE = "technique_head"
 DEFAULT_URL = "http://localhost:8102"
@@ -65,6 +69,17 @@ FEATURE_NAMES: tuple[str, ...] = (
     "th_proposed",
     "th_only",
 )
+
+
+def scores_prose(observation: Any) -> bool:
+    """Whether the head reads this observation: prose only, for now (report sentences, free
+    text, alerts, interview answers). Log-derived observations (Windows/Sysmon events, eCAR,
+    Elastic records, the EvidenceForge renders: the telemetry sources of the verifier's
+    interpreter rule, :func:`apt_classifier.cyberre.is_telemetry_source`) are not scored: the
+    head was trained on report prose, and the product owner asked for prose first
+    (2026-10-19)."""
+    provenance = getattr(observation, "provenance", None)
+    return not is_telemetry_source(getattr(provenance, "source", None))
 
 
 def family_of(technique_id: str) -> str:

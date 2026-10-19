@@ -51,6 +51,7 @@ from apt_classifier.technique_head import (
     TechniqueHeadScores,
     describe_head_scores,
     pool_scores,
+    scores_prose,
     technique_head_kwargs,
 )
 from apt_classifier.technique_signals import find_signals
@@ -716,7 +717,7 @@ def retrieve_techniques(
         segment_votes=exemplar_segment_votes,
         segments=segments,
     )
-    head_scores, head_status, head_errors = _technique_head_scores(
+    head_scores, head_status, head_errors, head_skipped = _technique_head_scores(
         observations, segments, technique_head, top_families=technique_head_top_families
     )
     head_active = technique_head is not None and head_status.startswith("active")
@@ -995,6 +996,8 @@ def retrieve_techniques(
                     "technique_head": head_status,
                     "technique_head_candidates_added": head_added,
                     "technique_head_errors": head_errors,
+                    # log-derived observations the head does not read (prose only, for now)
+                    "technique_head_skipped_logs": head_skipped,
                     "technique_head_fingerprint": getattr(technique_head, "fingerprint", None),
                 }
                 if technique_head is not None
@@ -1191,28 +1194,39 @@ def _technique_head_scores(
     technique_head: Any,
     *,
     top_families: int,
-) -> tuple[list[TechniqueHeadScores | None], str, int]:
-    """The technique head's scores per observation (``None`` entries when the head is off or the
-    request failed), the status and how many requests failed in this call. A segmented
-    observation is scored sentence by sentence and pooled (the head reads one sentence)."""
+) -> tuple[list[TechniqueHeadScores | None], str, int, int]:
+    """The technique head's scores per observation (``None`` entries when the head is off, the
+    observation comes from logs, or the request failed), the status, how many requests failed
+    in this call and how many log-derived observations were left unscored (prose only, for
+    now: :func:`apt_classifier.technique_head.scores_prose`). A segmented observation is scored
+    sentence by sentence and pooled (the head reads one sentence)."""
     empty: list[TechniqueHeadScores | None] = [None] * len(observations)
     if technique_head is None:
-        return empty, "off", 0
+        return empty, "off", 0, 0
     if not getattr(technique_head, "available", False):
-        return empty, str(getattr(technique_head, "status", "unavailable")), 0
+        return empty, str(getattr(technique_head, "status", "unavailable")), 0, 0
     if not observations:
-        return empty, "active", 0
+        return empty, "active", 0, 0
     texts: list[str] = []
-    spans: list[tuple[int, int]] = []
+    spans: list[tuple[int, int] | None] = []
+    skipped = 0
     for observation, group in zip(observations, segments, strict=True):
+        if not scores_prose(observation):
+            spans.append(None)
+            skipped += 1
+            continue
         parts = [str(text) for text in group if str(text).strip()] or [str(observation.text)]
         spans.append((len(texts), len(parts)))
         texts.extend(parts)
     failed_before = int(getattr(technique_head, "errors", 0))
-    scored = list(technique_head.score(texts))
+    scored = list(technique_head.score(texts)) if texts else []
     failed = int(getattr(technique_head, "errors", 0)) - failed_before
     output: list[TechniqueHeadScores | None] = []
-    for start, count in spans:
+    for span in spans:
+        if span is None:
+            output.append(None)
+            continue
+        start, count = span
         parts = [item for item in scored[start : start + count] if item is not None]
         if not parts:
             output.append(None)
@@ -1221,7 +1235,7 @@ def _technique_head_scores(
         else:
             output.append(pool_scores(parts, top_families=top_families))
     status = "active" if not failed else f"active ({failed} requests failed)"
-    return output, status, failed
+    return output, status, failed, skipped
 
 
 def _technique_head_evidence(

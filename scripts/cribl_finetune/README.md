@@ -299,3 +299,19 @@ PYTHONPATH=. .venv/bin/python scripts/cribl_finetune/external_bench.py score    
 Result (docs 21.3.18): AthenaBench ATE accuracy 0.736 (published: Gemini-2.5-Pro 76.2, GPT-5 76.0,
 Qwen3-4B 5.6); CTI-ATE F1 0.58 on all 60 texts (ChatGPT-4 0.64), 0.75 on the 47 Enterprise ones;
 TAA correct 0.38 (CTIBench, both group models) and 0.16-0.23 (AthenaBench).
+
+### Product integration: the technique head as a service (prereg `cribl_product_integration_2026-10-19.json`)
+
+```bash
+make technique-head-serve                       # .venv-cribl, GPU: serves E2 on http://localhost:8102 (serve.py + head_service.py)
+TECHNIQUE_HEAD_ENABLED=true PYTHONPATH=. .venv/bin/python scripts/fit_acceptance_model.py --priors-split none \
+  --require-technique-head --output data/models/acceptance/acceptance_model_technique_head.json   # schema-4 model, public dev only
+TECHNIQUE_HEAD_ENABLED=true ACCEPTANCE_MODEL_PATH=data/models/acceptance/acceptance_model_technique_head.json \
+  PYTHONPATH=. .venv/bin/python scripts/benchmark_mapping.py --split test --require-technique-head --output <file>
+PYTHONPATH=. .venv/bin/python scripts/cribl_finetune/integration_report.py    # arms, paired bootstraps, checks -> integration_report.json
+```
+
+The product side is `apt_classifier/technique_head.py` (client, fail closed), the hooks in
+`apt_classifier/retrieve.py` (head evidence on every candidate, up to three head proposals appended
+after the pool) and acceptance feature schema 4 (docs 8.2). Result: docs 21.3.18, "Product
+integration".

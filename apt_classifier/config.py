@@ -127,9 +127,10 @@ class Settings(BaseSettings):
     # model: evidence on every candidate (acceptance feature schema 4) and up to
     # TECHNIQUE_HEAD_NEW_CANDIDATES proposals retrieval missed. Off by default until the
     # pre-registered gate passes (docs/preregistration/cribl_product_integration_2026-10-19.json).
-    # Fail closed: unavailable, wrong ATT&CK version or a fingerprint other than the pinned one
-    # leaves the pipeline exactly as without it; an acceptance model fitted with the head runs
-    # only on that head.
+    # Prose only, for now: log-derived observations (the telemetry sources of cyberre.
+    # is_telemetry_source) are not scored. Fail closed: unavailable, wrong ATT&CK version or a
+    # fingerprint other than the pinned one leaves the pipeline exactly as without it; an
+    # acceptance model fitted with the head runs only on that head.
     technique_head_enabled: bool = False
     technique_head_url: str = "http://localhost:8102"
     technique_head_timeout: float = 120.0

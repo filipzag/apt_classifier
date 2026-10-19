@@ -864,6 +864,38 @@ exactly. The index is pinned to the embedding model and revision and integrity-c
 fingerprint. Results are in 21.3.10: real reports and the public held-out set gain markedly, while
 ATT&CK-phrased fold sentences and narrated telemetry pay a precision cost.
 
+**The fine-tuned technique head (optional, off by default; 2026-10-19).** The 4B technique
+model of 21.3.18 (Qwen3.5-4B-Base in 4-bit with a LoRA and two cosine heads: one row per ATT&CK
+family, one per technique, read at the decision slot of a one-sentence prompt) can score every
+observation. It needs transformers 5, which the product's `.venv` cannot hold next to
+ATTACK-BERT, so it runs as a local HTTP service (`make technique-head-serve`,
+`scripts/cribl_finetune/serve.py` on `http://localhost:8102`, about 3.5 GB of GPU memory) and
+`apt_classifier/technique_head.py` is the product's client. With `TECHNIQUE_HEAD_ENABLED=true`,
+`retrieve_techniques` posts each observation's sentences to the service once (a long observation
+is scored sentence by sentence and pooled by the largest probability) and does two things with the
+answer: every candidate gets `technique_head` evidence, i.e. the head's probability for the
+candidate's family and for the candidate itself, both inverse ranks, the head's confidence in its
+own top family, whether the candidate is one of the head's proposals and whether it exists only
+because of the head (**feature schema 4** of the acceptance model: schema 3 followed by these seven
+`th_*` features; a schema-3 artifact keeps reading its own prefix); and up to
+`TECHNIQUE_HEAD_NEW_CANDIDATES` (3) of the head's proposals that retrieval did not produce (its best
+technique in each of the `TECHNIQUE_HEAD_TOP_FAMILIES` (3) most probable families) are appended
+after the pool with fused score 0, exactly like exemplar-only candidates, platform scope applied.
+Nothing retrieved is displaced and the calibrated threshold is never overridden. Prose only, for
+now (product owner, 2026-10-19): observations that come from logs (the telemetry sources of the
+verifier's interpreter rule in 16.4a: Windows/Sysmon events, eCAR, Elastic records, the
+EvidenceForge renders) are not sent to the head and get no head evidence or proposals
+(`diagnostics["technique_head_skipped_logs"]`); the head was trained on report prose. Fail closed: the
+client is `None` (the pipeline runs as without it, the status strip says why) when the service does
+not answer, serves another ATT&CK version or a checkpoint other than the pinned
+`TECHNIQUE_HEAD_EXPECTED_FINGERPRINT` (the SHA-256 of the adapter and head files the service
+reports at `/health`); an acceptance model fitted with the head active records that fingerprint in
+its metadata and retrieval contract and refuses to run on another head or without one; a request
+the service fails mid-run leaves its observations without head evidence and is counted in
+`diagnostics["technique_head_errors"]`, and the benchmarks refuse to write such a run under
+`--require-technique-head`. The pre-registered gate and its result are in 21.3.18 ("Product
+integration").
+
 **Per-sentence judgement for long observations (optional, off by default).** With
 `TECHNIQUE_SEGMENT_ACCEPTANCE=true` each sentence of a long observation also gets its *own*
 candidate pool, fused ranks, margins and benign/sparse checks (`_build_segmented_candidates`, evidence metadata
@@ -2671,7 +2703,18 @@ RERANKER_ENABLED=false
 RERANKER_MODEL=
 RERANKER_MODEL_REVISION=
 RERANKER_MAX_CANDIDATES=20
+TECHNIQUE_HEAD_ENABLED=false
+TECHNIQUE_HEAD_URL=http://localhost:8102
+TECHNIQUE_HEAD_EXPECTED_FINGERPRINT=
+TECHNIQUE_HEAD_TOP_FAMILIES=3
+TECHNIQUE_HEAD_NEW_CANDIDATES=3
+TECHNIQUE_HEAD_TIMEOUT=120
 ```
+
+The `TECHNIQUE_HEAD_*` settings drive the fine-tuned technique head's local service (8.2,
+21.3.18): the URL of `make technique-head-serve`, the checkpoint fingerprint the client requires
+(empty accepts any), how many of the head's top families propose a candidate and how many
+proposals may join the pool.
 
 ### 18.3 Interview and fusion
 
