@@ -5508,6 +5508,37 @@ fingerprint and runs only on that head). Accepted-set metrics, one statement per
   and CTI-HAL were never used to train or choose anything on either side. 55% precision is still
   the ceiling the CTI-HAL labels allow a one-answer gate (21.3.18 above).
 
+*Two models behind one gate (amendment 2).* The first clinic check ran the schema-4 model on
+every candidate, including those of log-derived observations the head never scores: with every
+`th_*` feature at 0, a value absent from the fit, it lost 0.12 F1 on the eCAR windows and 0.07 on
+the narrative mode (`clinic_head_schema4_only.json`). The registered arm therefore pairs the two
+models (`acceptance.HeadAwareAcceptance`, `ACCEPTANCE_MODEL_HEAD_PATH`, 8.2): the schema-4 model
+judges the observations the head scored, the shipped model the rest. Rerun under the pair, the
+public and CTI-HAL numbers above are unchanged to the last digit (every statement is prose) and
+the checks below are the pair's.
+
+*No-regression checks (head on vs off, same code, one run each).*
+
+| Check | Off | Head on | Reading |
+|---|---|---|---|
+| EvidenceForge clinic bundle, local pipeline (narrative / windows / eCAR F1) | 0.357 / 0.600 / 0.545 | identical, bit for bit | the head reads no log-derived observation and the pair leaves them to the shipped model |
+| `check-regression` against the committed public baseline | pass | pass (F1 0.225 → 0.463) | |
+| CTI-HAL attribution, anonymised headline (55 reports): top-1 / top-5 / MRR / named correct / wrong names / technique recall | 0.455 / 0.600 / 0.512 / 10 / 0 / 0.405 | 0.473 / 0.636 / 0.540 / 9 / 0 / 0.491 | one more report right, one fewer reaches the naming gate, no wrong name |
+| ATT&CK folds, seed 7 (178 cases, 153 known): top-1 / top-5 / named correct / wrong names / technique recall | 0.824 / 0.941 / 26 / 0 / 0.604 | 0.837 / 0.974 / 38 / 0 / 0.778 | **not evidence of a gain**: E2 trained on ATT&CK's procedure sentences, which are the fold cases (the fold hiding keeps them out of the indexes, not out of the head); read as "nothing broke, no wrong name" only. The off numbers are the leak-free baseline under this code, below the committed artifact of 2026-10-02 that predates the BM25 fold hiding (21.3.5) |
+| Elastic real reports, strict anonymisation (amendment 3; 8 attributed posts + 22-post open set): top-1 / named correct / wrong names / technique recall; open-set posts given a cluster name | 4/8 / 1 / 0 / 0.759; 1 of 22 | 4/8 / 1 / 0 / 0.833; **2 of 22** | the attributed posts are unchanged and clean, but the head's extra accepted techniques push a second commodity post (the GoSar RAT write-up) through the cluster gate as "Lazarus Group / APT38" at probability 0.99, next to the banking-extension post the shipped pipeline already names "Kimsuky / Lazarus Group"; the benchmark's combined named risk rises from 0.50 to 0.67 |
+
+**Outcome and decision.** The registered headline holds with room to spare (CTI-HAL accepted-set
+F1 +0.126, precision up), the public test gains, the clinic bundle and the regression check are
+clean, and real-report attribution ranks slightly better. The naming side is not clean: one more
+open-set post is named, and the fold naming check is uninformative because the head saw the fold
+sentences in training. Under the project's rule that a default flip needs a clean naming gate, the
+head stays **off by default**: everything is in place for an opt-in (`make technique-head-serve`,
+`TECHNIQUE_HEAD_ENABLED=true`, the pinned fingerprint and `ACCEPTANCE_MODEL_HEAD_PATH` with the
+shipped model as the partner), and the open-set naming is the one thing to settle before a default
+flip, for instance by holding the cluster gate to its own separation floor on head-boosted cases,
+measured on a fresh fold seed, never on the Elastic set. Artifacts: `data/audits/cribl_ft/
+integration/` (gitignored; `integration_report.py` composes `integration_report.json`).
+
 ## 22. Failure modes and troubleshooting
 
 ### 22.1 “ATT&CK knowledge base has not been ingested”

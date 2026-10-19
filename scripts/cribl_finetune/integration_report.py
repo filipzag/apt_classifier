@@ -241,7 +241,7 @@ def main() -> None:
     }
     report["attribution"] = {
         f"{kind}_{arm}": attribution_block(artifact)
-        for kind in ("cti_hal", "folds")
+        for kind in ("cti_hal", "folds", "elastic")
         for arm in ("off", "head")
         if (artifact := load(args.dir / f"attribution_{kind}_{arm}.json")) is not None
     }
