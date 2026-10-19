@@ -116,7 +116,8 @@ class Settings(BaseSettings):
     # Single-answer cap (2026-10-19, prereg cribl_single_answer_cap_2026-10-19): "model" follows
     # the acceptance artifact's own gate record (at most one probability-only acceptance per
     # observation, a second one above the artifact's bar; artifacts without a record run
-    # uncapped), "off" ignores it for an ablation.
+    # uncapped), "off" ignores it, a number in (0, 1] forces that bar for an ablation (1.0:
+    # strictly one acceptance on probability per observation).
     technique_single_answer_cap: str = "model"
     # Agreement filter (2026-10-19, prereg cribl_head_agreement): "technique" / "family" /
     # "top3" keep an accepted technique only when the technique head picks it too (its top

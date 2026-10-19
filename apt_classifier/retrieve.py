@@ -686,7 +686,7 @@ def retrieve_techniques(
         raise ValueError("unsupported parent policy")
     if exemplar_segment_votes not in SEGMENT_VOTE_MODES:
         raise ValueError(f"unsupported exemplar segment votes {exemplar_segment_votes!r}")
-    if single_answer_cap not in SINGLE_ANSWER_CAP_MODES:
+    if parse_single_answer_cap(single_answer_cap) is None:
         raise ValueError(f"unsupported single-answer cap {single_answer_cap!r}")
     if technique_head_agreement not in HEAD_AGREEMENT_MODES:
         raise ValueError(f"unsupported technique head agreement {technique_head_agreement!r}")
@@ -2381,8 +2381,8 @@ def _assign_states_for_group(
         if extra_evidence:
             update["evidence"] = [*candidate.evidence, *extra_evidence]
         output.append(candidate.model_copy(update=update))
-    if acceptance_model is not None and single_answer_cap == "model":
-        output = _apply_single_answer_cap(output, acceptance_model)
+    if acceptance_model is not None and single_answer_cap != "off":
+        output = _apply_single_answer_cap(output, acceptance_model, single_answer_cap)
     if technique_head_agreement != "off":
         output = _apply_head_agreement(output, technique_head_agreement)
     if hierarchy_parent_mode == "off":
@@ -2395,9 +2395,30 @@ def _assign_states_for_group(
     )
 
 
-def _second_answer_bar(model: Any, candidates: Sequence[TechniqueCandidate]) -> float | None:
-    """The cap's bar of the model judging these candidates (a head-aware pair answers per
-    observation through ``model_for``); ``None`` when the model carries no cap."""
+def parse_single_answer_cap(value: Any) -> str | float | None:
+    """``model`` (follow the artifact), ``off``, or a forced bar in (0, 1] for an ablation
+    (``TECHNIQUE_SINGLE_ANSWER_CAP=1.0`` is strictly one acceptance); ``None`` when invalid."""
+    text = str(value if value is not None else "model").strip().lower() or "model"
+    if text in SINGLE_ANSWER_CAP_MODES:
+        return text
+    try:
+        bar = float(text)
+    except ValueError:
+        return None
+    return bar if 0.0 < bar <= 1.0 else None
+
+
+def _second_answer_bar(
+    model: Any, candidates: Sequence[TechniqueCandidate], mode: Any = SINGLE_ANSWER_CAP
+) -> float | None:
+    """The cap's bar: a forced one (``mode`` a number), else the bar of the model judging these
+    candidates (a head-aware pair answers per observation through ``model_for``); ``None`` when
+    there is no cap."""
+    parsed = parse_single_answer_cap(mode)
+    if isinstance(parsed, float):
+        return parsed
+    if parsed != "model":
+        return None
     picker = getattr(model, "model_for", None)
     if callable(picker) and candidates:
         model = picker(candidates[0])
@@ -2406,12 +2427,13 @@ def _second_answer_bar(model: Any, candidates: Sequence[TechniqueCandidate]) -> 
 
 
 def _apply_single_answer_cap(
-    candidates: list[TechniqueCandidate], model: Any
+    candidates: list[TechniqueCandidate], model: Any, mode: Any = SINGLE_ANSWER_CAP
 ) -> list[TechniqueCandidate]:
     """At most one acceptance on probability alone per observation: the most probable stays,
-    another only at or above the model's bar; cue-supported, verifier and reranker decisions
-    are untouched. The capped ones return to review with the reason recorded."""
-    bar = _second_answer_bar(model, candidates)
+    another only at or above the bar (the model's, or a forced one); cue-supported, verifier
+    and reranker decisions are untouched. The capped ones return to review with the reason
+    recorded."""
+    bar = _second_answer_bar(model, candidates, mode)
     if bar is None:
         return candidates
     scored: list[tuple[float, int]] = []

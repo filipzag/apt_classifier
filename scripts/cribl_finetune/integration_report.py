@@ -21,7 +21,41 @@ from typing import Any
 REPO_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_DIR = REPO_ROOT / "data" / "audits" / "cribl_ft" / "integration"
 HEAD_MODEL = REPO_ROOT / "data" / "models" / "acceptance" / "acceptance_model_technique_head.json"
-ARMS = ("off", "proposer", "head", "multi")
+ARMS = (
+    "off",
+    "proposer",
+    "head",
+    "multi",
+    "off_cap",
+    "head_cap",
+    "agree_family",
+    "agree_technique",
+    "agree_top3",
+    "head_agree_family",
+)
+# paired comparisons: (arm, its baseline)
+PAIRS = (
+    ("proposer", "off"),
+    ("head", "off"),
+    ("multi", "off"),
+    ("multi", "head"),
+    ("off_cap", "off"),
+    ("head_cap", "head"),
+    ("head_cap", "off"),
+    ("agree_family", "off"),
+    ("agree_technique", "off"),
+    ("agree_top3", "off"),
+    ("head_agree_family", "head"),
+    ("head_agree_family", "off"),
+)
+ATTRIBUTION_ARMS = (
+    "off",
+    "head",
+    "off_cap",
+    "head_cap",
+    "agree_family",
+    "head_agree_family",
+)
 SETS = ("public", "cti_hal")
 BOOTSTRAP = 1000
 SEED = 7
@@ -201,7 +235,7 @@ def clinic_block(artifact: dict[str, Any]) -> dict[str, Any]:
 
 def attribution_block(artifact: dict[str, Any]) -> dict[str, Any]:
     metrics = artifact.get("metrics") or {}
-    return {
+    block = {
         key: metrics.get(key)
         for key in (
             "case_count",
@@ -215,6 +249,11 @@ def attribution_block(artifact: dict[str, Any]) -> dict[str, Any]:
             "mean_technique_recall",
         )
     }
+    open_set = metrics.get("open_set")
+    if isinstance(open_set, dict):
+        block["open_set_named"] = open_set.get("named")
+        block["open_set_reports"] = open_set.get("reports")
+    return block
 
 
 def model_block(path: Path) -> dict[str, Any] | None:
@@ -260,23 +299,15 @@ def main() -> None:
             report["arms"][f"{arm}_{name}"] = summary_block(artifact)
             report["multi_label"][f"{arm}_{name}"] = multi_label(case_rows(artifact))
     for name in SETS:
-        base = artifacts.get(("off", name))
-        if base is None:
-            continue
-        base_rows = case_rows(base)
-        for arm in ("proposer", "head", "multi"):
-            other = artifacts.get((arm, name))
-            if other is None:
+        for arm, base_arm in PAIRS:
+            base, other = artifacts.get((base_arm, name)), artifacts.get((arm, name))
+            if base is None or other is None:
                 continue
-            rows = case_rows(other)
-            report["paired"][f"{arm}_vs_off_{name}"] = paired(base_rows, rows)
-            report["breakdown"][f"{arm}_vs_off_{name}"] = breakdown(base_rows, rows)
+            base_rows, rows = case_rows(base), case_rows(other)
+            key = f"{arm}_vs_{base_arm}_{name}"
+            report["paired"][key] = paired(base_rows, rows)
+            report["breakdown"][key] = breakdown(base_rows, rows)
             report["head_only"][f"{arm}_{name}"] = head_only(rows)
-        # the multi-answer arm against the schema-4 head arm (its registered baseline)
-        if ("head", name) in artifacts and ("multi", name) in artifacts:
-            report["paired"][f"multi_vs_head_{name}"] = paired(
-                case_rows(artifacts[("head", name)]), case_rows(artifacts[("multi", name)])
-            )
     report["model"] = model_block(args.model)
     report["clinic"] = {
         arm: clinic_block(artifact)
@@ -286,7 +317,7 @@ def main() -> None:
     report["attribution"] = {
         f"{kind}_{arm}": attribution_block(artifact)
         for kind in ("cti_hal", "folds", "elastic")
-        for arm in ("off", "head")
+        for arm in ATTRIBUTION_ARMS
         if (artifact := load(args.dir / f"attribution_{kind}_{arm}.json")) is not None
     }
     regression = args.dir / "check_regression_head.log"

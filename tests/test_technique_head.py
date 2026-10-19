@@ -741,6 +741,16 @@ def test_single_answer_cap_in_the_threshold_rule_and_the_gate():
     )
     with pytest.raises(ValueError):
         retrieve_techniques(ledger, store, kb, retrieval_mode="dense", single_answer_cap="maybe")
+    # a forced bar caps a model without a gate record (ablation), e.g. strictly one acceptance
+    model.metadata.pop("gate")
+    forced = retrieve_techniques(
+        ledger, store, kb, retrieval_mode="dense", acceptance_model=model, single_answer_cap="1.0"
+    )
+    assert len([c for c in forced.candidates if str(c.state).endswith("auto_accepted")]) == 1
+    from apt_classifier.retrieve import parse_single_answer_cap
+
+    assert parse_single_answer_cap("0.5") == 0.5 and parse_single_answer_cap("model") == "model"
+    assert parse_single_answer_cap("1.5") is None and parse_single_answer_cap("") == "model"
 
 
 def test_head_agreement_filter_keeps_only_what_the_head_picks():
