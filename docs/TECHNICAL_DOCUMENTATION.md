@@ -864,14 +864,15 @@ exactly. The index is pinned to the embedding model and revision and integrity-c
 fingerprint. Results are in 21.3.10: real reports and the public held-out set gain markedly, while
 ATT&CK-phrased fold sentences and narrated telemetry pay a precision cost.
 
-**The fine-tuned technique head (optional, off by default; 2026-10-19).** The 4B technique
+**The fine-tuned technique head (on by default since 2026-10-20; 2026-10-19).** The 4B technique
 model of 21.3.18 (Qwen3.5-4B-Base in 4-bit with a LoRA and two cosine heads: one row per ATT&CK
 family, one per technique, read at the decision slot of a one-sentence prompt) can score every
 observation. It needs transformers 5, which the product's `.venv` cannot hold next to
 ATTACK-BERT, so it runs as a local HTTP service (`make technique-head-serve`,
 `scripts/cribl_finetune/serve.py` on `http://localhost:8102`, about 3.5 GB of GPU memory) and
-`apt_classifier/technique_head.py` is the product's client. With `TECHNIQUE_HEAD_ENABLED=true`,
-`retrieve_techniques` posts each observation's sentences to the service once (a long observation
+`apt_classifier/technique_head.py` is the product's client. With `TECHNIQUE_HEAD_ENABLED=true`
+(the default since 2026-10-20, pinned to the registered checkpoint; the pipeline runs exactly as
+without it while the service is down), `retrieve_techniques` posts each observation's sentences to the service once (a long observation
 is scored sentence by sentence and pooled by the largest probability) and does two things with the
 answer: every candidate gets `technique_head` evidence, i.e. the head's probability for the
 candidate's family and for the candidate itself, both inverse ranks, the head's confidence in its
@@ -2723,9 +2724,9 @@ RERANKER_ENABLED=false
 RERANKER_MODEL=
 RERANKER_MODEL_REVISION=
 RERANKER_MAX_CANDIDATES=20
-TECHNIQUE_HEAD_ENABLED=false
+TECHNIQUE_HEAD_ENABLED=true
 TECHNIQUE_HEAD_URL=http://localhost:8102
-TECHNIQUE_HEAD_EXPECTED_FINGERPRINT=
+TECHNIQUE_HEAD_EXPECTED_FINGERPRINT=5b5d015d8766dd27cdeceaf0ea1aaa0ea7c613f397d2bf0fecb07eea41fcea01
 TECHNIQUE_HEAD_TOP_FAMILIES=3
 TECHNIQUE_HEAD_NEW_CANDIDATES=3
 TECHNIQUE_HEAD_TIMEOUT=120

@@ -1,0 +1,18 @@
+{
+  "schema": "cribl_finetune_prereg/1",
+  "id": "cribl_cyberthreat_eval_2026-10-20",
+  "title": "CyberThreat-Eval TTP extraction: the product pipeline with the technique head off and on",
+  "registered": "2026-10-20",
+  "parent": "docs/preregistration/cribl_product_integration_2026-10-19.json (the head, on by default since 2026-10-20); docs 21.3.18",
+  "source": "xse/CyberThreat-Eval (Hugging Face, MIT; TMLR paper arXiv 2603.09452), stage3_ti_drafting/ttp: 186 expert-annotated CTI digest articles (markdown, 208 to 2,326 words, median 681) with article-level ATT&CK technique sets (1,565 labels, 635 of them sub-techniques, median 7 per article) and the authors' scorer (micro precision and recall over articles, an extracted id counts only when it is in the TTP mapping); downloaded 2026-10-20 to data/benchmarks/cyberthreat_eval/raw (gitignored)",
+  "question": "On expert-labelled real CTI digests read as a pasted report (the product's no-LLM path: every sentence an observation, the local gate, cross-observation corroboration), what does the pipeline's accepted technique set score under the authors' rule, and what does the technique head change?",
+  "harness": "scripts/cribl_finetune/cyberthreat_eval.py: prepare (markdown stripped, sentences split as scripts/prepare_elastic_reports.py splits a report, data/benchmarks/cyberthreat_eval/reports.jsonl), run (the AttributionEngine's map_techniques in local mode per article, as scripts/attribution_benchmark.py reads a report), score (the authors' micro precision/recall/F1 on exact ids, and the same at parent level, since 41% of the labels are sub-techniques and our catalogue answers parents for many; paired article bootstrap, 1,000 resamples, seed 7, head on minus off)",
+  "arms": {
+    "off": "TECHNIQUE_HEAD_ENABLED=false (the shipped gate)",
+    "head": "the new default (head on, pinned checkpoint, head-aware pair, cluster guard irrelevant here)"
+  },
+  "headline": "report only: no adoption decision rests on this set; the authors' exact-id micro F1 and the parent-level F1 for both arms with the paired interval, beside the paper's published LLM numbers where they are given for this task",
+  "constraints": "none registered; the set is evaluation only and never trained or tuned on",
+  "caveats": "the articles are vendor digests of public reports; some of their sources may be cited in ATT&CK group or software descriptions the head's training data and the exemplar index draw on, as for CTI-ATE; the labels are expert sets per article, so a technique the article mentions in passing counts as gold while the pipeline's statement-level gate may hold it; the authors score ids as given (a parent is not a hit for a sub-technique label), which the parent-level number relaxes",
+  "cost": "laptop only, about 25 minutes per arm; no API credit"
+}
