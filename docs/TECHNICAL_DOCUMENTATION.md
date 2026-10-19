@@ -1848,6 +1848,18 @@ pair as a whole is clearly ahead. The cluster step names the pair, for example "
   for a nested pair), and the members' combiner probabilities summing to >= 0.8. A single name
   whose nested twin is in the window becomes the cluster when it clears, and is held at shortlist
   otherwise.
+- **Evidence-volume guard (2026-10-19).** The three bars were set and validated on cases with 3
+  to 23 accepted techniques. A commodity malware write-up that enumerates one family's whole
+  capability list (50 to 95 accepted techniques) clears them on mass alone: two giant profiles
+  contain most of any long list, the merged mass reaches 20 and the combined probability
+  saturates. With `ATTRIBUTION_CLUSTER_MAX_TECHNIQUES` (30) a cluster on more accepted techniques
+  than that is held at shortlist unless decisive software supports the leader
+  (`decisive_software.factor > 1`, group-exclusive malware named in the report); the held
+  candidate records `volume_guard` with the count and the bar. The guard is a hold, never a
+  name; the single-name gate is untouched (it named no open-set post). The bar comes from the
+  design sets (vendor reports and the design fold seeds, where correct names carry at most 20
+  techniques) and is inert on every design and test set except the Elastic open set, where it
+  removes both wrongly named commodity posts (21.3.18, "Cluster gate").
 - **Scoring.** A benchmark counts a cluster name as correct when the truth is one of its
   members and as wrong otherwise (`AttributionPrediction.named_members`).
   `named_risk_single` is the single-name risk; `named_cluster_recovered` counts clusters whose
@@ -5652,6 +5664,35 @@ counted the extra acceptances on statements whose first acceptance was already w
 noise, while the cap keeps that wrong first one and drops the right second one. The registered
 procedure (choose on dev) got this right; the lesson for the record is that a test-row estimate
 is not a dev result.
+
+**Cluster gate: the evidence-volume guard for commodity write-ups (2026-10-19).** Pre-registered
+in `docs/preregistration/cribl_cluster_volume_guard_2026-10-19.json`; the rule is in 10.11. The
+analysis behind it: the two wrongly named Elastic open-set posts carry 51 to 95 accepted
+techniques, every correctly named report in the design sets at most 20 (vendor set 7 to 18 among
+the 16 correct names, design fold seeds 41/53 up to 17); profile coverage of the named unit
+(0.68 to 0.76) and the number of rare matched techniques do not separate them (the long lists
+hold more rare matches, not fewer), evidence volume does. The bar of 30 accepted techniques was
+fixed from the design sets before any run. An offline replay over every existing artifact finds
+the guard inert on the design seeds, the vendor set, the seed-7 folds and CTI-HAL (no row above
+30 without decisive software) and holding exactly the two wrong clusters; applied to single
+names it would hold none anywhere. Confirmation runs, guard on against the existing arms:
+
+| Set | Head off: without → with the guard | Head on: without → with the guard |
+|---|---|---|
+| Elastic attributed (8): top-1 / named correct / wrong | 4/8 / 1 / 0 → unchanged | 4/8 / 1 / 0 → unchanged |
+| Elastic open set (22): cluster names | 1 → **0** | 2 → **0** |
+| CTI-HAL (55): top-1 / named correct / wrong | 0.455 / 10 / 0 → identical row for row | 0.473 / 9 / 0 → identical |
+| Vendor set (34, dev): top-1 / named correct / wrong | 0.706 / 16 / 2 → identical | not run |
+| ATT&CK folds, seed 7 (178): top-1 / named / wrong / cluster names | 0.824 / 26 / 0 / 1 correct → identical row for row | not run (the head saw the fold sentences) |
+
+The headline holds: no correct name is lost anywhere, the Elastic attributed posts are unchanged,
+and the open set names nothing with the head off or on. **Adopted**: `ATTRIBUTION_CLUSTER_MAX_TECHNIQUES`
+defaults to 30 (commit of 2026-10-19); the current attribution artifacts on the main branch
+predate it and are regenerated after the merge (they cannot change on the folds or CTI-HAL, only
+the Elastic open-set count). The guard holds, it never names; a long APT report with group-exclusive
+malware named passes as before, and a long one without it is shown as a shortlist, which is what
+the Elastic attributed posts above 30 techniques already were. The open set has 7 APT-like posts
+and 15 commodity ones; the guard does not look at that label, only at the evidence volume.
 
 ## 22. Failure modes and troubleshooting
 

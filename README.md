@@ -432,6 +432,7 @@ All settings are environment variables documented in `.env.example`. Important v
 - `EXTRACT_MODEL=openai/gpt-5.6-sol`
 - `REVIEW_MODEL=anthropic/claude-sonnet-5`
 - `LOCAL_LLM_ENABLED=true` (local LLM via Ollama, `qwen3.5:4b-text` by default, GPU only, used when Ollama answers with `LOCAL_LLM_FALLBACK_MODEL` pulled: without an OpenRouter key it verifies ambiguous techniques, rewrites report prose sentence by sentence and runs the review; with a key only `local/` model ids use it; `make llm-pull`, `make llm-check`; docs 16.4a)
+- `ATTRIBUTION_CLUSTER_MAX_TECHNIQUES=30` (a documented-overlap cluster is held when a report carries more accepted techniques than this and names no group-exclusive software: long commodity malware write-ups otherwise clear the cluster bars on volume alone; docs 10.11)
 - `TECHNIQUE_HEAD_ENABLED=false` (the fine-tuned technique head's local service, `make technique-head-serve`; off until its pre-registered gate passes, docs 21.3.18)
 - `SIMILARITY_THRESHOLD=0.45`
 - `BEHAVIOR_SIMILARITY_THRESHOLD=0.55`

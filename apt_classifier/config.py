@@ -350,10 +350,12 @@ class Settings(BaseSettings):
     # groups that only share rare malware or that ATT&CK calls distinct are different actors),
     # "full" (the pre-registered rule: any relation, shared rare malware too), "nested".
     attribution_cluster_scope: Literal["documented", "full", "nested"] = "documented"
-    # Evidence-volume guard for the cluster step (2026-10-19, prereg cribl_cluster_volume_guard):
-    # a cluster is held at shortlist on more accepted techniques than this unless decisive
-    # software supports the leader; 0 = off (until the registered checks pass; the bar is 30).
-    attribution_cluster_max_techniques: int = 0
+    # Evidence-volume guard for the cluster step (2026-10-19, prereg cribl_cluster_volume_guard,
+    # docs 10.11 / 21.3.18): a cluster is held at shortlist on more accepted techniques than this
+    # unless decisive software supports the leader. On by default since the registered checks
+    # passed (inert on the folds, CTI-HAL and the vendor set; removes the two wrongly named
+    # commodity posts of the Elastic open set); 0 switches it off.
+    attribution_cluster_max_techniques: int = 30
     # Calibrated confidence labels on the Top-three view (apt_classifier/confidence_labels.py,
     # scripts/fit_confidence_labels.py): display only, never a gate, pinned to the combiner
     # artifact above. Adopted 2026-10-02 after the pre-registered check on fresh seeds 43/47
