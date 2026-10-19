@@ -32,6 +32,7 @@ diagnostics, so a benchmark can refuse to write a run the head did not score thr
 
 from __future__ import annotations
 
+import math
 import re
 from collections import OrderedDict
 from collections.abc import Mapping, Sequence
@@ -69,6 +70,22 @@ FEATURE_NAMES: tuple[str, ...] = (
     "th_proposed",
     "th_only",
 )
+# Schema 5 (2026-10-19, prereg cribl_multi_answer_acceptance_2026-10-19): the head's second
+# answer as relative evidence, with the statement length
+# th_rel_family       P(candidate's family) / P(the head's top family)
+# th_rel_technique    P(candidate) / P(the head's top technique)
+# th_second           the candidate's family is the head's 2nd or 3rd with th_rel_family >= 0.25
+# statement_log_words log(1 + words of the judged text)
+# th_second_x_words   th_second x statement_log_words
+MULTI_FEATURE_NAMES: tuple[str, ...] = (
+    "th_rel_family",
+    "th_rel_technique",
+    "th_second",
+    "statement_log_words",
+    "th_second_x_words",
+)
+ALL_FEATURE_NAMES: tuple[str, ...] = (*FEATURE_NAMES, *MULTI_FEATURE_NAMES)
+SECOND_ANSWER_KNEE = 0.25
 
 
 def scores_prose(observation: Any) -> bool:
@@ -118,18 +135,34 @@ class TechniqueHeadScores:
     def top_p(self) -> float:
         return float(next(iter(self.families.values()), 0.0))
 
-    def features(self, technique_id: str, *, head_only: bool = False) -> dict[str, float]:
+    def features(
+        self, technique_id: str, *, head_only: bool = False, words: int = 0
+    ) -> dict[str, float]:
+        """The schema-4 features and the schema-5 ones (``MULTI_FEATURE_NAMES``; ``words`` is
+        the length of the judged text); a schema-4 model reads its own prefix."""
         family = family_of(technique_id)
         family_rank = self.family_ranks.get(family)
         technique_rank = self.technique_ranks.get(technique_id)
+        family_p = float(self.families.get(family, 0.0))
+        technique_p = float(self.techniques.get(technique_id, 0.0))
+        top_technique_p = float(next(iter(self.techniques.values()), 0.0))
+        rel_family = family_p / self.top_p if self.top_p > 0 else 0.0
+        rel_technique = technique_p / top_technique_p if top_technique_p > 0 else 0.0
+        second = 1.0 if family_rank in (2, 3) and rel_family >= SECOND_ANSWER_KNEE else 0.0
+        log_words = math.log1p(max(int(words), 0))
         return {
-            "th_family_p": float(self.families.get(family, 0.0)),
-            "th_technique_p": float(self.techniques.get(technique_id, 0.0)),
+            "th_family_p": family_p,
+            "th_technique_p": technique_p,
             "th_family_rank": 1.0 / family_rank if family_rank else NO_RANK,
             "th_technique_rank": 1.0 / technique_rank if technique_rank else NO_RANK,
             "th_top_p": self.top_p,
             "th_proposed": 1.0 if technique_id in self.proposals else 0.0,
             "th_only": 1.0 if head_only else 0.0,
+            "th_rel_family": rel_family,
+            "th_rel_technique": rel_technique,
+            "th_second": second,
+            "statement_log_words": log_words,
+            "th_second_x_words": second * log_words,
         }
 
     @classmethod
@@ -202,7 +235,7 @@ def pool_scores(parts: Sequence[TechniqueHeadScores], *, top_families: int) -> T
 
 def empty_features() -> dict[str, float]:
     """The features of a candidate without ``technique_head`` evidence (the head off)."""
-    return {name: 0.0 for name in FEATURE_NAMES}
+    return {name: 0.0 for name in ALL_FEATURE_NAMES}
 
 
 def features_from_evidence(evidence: Any) -> dict[str, float]:
@@ -213,7 +246,7 @@ def features_from_evidence(evidence: Any) -> dict[str, float]:
     values = metadata.get("features")
     base = empty_features()
     if isinstance(values, Mapping):
-        for name in FEATURE_NAMES:
+        for name in ALL_FEATURE_NAMES:
             try:
                 base[name] = float(values.get(name, base[name]))
             except (TypeError, ValueError):

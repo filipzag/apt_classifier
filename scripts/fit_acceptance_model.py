@@ -448,6 +448,13 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="exit 2 unless the technique head service scored every case (TECHNIQUE_HEAD_ENABLED)",
     )
+    parser.add_argument(
+        "--feature-schema",
+        choices=("auto", "4", "5"),
+        default="auto",
+        help="acceptance feature schema: auto = 4 with the technique head active, else 3; "
+        "5 adds the head's second-answer features (needs the head)",
+    )
     add_output_guard_arguments(parser)
     add_exemplar_backend_arguments(parser)
     args = parser.parse_args(argv)
@@ -558,6 +565,10 @@ def main(argv: list[str] | None = None) -> int:
         settings, exemplar_index, store=store, technique_head=technique_head
     )
     schema = 4 if technique_head is not None else 3
+    if args.feature_schema != "auto":
+        if technique_head is None:
+            parser.error(f"--feature-schema {args.feature_schema} needs the technique head")
+        schema = int(args.feature_schema)
     model = AcceptanceModel.fit(
         rows,
         labels,

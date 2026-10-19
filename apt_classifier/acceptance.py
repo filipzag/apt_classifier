@@ -47,6 +47,7 @@ from apt_classifier.technique_head import DEFAULT_NEW_CANDIDATES as HEAD_NEW_CAN
 from apt_classifier.technique_head import DEFAULT_TOP_FAMILIES as HEAD_TOP_FAMILIES
 from apt_classifier.technique_head import EVIDENCE_SOURCE as TECHNIQUE_HEAD_EVIDENCE_SOURCE
 from apt_classifier.technique_head import FEATURE_NAMES as TECHNIQUE_HEAD_FEATURE_NAMES
+from apt_classifier.technique_head import MULTI_FEATURE_NAMES as TECHNIQUE_HEAD_MULTI_NAMES
 from apt_classifier.technique_head import features_from_evidence as head_features_from_evidence
 
 # Schema 3 (2026-09-30): exemplar features, i.e. what the nearest labelled real-report
@@ -56,8 +57,11 @@ from apt_classifier.technique_head import features_from_evidence as head_feature
 # (``apt_classifier.technique_head``). A model fitted with the head records the head's
 # checkpoint fingerprint and refuses to run on another head or without one. Schema-3 artifacts
 # keep loading unchanged (their feature vector is the schema-3 prefix): ``feature_names_for``.
-FEATURE_SCHEMA_VERSION = 4
-SUPPORTED_FEATURE_SCHEMAS: tuple[int, ...] = (3, 4)
+# Schema 5 (2026-10-19): schema 4 plus the head's relative probabilities (its second answer) and
+# the statement length (``technique_head.MULTI_FEATURE_NAMES``; prereg
+# cribl_multi_answer_acceptance_2026-10-19).
+FEATURE_SCHEMA_VERSION = 5
+SUPPORTED_FEATURE_SCHEMAS: tuple[int, ...] = (3, 4, 5)
 
 # Per-technique priors (schema 2): how often the technique is labelled in the public *train*
 # splits, how many ATT&CK procedure sentences it has, and how many groups document it. They
@@ -98,6 +102,8 @@ FEATURE_NAMES: tuple[str, ...] = (
 )
 # schema 4 = schema 3 followed by the technique head's features
 FEATURE_NAMES_V4: tuple[str, ...] = (*FEATURE_NAMES, *TECHNIQUE_HEAD_FEATURE_NAMES)
+# schema 5 = schema 4 followed by the head's second-answer features
+FEATURE_NAMES_V5: tuple[str, ...] = (*FEATURE_NAMES_V4, *TECHNIQUE_HEAD_MULTI_NAMES)
 
 
 def feature_names_for(schema_version: int) -> tuple[str, ...]:
@@ -106,6 +112,8 @@ def feature_names_for(schema_version: int) -> tuple[str, ...]:
         return FEATURE_NAMES
     if int(schema_version) == 4:
         return FEATURE_NAMES_V4
+    if int(schema_version) == 5:
+        return FEATURE_NAMES_V5
     raise ValueError(f"unknown acceptance feature schema {schema_version!r}")
 
 

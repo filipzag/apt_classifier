@@ -135,7 +135,7 @@ def test_scores_features_ranks_and_proposals():
     other = scores.features("T1566.002", head_only=True)
     assert other["th_family_p"] == 0.0 and other["th_technique_rank"] == 0.0
     assert other["th_top_p"] == pytest.approx(0.9) and other["th_only"] == 1.0
-    assert set(features) == set(HEAD_FEATURES)
+    assert set(HEAD_FEATURES) < set(features)
     assert propose({"T1003": 0.5, "T1059": 0.3}, {}, top_families=5) == ("T1003", "T1059")
 
 
@@ -303,7 +303,7 @@ def test_retrieval_attaches_head_evidence_and_appends_proposals():
     feats = candidate_features(
         plain.candidates[0], list(plain.candidates), benign_context=False, sparse_context=False
     )
-    assert {k: feats[k] for k in HEAD_FEATURES} == empty_features()
+    assert {k: feats[k] for k in HEAD_FEATURES} == {k: empty_features()[k] for k in HEAD_FEATURES}
 
 
 def test_retrieval_without_proposals_or_with_a_failing_service():
@@ -372,7 +372,7 @@ def test_schema_4_models_read_the_head_features_and_schema_3_ones_ignore_them(tm
     assert four.feature_names == FEATURE_NAMES_V4 and three.feature_names == FEATURE_NAMES
     assert feature_names_for(3) == FEATURE_NAMES and feature_names_for(4) == FEATURE_NAMES_V4
     with pytest.raises(ValueError):
-        feature_names_for(5)
+        feature_names_for(6)
     # the head features separate the labels perfectly for the schema-4 fit only
     assert all((four.probability(r) >= 0.5) == bool(y) for r, y in zip(rows, labels, strict=True))
     assert not all(
@@ -622,3 +622,61 @@ def test_head_aware_pair_judges_scored_observations_with_the_head_model(tmp_path
         contract=with_head,
     )
     assert isinstance(loaded, AcceptanceModel) and "technique head model" in status
+
+
+def test_second_answer_features_and_schema_5(tmp_path):
+    import math
+
+    from apt_classifier.acceptance import FEATURE_NAMES_V5
+    from apt_classifier.technique_head import ALL_FEATURE_NAMES, MULTI_FEATURE_NAMES
+
+    scores = TechniqueHeadScores.from_row(_rows_for("lsass"), top_families=3)
+    # families T1003 0.8, T1059 0.1, T1055 0.05; techniques T1003.001 0.7 ... T1059.001 0.09
+    second = scores.features("T1059.001", words=30)
+    assert second["th_rel_family"] == pytest.approx(0.125)
+    assert second["th_rel_technique"] == pytest.approx(0.09 / 0.7)
+    assert second["th_second"] == 0.0  # below the 0.25 knee
+    assert second["statement_log_words"] == pytest.approx(math.log1p(30))
+    top = scores.features("T1003.001", words=30)
+    assert top["th_rel_family"] == 1.0 and top["th_second"] == 0.0
+    strong = TechniqueHeadScores(
+        families={"T1003": 0.5, "T1059": 0.4}, techniques={"T1003.001": 0.45, "T1059.001": 0.35}
+    )
+    feats = strong.features("T1059.001", words=7)
+    assert feats["th_second"] == 1.0 and feats["th_second_x_words"] == pytest.approx(math.log1p(7))
+    assert set(feats) == set(ALL_FEATURE_NAMES) and set(MULTI_FEATURE_NAMES) < set(
+        ALL_FEATURE_NAMES
+    )
+    assert features_from_evidence(None)["th_second"] == 0.0
+    # retrieval carries the statement length in the evidence
+    kb, store, _ = _two_hit_setup()
+    text = "the tool read lsass memory and then ran powershell"
+    ledger = EvidenceLedger(
+        observations=[Observation(text=text, provenance=Provenance(source="free_text"))]
+    )
+    result = retrieve_techniques(
+        ledger, store, kb, retrieval_mode="dense", technique_head=_client(FakeService(_rows_for))
+    )
+    evidence = result.candidates[0].evidence_for(EVIDENCE_SOURCE)
+    assert evidence.metadata["features"]["statement_log_words"] == pytest.approx(
+        math.log1p(len(text.split()))
+    )
+    # schema 5 reads the new features, schema 4 ignores them, both round-trip
+    rows, labels = _rows()
+    for i, row in enumerate(rows):
+        row.update({name: float(i % 2) for name in MULTI_FEATURE_NAMES})
+        row.update({name: 0.0 for name in HEAD_FEATURES})
+    five = AcceptanceModel.fit(rows, labels, attack_version="19.2", feature_schema_version=5)
+    four = AcceptanceModel.fit(rows, labels, attack_version="19.2", feature_schema_version=4)
+    assert (
+        five.feature_names == FEATURE_NAMES_V5
+        and len(FEATURE_NAMES_V5) == len(FEATURE_NAMES_V4) + 5
+    )
+    assert all((five.probability(r) >= 0.5) == bool(y) for r, y in zip(rows, labels, strict=True))
+    assert not all(
+        (four.probability(r) >= 0.5) == bool(y) for r, y in zip(rows, labels, strict=True)
+    )
+    loaded = AcceptanceModel.load(five.save(tmp_path / "five.json"))
+    assert loaded is not None and loaded.feature_schema_version == 5
+    assert loaded.compatible_with("19.2") == (True, "ok")
+    assert loaded.probability(rows[3]) == pytest.approx(five.probability(rows[3]))

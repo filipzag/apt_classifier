@@ -64,8 +64,8 @@ from apt_classifier.retrieve import (
     retrieval_kwargs,
     retrieve_techniques,
 )
+from apt_classifier.technique_head import ALL_FEATURE_NAMES as TECHNIQUE_HEAD_FEATURE_NAMES
 from apt_classifier.technique_head import EVIDENCE_SOURCE as TECHNIQUE_HEAD_EVIDENCE_SOURCE
-from apt_classifier.technique_head import FEATURE_NAMES as TECHNIQUE_HEAD_FEATURE_NAMES
 from apt_classifier.technique_head import load_technique_head
 from apt_classifier.vectorstore import (
     ChromaVectorStore,

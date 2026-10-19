@@ -906,7 +906,9 @@ def retrieve_techniques(
         if votes is not None:
             observation_candidates = _attach_exemplar_evidence(observation_candidates, votes)
         if scores is not None:
-            observation_candidates = _attach_technique_head_evidence(observation_candidates, scores)
+            observation_candidates = _attach_technique_head_evidence(
+                observation_candidates, scores, observation
+            )
         candidates.extend(observation_candidates)
     behavior_query = getattr(store, "query_group_behaviors", None)
     behavior_hits = (
@@ -1239,9 +1241,9 @@ def _technique_head_scores(
 
 
 def _technique_head_evidence(
-    scores: TechniqueHeadScores, technique_id: str, *, head_only: bool
+    scores: TechniqueHeadScores, technique_id: str, *, head_only: bool, words: int = 0
 ) -> TechniqueRetrievalEvidence:
-    features = scores.features(technique_id, head_only=head_only)
+    features = scores.features(technique_id, head_only=head_only, words=words)
     rank = scores.technique_ranks.get(technique_id)
     return TechniqueRetrievalEvidence(
         source=TECHNIQUE_HEAD_SOURCE,
@@ -1291,7 +1293,11 @@ def _append_technique_head_candidates(
                 is_subtechnique=bool(_record_value(technique, "is_subtechnique", False)),
                 fused_score=0.0,
                 fused_rank=next_rank,
-                evidence=[_technique_head_evidence(scores, technique_id, head_only=True)],
+                evidence=[
+                    _technique_head_evidence(
+                        scores, technique_id, head_only=True, words=_word_count(observation)
+                    )
+                ],
                 state=TechniqueCandidateState.NEEDS_REVIEW,
                 state_reason="technique head proposal; acceptance not yet evaluated",
             )
@@ -1302,16 +1308,23 @@ def _append_technique_head_candidates(
 
 
 def _attach_technique_head_evidence(
-    candidates: list[TechniqueCandidate], scores: TechniqueHeadScores
+    candidates: list[TechniqueCandidate], scores: TechniqueHeadScores, observation: Any = None
 ) -> list[TechniqueCandidate]:
     output = []
+    words = _word_count(observation)
     for candidate in candidates:
         if candidate.evidence_for(TECHNIQUE_HEAD_SOURCE) is not None:
             output.append(candidate)
             continue
-        evidence = _technique_head_evidence(scores, candidate.technique_id, head_only=False)
+        evidence = _technique_head_evidence(
+            scores, candidate.technique_id, head_only=False, words=words
+        )
         output.append(candidate.model_copy(update={"evidence": [*candidate.evidence, evidence]}))
     return output
+
+
+def _word_count(observation: Any) -> int:
+    return len(str(getattr(observation, "text", "") or "").split())
 
 
 def _observation_segments(text: str) -> list[str]:

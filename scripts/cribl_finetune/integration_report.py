@@ -21,7 +21,7 @@ from typing import Any
 REPO_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_DIR = REPO_ROOT / "data" / "audits" / "cribl_ft" / "integration"
 HEAD_MODEL = REPO_ROOT / "data" / "models" / "acceptance" / "acceptance_model_technique_head.json"
-ARMS = ("off", "proposer", "head")
+ARMS = ("off", "proposer", "head", "multi")
 SETS = ("public", "cti_hal")
 BOOTSTRAP = 1000
 SEED = 7
@@ -133,6 +133,38 @@ def head_only(rows: dict[str, dict[str, Any]]) -> dict[str, Any]:
     }
 
 
+def multi_label(rows: dict[str, dict[str, Any]]) -> dict[str, Any]:
+    """Recall on statements with two or more gold labels, and how often more than one technique
+    is accepted (and how many of those extra acceptances are right)."""
+    statements = labels = found = all_found = 0
+    multi_accept = extra_right = extra_wrong = 0
+    for row in rows.values():
+        expected = set(row["expected_technique_ids"])
+        accepted = set(row["accepted_technique_ids"])
+        if len(accepted) > 1:
+            multi_accept += 1
+            right = len(accepted & expected)
+            # the "extra" acceptances beyond one: right ones count as recovered answers
+            extra_right += max(right - 1, 0)
+            extra_wrong += len(accepted - expected) - (1 if right == 0 and accepted else 0)
+        if len(expected) < 2:
+            continue
+        statements += 1
+        labels += len(expected)
+        found += len(expected & accepted)
+        all_found += int(expected <= accepted)
+    return {
+        "multi_label_statements": statements,
+        "labels": labels,
+        "labels_found": found,
+        "label_recall": round(found / labels, 4) if labels else None,
+        "all_labels_found": all_found,
+        "statements_with_more_than_one_accepted": multi_accept,
+        "extra_acceptances_right": extra_right,
+        "extra_acceptances_wrong": extra_wrong,
+    }
+
+
 def summary_block(artifact: dict[str, Any], mode: str = "hybrid") -> dict[str, Any]:
     run = artifact["results"][mode]
     pooled = run["pooled"]["summary"]
@@ -211,7 +243,13 @@ def main() -> None:
     parser.add_argument("--dir", type=Path, default=DEFAULT_DIR)
     parser.add_argument("--model", type=Path, default=HEAD_MODEL)
     args = parser.parse_args()
-    report: dict[str, Any] = {"arms": {}, "paired": {}, "breakdown": {}, "head_only": {}}
+    report: dict[str, Any] = {
+        "arms": {},
+        "paired": {},
+        "breakdown": {},
+        "head_only": {},
+        "multi_label": {},
+    }
     artifacts: dict[tuple[str, str], dict[str, Any]] = {}
     for arm in ARMS:
         for name in SETS:
@@ -220,12 +258,13 @@ def main() -> None:
                 continue
             artifacts[(arm, name)] = artifact
             report["arms"][f"{arm}_{name}"] = summary_block(artifact)
+            report["multi_label"][f"{arm}_{name}"] = multi_label(case_rows(artifact))
     for name in SETS:
         base = artifacts.get(("off", name))
         if base is None:
             continue
         base_rows = case_rows(base)
-        for arm in ("proposer", "head"):
+        for arm in ("proposer", "head", "multi"):
             other = artifacts.get((arm, name))
             if other is None:
                 continue
@@ -233,6 +272,11 @@ def main() -> None:
             report["paired"][f"{arm}_vs_off_{name}"] = paired(base_rows, rows)
             report["breakdown"][f"{arm}_vs_off_{name}"] = breakdown(base_rows, rows)
             report["head_only"][f"{arm}_{name}"] = head_only(rows)
+        # the multi-answer arm against the schema-4 head arm (its registered baseline)
+        if ("head", name) in artifacts and ("multi", name) in artifacts:
+            report["paired"][f"multi_vs_head_{name}"] = paired(
+                case_rows(artifacts[("head", name)]), case_rows(artifacts[("multi", name)])
+            )
     report["model"] = model_block(args.model)
     report["clinic"] = {
         arm: clinic_block(artifact)
@@ -264,6 +308,8 @@ def main() -> None:
         )
     for key, block in report["head_only"].items():
         print(f"head-only {key}: {block}")
+    for key, block in report["multi_label"].items():
+        print(f"multi-label {key}: {block}")
     print(f"wrote {output}")
 
 

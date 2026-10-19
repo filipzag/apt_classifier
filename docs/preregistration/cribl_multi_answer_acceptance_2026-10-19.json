@@ -1,0 +1,31 @@
+{
+  "schema": "cribl_finetune_prereg/1",
+  "id": "cribl_multi_answer_acceptance_2026-10-19",
+  "title": "Multi-answer acceptance: the head's relative probabilities and the statement length as acceptance features (schema 5)",
+  "registered": "2026-10-19",
+  "parent": "docs/preregistration/cribl_product_integration_2026-10-19.json (the head-aware gate, schema 4); docs 21.3.18",
+  "question": "With the technique head wired in, multi-technique statements are under-recovered: on CTI-HAL 68 statements carry two or more labels, 45 get one right and 6 get all; of the 96 missed labels 53 sit in the top-12 candidate rows with a median acceptance probability of 0.05, and for 40% of them the head gives the label's family at least a quarter of its top family's probability (48% on the public test, 360 of 678 missed labels in rows). The head is a one-answer softmax, so its second answer shows only as a relative probability. Does giving the gate that relative evidence, with the statement length, recover second answers without costing precision?",
+  "change": {
+    "features": "acceptance feature schema 5 = schema 4 plus five features carried in the technique_head evidence: th_rel_family = P(candidate's family) / P(head's top family); th_rel_technique = P(candidate) / P(head's top technique); th_second = 1 when the candidate's family is the head's second or third family with th_rel_family >= 0.25; statement_log_words = log(1 + words of the judged text); th_second_x_words = th_second x statement_log_words. The gate, threshold rule and everything else are unchanged; schema-4 and schema-3 artifacts keep loading and reading their own prefix",
+    "fit": "scripts/fit_acceptance_model.py --priors-split none --require-technique-head --feature-schema 5 on public dev (the same rows and out-of-fold threshold rule as the schema-4 fit), written to data/models/acceptance/acceptance_model_technique_head_multi.json; used through ACCEPTANCE_MODEL_HEAD_PATH in the head-aware pair"
+  },
+  "arms": {
+    "head": "the schema-4 pair of the parent registration (its public and CTI-HAL artifacts are reused unchanged)",
+    "multi": "the schema-5 pair: one run on the public test splits, one on CTI-HAL"
+  },
+  "headline": "CTI-HAL accepted-set micro-F1, multi minus head, paired case bootstrap (1,000, seed 7); the change is kept when the point estimate is not below 0 and the interval's upper bound is above 0, i.e. no loss",
+  "constraints": [
+    "accepted-set micro-precision on CTI-HAL and on the pooled public test not more than 0.02 below arm head",
+    "label recall on multi-label statements (two or more gold labels) on CTI-HAL and on the public test above arm head; reported with the number of such statements and labels",
+    "public test pooled F1 not below arm head beyond its paired interval"
+  ],
+  "secondary": [
+    "per dataset P/R/F1 (expert paragraphs are 30% multi-label and the likeliest to move)",
+    "accepted techniques per statement, statements with more than one acceptance, second-answer acceptances that are right / wrong",
+    "the standardised weights of the five new features and the dev operating point"
+  ],
+  "selection": "none: one fit, one run per set; the 0.25 relative-probability knee of th_second is fixed here before any run",
+  "adoption": "if the headline and constraints hold, the schema-5 artifact becomes the ACCEPTANCE_MODEL_HEAD_PATH default (the head itself stays off by default per the parent registration); otherwise schema 4 stays and the result is documented",
+  "expectation": "small: the recoverable labels are 53 of 1,154 on CTI-HAL (under 5 points of recall at most) and 360 of 2,300 on the public test; a null result on CTI-HAL with a gain on the expert split is the likeliest outcome",
+  "cost": "laptop only, about 45 minutes; no API credit"
+}
