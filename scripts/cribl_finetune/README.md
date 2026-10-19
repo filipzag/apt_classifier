@@ -310,6 +310,9 @@ TECHNIQUE_HEAD_ENABLED=true ACCEPTANCE_MODEL_PATH=data/models/acceptance/accepta
   PYTHONPATH=. .venv/bin/python scripts/benchmark_mapping.py --split test --require-technique-head --output <file>
 PYTHONPATH=. .venv/bin/python scripts/cribl_finetune/integration_report.py    # arms, paired bootstraps, checks -> integration_report.json
 # multi-answer acceptance (schema 5, rejected: prereg cribl_multi_answer_acceptance_2026-10-19.json): add --feature-schema 5 to the fit
+# single-answer cap (declined on dev, prereg cribl_single_answer_cap_2026-10-19.json): add --single-answer-cap to the fit;
+#   TECHNIQUE_SINGLE_ANSWER_CAP=model|off|<bar> at run time. Agreement filter (prereg cribl_head_agreement_2026-10-19.json):
+#   TECHNIQUE_HEAD_AGREEMENT=technique|family|top3 keeps only techniques the head picks too (precision/naming lever, F1 down)
 ```
 
 The product side is `apt_classifier/technique_head.py` (client, fail closed), the hooks in

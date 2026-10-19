@@ -5634,6 +5634,25 @@ Arms on the shipped gate (the head present only for the filter) and on the schem
   off by default, and the one lever both experiments point at is the cluster gate's behaviour on
   commodity reports with clean technique sets.
 
+*Forced-cap diagnostics (report only; dev chose against the cap).* `TECHNIQUE_SINGLE_ANSWER_CAP=1.0`
+(strictly one probability-only acceptance per statement; cue-supported ones are never capped) on
+the shipped gate and on the head pair, one run per set:
+
+| Gate | Public test: P / R / F1 (statements with > 1 accepted) | CTI-HAL: P / R / F1 (statements with > 1 accepted) |
+|---|---|---|
+| shipped | 0.516 / 0.349 / 0.417 (256) | 0.425 / 0.341 / 0.378 (164) |
+| shipped, strict cap | 0.562 / 0.322 / 0.410 (73) | 0.467 / 0.307 / 0.371 (27) |
+| head pair | 0.553 / 0.398 / 0.463 (230) | 0.553 / 0.463 / 0.504 (102) |
+| head pair, strict cap | 0.585 / 0.369 / 0.452 (69) | 0.580 / 0.434 / 0.497 (19) |
+| head pair, second acceptance above 0.5 | 0.586 / 0.373 / 0.456 | 0.582 / 0.439 / 0.501 |
+
+The cap buys 3 to 4.5 points of precision for 2.7 to 3 points of recall and loses F1 everywhere,
+on test exactly as on dev. The earlier estimate from the stored rows (+2 to +3 F1) was wrong: it
+counted the extra acceptances on statements whose first acceptance was already wrong as pure
+noise, while the cap keeps that wrong first one and drops the right second one. The registered
+procedure (choose on dev) got this right; the lesson for the record is that a test-row estimate
+is not a dev result.
+
 ## 22. Failure modes and troubleshooting
 
 ### 22.1 “ATT&CK knowledge base has not been ingested”
