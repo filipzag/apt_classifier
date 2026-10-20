@@ -40,6 +40,7 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from apt_classifier.attack.kb import AttackKnowledgeBase  # noqa: E402
+from apt_classifier.behavior_text import behavior_text_votes  # noqa: E402
 from apt_classifier.combiner import (  # noqa: E402
     FEATURE_NAMES,
     AttributionCombiner,
@@ -238,12 +239,23 @@ def generate_lists(
     base_store = engine.store
     base_text = getattr(engine, "text_group", None)
     base_text_status = getattr(engine, "text_group_status", None)
+    base_behavior = getattr(engine, "behavior_text", None)
+    base_behavior_status = getattr(engine, "behavior_text_status", None)
 
     def hide_text(fold: Any) -> None:
         # the text model's group documents hide the fold like the store does (cheap refit)
         if base_text is not None:
             engine.set_text_group(
                 base_text.without(
+                    kb,
+                    group_id=fold.group_id,
+                    techniques=fold.held_out_techniques,
+                    texts=fold.held_out_texts,
+                )
+            )
+        if base_behavior is not None:
+            engine.set_behavior_text(
+                base_behavior.without(
                     kb,
                     group_id=fold.group_id,
                     techniques=fold.held_out_techniques,
@@ -338,6 +350,8 @@ def generate_lists(
         engine.store = base_store
         if base_text is not None:
             engine.set_text_group(base_text, base_text_status)
+        if base_behavior is not None:
+            engine.set_behavior_text(base_behavior, base_behavior_status)
         engine.lexical_index = base_lexical
     return records, stats
 
@@ -390,6 +404,12 @@ def generate_unknown_lists(
         if getattr(engine, "text_group", None) is not None:
             engine.set_text_group(
                 engine.text_group.without(
+                    reduced, group_id=fold.group_id, texts=fold.held_out_texts, remove_group=True
+                )
+            )
+        if getattr(engine, "behavior_text", None) is not None:
+            engine.set_behavior_text(
+                engine.behavior_text.without(
                     reduced, group_id=fold.group_id, texts=fold.held_out_texts, remove_group=True
                 )
             )
@@ -734,6 +754,11 @@ def main(argv: list[str] | None = None) -> int:
         raise SystemExit(
             f"refusing to fit: TEXT_GROUP_WEIGHT > 0 but the text model is "
             f"{engine.text_group_status!r} (build it with make fit-text-group)"
+        )
+    if behavior_text_votes(settings) and engine.behavior_text is None:
+        raise SystemExit(
+            f"refusing to fit: BEHAVIOR_TEXT_WEIGHT > 0 but the behaviour-text member is "
+            f"{engine.behavior_text_status!r} (it reads TEXT_GROUP_PATH)"
         )
     stamp = args.lists_cache.with_name(args.lists_cache.name + ".pipeline")
     fold_args = {

@@ -1,0 +1,23 @@
+{
+  "schema": "cribl_finetune_prereg/1",
+  "id": "attribution_behavior_text_2026-10-20",
+  "title": "Behaviour-text member: statement-level matching against ATT&CK's per-group procedure sentences",
+  "registered": "2026-10-20",
+  "parent": "docs 21.3.16 (the free-text member's gate trial) and the attribution diagnosis of 2026-10-20 (docs 21.3.19)",
+  "problem": "On real reports attribution rests on named ATT&CK software (CTI-HAL top-1 22/31 with a listed tool named, 4/24 without). The technique-set members put the truth first in 0 to 1 of 55 reports; the one behaviour member (specific_behavior, dense cosine >= 0.55 on actor procedure sentences) is right first in 11 of the 24 reports where it fires and silent on 31; the free-text member (TF-IDF, one document per group) scores 49% alone but is off after failing the fold naming gate by one case. The owner wants actors caught on TTPs and behaviour.",
+  "member": "apt_classifier/behavior_text.py: the text member's anonymised corpus (group and software procedure examples, campaign procedures, group descriptions) indexed sentence by sentence (TF-IDF 1-2 grams, IDF over sentences); every case statement votes for the groups of its top_k nearest corpus sentences with the cosine (best vote per group per statement); a group's case score is the mean of its votes over the statements (or over its five best statements), z-scored across groups, plus an optional prominence prior; softmax over the groups reached. Family learned_profile, never an independent evidence family; joins the ensemble only with BEHAVIOR_TEXT_WEIGHT > 0; fold hiding through TextGroupModel.without (held-out sentences and a removed actor leave the index exactly as they leave the text member)",
+  "selection_on_dev": "scripts/fit_behavior_text.py scores the vendor set (34 reports, actor names replaced as the benchmarks replace them) with the member alone for top_k in {10, 20, 50}, aggregate in {mean, top5}, prior in {0, 0.25, 0.5}; the variant with the best MRR (ties: top-1, then the simplest: smaller top_k, mean, prior 0) sets the defaults BEHAVIOR_TEXT_TOP_K / _AGGREGATE / _PRIOR. The ensemble weight is 1.0 as for the text member's trial (no weight sweep). The vendor set is the only development data; nothing is read from the folds, CTI-HAL or Elastic before the gate",
+  "gate": {
+    "combiner": "at weight 1.0 the combiner fingerprint binds the member, so a combiner is refitted with it voting (TEXT_GROUP_WEIGHT=0 BEHAVIOR_TEXT_WEIGHT=1.0 scripts/fit_attribution_combiner.py ... --output data/models/combiner/attribution_combiner_behavior_text.json), the recipe of docs 21.3.16",
+    "naming_gate": "ATT&CK folds on two seeds not used for any design (67 and 71), member on against off under the same code: top-1 not below the off arm by more than 2 cases per seed, 0 wrong names, 0 removed actors named; the seed-7 fold artifact of the head-on default is reported beside them",
+    "real_reports": "CTI-HAL anonymised (55) and Elastic strict (8 + 22 open set), once each: the member alone must be right first on at least 50% of CTI-HAL; the ensemble must not lose top-1 on either set, must keep 0 wrong names, and the open set must name nothing (cluster volume guard on)",
+    "adoption": "if every bar holds, BEHAVIOR_TEXT_WEIGHT defaults to 1.0 with the new combiner as ATTRIBUTION_COMBINER_PATH; a wrong name or a lost real-report top-1 keeps it at 0 and the result is documented"
+  },
+  "secondary": [
+    "the member alone on CTI-HAL and Elastic: top-1, top-3, MRR; the ensemble's named correct and coverage; the confidence-label calibration on CTI-HAL",
+    "the 24 CTI-HAL reports without ATT&CK software: top-1 before and after",
+    "the text member (TEXT_GROUP_WEIGHT=1.0) under the same new seeds, for the record (its earlier trial predates the cluster volume guard)"
+  ],
+  "caveats": "12 of the free-text member's 27 CTI-HAL hits rested on ATT&CK wording copied from the same vendor reports (docs 21.3.16); the same corpus feeds this member, so CTI-HAL numbers are optimistic for both; the fresh fold seeds and Elastic are the clean checks. The head's technique output does not enter this member (it reads text), so the member is clean of the head's training data",
+  "cost": "laptop only: dev minutes, combiner refit about 1 h, two fold seeds about 40 min, real reports 15 min; no API credit"
+}

@@ -3222,11 +3222,12 @@ def build_classifier_context(
         for observation in ledger.observations
         if observation.status is EvidenceStatus.POSITIVE and observation.metadata.get("software_id")
     }
-    narrative = " ".join(
-        observation.text
+    statements = tuple(
+        str(observation.text)
         for observation in ledger.observations
         if observation.status is EvidenceStatus.POSITIVE
     )
+    narrative = " ".join(statements)
     software_ids.update(
         match.software_id for match in match_software_aliases(narrative, kb) if match.software_id
     )
@@ -3239,6 +3240,7 @@ def build_classifier_context(
         group_text_scores=retrieval.group_text_scores,
         software_ids=software_ids,
         narrative=narrative,
+        statements=statements,
         parent_policy=str(getattr(retrieval, "parent_policy", "ancestor_compatible")),
     )
     context.soft_techniques = soft

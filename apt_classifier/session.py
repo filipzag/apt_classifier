@@ -13,6 +13,13 @@ from apt_classifier.attribution import (
     MaturityThresholds,
     assess_attribution,
 )
+from apt_classifier.behavior_text import (
+    BEHAVIOR_TEXT_NAME,
+    BehaviorTextClassifier,
+    behavior_text_bound_fingerprint,
+    behavior_text_votes,
+    load_behavior_text_for,
+)
 from apt_classifier.classifiers.base import ClassifierContext, ClassifierResult
 from apt_classifier.classifiers.naive_bayes import posterior
 from apt_classifier.classifiers.profile_forest import PROFILE_FOREST_NAME, SOURCE_COUNTRY_NAME
@@ -136,6 +143,8 @@ _CLASSIFIER_FAMILIES = {
     GROUP_MLP_NAME: "learned_profile",
     # free text scored against ATT&CK-derived group documents: also a learned profile
     TEXT_GROUP_NAME: "learned_profile",
+    # statements scored against the same corpus sentence by sentence: also a learned profile
+    BEHAVIOR_TEXT_NAME: "learned_profile",
 }
 
 
@@ -312,6 +321,12 @@ class AttributionEngine:
         self.text_group, self.text_group_status = load_text_group_for(self.settings, knowledge_base)
         if self.text_group is not None:
             self.classifiers = (*self.classifiers, TextGroupClassifier(self.text_group))
+        # the behaviour-text member shares the text member's artifact (loaded once when both vote)
+        self.behavior_text, self.behavior_text_status = load_behavior_text_for(
+            self.settings, knowledge_base, self.text_group
+        )
+        if self.behavior_text is not None:
+            self.classifiers = (*self.classifiers, BehaviorTextClassifier(self.behavior_text))
         self.telemetry_profile: Any = None
         # the store's Chroma client serves a Chroma exemplar backend (never a client of its own)
         self.exemplar_index, self.exemplar_status = load_exemplar_index(
@@ -343,6 +358,10 @@ class AttributionEngine:
             # a combiner fitted with the text model voting is bound to that model and code
             self.combiner_fingerprint = text_group_bound_fingerprint(
                 self.combiner_fingerprint, self.text_group
+            )
+        if self.behavior_text is not None:
+            self.combiner_fingerprint = behavior_text_bound_fingerprint(
+                self.combiner_fingerprint, self.behavior_text
             )
         self.combiner, self.combiner_status = load_attribution_combiner(
             self.settings, knowledge_base, fingerprint=self.combiner_fingerprint
@@ -1339,6 +1358,17 @@ class AttributionEngine:
             if getattr(classifier, "name", None) == GROUP_MLP_NAME:
                 classifier.model = model
 
+    def set_behavior_text(self, model: Any, status: str | None = None) -> None:
+        """Swap the behaviour-text member (the benchmarks refit it without a fold's held-out
+        behaviour or a removed actor, as the text member)."""
+        self.behavior_text = model
+        self.behavior_text_status = status or (
+            "active (injected)" if model is not None else "disabled"
+        )
+        for classifier in self.classifiers:
+            if getattr(classifier, "name", None) == BEHAVIOR_TEXT_NAME:
+                classifier.model = model
+
     def set_text_group(self, model: Any, status: str | None = None) -> None:
         """Swap the free-text model; the benchmarks refit it without a fold's held-out
         behaviour or a removed actor (and restore the loaded one with its status)."""
@@ -1388,6 +1418,11 @@ class AttributionEngine:
             **(
                 {TEXT_GROUP_NAME: float(self.settings.text_group_weight)}
                 if text_group_votes(self.settings)
+                else {}
+            ),
+            **(
+                {BEHAVIOR_TEXT_NAME: float(self.settings.behavior_text_weight)}
+                if behavior_text_votes(self.settings)
                 else {}
             ),
         }

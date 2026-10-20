@@ -262,6 +262,20 @@ class Settings(BaseSettings):
     text_group_enabled: bool = True
     text_group_path: Path = PROJECT_ROOT / "data" / "models" / "text_group" / "text_group.json.gz"
     text_group_weight: float = 0.0
+    # Behaviour-text member (apt_classifier/behavior_text.py, prereg
+    # attribution_behavior_text_2026-10-20): the text member's corpus indexed sentence by
+    # sentence, every case statement voting for the groups of its nearest procedure sentences.
+    # Reads TEXT_GROUP_PATH; joins the ensemble only with a positive weight (0 until the gate
+    # passes); a learned profile that never counts as an independent evidence family. The
+    # parameters are the dev choice of scripts/fit_behavior_text.py (vendor set).
+    behavior_text_enabled: bool = True
+    behavior_text_weight: float = 0.0
+    # dev choice 2026-10-21 (vendor set, member alone): top_k 10, the five best statements, no
+    # prior: MRR 0.809, top-1 0.676, top-3 0.912 (mean over all statements: top-1 0.706, MRR 0.784)
+    behavior_text_top_k: int = 10
+    behavior_text_min_similarity: float = 0.0
+    behavior_text_aggregate: str = "top5"
+    behavior_text_prior: float = 0.0
     cyberre_model: str = "openai/gpt-5.6-sol"
     cyberre_effort: str = "low"
     cyberre_weight: float = 0.35

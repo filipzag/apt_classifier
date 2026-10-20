@@ -69,6 +69,7 @@ if str(REPO_ROOT) not in sys.path:
 from apt_classifier.attack.kb import AttackKnowledgeBase  # noqa: E402
 from apt_classifier.attack.related import related_groups  # noqa: E402
 from apt_classifier.attribution import AttributionStage  # noqa: E402
+from apt_classifier.behavior_text import behavior_text_votes  # noqa: E402
 from apt_classifier.classifiers.profile_forest import (  # noqa: E402
     PROFILE_FOREST_NAME,
     SOURCE_COUNTRY_NAME,
@@ -141,6 +142,7 @@ FINGERPRINTED_SOURCES = (
     REPO_ROOT / "apt_classifier" / "classifiers" / "profile_forest.py",
     REPO_ROOT / "apt_classifier" / "group_mlp.py",
     REPO_ROOT / "apt_classifier" / "text_group.py",
+    REPO_ROOT / "apt_classifier" / "behavior_text.py",
     # technique mapping inputs: the exemplar votes, the acceptance model and the dense index
     REPO_ROOT / "apt_classifier" / "exemplars.py",
     REPO_ROOT / "apt_classifier" / "exemplar_store.py",
@@ -1085,6 +1087,8 @@ def run_known(
     base_store = engine.store
     base_text = getattr(engine, "text_group", None)
     base_text_status = getattr(engine, "text_group_status", None)
+    base_behavior = getattr(engine, "behavior_text", None)
+    base_behavior_status = getattr(engine, "behavior_text_status", None)
     base_lexical = getattr(engine, "lexical_index", None)
     related = related_groups(engine.kb)
     dropped_total = {"technique": 0, "behavior": 0, "profile": 0, "lexical": 0}
@@ -1094,6 +1098,16 @@ def run_known(
                 # the text model's group documents hide the fold like the store does
                 engine.set_text_group(
                     base_text.without(
+                        engine.kb,
+                        group_id=fold.group_id,
+                        techniques=fold.held_out_techniques,
+                        texts=fold.held_out_texts,
+                    )
+                )
+            if base_behavior is not None and hide_evidence:
+                # the behaviour-text index hides the fold the same way
+                engine.set_behavior_text(
+                    base_behavior.without(
                         engine.kb,
                         group_id=fold.group_id,
                         techniques=fold.held_out_techniques,
@@ -1241,6 +1255,8 @@ def run_known(
         engine.store = base_store
         if base_text is not None:
             engine.set_text_group(base_text, base_text_status)
+        if base_behavior is not None:
+            engine.set_behavior_text(base_behavior, base_behavior_status)
         engine.lexical_index = base_lexical
     return rows, dropped_total
 
@@ -1315,6 +1331,14 @@ def run_unknown(
                 )
             )
             text_group = "refit without the actor"
+        behavior_text = "off"
+        if getattr(engine, "behavior_text", None) is not None:
+            engine.set_behavior_text(
+                engine.behavior_text.without(
+                    reduced, group_id=fold.group_id, texts=fold.held_out_texts, remove_group=True
+                )
+            )
+            behavior_text = "refit without the actor"
         cost_before = client.total_usage.cost_usd if client is not None else 0.0
         state = engine.analyze(_ledger(fold))
         fusion = state.fusion
@@ -1326,6 +1350,7 @@ def run_unknown(
                 "profile_forest": forest,
                 "group_mlp": group_mlp,
                 "text_group": text_group,
+                "behavior_text": behavior_text,
                 "lexical_hidden": hidden_lexical or 0,
                 "llm": _llm_accounting(state, client, cost_before),
                 **_separation_fields(state, None, decision),
@@ -1944,6 +1969,13 @@ def main(argv: list[str] | None = None) -> int:
             file=sys.stderr,
         )
         return 3
+    if behavior_text_votes(settings) and engine.behavior_text is None:
+        print(
+            f"refusing to run: BEHAVIOR_TEXT_WEIGHT > 0 but the behaviour-text member is "
+            f"{engine.behavior_text_status!r} (it reads TEXT_GROUP_PATH)",
+            file=sys.stderr,
+        )
+        return 3
     combiner_expected = bool(getattr(settings, "attribution_combiner_enabled", False))
     if (
         combiner_expected
@@ -2046,6 +2078,17 @@ def main(argv: list[str] | None = None) -> int:
                 }
             }
             if text_group_votes(settings)
+            else {}
+        ),
+        **(
+            {
+                "behavior_text": {
+                    "status": engine.behavior_text_status,
+                    "fingerprint": getattr(engine.behavior_text, "fingerprint", None),
+                    "params": getattr(engine.behavior_text, "params", None),
+                }
+            }
+            if behavior_text_votes(settings)
             else {}
         ),
         # only when the network votes, so a default run keeps its fingerprint inputs
