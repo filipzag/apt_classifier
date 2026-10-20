@@ -123,6 +123,11 @@ class Settings(BaseSettings):
     # "top3" keep an accepted technique only when the technique head picks it too (its top
     # technique, its top family, one of its top-3 families); "off" (default) no filter.
     technique_head_agreement: str = "off"
+    # Head-first acceptance (2026-10-20, prereg cribl_head_first): "model" follows the acceptance
+    # artifact's gate record (a candidate the head gives at least that joint probability is
+    # accepted outright; artifacts without the record change nothing), "off" ignores it, a
+    # number forces a bar for an ablation.
+    technique_head_first: str = "model"
     acceptance_model_path: Path = (
         PROJECT_ROOT / "data" / "models" / "acceptance" / "acceptance_model.json"
     )
@@ -148,7 +153,9 @@ class Settings(BaseSettings):
     technique_head_timeout: float = 120.0
     # SHA-256 of the served checkpoint (its /health "fingerprint"); pinned to E2 step_52706
     # (the registered head); empty accepts any checkpoint
-    technique_head_expected_fingerprint: str = "5b5d015d8766dd27cdeceaf0ea1aaa0ea7c613f397d2bf0fecb07eea41fcea01"
+    technique_head_expected_fingerprint: str = (
+        "5b5d015d8766dd27cdeceaf0ea1aaa0ea7c613f397d2bf0fecb07eea41fcea01"
+    )
     technique_head_top_families: int = 3
     technique_head_new_candidates: int = 3
     technique_head_batch: int = 16

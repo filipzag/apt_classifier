@@ -578,6 +578,20 @@ class AcceptanceModel:
         except (TypeError, ValueError):
             return None
 
+    @property
+    def head_first_min_probability(self) -> float | None:
+        """The head-first bar (``metadata["gate"]["head_first_min_probability"]``, chosen by
+        the fit on dev): a candidate the technique head gives at least this joint probability is
+        accepted outright; ``None`` when the model carries no such rule."""
+        gate = self.metadata.get("gate")
+        if not isinstance(gate, Mapping):
+            return None
+        value = gate.get("head_first_min_probability")
+        try:
+            return float(value) if value is not None else None
+        except (TypeError, ValueError):
+            return None
+
     def compatible_with(
         self,
         attack_version: str | None,
@@ -803,6 +817,10 @@ class HeadAwareAcceptance:
     def second_min_probability(self) -> float | None:
         return self.head_model.second_min_probability
 
+    @property
+    def head_first_min_probability(self) -> float | None:
+        return self.head_model.head_first_min_probability
+
     def prior_features(self, technique_id: str) -> dict[str, float]:
         return self.head_model.prior_features(technique_id)
 
@@ -901,8 +919,14 @@ def choose_threshold_runtime(
     min_precision: float = 0.5,
     grid: Iterable[float] | None = None,
     second_min_probability: float | None = None,
+    head_probabilities: Sequence[float] | None = None,
+    head_first_min_probability: float | None = None,
 ) -> dict[str, Any]:
     """:func:`choose_threshold` scored on the accepted sets the runtime gate produces.
+
+    ``head_first_min_probability`` with ``head_probabilities`` (the technique head's
+    ``th_technique_p`` per row) emulates the head-first rule: an eligible row at or above the
+    bar is accepted whatever its calibrated probability (prereg cribl_head_first_2026-10-20).
 
     ``second_min_probability`` emulates the single-answer cap (``retrieve.
     _assign_states_for_group``): per case only the most probable row accepted on probability
@@ -951,11 +975,17 @@ def choose_threshold_runtime(
         if second_min_probability is not None
         else None
     )
+    head_first_rows = np.zeros(len(probs), dtype=bool)
+    if head_first_min_probability is not None and head_probabilities is not None:
+        head = np.asarray(list(head_probabilities), dtype=float)
+        if len(head) != len(probs):
+            raise ValueError("head probabilities and rows are misaligned")
+        head_first_rows = eligible & (head >= float(head_first_min_probability))
     for threshold in candidates:
         on_probability = eligible & (probs >= threshold)
         if capper is not None:
             on_probability = capper.keep(on_probability)
-        accepted_rows = forced_mask | on_probability
+        accepted_rows = forced_mask | on_probability | head_first_rows
         accepted = np.zeros(len(pair_index), dtype=bool)
         accepted[pairs[accepted_rows]] = True
         tp = int((accepted & pair_truth).sum())
@@ -983,6 +1013,9 @@ def choose_threshold_runtime(
     chosen["blocked_rows"] = int(blocked_mask.sum())
     chosen["second_min_probability"] = (
         float(second_min_probability) if second_min_probability is not None else None
+    )
+    chosen["head_first_min_probability"] = (
+        float(head_first_min_probability) if head_first_min_probability is not None else None
     )
     return chosen
 

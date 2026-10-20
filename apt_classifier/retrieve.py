@@ -461,6 +461,10 @@ DENSE_RELATIVE_MARGIN = 0.12
 # the single-answer cap of the calibrated gate (2026-10-19): follow the artifact's gate record, or off
 SINGLE_ANSWER_CAP = "model"
 SINGLE_ANSWER_CAP_MODES = ("model", "off")
+# head-first acceptance (2026-10-20, prereg cribl_head_first): a candidate the technique head
+# gives at least the artifact's bar is accepted outright; model / off / a forced bar
+HEAD_FIRST = "model"
+HEAD_FIRST_REASON = "technique head probability passed the dev-selected bar"
 # the agreement filter (2026-10-19, prereg cribl_head_agreement): an accepted technique stays
 # accepted only when the technique head picks it too (off: no filter)
 HEAD_AGREEMENT = "off"
@@ -540,6 +544,9 @@ def retrieval_kwargs(
         "technique_head_agreement": str(
             getattr(settings, "technique_head_agreement", HEAD_AGREEMENT) or HEAD_AGREEMENT
         ),
+        "technique_head_first": str(
+            getattr(settings, "technique_head_first", HEAD_FIRST) or HEAD_FIRST
+        ),
     }
 
 
@@ -618,6 +625,7 @@ def retrieve_techniques(
     technique_head_top_families: int = HEAD_TOP_FAMILIES,
     single_answer_cap: str = SINGLE_ANSWER_CAP,
     technique_head_agreement: str = HEAD_AGREEMENT,
+    technique_head_first: str = HEAD_FIRST,
 ) -> RetrievalResult:
     """Retrieve ATT&CK technique candidates for the positive observations in a ledger.
 
@@ -649,6 +657,11 @@ def retrieve_techniques(
     candidates. A request the service fails leaves its observations without head evidence
     (counted in ``diagnostics["technique_head_errors"]``). An acceptance model fitted with the
     head is not used on another head or without one.
+
+    ``technique_head_first`` (``model``, the default, ``off``, or a forced bar): accept a
+    candidate outright when the head's joint probability for it reaches the acceptance
+    artifact's head-first bar (``AcceptanceModel.head_first_min_probability``); the context
+    guards still apply and the calibrated gate judges everything else.
 
     ``technique_head_agreement`` (``off``, the default; ``technique``, ``family`` or ``top3``):
     keep an accepted technique of an observation the head scored only when the head picks it
@@ -690,6 +703,8 @@ def retrieve_techniques(
         raise ValueError(f"unsupported single-answer cap {single_answer_cap!r}")
     if technique_head_agreement not in HEAD_AGREEMENT_MODES:
         raise ValueError(f"unsupported technique head agreement {technique_head_agreement!r}")
+    if parse_single_answer_cap(technique_head_first) is None:
+        raise ValueError(f"unsupported technique head first {technique_head_first!r}")
     observations = [
         observation
         for observation in ledger.observations
@@ -1066,6 +1081,7 @@ def retrieve_techniques(
         corroboration_accept_min_probability=corroboration_accept_min_probability,
         single_answer_cap=single_answer_cap,
         technique_head_agreement=technique_head_agreement,
+        technique_head_first=technique_head_first,
     )
 
 
@@ -1584,6 +1600,7 @@ def finalize_retrieval_candidates(
     corroboration_accept_min_probability: float = 0.2,
     single_answer_cap: str = SINGLE_ANSWER_CAP,
     technique_head_agreement: str = HEAD_AGREEMENT,
+    technique_head_first: str = HEAD_FIRST,
 ) -> RetrievalResult:
     """Assign mapping states only after all candidate evidence is available.
 
@@ -1617,6 +1634,7 @@ def finalize_retrieval_candidates(
                 hierarchy_parent_mode=hierarchy_parent_mode,
                 single_answer_cap=single_answer_cap,
                 technique_head_agreement=technique_head_agreement,
+                technique_head_first=technique_head_first,
             )
         )
     corroborated = 0
@@ -2127,6 +2145,7 @@ def _assign_candidate_states(
     hierarchy_parent_mode: str = "off",
     single_answer_cap: str = SINGLE_ANSWER_CAP,
     technique_head_agreement: str = HEAD_AGREEMENT,
+    technique_head_first: str = HEAD_FIRST,
 ) -> list[TechniqueCandidate]:
     """Assign AUTO_ACCEPTED / NEEDS_REVIEW / AUTO_REJECTED per candidate.
 
@@ -2148,6 +2167,7 @@ def _assign_candidate_states(
             hierarchy_parent_mode=hierarchy_parent_mode,
             single_answer_cap=single_answer_cap,
             technique_head_agreement=technique_head_agreement,
+            technique_head_first=technique_head_first,
         )
     decided: dict[str, TechniqueCandidate] = {}
     for view, views, group in judged:
@@ -2163,6 +2183,7 @@ def _assign_candidate_states(
             hierarchy_parent_mode=hierarchy_parent_mode,
             single_answer_cap=single_answer_cap,
             technique_head_agreement=technique_head_agreement,
+            technique_head_first=technique_head_first,
         )
         for original, result in zip(group, results, strict=True):
             decided[original.technique_id] = original.model_copy(
@@ -2188,6 +2209,7 @@ def _assign_states_for_group(
     hierarchy_parent_mode: str = "off",
     single_answer_cap: str = SINGLE_ANSWER_CAP,
     technique_head_agreement: str = HEAD_AGREEMENT,
+    technique_head_first: str = HEAD_FIRST,
 ) -> list[TechniqueCandidate]:
     dense_scores = sorted(
         (
@@ -2315,17 +2337,26 @@ def _assign_states_for_group(
                         rationale="calibrated acceptance model",
                     )
                 )
-            model_accepted = model_says_yes and not benign_context and not sparse_context
+            # head-first (prereg cribl_head_first): the head's joint probability for this
+            # candidate at or above the artifact's bar accepts it outright
+            head_first_bar = _head_first_bar(acceptance_model, candidate, technique_head_first)
+            head_probability = _head_probability(candidate)
+            head_first = head_first_bar is not None and head_probability >= head_first_bar
+            model_accepted = (
+                (model_says_yes or head_first) and not benign_context and not sparse_context
+            )
             accepted = model_accepted or cue_supported
             reason = (
                 "structured or explicit behavior supported by retrieval"
                 if cue_supported
                 else "calibrated acceptance model score passed the dev-selected threshold"
+                if model_accepted and model_says_yes
+                else f"{HEAD_FIRST_REASON} ({head_probability:.2f})"
                 if model_accepted
                 else "benign-context observation: similarity-only mapping requires review"
-                if benign_context and model_says_yes
+                if benign_context and (model_says_yes or head_first)
                 else "observation too sparse for similarity-only acceptance"
-                if sparse_context and model_says_yes
+                if sparse_context and (model_says_yes or head_first)
                 else "calibrated acceptance model score below threshold; requires review"
             )
         else:
@@ -2406,6 +2437,35 @@ def parse_single_answer_cap(value: Any) -> str | float | None:
     except ValueError:
         return None
     return bar if 0.0 < bar <= 1.0 else None
+
+
+def _head_probability(candidate: TechniqueCandidate) -> float:
+    """The technique head's joint probability for the candidate (0 without head evidence)."""
+    evidence = candidate.evidence_for(TECHNIQUE_HEAD_SOURCE)
+    if evidence is None:
+        return 0.0
+    features = (evidence.metadata or {}).get("features") or {}
+    try:
+        return float(features.get("th_technique_p", 0.0) or 0.0)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _head_first_bar(
+    model: Any, candidate: TechniqueCandidate, mode: Any = HEAD_FIRST
+) -> float | None:
+    """The head-first bar: a forced one (``mode`` a number), else the bar of the model judging
+    the candidate (``model_for`` for a head-aware pair); ``None`` when there is no rule."""
+    parsed = parse_single_answer_cap(mode)
+    if isinstance(parsed, float):
+        return parsed
+    if parsed != "model" or model is None:
+        return None
+    picker = getattr(model, "model_for", None)
+    if callable(picker):
+        model = picker(candidate)
+    bar = getattr(model, "head_first_min_probability", None)
+    return float(bar) if bar is not None else None
 
 
 def _second_answer_bar(

@@ -478,6 +478,9 @@ class AttributionEngine:
             technique_head_agreement=str(
                 getattr(self.settings, "technique_head_agreement", "off") or "off"
             ),
+            technique_head_first=str(
+                getattr(self.settings, "technique_head_first", "model") or "model"
+            ),
         )
 
     def analyze(

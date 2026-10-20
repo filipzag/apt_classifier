@@ -816,3 +816,105 @@ def test_head_agreement_filter_keeps_only_what_the_head_picks():
             retrieval_mode="dense",
             technique_head_agreement="all",
         )
+
+
+def test_head_first_rule_accepts_what_the_head_is_sure_of():
+    import numpy as np
+
+    from apt_classifier.acceptance import choose_threshold_runtime
+    from apt_classifier.retrieve import HEAD_FIRST_REASON
+
+    # the threshold rule: a row above the head-first bar is accepted whatever its probability
+    probs = np.asarray([0.9, 0.1, 0.1, 0.3])
+    head = [0.2, 0.95, 0.4, 0.0]
+    labels = [1, 1, 0, 0]
+    common = {
+        "blocked": [False, False, True, False],
+        "forced": [False] * 4,
+        "technique_ids": ["T1", "T2", "T3", "T4"],
+        "min_precision": 0.0,
+        "grid": [0.5],
+    }
+    plain = choose_threshold_runtime(
+        probs, labels, ["a", "b", "c", "d"], {"a": 1, "b": 1}, **common
+    )
+    first = choose_threshold_runtime(
+        probs,
+        labels,
+        ["a", "b", "c", "d"],
+        {"a": 1, "b": 1},
+        head_probabilities=head,
+        head_first_min_probability=0.9,
+        **common,
+    )
+    assert plain["accepted"] == 1 and first["accepted"] == 2 and first["recall"] == 1.0
+    assert first["head_first_min_probability"] == 0.9
+    # the gate: the model says no to everything (threshold 1.0); the head's 0.7 for T1003.001
+    # clears a 0.6 bar from the artifact's gate record, T1059.001 (0.09) does not
+    kb, store, _ = _two_hit_setup()
+    rows, labels = _rows()
+    model = AcceptanceModel.fit(rows, labels, attack_version="")
+    model.threshold = 1.0
+    prose = Observation(
+        text="the tool read lsass memory", provenance=Provenance(source="free_text")
+    )
+    client = _client(FakeService(_rows_for))
+    plain_result = retrieve_techniques(
+        EvidenceLedger(observations=[prose]),
+        store,
+        kb,
+        retrieval_mode="dense",
+        acceptance_model=model,
+        technique_head=client,
+        technique_head_new_candidates=0,
+    )
+    assert not [c for c in plain_result.candidates if str(c.state).endswith("auto_accepted")]
+    model.metadata["gate"] = {"head_first_min_probability": 0.6}
+    assert model.head_first_min_probability == 0.6
+    result = retrieve_techniques(
+        EvidenceLedger(observations=[prose]),
+        store,
+        kb,
+        retrieval_mode="dense",
+        acceptance_model=model,
+        technique_head=client,
+        technique_head_new_candidates=0,
+    )
+    accepted = [c for c in result.candidates if str(c.state).endswith("auto_accepted")]
+    assert [c.technique_id for c in accepted] == ["T1003.001"]
+    assert accepted[0].state_reason.startswith(HEAD_FIRST_REASON)
+    # the switch and a forced bar
+    off = retrieve_techniques(
+        EvidenceLedger(observations=[prose]),
+        store,
+        kb,
+        retrieval_mode="dense",
+        acceptance_model=model,
+        technique_head=client,
+        technique_head_new_candidates=0,
+        technique_head_first="off",
+    )
+    assert not [c for c in off.candidates if str(c.state).endswith("auto_accepted")]
+    forced = retrieve_techniques(
+        EvidenceLedger(observations=[prose]),
+        store,
+        kb,
+        retrieval_mode="dense",
+        acceptance_model=model,
+        technique_head=client,
+        technique_head_new_candidates=0,
+        technique_head_first="0.05",
+    )
+    assert len([c for c in forced.candidates if str(c.state).endswith("auto_accepted")]) == 2
+    # a log observation (no head evidence) is never accepted by the rule
+    log = Observation(text="lsass read by procdump", provenance=Provenance(source="winlog"))
+    logged = retrieve_techniques(
+        EvidenceLedger(observations=[log]),
+        store,
+        kb,
+        retrieval_mode="dense",
+        acceptance_model=model,
+        technique_head=client,
+    )
+    # (a cue may still accept on a log line; the head-first reason never appears there)
+    assert not [c for c in logged.candidates if c.state_reason.startswith(HEAD_FIRST_REASON)]

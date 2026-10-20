@@ -1989,6 +1989,8 @@ NEW_RETRIEVAL_KNOBS = {
     "single_answer_cap",
     # the technique head agreement filter (2026-10-19): off unless asked
     "technique_head_agreement",
+    # head-first acceptance (2026-10-20): "model" follows the artifact's gate record
+    "technique_head_first",
 }
 
 
