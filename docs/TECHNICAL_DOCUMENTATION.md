@@ -5759,6 +5759,29 @@ answers; it sits in the medium-confidence region, where the gate sometimes prefe
 sibling or holds the head's answer, and trusting the head there costs precision on dev (the 0.5 to
 0.7 bars score below "no rule").
 
+**Sibling replacement (2026-10-20, rejected).** Pre-registered in
+`docs/preregistration/cribl_sibling_replacement_2026-10-20.json`: after the gate, the head's
+preferred member of a family replaces an accepted sibling when the head prefers it by a ratio,
+the ratio chosen on public dev by `fit_acceptance_model.py --sibling` (the threshold rule swaps
+within (case, family) groups the same way; "no rule" competes; `TECHNIQUE_HEAD_SIBLING=model|off|
+<ratio>` at run time). Dev declined it: every ratio lowers out-of-fold F1 (1.5: 0.481, 2: 0.484,
+3: 0.485, 5: 0.486, none: 0.488), so the registered artifact carries no rule and the current pair
+stays. Forced on test as a report-only diagnostic (ratio 2 and 5 on the head pair):
+
+| Set | Ratio 2: P / R / F1, paired vs the pair | Ratio 5 | Swapped in (right) / out (right) at ratio 2 |
+|---|---|---|---|
+| CTI-HAL | 0.553 / 0.455 / 0.499, −0.005 [−0.010, −0.000] | 0.501, −0.003 n.s. | 3 (0) / 17 (8) |
+| Public test | 0.555 / 0.392 / 0.460, −0.003 [−0.007, +0.000] | 0.463, 0.000 | 4 (0) / 30 (11) |
+
+The rule rarely swaps a member in: in most cases the head's preferred member was already
+accepted, so the rule only removed the sibling, and on multi-label statements that sibling was
+right about half the time. The 65 same-family confusions of CTI-HAL are therefore not "the head
+knows the right member and retrieval picked another" cases; where the head's member is right it
+is already accepted, and where it is not, the head does not prefer it either. Together with the
+head-first null this closes the question: the remaining gap to the model alone is not recoverable
+by trusting the head more inside the current gate; the parent-aware number rises by 0.4 points
+under the rule only because removed siblings were sub-technique members of the right family.
+
 ## 22. Failure modes and troubleshooting
 
 ### 22.1 “ATT&CK knowledge base has not been ingested”
