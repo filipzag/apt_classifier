@@ -5742,6 +5742,23 @@ sub-technique. The committed `*_current.json` artifacts on the main branch preda
 and are regenerated after the merge (the numbers here are the worktree's run of the same
 targets).
 
+**Head-first acceptance (2026-10-20, rejected).** Pre-registered in
+`docs/preregistration/cribl_head_first_2026-10-20.json`: a candidate the head gives at least a bar
+of joint probability is accepted outright, the calibrated gate judging the rest, the bar chosen on
+public dev by `fit_acceptance_model.py --head-first` (the rule competes with "no rule"; the
+artifact carries the choice in its gate record, `TECHNIQUE_HEAD_FIRST=model|off|<bar>` at run
+time). Dev chose 0.8, out-of-fold F1 0.491 against 0.488 without the rule. On test the rule is
+inert: it fires once on CTI-HAL (wrongly), 45 times on the 1,391 public cases and 0 to 7 times on
+the other sets, because the calibrated gate already accepts nearly everything the head gives 0.8
+or more. CTI-HAL F1 0.5039 → 0.5036 (paired −0.0003 [−0.0008, 0.0000]), public 0.4628 → 0.4627
+(recall +0.5 points, precision −1.0), parent-aware F1 unchanged, AnnoCTR / CTI-Rationale /
+AthenaBench / CTIBench / CyberThreat-Eval unchanged to the third decimal, attribution identical.
+The headline fails and the current pair stays. What it establishes: the 2 to 6 point gap between
+the pipeline and the head alone at the family level is not the gate holding back confident head
+answers; it sits in the medium-confidence region, where the gate sometimes prefers a retrieved
+sibling or holds the head's answer, and trusting the head there costs precision on dev (the 0.5 to
+0.7 bars score below "no rule").
+
 ## 22. Failure modes and troubleshooting
 
 ### 22.1 “ATT&CK knowledge base has not been ingested”
