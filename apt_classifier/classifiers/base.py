@@ -55,8 +55,6 @@ class ClassifierContext:
     group_text_scores: dict[str, float]
     software_ids: set[str]
     narrative: str = ""
-    # the positive observations' texts in order (the behaviour-text member scores them one by one)
-    statements: tuple[str, ...] = ()
     cyberre_techniques: dict[str, float] = field(default_factory=dict)
     cyberre_technique_observations: dict[str, tuple[str, ...]] = field(default_factory=dict)
     parent_policy: str = "ancestor_compatible"

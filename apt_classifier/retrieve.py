@@ -3240,9 +3240,11 @@ def build_classifier_context(
         group_text_scores=retrieval.group_text_scores,
         software_ids=software_ids,
         narrative=narrative,
-        statements=statements,
         parent_policy=str(getattr(retrieval, "parent_policy", "ancestor_compatible")),
     )
+    # the positive observations' texts in order, for the behaviour-text member (set after
+    # construction: the context dataclass is hashed into the combiner fingerprint)
+    context.statements = statements
     context.soft_techniques = soft
     context.soft_technique_observations = soft_observations
     # Contrastive near misses: same qualification as soft evidence, but they only reach the
