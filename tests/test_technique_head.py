@@ -1016,3 +1016,7 @@ def test_sibling_replacement_swaps_the_accepted_sibling_for_the_heads_pick():
     )
     assert not [c for c in forced.candidates if str(c.state).endswith("auto_accepted")]
     assert SIBLING_REASON  # the reason constant exists for the display
+    from apt_classifier.retrieve import parse_head_ratio
+
+    assert parse_head_ratio("2.0") == 2.0 and parse_head_ratio("model") == "model"
+    assert parse_head_ratio("0") is None and parse_head_ratio("x") is None

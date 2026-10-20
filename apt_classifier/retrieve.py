@@ -716,7 +716,7 @@ def retrieve_techniques(
         raise ValueError(f"unsupported technique head agreement {technique_head_agreement!r}")
     if parse_single_answer_cap(technique_head_first) is None:
         raise ValueError(f"unsupported technique head first {technique_head_first!r}")
-    if parse_single_answer_cap(technique_head_sibling) is None:
+    if parse_head_ratio(technique_head_sibling) is None:
         raise ValueError(f"unsupported technique head sibling {technique_head_sibling!r}")
     observations = [
         observation
@@ -2461,10 +2461,23 @@ def parse_single_answer_cap(value: Any) -> str | float | None:
     return bar if 0.0 < bar <= 1.0 else None
 
 
+def parse_head_ratio(value: Any) -> str | float | None:
+    """``model`` (follow the artifact), ``off``, or a forced ratio > 0 for an ablation; ``None``
+    when invalid."""
+    text = str(value if value is not None else "model").strip().lower() or "model"
+    if text in SINGLE_ANSWER_CAP_MODES:
+        return text
+    try:
+        ratio = float(text)
+    except ValueError:
+        return None
+    return ratio if ratio > 0.0 else None
+
+
 def _sibling_ratio(
     model: Any, candidate: TechniqueCandidate, mode: Any = HEAD_SIBLING
 ) -> float | None:
-    parsed = parse_single_answer_cap(mode)
+    parsed = parse_head_ratio(mode)
     if isinstance(parsed, float):
         return parsed
     if parsed != "model" or model is None:
