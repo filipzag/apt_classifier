@@ -149,6 +149,8 @@ DEFAULT_OUTPUT = REPO_ROOT / "data" / "models" / "acceptance" / "acceptance_mode
 CAP_BARS: tuple[float | None, ...] = (None, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0)
 # the head-first rule's bars on the head's joint probability (None: no rule)
 HEAD_FIRST_BARS: tuple[float | None, ...] = (None, 0.5, 0.6, 0.7, 0.8, 0.9, 0.95)
+# sibling replacement: the head must prefer the other member by at least this factor (None: off)
+SIBLING_RATIOS: tuple[float | None, ...] = (None, 1.5, 2.0, 3.0, 5.0)
 # an out-of-fold threshold this far from the in-sample runtime one is flagged in the metadata
 THRESHOLD_GAP_FLAG = 0.03
 
@@ -265,6 +267,7 @@ def select_threshold(
     feature_schema_version: int = 3,
     cap_bars: Sequence[float | None] = (None,),
     head_first_bars: Sequence[float | None] = (None,),
+    sibling_ratios: Sequence[float | None] = (None,),
 ) -> ThresholdSelection:
     """The acceptance threshold by ``method`` (``oof_runtime`` or ``in_sample``), with both
     in-sample operating points recorded beside it; ``probabilities`` are the in-sample ones of
@@ -325,22 +328,26 @@ def select_threshold(
     head_probabilities = [float(row.get("th_technique_p", 0.0) or 0.0) for row in rows]
     for bar in cap_bars:
         for head_bar in head_first_bars:
-            point = choose_threshold_runtime(
-                out_of_fold.tolist(),
-                labels,
-                case_ids,
-                fitted.expected_counts,
-                second_min_probability=bar,
-                head_probabilities=head_probabilities if head_bar is not None else None,
-                head_first_min_probability=head_bar,
-                **runtime_scoring,
-            )
-            cap_grid.append(point)
-            if operating_point is None or (
-                point["precision_floor_met"],
-                point["micro_f1"],
-            ) > (operating_point["precision_floor_met"], operating_point["micro_f1"]):
-                operating_point = point
+            for ratio in sibling_ratios:
+                point = choose_threshold_runtime(
+                    out_of_fold.tolist(),
+                    labels,
+                    case_ids,
+                    fitted.expected_counts,
+                    second_min_probability=bar,
+                    head_probabilities=head_probabilities
+                    if (head_bar is not None or ratio is not None)
+                    else None,
+                    head_first_min_probability=head_bar,
+                    sibling_min_ratio=ratio,
+                    **runtime_scoring,
+                )
+                cap_grid.append(point)
+                if operating_point is None or (
+                    point["precision_floor_met"],
+                    point["micro_f1"],
+                ) > (operating_point["precision_floor_met"], operating_point["micro_f1"]):
+                    operating_point = point
     assert operating_point is not None
     gap = abs(float(operating_point["threshold"]) - float(in_sample_runtime["threshold"]))
     selection.update(
@@ -487,6 +494,12 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="choose a head-first bar on dev: a candidate the technique head gives at least that "
         "joint probability is accepted outright; 'no rule' competes on the same grid",
+    )
+    parser.add_argument(
+        "--sibling",
+        action="store_true",
+        help="choose a sibling-replacement ratio on dev: the head's preferred member of a family "
+        "replaces an accepted sibling when the head prefers it by the ratio; 'no rule' competes",
     )
     parser.add_argument(
         "--feature-schema",
@@ -637,6 +650,7 @@ def main(argv: list[str] | None = None) -> int:
         feature_schema_version=schema,
         cap_bars=CAP_BARS if args.single_answer_cap else (None,),
         head_first_bars=HEAD_FIRST_BARS if args.head_first else (None,),
+        sibling_ratios=SIBLING_RATIOS if args.sibling else (None,),
     )
     operating_point, selection = selected.operating_point, selected.selection
     model.threshold = float(operating_point["threshold"])
@@ -645,9 +659,10 @@ def main(argv: list[str] | None = None) -> int:
         "single_answer": chosen_bar is not None,
         "second_min_probability": chosen_bar,
         "head_first_min_probability": operating_point.get("head_first_min_probability"),
+        "sibling_min_ratio": operating_point.get("sibling_min_ratio"),
         "chosen_on": "public dev, out-of-fold",
     }
-    gate_chosen = args.single_answer_cap or args.head_first
+    gate_chosen = args.single_answer_cap or args.head_first or args.sibling
     model.metadata = {
         **({"gate": gate} if gate_chosen else {}),
         **exemplar_fit_metadata(settings, exemplar_index),
@@ -721,7 +736,8 @@ def main(argv: list[str] | None = None) -> int:
         for point in selection.get("cap_grid", []):
             print(
                 f"  cap bar {point['second_min_probability']} head-first bar "
-                f"{point['head_first_min_probability']}: threshold {point['threshold']:.2f} "
+                f"{point['head_first_min_probability']} sibling ratio {point['sibling_min_ratio']}: "
+                f"threshold {point['threshold']:.2f} "
                 f"P {point['precision']:.3f} R {point['recall']:.3f} F1 {point['micro_f1']:.4f}"
             )
     print("standardized weights (top by |w|):")

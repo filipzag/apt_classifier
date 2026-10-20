@@ -1991,6 +1991,8 @@ NEW_RETRIEVAL_KNOBS = {
     "technique_head_agreement",
     # head-first acceptance (2026-10-20): "model" follows the artifact's gate record
     "technique_head_first",
+    # sibling replacement (2026-10-20): "model" follows the artifact's gate record
+    "technique_head_sibling",
 }
 
 

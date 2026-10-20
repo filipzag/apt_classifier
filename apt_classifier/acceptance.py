@@ -579,6 +579,20 @@ class AcceptanceModel:
             return None
 
     @property
+    def sibling_min_ratio(self) -> float | None:
+        """The sibling-replacement ratio (``metadata["gate"]["sibling_min_ratio"]``, chosen by the
+        fit on dev): the head's preferred member of a family replaces an accepted sibling when
+        the head prefers it by at least this factor; ``None`` when the model carries no rule."""
+        gate = self.metadata.get("gate")
+        if not isinstance(gate, Mapping):
+            return None
+        value = gate.get("sibling_min_ratio")
+        try:
+            return float(value) if value is not None else None
+        except (TypeError, ValueError):
+            return None
+
+    @property
     def head_first_min_probability(self) -> float | None:
         """The head-first bar (``metadata["gate"]["head_first_min_probability"]``, chosen by
         the fit on dev): a candidate the technique head gives at least this joint probability is
@@ -821,6 +835,10 @@ class HeadAwareAcceptance:
     def head_first_min_probability(self) -> float | None:
         return self.head_model.head_first_min_probability
 
+    @property
+    def sibling_min_ratio(self) -> float | None:
+        return self.head_model.sibling_min_ratio
+
     def prior_features(self, technique_id: str) -> dict[str, float]:
         return self.head_model.prior_features(technique_id)
 
@@ -921,8 +939,14 @@ def choose_threshold_runtime(
     second_min_probability: float | None = None,
     head_probabilities: Sequence[float] | None = None,
     head_first_min_probability: float | None = None,
+    sibling_min_ratio: float | None = None,
 ) -> dict[str, Any]:
     """:func:`choose_threshold` scored on the accepted sets the runtime gate produces.
+
+    ``sibling_min_ratio`` with ``head_probabilities`` emulates sibling replacement (prereg
+    cribl_sibling_replacement_2026-10-20): per (case, family) the row the head gives the
+    highest probability replaces an accepted sibling on probability alone when its head
+    probability is at least the ratio times the sibling's (``technique_ids`` give the family).
 
     ``head_first_min_probability`` with ``head_probabilities`` (the technique head's
     ``th_technique_p`` per row) emulates the head-first rule: an eligible row at or above the
@@ -981,10 +1005,23 @@ def choose_threshold_runtime(
         if len(head) != len(probs):
             raise ValueError("head probabilities and rows are misaligned")
         head_first_rows = eligible & (head >= float(head_first_min_probability))
+    swapper = (
+        _SiblingSwap(
+            case_ids,
+            technique_ids,
+            np.asarray(list(head_probabilities), dtype=float),
+            float(sibling_min_ratio),
+            eligible,
+        )
+        if sibling_min_ratio is not None and head_probabilities is not None
+        else None
+    )
     for threshold in candidates:
         on_probability = eligible & (probs >= threshold)
         if capper is not None:
             on_probability = capper.keep(on_probability)
+        if swapper is not None:
+            on_probability = swapper.swap(on_probability)
         accepted_rows = forced_mask | on_probability | head_first_rows
         accepted = np.zeros(len(pair_index), dtype=bool)
         accepted[pairs[accepted_rows]] = True
@@ -1017,7 +1054,56 @@ def choose_threshold_runtime(
     chosen["head_first_min_probability"] = (
         float(head_first_min_probability) if head_first_min_probability is not None else None
     )
+    chosen["sibling_min_ratio"] = (
+        float(sibling_min_ratio) if sibling_min_ratio is not None else None
+    )
     return chosen
+
+
+class _SiblingSwap:
+    """Per (case, family) the row with the highest head probability; an accepted sibling on
+    probability alone is replaced by it when the head prefers it by the ratio (the runtime rule
+    of ``retrieve._apply_sibling_replacement``)."""
+
+    def __init__(
+        self,
+        case_ids: Sequence[str],
+        technique_ids: Sequence[str],
+        head: np.ndarray,
+        ratio: float,
+        eligible: np.ndarray,
+    ) -> None:
+        keys = [
+            f"{case}\0{str(technique).split('.', 1)[0]}"
+            for case, technique in zip(case_ids, technique_ids, strict=True)
+        ]
+        index: dict[str, int] = {}
+        group = np.asarray([index.setdefault(key, len(index)) for key in keys])
+        order = np.lexsort((-head, group))
+        best = np.zeros(len(index), dtype=np.int64)
+        seen = np.zeros(len(index), dtype=bool)
+        for row in order:
+            g = group[row]
+            if not seen[g] and eligible[row]:
+                best[g], seen[g] = row, True
+        self.best_row = np.where(seen[group], best[group], np.arange(len(head)))
+        self.head = head
+        self.ratio = ratio
+
+    def swap(self, accepted: np.ndarray) -> np.ndarray:
+        if not len(accepted):
+            return accepted
+        rows = np.arange(len(accepted))
+        best = self.best_row
+        moved = (
+            accepted
+            & (best != rows)
+            & (self.head[best] >= self.ratio * self.head)
+            & (self.head[best] > 0)
+        )
+        out = accepted & ~moved
+        out[best[moved]] = True
+        return out
 
 
 class _SingleAnswerCap:

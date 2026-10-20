@@ -1,0 +1,31 @@
+{
+  "schema": "cribl_finetune_prereg/1",
+  "id": "cribl_sibling_replacement_2026-10-20",
+  "title": "Sibling replacement: the head's preferred technique replaces an accepted sibling of the same family",
+  "registered": "2026-10-20",
+  "parent": "docs/preregistration/cribl_head_first_2026-10-20.json (rejected: the gate already accepts what the head is sure of) and cribl_product_integration_2026-10-19.json; docs 21.3.18",
+  "question": "On CTI-HAL, 65 of the 292 statements where the pipeline accepts only wrong techniques accept a sibling or the parent of the gold technique: the family is right, the member is not. The head picks the member within a family better than retrieval does (exact top-1 0.514 against the pipeline's 0.509 hit@1 with the head, and the within-family rows of the technique head were trained for exactly that). Does letting the head's preferred member replace an accepted sibling raise exact-id F1 without touching family-level F1 or precision?",
+  "change": {
+    "rule": "after the calibrated gate in _assign_states_for_group, for each candidate accepted on probability (not cue-supported, no verifier verdict): among the candidates of the same family in the pool (retrieved ones and the head's proposals), take the one the head gives the highest joint probability; when it is another candidate and its head probability is at least sibling_min_ratio times the accepted one's, it is accepted in the sibling's place (the sibling returns to review, both with the reason recorded). The context guards, the hierarchy rules, the cap and the agreement filter are untouched; observations the head did not score are unchanged",
+    "where_the_ratio_comes_from": "the acceptance artifact's gate record, chosen on public dev by scripts/fit_acceptance_model.py --sibling: the out-of-fold runtime threshold rule, now sibling-aware (it swaps within (case, family) groups of the fit rows the same way), is run for ratios {none, 1.5, 2, 3, 5} jointly with the usual threshold grid, and the pair with the best out-of-fold micro-F1 at the precision floor is kept; 'none' competes. TECHNIQUE_HEAD_SIBLING=model follows the artifact, off ignores it, a number forces a ratio for an ablation"
+  },
+  "arms": {
+    "head": "the current default (schema-4 pair; the artifacts of 2026-10-20 reused)",
+    "sibling": "a schema-4 refit with --sibling on public dev, through the head-aware pair"
+  },
+  "headline": "CTI-HAL accepted-set micro-F1 on exact ids, sibling minus head, paired case bootstrap (1,000, seed 7), lower bound above 0",
+  "constraints": [
+    "parent-aware F1 not below the head arm on CTI-HAL or the public test (the rule moves within families, so it should not change)",
+    "public test exact F1 not below the head arm beyond its paired interval",
+    "accepted-set micro-precision on CTI-HAL and the public test not more than 0.01 below the head arm",
+    "CTI-HAL attribution top-1 not below the head arm and no wrong name; Elastic strict top-1 not below, no wrong name, open-set names 0"
+  ],
+  "secondary": [
+    "the dev-chosen ratio and the out-of-fold grid; how many swaps per set and how many turn a wrong member into the right one or the reverse",
+    "AnnoCTR, CTI-Rationale, AthenaBench ATE, CTIBench ATE and CyberThreat-Eval, sibling against head (report only)"
+  ],
+  "selection": "the ratio and threshold on public dev only; one run per arm per set",
+  "adoption": "if the headline and constraints hold, the sibling artifact becomes the ACCEPTANCE_MODEL_HEAD_PATH default; otherwise the current pair stays and the result is documented",
+  "expectation": "exact F1 up by 1 to 3 points on CTI-HAL where the sibling confusions sit; small or nothing on the public test, whose labels are often parent-level; family-level numbers unchanged by construction",
+  "cost": "laptop only, about 1.5 hours; no API credit"
+}

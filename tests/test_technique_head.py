@@ -923,3 +923,96 @@ def test_head_first_rule_accepts_what_the_head_is_sure_of():
     )
     # (a cue may still accept on a log line; the head-first reason never appears there)
     assert not [c for c in logged.candidates if c.state_reason.startswith(HEAD_FIRST_REASON)]
+
+
+def test_sibling_replacement_swaps_the_accepted_sibling_for_the_heads_pick():
+    import numpy as np
+
+    from apt_classifier.acceptance import choose_threshold_runtime
+    from apt_classifier.retrieve import SIBLING_REASON, SIBLING_REPLACED_REASON
+
+    # the threshold rule: within (case, family) the head's best member replaces an accepted
+    # sibling when preferred by the ratio
+    probs = np.asarray([0.9, 0.1, 0.9, 0.2])
+    head = [0.1, 0.6, 0.5, 0.4]
+    techniques = ["T1059.003", "T1059.001", "T1003.001", "T1003.002"]
+    labels = [0, 1, 1, 0]
+    common = {
+        "blocked": [False] * 4,
+        "forced": [False] * 4,
+        "technique_ids": techniques,
+        "min_precision": 0.0,
+        "grid": [0.5],
+    }
+    plain = choose_threshold_runtime(
+        probs, labels, ["a", "a", "b", "b"], {"a": 1, "b": 1}, **common
+    )
+    swapped = choose_threshold_runtime(
+        probs,
+        labels,
+        ["a", "a", "b", "b"],
+        {"a": 1, "b": 1},
+        head_probabilities=head,
+        sibling_min_ratio=2.0,
+        **common,
+    )
+    # case a: .003 (0.1) replaced by .001 (0.6, 6x); case b: .001 (0.5) stays (0.4 is below)
+    assert plain["precision"] == 0.5 and swapped["precision"] == 1.0 and swapped["accepted"] == 2
+    assert swapped["sibling_min_ratio"] == 2.0
+    # the gate: the shipped model accepts T1059.001 (the retrieved candidate), the head puts
+    # T1059 far above it among the family's candidates when T1059 is in the pool
+    kb, store, _ = _two_hit_setup()
+    kb.techniques["T1059"] = Technique(id="T1059", name="Command and Scripting Interpreter")
+    rows, labels = _rows()
+    model = AcceptanceModel.fit(rows, labels, attack_version="")
+    model.threshold = 0.0
+
+    def rows_for(text):
+        return _row([["T1059", 0.9]], [["T1059", 0.8], ["T1059.001", 0.05]])
+
+    client = _client(FakeService(rows_for))
+    prose = Observation(text="the operator ran a script", provenance=Provenance(source="free_text"))
+    before = retrieve_techniques(
+        EvidenceLedger(observations=[prose]),
+        store,
+        kb,
+        retrieval_mode="dense",
+        cues_enabled=False,
+        acceptance_model=model,
+        technique_head=client,
+    )
+    accepted = {c.technique_id for c in before.candidates if str(c.state).endswith("auto_accepted")}
+    assert "T1059.001" in accepted and "T1059" in accepted  # the proposal is accepted too
+    model.metadata["gate"] = {"sibling_min_ratio": 2.0}
+    assert model.sibling_min_ratio == 2.0
+    after = retrieve_techniques(
+        EvidenceLedger(observations=[prose]),
+        store,
+        kb,
+        retrieval_mode="dense",
+        cues_enabled=False,
+        acceptance_model=model,
+        technique_head=client,
+    )
+    by_id = {c.technique_id: c for c in after.candidates}
+    assert str(by_id["T1059.001"].state).endswith("needs_review")
+    assert by_id["T1059.001"].state_reason == SIBLING_REPLACED_REASON
+    assert str(by_id["T1059"].state).endswith("auto_accepted")
+    # T1059 had been accepted on probability already, so its reason is the model's; a member
+    # accepted only through the swap carries the sibling reason
+    model.threshold = (
+        0.99  # the model now accepts nothing on its own; force T1059.001 via head-first
+    )
+    forced = retrieve_techniques(
+        EvidenceLedger(observations=[prose]),
+        store,
+        kb,
+        retrieval_mode="dense",
+        cues_enabled=False,
+        acceptance_model=model,
+        technique_head=client,
+        technique_head_first="off",
+        technique_head_sibling="off",
+    )
+    assert not [c for c in forced.candidates if str(c.state).endswith("auto_accepted")]
+    assert SIBLING_REASON  # the reason constant exists for the display

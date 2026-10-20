@@ -465,6 +465,13 @@ SINGLE_ANSWER_CAP_MODES = ("model", "off")
 # gives at least the artifact's bar is accepted outright; model / off / a forced bar
 HEAD_FIRST = "model"
 HEAD_FIRST_REASON = "technique head probability passed the dev-selected bar"
+# sibling replacement (2026-10-20, prereg cribl_sibling_replacement): the head's preferred member
+# of a family replaces an accepted sibling; model / off / a forced ratio
+HEAD_SIBLING = "model"
+SIBLING_REASON = "technique head prefers this member of the family over the accepted sibling"
+SIBLING_REPLACED_REASON = (
+    "replaced by the technique head's preferred member of the family; requires review"
+)
 # the agreement filter (2026-10-19, prereg cribl_head_agreement): an accepted technique stays
 # accepted only when the technique head picks it too (off: no filter)
 HEAD_AGREEMENT = "off"
@@ -547,6 +554,9 @@ def retrieval_kwargs(
         "technique_head_first": str(
             getattr(settings, "technique_head_first", HEAD_FIRST) or HEAD_FIRST
         ),
+        "technique_head_sibling": str(
+            getattr(settings, "technique_head_sibling", HEAD_SIBLING) or HEAD_SIBLING
+        ),
     }
 
 
@@ -626,6 +636,7 @@ def retrieve_techniques(
     single_answer_cap: str = SINGLE_ANSWER_CAP,
     technique_head_agreement: str = HEAD_AGREEMENT,
     technique_head_first: str = HEAD_FIRST,
+    technique_head_sibling: str = HEAD_SIBLING,
 ) -> RetrievalResult:
     """Retrieve ATT&CK technique candidates for the positive observations in a ledger.
 
@@ -705,6 +716,8 @@ def retrieve_techniques(
         raise ValueError(f"unsupported technique head agreement {technique_head_agreement!r}")
     if parse_single_answer_cap(technique_head_first) is None:
         raise ValueError(f"unsupported technique head first {technique_head_first!r}")
+    if parse_single_answer_cap(technique_head_sibling) is None:
+        raise ValueError(f"unsupported technique head sibling {technique_head_sibling!r}")
     observations = [
         observation
         for observation in ledger.observations
@@ -1082,6 +1095,7 @@ def retrieve_techniques(
         single_answer_cap=single_answer_cap,
         technique_head_agreement=technique_head_agreement,
         technique_head_first=technique_head_first,
+        technique_head_sibling=technique_head_sibling,
     )
 
 
@@ -1601,6 +1615,7 @@ def finalize_retrieval_candidates(
     single_answer_cap: str = SINGLE_ANSWER_CAP,
     technique_head_agreement: str = HEAD_AGREEMENT,
     technique_head_first: str = HEAD_FIRST,
+    technique_head_sibling: str = HEAD_SIBLING,
 ) -> RetrievalResult:
     """Assign mapping states only after all candidate evidence is available.
 
@@ -1635,6 +1650,7 @@ def finalize_retrieval_candidates(
                 single_answer_cap=single_answer_cap,
                 technique_head_agreement=technique_head_agreement,
                 technique_head_first=technique_head_first,
+                technique_head_sibling=technique_head_sibling,
             )
         )
     corroborated = 0
@@ -2146,6 +2162,7 @@ def _assign_candidate_states(
     single_answer_cap: str = SINGLE_ANSWER_CAP,
     technique_head_agreement: str = HEAD_AGREEMENT,
     technique_head_first: str = HEAD_FIRST,
+    technique_head_sibling: str = HEAD_SIBLING,
 ) -> list[TechniqueCandidate]:
     """Assign AUTO_ACCEPTED / NEEDS_REVIEW / AUTO_REJECTED per candidate.
 
@@ -2168,6 +2185,7 @@ def _assign_candidate_states(
             single_answer_cap=single_answer_cap,
             technique_head_agreement=technique_head_agreement,
             technique_head_first=technique_head_first,
+            technique_head_sibling=technique_head_sibling,
         )
     decided: dict[str, TechniqueCandidate] = {}
     for view, views, group in judged:
@@ -2184,6 +2202,7 @@ def _assign_candidate_states(
             single_answer_cap=single_answer_cap,
             technique_head_agreement=technique_head_agreement,
             technique_head_first=technique_head_first,
+            technique_head_sibling=technique_head_sibling,
         )
         for original, result in zip(group, results, strict=True):
             decided[original.technique_id] = original.model_copy(
@@ -2210,6 +2229,7 @@ def _assign_states_for_group(
     single_answer_cap: str = SINGLE_ANSWER_CAP,
     technique_head_agreement: str = HEAD_AGREEMENT,
     technique_head_first: str = HEAD_FIRST,
+    technique_head_sibling: str = HEAD_SIBLING,
 ) -> list[TechniqueCandidate]:
     dense_scores = sorted(
         (
@@ -2412,6 +2432,8 @@ def _assign_states_for_group(
         if extra_evidence:
             update["evidence"] = [*candidate.evidence, *extra_evidence]
         output.append(candidate.model_copy(update=update))
+    if acceptance_model is not None and technique_head_sibling != "off":
+        output = _apply_sibling_replacement(output, acceptance_model, technique_head_sibling)
     if acceptance_model is not None and single_answer_cap != "off":
         output = _apply_single_answer_cap(output, acceptance_model, single_answer_cap)
     if technique_head_agreement != "off":
@@ -2437,6 +2459,76 @@ def parse_single_answer_cap(value: Any) -> str | float | None:
     except ValueError:
         return None
     return bar if 0.0 < bar <= 1.0 else None
+
+
+def _sibling_ratio(
+    model: Any, candidate: TechniqueCandidate, mode: Any = HEAD_SIBLING
+) -> float | None:
+    parsed = parse_single_answer_cap(mode)
+    if isinstance(parsed, float):
+        return parsed
+    if parsed != "model" or model is None:
+        return None
+    picker = getattr(model, "model_for", None)
+    if callable(picker):
+        model = picker(candidate)
+    ratio = getattr(model, "sibling_min_ratio", None)
+    return float(ratio) if ratio is not None else None
+
+
+def _apply_sibling_replacement(
+    candidates: list[TechniqueCandidate], model: Any, mode: Any = HEAD_SIBLING
+) -> list[TechniqueCandidate]:
+    """The head's preferred member of a family replaces an accepted sibling (prereg
+    cribl_sibling_replacement): for each candidate accepted on probability alone, the candidate
+    of the same family with the highest head probability takes its place when the head prefers
+    it by the model's ratio; cue-supported, verifier and head-first decisions are untouched."""
+    if not candidates:
+        return candidates
+    ratio = _sibling_ratio(model, candidates[0], mode)
+    if ratio is None:
+        return candidates
+    head = [_head_probability(candidate) for candidate in candidates]
+    families: dict[str, list[int]] = {}
+    for index, candidate in enumerate(candidates):
+        if candidate.evidence_for("hierarchy_parent") is None:
+            families.setdefault(str(candidate.technique_id).split(".", 1)[0], []).append(index)
+    output = list(candidates)
+    for members in families.values():
+        if len(members) < 2:
+            continue
+        best = max(members, key=lambda i: (head[i], -i))
+        if head[best] <= 0.0:
+            continue
+        for index in members:
+            candidate = output[index]
+            if (
+                index == best
+                or candidate.state is not TechniqueCandidateState.AUTO_ACCEPTED
+                or candidate.state_reason != MODEL_ACCEPT_REASON
+                or head[best] < ratio * head[index]
+            ):
+                continue
+            target = output[best]
+            if (
+                target.verification.verdict is TechniqueVerificationVerdict.UNSUPPORTED
+                or target.state is TechniqueCandidateState.AUTO_REJECTED
+            ):
+                continue
+            output[index] = candidate.model_copy(
+                update={
+                    "state": TechniqueCandidateState.NEEDS_REVIEW,
+                    "state_reason": SIBLING_REPLACED_REASON,
+                }
+            )
+            if target.state is not TechniqueCandidateState.AUTO_ACCEPTED:
+                output[best] = target.model_copy(
+                    update={
+                        "state": TechniqueCandidateState.AUTO_ACCEPTED,
+                        "state_reason": f"{SIBLING_REASON} ({head[best]:.2f} vs {head[index]:.2f})",
+                    }
+                )
+    return output
 
 
 def _head_probability(candidate: TechniqueCandidate) -> float:

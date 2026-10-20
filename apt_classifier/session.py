@@ -481,6 +481,9 @@ class AttributionEngine:
             technique_head_first=str(
                 getattr(self.settings, "technique_head_first", "model") or "model"
             ),
+            technique_head_sibling=str(
+                getattr(self.settings, "technique_head_sibling", "model") or "model"
+            ),
         )
 
     def analyze(

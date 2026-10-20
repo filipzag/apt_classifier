@@ -128,6 +128,10 @@ class Settings(BaseSettings):
     # accepted outright; artifacts without the record change nothing), "off" ignores it, a
     # number forces a bar for an ablation.
     technique_head_first: str = "model"
+    # Sibling replacement (2026-10-20, prereg cribl_sibling_replacement): "model" follows the
+    # artifact's gate record (the head's preferred member of a family replaces an accepted
+    # sibling when it prefers it by the recorded ratio), "off" ignores it, a number forces it.
+    technique_head_sibling: str = "model"
     acceptance_model_path: Path = (
         PROJECT_ROOT / "data" / "models" / "acceptance" / "acceptance_model.json"
     )
