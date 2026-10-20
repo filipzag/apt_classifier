@@ -5723,8 +5723,17 @@ puts them in the mapping benchmark's format under `data/benchmarks/extra/`):
 | AthenaBench ATE (500 scenarios, parent labels; evaluation only) | top-ranked technique right at parent level / top-3 / accepted set holds the gold family / parent-aware F1 | 0.498 / 0.758 / 0.348 / 0.390 | **0.682** / 0.860 / 0.616 / 0.603 (the head alone 0.736; frontier models 0.76) |
 | CTIBench ATE (60 texts, accepted techniques pooled per text, parent level; evaluation only) | P / R / F1 | 0.533 / 0.385 / 0.447 | 0.644 / 0.506 / **0.567** (the head alone 0.575) |
 
+| CyberThreat-Eval TTP extraction (xse/CyberThreat-Eval, MIT; 186 expert-labelled CTI digests read as pasted reports, 7,612 sentences; prereg `cribl_cyberthreat_eval_2026-10-20.json`) | the authors' rule: article-level exact ids, micro P / R / F1; parent level beside | 0.119 / 0.244 / 0.160; parent 0.229 | 0.139 / 0.310 / **0.192** (+0.032 [+0.021, +0.043]); parent 0.261 |
+
 Every set moves the same way: precision and recall both up, hit@1 up 10 to 18 points, no wrong
-name anywhere, the open set clean. The gains are largest where the shipped pipeline was weakest
+name anywhere, the open set clean. CyberThreat-Eval is the one set where both arms score low in
+absolute terms: its labels are a curated set of about 8 techniques per article (median 681 words,
+39 sentences), while the pipeline reads every sentence and accepts 17 to 19 techniques per
+article, so precision is the limit (0.14) and recall only reaches 0.31; the head adds three
+points of F1 at both levels. That is the task formulation (an analyst's digest set against an
+exhaustive statement-level read), not the per-statement quality measured above; a
+precision-oriented setting such as the family agreement filter is the lever there (its run on this
+set is below). The paper's own LLM baselines are not in the dataset card and are not quoted. The gains are largest where the shipped pipeline was weakest
 (AnnoCTR, CTI-HAL) and smallest on CTI-Rationale, whose labels are rationale-level and partly
 sub-technique. The committed `*_current.json` artifacts on the main branch predate the default
 and are regenerated after the merge (the numbers here are the worktree's run of the same
