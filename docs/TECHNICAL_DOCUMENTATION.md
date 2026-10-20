@@ -5695,6 +5695,41 @@ malware named passes as before, and a long one without it is shown as a shortlis
 the Elastic attributed posts above 30 techniques already were. The open set has 7 APT-like posts
 and 15 commodity ones; the guard does not look at that label, only at the evidence volume.
 
+**The head on by default: re-evaluation of 2026-10-20.** Product owner's decision after the
+cluster guard settled the open-set naming: `TECHNIQUE_HEAD_ENABLED=true`, pinned to the registered
+checkpoint, the head-aware acceptance pair, the cluster volume guard at 30. Every local benchmark
+was rerun under these defaults with the service up (the benchmarks refuse to write a run the head
+did not score throughout), and the four other technique sets were run head off and on:
+
+| Benchmark (local pipeline) | Before (committed artifact or the same-code off arm) | New default |
+|---|---|---|
+| Public held-out, pooled (1,391): P / R / F1 / parent-aware F1 / hit@1 / hit@10 | 0.516 / 0.349 / 0.417 / 0.451 / 0.501 / 0.805 | **0.553 / 0.398 / 0.463 / 0.500 / 0.556 / 0.851**; without cues 0.467 (the cues are now a hair net-negative); `check-regression` passes |
+| CTI-HAL statements (968): P / R / F1 / parent-aware F1 | 0.425 / 0.341 / 0.378 / 0.425 | **0.553 / 0.463 / 0.504 / 0.564** |
+| CTI-HAL attribution, anonymised (55): top-1 / top-5 / MRR / named correct / wrong / technique recall | 0.455 / 0.600 / 0.512 / 10 / 0 / 0.405 | 0.473 / 0.636 / 0.540 / 9 / 0 / 0.491 |
+| CTI-HAL attribution, as reported | 0.564 / 0.727 / 0.636 / 13 / 0 / 0.399 | 0.564 / 0.764 / 0.650 / 12 / 0 / 0.488 |
+| Elastic strict (8 + 22 open): top-1 / named / wrong / technique recall; open-set names | 4/8 / 1 / 0 / 0.759; 1 (same code) | 4/8 / 1 / 0 / 0.832; **0** |
+| Elastic names / tradecraft / as reported: top-1, top-5, named | 5/8, 0.75, 1 / 1/8, 0.25, 0 / 5/8, 0.75, 0 | 5/8, 0.75, 1 / 1/8, 0.375, 0 / 5/8, 0.75, 1 |
+| ATT&CK folds, seed 7 (178): top-1 / top-5 / named / wrong / technique recall | 0.824 / 0.941 / 26 / 0 / 0.604 (same code) | 0.837 / 0.974 / 38 / 0 / 0.778 (optimistic: the head trained on the procedure sentences; no wrong name is the only reading) |
+| EvidenceForge clinic (logs) | 0.357 / 0.600 / 0.545 | identical (logs are not scored) |
+| Curated retrieval diagnostic | 0.765 | identical (the script calls retrieval without the gate or the head) |
+
+The other technique sets (head off → on, same code; `scripts/cribl_finetune/export_eval_sets.py`
+puts them in the mapping benchmark's format under `data/benchmarks/extra/`):
+
+| Set | Rule | Off | Head on |
+|---|---|---|---|
+| AnnoCTR test (738 sentences, parent-level labels) | parent-aware F1 / exact F1 / hit@1 | 0.414 / 0.272 / 0.331 | **0.611** / 0.392 / 0.453 |
+| CTI-Rationale test (209) | exact P / R / F1, hit@1 | 0.394 / 0.287 / 0.332, 0.325 | 0.447 / 0.357 / **0.397**, 0.416 |
+| AthenaBench ATE (500 scenarios, parent labels; evaluation only) | top-ranked technique right at parent level / top-3 / accepted set holds the gold family / parent-aware F1 | 0.498 / 0.758 / 0.348 / 0.390 | **0.682** / 0.860 / 0.616 / 0.603 (the head alone 0.736; frontier models 0.76) |
+| CTIBench ATE (60 texts, accepted techniques pooled per text, parent level; evaluation only) | P / R / F1 | 0.533 / 0.385 / 0.447 | 0.644 / 0.506 / **0.567** (the head alone 0.575) |
+
+Every set moves the same way: precision and recall both up, hit@1 up 10 to 18 points, no wrong
+name anywhere, the open set clean. The gains are largest where the shipped pipeline was weakest
+(AnnoCTR, CTI-HAL) and smallest on CTI-Rationale, whose labels are rationale-level and partly
+sub-technique. The committed `*_current.json` artifacts on the main branch predate the default
+and are regenerated after the merge (the numbers here are the worktree's run of the same
+targets).
+
 ## 22. Failure modes and troubleshooting
 
 ### 22.1 “ATT&CK knowledge base has not been ingested”
