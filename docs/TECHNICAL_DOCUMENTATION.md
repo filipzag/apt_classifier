@@ -5732,8 +5732,11 @@ absolute terms: its labels are a curated set of about 8 techniques per article (
 article, so precision is the limit (0.14) and recall only reaches 0.31; the head adds three
 points of F1 at both levels. That is the task formulation (an analyst's digest set against an
 exhaustive statement-level read), not the per-statement quality measured above; a
-precision-oriented setting such as the family agreement filter is the lever there (its run on this
-set is below). The paper's own LLM baselines are not in the dataset card and are not quoted. The gains are largest where the shipped pipeline was weakest
+precision-oriented setting was tried on it: the family agreement filter on the head pair
+(`TECHNIQUE_HEAD_AGREEMENT=family`) scores 0.141 / 0.295 / 0.190, i.e. it removes about one
+accepted technique per article and changes nothing, because the surplus acceptances are
+techniques the head agrees the sentences describe; they are simply not in the curated article
+set. The paper's own LLM baselines are not in the dataset card and are not quoted. The gains are largest where the shipped pipeline was weakest
 (AnnoCTR, CTI-HAL) and smallest on CTI-Rationale, whose labels are rationale-level and partly
 sub-technique. The committed `*_current.json` artifacts on the main branch predate the default
 and are regenerated after the merge (the numbers here are the worktree's run of the same
