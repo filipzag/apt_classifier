@@ -145,7 +145,13 @@ def test_votes_are_conditioned_on_the_accepted_technique():
 
 def test_software_route_links_a_tool_sentence_to_its_users_with_rarity_and_the_seen_bonus():
     kb = _kb()
-    params = {"family": "exact", "link_weight": 0.0, "seen_bonus": 1.0, "min_similarity": 0.0}
+    params = {
+        "family": "exact",
+        "software_route": True,
+        "link_weight": 0.0,
+        "seen_bonus": 1.0,
+        "min_similarity": 0.0,
+    }
     model = ProcedureMatchModel(_base(kb), kb, params)
     g = {gid: i for i, gid in enumerate(model.group_ids)}
     statement = ["the malware downloads additional payloads from its command server over https"]

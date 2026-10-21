@@ -1354,6 +1354,34 @@ member as a runtime attribute of the classifier context (`context.statements`, s
 combiner fingerprint, so a new field there would invalidate the production combiner. Gate trial
 2026-10-21: 21.3.19.
 
+**Technique-conditioned procedure model (2026-10-21).** `apt_classifier/procedure_match.py` reads the
+case **per accepted technique**: the statements that support a technique are compared only with the
+corpus sentences documented under that technique (`PROCEDURE_MATCH_FAMILY=parent`: also its parent and
+its sub-techniques, never its siblings), with the sentence index of the behaviour model. A group is
+reached through three routes: its own (or its campaign's) procedure sentence under the technique
+(vote = cosine); a malware or tool's procedure sentence under the technique, vote = cosine x the
+software member's rarity weight normalised to [0, 1] x `1 + PROCEDURE_MATCH_SEEN_BONUS` when the report
+names that software, for every group ATT&CK links the software to (`PROCEDURE_MATCH_SOFTWARE_ROUTE`); and
+the text-free link, the report names a software that ATT&CK documents for the accepted technique, vote =
+`PROCEDURE_MATCH_LINK_WEIGHT` x rarity for every group that uses it. A group's vote per technique is the
+best route; its case score the mean of its votes over the accepted techniques (`mean`; `top5` over its
+five best), z-scored, plus `PROCEDURE_MATCH_PRIOR` x the log prominence prior, softmax over the groups
+reached. The statements reach it as `context.technique_statements` (per accepted technique, set at
+runtime in `retrieve.build_classifier_context`). Dev choice (`scripts/fit_procedure_match.py`: the vendor
+set and the ATT&CK campaigns run through the head-on pipeline once, then 64 variants with the member
+alone, each report scored against a corpus that hides the report's own statements, since a campaign's
+statements are the corpus's campaign sentences): floor 0.30, exact technique, software-sentence route
+off, link on, mean: MRR 0.820, top-1 0.782 over 55 reports (vendor 0.794 / MRR 0.845, campaigns 0.762 /
+0.779). The text routes alone reach MRR 0.64 (top-1 0.55); the named-software link lifts it to 0.82,
+the parent family changes little (0.815 at floor 0.15) and the software sentences add nothing on top of
+the link. The `procedure_match` member votes in the `learned_profile`
+family only when `PROCEDURE_MATCH_WEIGHT` > 0, is listed in `attribution.NOT_INDEPENDENT_EVIDENCE`, binds
+the combiner fingerprint at weight > 0 and is hidden per fold like the two text members. With it the
+combiner's feature schema became 3: every optional member (`combiner.OPTIONAL_CLASSIFIERS`: the group
+network, the text, behaviour and procedure models) has its own present / inverse-rank / relative-score
+columns and regime interactions, zero when it does not vote, appended after the schema-2 columns so an
+older artifact keeps loading on its own columns. Gate trial 2026-10-21: 21.3.20.
+
 ---
 
 ## 10. Family-aware Reciprocal Rank Fusion

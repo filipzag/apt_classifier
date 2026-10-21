@@ -52,19 +52,22 @@ PROCEDURE_MATCH_NAME = "procedure_match"
 AGGREGATES = ("mean", "top5")
 FAMILIES = ("exact", "parent")
 DEFAULT_PARAMS: dict[str, Any] = {
-    # a corpus sentence votes only above this cosine
-    "min_similarity": 0.15,
-    # "exact": sentences documented under the accepted technique only; "parent": also under its
-    # parent and its sub-techniques (never its siblings, which are what separates groups)
-    "family": "parent",
+    # a corpus sentence votes only above this cosine (dev choice 2026-10-21: 0.30)
+    "min_similarity": 0.30,
+    # "exact": sentences documented under the accepted technique only (dev choice 2026-10-21);
+    # "parent": also under its parent and its sub-techniques (never its siblings, which are what
+    # separates groups)
+    "family": "exact",
     # software procedure sentences under the technique vote for the software's user groups
-    "software_route": True,
+    # (dev choice 2026-10-21: off, they add nothing on top of the link route)
+    "software_route": False,
     # multiplier (1 + seen_bonus) on the software route when the report names that software
-    "seen_bonus": 1.0,
+    "seen_bonus": 0.0,
     # the text-free link: named software documented for the accepted technique -> its users
     "link_weight": 1.0,
     # "mean": votes averaged over every accepted technique; "top5": over the five best
-    "aggregate": "top5",
+    # (dev choice 2026-10-21: mean)
+    "aggregate": "mean",
     # weight of the log-prominence prior on the z-scored case score (0: none)
     "prior": 0.0,
 }

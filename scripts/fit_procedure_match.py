@@ -88,16 +88,16 @@ def load_reports(paths: list[Path], kb: Any) -> list[dict[str, Any]]:
 
 def extract(reports: list[dict[str, Any]], output: Path) -> None:
     """Run each report through the engine once and cache the member's inputs."""
-    from apt_classifier.evidence import EvidenceLedger, Observation, Provenance
-    from apt_classifier.llm import OpenRouterClient
+    from apt_classifier.embeddings import SentenceTransformerEmbedder
+    from apt_classifier.evidence.models import EvidenceLedger, Observation, Provenance
     from apt_classifier.session import AttributionEngine
     from apt_classifier.vectorstore import ChromaVectorStore
 
     settings = Settings()
     kb = AttackKnowledgeBase.load(settings.kb_path)
-    store = ChromaVectorStore(settings=settings)
-    client = OpenRouterClient(settings) if settings.openrouter_api_key else None
-    engine = AttributionEngine(settings, kb, store, client)  # type: ignore[arg-type]
+    store = ChromaVectorStore(settings, SentenceTransformerEmbedder.from_settings(settings))
+    # no LLM: the local pipeline (retrieval, the technique head, acceptance) decides
+    engine = AttributionEngine(settings, kb, store, None)  # type: ignore[arg-type]
     rows: dict[str, Any] = {}
     for i, report in enumerate(reports, 1):
         ledger = EvidenceLedger(
@@ -128,28 +128,39 @@ def extract(reports: list[dict[str, Any]], output: Path) -> None:
     print(f"wrote {output}")
 
 
-def evaluate(
-    base: TextGroupModel, kb: Any, params: dict[str, Any], inputs: dict[str, Any]
-) -> dict[str, Any]:
-    model = ProcedureMatchModel(base, kb, params)
-    ranks: list[int | None] = []
-    for row in inputs.values():
-        scorer = model
-        if row.get("hidden_texts"):
-            scorer = model.without(kb, group_id=row["group_id"], texts=row["hidden_texts"])
-        scores, _ = scorer.scores(row["technique_statements"], set(row["software_ids"]))
-        ordered = sorted(scores.items(), key=lambda item: (-item[1], item[0]))
-        rank = next((i for i, (g, _) in enumerate(ordered, 1) if g == row["group_id"]), None)
-        ranks.append(rank)
-    n = len(ranks)
+def _metrics(ranks: list[int | None]) -> dict[str, Any]:
+    n = max(len(ranks), 1)
     return {
-        "reports": n,
+        "reports": len(ranks),
         "top1": round(sum(1 for r in ranks if r == 1) / n, 4),
         "top3": round(sum(1 for r in ranks if r and r <= 3) / n, 4),
         "top5": round(sum(1 for r in ranks if r and r <= 5) / n, 4),
         "mrr": round(sum(1.0 / r for r in ranks if r) / n, 4),
         "unranked": sum(1 for r in ranks if r is None),
     }
+
+
+def evaluate(
+    base: TextGroupModel,
+    kb: Any,
+    params: dict[str, Any],
+    inputs: dict[str, Any],
+    statements: dict[str, list[str]],
+) -> dict[str, Any]:
+    """The member alone; each report scored against a corpus that hides the report's own
+    statements and its listed near-copies (an ATT&CK campaign's statements *are* the corpus's
+    campaign procedure sentences, so without this the campaigns would score themselves)."""
+    model = ProcedureMatchModel(base, kb, params)
+    ranks: dict[str, list[int | None]] = {}
+    for report_id, row in inputs.items():
+        hidden = list(row.get("hidden_texts") or []) + list(statements.get(report_id, []))
+        scorer = model.without(kb, group_id=row["group_id"], texts=hidden)
+        scores, _ = scorer.scores(row["technique_statements"], set(row["software_ids"]))
+        ordered = sorted(scores.items(), key=lambda item: (-item[1], item[0]))
+        rank = next((i for i, (g, _) in enumerate(ordered, 1) if g == row["group_id"]), None)
+        ranks.setdefault(str(row.get("source") or "all"), []).append(rank)
+    every = [r for values in ranks.values() for r in values]
+    return {**_metrics(every), "by_source": {k: _metrics(v) for k, v in sorted(ranks.items())}}
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -178,6 +189,7 @@ def main(argv: list[str] | None = None) -> int:
             f"inputs were extracted on ATT&CK {payload.get('attack_version')}, kb {kb.version}"
         )
     inputs = payload["reports"]
+    statements = {r["report_id"]: r["statements"] for r in load_reports(args.reports, kb)}
     base = TextGroupModel.load(settings.text_group_path, kb)
     if base is None:
         parser.error(f"text member artifact not found: {settings.text_group_path}")
@@ -185,14 +197,17 @@ def main(argv: list[str] | None = None) -> int:
     results = []
     for values in itertools.product(*GRID.values()):
         params = dict(zip(GRID.keys(), values, strict=True))
-        result = evaluate(base, kb, params, inputs)
+        result = evaluate(base, kb, params, inputs, statements)
         results.append({"params": params, **result})
+        by_source = " ".join(
+            f"{name} {m['top1']:.3f}/{m['mrr']:.3f}" for name, m in result["by_source"].items()
+        )
         print(
             f"sim {params['min_similarity']:.2f} {params['family']:6s} software "
             f"{int(params['software_route'])} bonus {params['seen_bonus']:.0f} link "
             f"{params['link_weight']:.0f} {params['aggregate']:5s}: top-1 {result['top1']:.3f} "
             f"top-3 {result['top3']:.3f} top-5 {result['top5']:.3f} MRR {result['mrr']:.4f} "
-            f"unranked {result['unranked']}",
+            f"unranked {result['unranked']} [{by_source}]",
             flush=True,
         )
     best = max(

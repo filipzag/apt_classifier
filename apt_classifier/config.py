@@ -285,12 +285,17 @@ class Settings(BaseSettings):
     # scripts/fit_procedure_match.py (vendor set + ATT&CK campaigns).
     procedure_match_enabled: bool = True
     procedure_match_weight: float = 0.0
-    procedure_match_min_similarity: float = 0.15
-    procedure_match_family: str = "parent"
-    procedure_match_software_route: bool = True
-    procedure_match_seen_bonus: float = 1.0
+    # dev choice 2026-10-21 (vendor set + campaigns, member alone, each report's own statements
+    # hidden from the corpus, 64 variants): floor 0.30, exact technique, no software-sentence
+    # route, the named-software link on, mean over the accepted techniques: MRR 0.820, top-1 0.782
+    # (vendor 0.794 / 0.845, campaigns 0.762 / 0.779); the text routes alone reach MRR 0.64, the
+    # software sentences add nothing on top of the link
+    procedure_match_min_similarity: float = 0.30
+    procedure_match_family: str = "exact"
+    procedure_match_software_route: bool = False
+    procedure_match_seen_bonus: float = 0.0
     procedure_match_link_weight: float = 1.0
-    procedure_match_aggregate: str = "top5"
+    procedure_match_aggregate: str = "mean"
     procedure_match_prior: float = 0.0
     cyberre_model: str = "openai/gpt-5.6-sol"
     cyberre_effort: str = "low"
