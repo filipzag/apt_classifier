@@ -5932,6 +5932,49 @@ The registered secondary "text member under the same seeds" was not run: its 202
 longer matches the pipeline fingerprint (classifier code changed since) and a second one-hour refit was
 not spent on a member already rejected.
 
+#### 21.3.20 ATT&CK 20.0 and the technique-conditioned procedure member (2026-10-21)
+
+**ATT&CK 20.0.** The knowledge base moved from 19.2 to 20.0 (released 2026-10-13) at the product
+owner's request: 9 new techniques (T1696-T1700 and three sub-techniques, five of them AI-related), 2
+groups (The Gentlemen, NIMBUS MANTICORE), 17 software, 1 campaign; nothing revoked or renamed; no new
+same-activity description links (`unreviewed_description_pairs` is empty). The 19.2 bundle, knowledge
+base, synthetic sentences and every pinned model were copied to `data/backup_attack_19.2/` first
+(rollback: `ATTACK_VERSION=19.2` ingest and restore). Refits, in order: text model, forest, network;
+synthetic sentences for the 9 new techniques only (a reduced knowledge base through `DATA_DIR`, $0.06;
+the shared file held a 50-technique pilot and a full run, about $2, was not spent); the base and
+no-exemplar acceptance models with the head *off* (a first fit with the service running produced a
+head-aware base that failed closed in tests and in any product without the service: the base pair
+must stay head-free), then the head-aware pair; the combiner (`attribution_combiner_1021_fsum.json`,
+feature schema 3, l2 1.0, cross-validated clean top-1 0.871); design seeds 41/53; every baseline. The
+technique head checkpoint reports 19.2; `/health` now lists its technique ids and the client accepts a
+newer knowledge base when all of them still exist (all 697 do), with the status saying so.
+
+| Set | 19.2 head-on baseline (21.3.18/19, where retained) | 20.0 |
+| --- | --- | --- |
+| Public test: hybrid micro-F1 / hit@1 | 0.463 / - | 0.463 / 0.559 |
+| CTI-HAL mapping: accepted-set micro-F1 / hit@1 | 0.504 / 0.509 | 0.506 / 0.509 |
+| Curated: hybrid accepted-set F1 (with / without cues) | - | 0.765 / 0.469 |
+| EvidenceForge clinic (local): narrative / windows / ecar micro-F1 | - | 0.370 / 0.600 / 0.545 |
+| ATT&CK folds seed 7: top-1 / top-5 / MRR / named / wrong / removed named | 0.837 (128/153) / 0.974 / 0.887 / 38 / 0 / 0 | 0.832 (129/155) / 0.961 / 0.886 / 42 / 0 / 0 |
+| Design seeds 41 / 53 (20.0): top-1, removed named | - | 0.877 (136/155), 0 / 0.871 (135/155), 1 |
+| CTI-HAL anonymised: top-1 / top-3 / MRR / named / wrong | 26/55 / 0.582 / 0.540 / 9 / 0 | 24/55 / 0.564 / 0.514 / 9 / 0 |
+| CTI-HAL as reported: top-1 / top-3 / MRR / named | - | 29/55 / 0.709 / 0.626 / 11 |
+| Elastic strict: top-1 / top-3 / MRR / named / wrong / open set named | 4/8 / 0.625 / 0.549 / 1 / 0 / 0 | 4/8 / 0.500 / 0.532 / 1 / 0 / 0 |
+
+The 19.2 head-on artifacts of the sets marked "-" were overwritten by the 20.0 runs before their numbers
+were recorded in this section; the public and CTI-HAL mapping numbers are unchanged to the third
+decimal (the index gained the new techniques and nothing a report mentions). Attribution moved by two
+reports on CTI-HAL (Sandworm's OlympicDestroyer and one FIN6
+report now rank 2-3 under the refitted combiner) and the fold numbers are within noise on 155 instead of
+153 folds; one design seed names a removed actor with the default, as seed 67 did on 19.2 (21.3.19). The
+calibrated confidence labels could not be refitted: the registered "one of these 2/3" rule (shown set
+misses the truth in at most 10% of the non-strong design rows with a one-sided 95% upper bound of 0.20)
+passed narrowly on 19.2 (24 rows, 1 miss, bound 0.183) and finds no threshold on the 20.0 design seeds
+(best point 12 rows, 1 miss, bound 0.339; the strong-answer rule still fits at 0.855 with 197 rows and 4
+errors). The labels are display-only and fail closed, so the Top-three view shows no label on 20.0 until
+a rule is re-registered. The verification artifact's pytest and compose gates fail for worktree reasons
+(no `.env`; one engine-loading test cannot get the GPU while the refits run), not for code.
+
 ## 22. Failure modes and troubleshooting
 
 ### 22.1 “ATT&CK knowledge base has not been ingested”
