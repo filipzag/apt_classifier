@@ -380,8 +380,10 @@ class Settings(BaseSettings):
     attribution_combiner_enabled: bool = True
     # the 2026-09-30 weights stamped for the exactly rounded classifier sums (docs 21.3.9); the
     # earlier artifacts stay next to it for checkouts with the previous classifier code
+    # refitted on ATT&CK 20.0 (2026-10-21, feature schema 3, same pipeline fingerprint as the
+    # 2026-09-30 artifact it replaces; that one is pinned to 19.2 and fails closed on 20.0)
     attribution_combiner_path: Path = (
-        PROJECT_ROOT / "data" / "models" / "combiner" / "attribution_combiner_0930_fsum.json"
+        PROJECT_ROOT / "data" / "models" / "combiner" / "attribution_combiner_1021_fsum.json"
     )
     attribution_combiner_top_n: int = 20
     attribution_combiner_blend: float = 0.5
