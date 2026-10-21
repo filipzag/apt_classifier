@@ -50,6 +50,7 @@ from apt_classifier.combiner import (  # noqa: E402
 from apt_classifier.config import Settings  # noqa: E402
 from apt_classifier.embeddings import SentenceTransformerEmbedder  # noqa: E402
 from apt_classifier.group_mlp import precompute_draws, refit_without_groups  # noqa: E402
+from apt_classifier.procedure_match import procedure_match_votes  # noqa: E402
 from apt_classifier.separation import discriminate, technique_document_counts  # noqa: E402
 from apt_classifier.session import AttributionEngine  # noqa: E402
 from apt_classifier.text_group import text_group_votes  # noqa: E402
@@ -241,6 +242,8 @@ def generate_lists(
     base_text_status = getattr(engine, "text_group_status", None)
     base_behavior = getattr(engine, "behavior_text", None)
     base_behavior_status = getattr(engine, "behavior_text_status", None)
+    base_procedure = getattr(engine, "procedure_match", None)
+    base_procedure_status = getattr(engine, "procedure_match_status", None)
 
     def hide_text(fold: Any) -> None:
         # the text model's group documents hide the fold like the store does (cheap refit)
@@ -256,6 +259,15 @@ def generate_lists(
         if base_behavior is not None:
             engine.set_behavior_text(
                 base_behavior.without(
+                    kb,
+                    group_id=fold.group_id,
+                    techniques=fold.held_out_techniques,
+                    texts=fold.held_out_texts,
+                )
+            )
+        if base_procedure is not None:
+            engine.set_procedure_match(
+                base_procedure.without(
                     kb,
                     group_id=fold.group_id,
                     techniques=fold.held_out_techniques,
@@ -352,6 +364,8 @@ def generate_lists(
             engine.set_text_group(base_text, base_text_status)
         if base_behavior is not None:
             engine.set_behavior_text(base_behavior, base_behavior_status)
+        if base_procedure is not None:
+            engine.set_procedure_match(base_procedure, base_procedure_status)
         engine.lexical_index = base_lexical
     return records, stats
 
@@ -410,6 +424,12 @@ def generate_unknown_lists(
         if getattr(engine, "behavior_text", None) is not None:
             engine.set_behavior_text(
                 engine.behavior_text.without(
+                    reduced, group_id=fold.group_id, texts=fold.held_out_texts, remove_group=True
+                )
+            )
+        if getattr(engine, "procedure_match", None) is not None:
+            engine.set_procedure_match(
+                engine.procedure_match.without(
                     reduced, group_id=fold.group_id, texts=fold.held_out_texts, remove_group=True
                 )
             )
@@ -759,6 +779,11 @@ def main(argv: list[str] | None = None) -> int:
         raise SystemExit(
             f"refusing to fit: BEHAVIOR_TEXT_WEIGHT > 0 but the behaviour-text member is "
             f"{engine.behavior_text_status!r} (it reads TEXT_GROUP_PATH)"
+        )
+    if procedure_match_votes(settings) and engine.procedure_match is None:
+        raise SystemExit(
+            f"refusing to fit: PROCEDURE_MATCH_WEIGHT > 0 but the procedure member is "
+            f"{engine.procedure_match_status!r} (it reads TEXT_GROUP_PATH)"
         )
     stamp = args.lists_cache.with_name(args.lists_cache.name + ".pipeline")
     fold_args = {

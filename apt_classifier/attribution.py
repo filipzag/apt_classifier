@@ -159,7 +159,7 @@ SUPPORT_RANK_LIMIT = 10
 # Members that re-read evidence other families already score: they rank, but never count as an
 # independent evidence family for the naming gate. The free-text model (text_group.py) scores
 # the same case narrative the technique, software and behaviour classifiers read.
-NOT_INDEPENDENT_EVIDENCE = frozenset({"text_group", "behavior_text"})
+NOT_INDEPENDENT_EVIDENCE = frozenset({"text_group", "behavior_text", "procedure_match"})
 
 
 def _evidence_family_count(

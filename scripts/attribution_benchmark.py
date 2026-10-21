@@ -95,6 +95,7 @@ from apt_classifier.evidence.models import (  # noqa: E402
 from apt_classifier.group_mlp import refit_without_groups  # noqa: E402
 from apt_classifier.llm import OpenRouterClient  # noqa: E402
 from apt_classifier.overlap_cluster import SAME_ACTIVITY_LINKS, link_kind  # noqa: E402
+from apt_classifier.procedure_match import procedure_match_votes  # noqa: E402
 from apt_classifier.profile_forest import fit_profile_forest  # noqa: E402
 from apt_classifier.session import AttributionEngine  # noqa: E402
 from apt_classifier.text_group import text_group_votes  # noqa: E402
@@ -143,6 +144,7 @@ FINGERPRINTED_SOURCES = (
     REPO_ROOT / "apt_classifier" / "group_mlp.py",
     REPO_ROOT / "apt_classifier" / "text_group.py",
     REPO_ROOT / "apt_classifier" / "behavior_text.py",
+    REPO_ROOT / "apt_classifier" / "procedure_match.py",
     # technique mapping inputs: the exemplar votes, the acceptance model and the dense index
     REPO_ROOT / "apt_classifier" / "exemplars.py",
     REPO_ROOT / "apt_classifier" / "exemplar_store.py",
@@ -1089,6 +1091,8 @@ def run_known(
     base_text_status = getattr(engine, "text_group_status", None)
     base_behavior = getattr(engine, "behavior_text", None)
     base_behavior_status = getattr(engine, "behavior_text_status", None)
+    base_procedure = getattr(engine, "procedure_match", None)
+    base_procedure_status = getattr(engine, "procedure_match_status", None)
     base_lexical = getattr(engine, "lexical_index", None)
     related = related_groups(engine.kb)
     dropped_total = {"technique": 0, "behavior": 0, "profile": 0, "lexical": 0}
@@ -1108,6 +1112,16 @@ def run_known(
                 # the behaviour-text index hides the fold the same way
                 engine.set_behavior_text(
                     base_behavior.without(
+                        engine.kb,
+                        group_id=fold.group_id,
+                        techniques=fold.held_out_techniques,
+                        texts=fold.held_out_texts,
+                    )
+                )
+            if base_procedure is not None and hide_evidence:
+                # and so does the procedure member's technique-indexed corpus
+                engine.set_procedure_match(
+                    base_procedure.without(
                         engine.kb,
                         group_id=fold.group_id,
                         techniques=fold.held_out_techniques,
@@ -1257,6 +1271,8 @@ def run_known(
             engine.set_text_group(base_text, base_text_status)
         if base_behavior is not None:
             engine.set_behavior_text(base_behavior, base_behavior_status)
+        if base_procedure is not None:
+            engine.set_procedure_match(base_procedure, base_procedure_status)
         engine.lexical_index = base_lexical
     return rows, dropped_total
 
@@ -1339,6 +1355,14 @@ def run_unknown(
                 )
             )
             behavior_text = "refit without the actor"
+        procedure_match = "off"
+        if getattr(engine, "procedure_match", None) is not None:
+            engine.set_procedure_match(
+                engine.procedure_match.without(
+                    reduced, group_id=fold.group_id, texts=fold.held_out_texts, remove_group=True
+                )
+            )
+            procedure_match = "refit without the actor"
         cost_before = client.total_usage.cost_usd if client is not None else 0.0
         state = engine.analyze(_ledger(fold))
         fusion = state.fusion
@@ -1351,6 +1375,7 @@ def run_unknown(
                 "group_mlp": group_mlp,
                 "text_group": text_group,
                 "behavior_text": behavior_text,
+                "procedure_match": procedure_match,
                 "lexical_hidden": hidden_lexical or 0,
                 "llm": _llm_accounting(state, client, cost_before),
                 **_separation_fields(state, None, decision),
@@ -1976,6 +2001,13 @@ def main(argv: list[str] | None = None) -> int:
             file=sys.stderr,
         )
         return 3
+    if procedure_match_votes(settings) and engine.procedure_match is None:
+        print(
+            f"refusing to run: PROCEDURE_MATCH_WEIGHT > 0 but the procedure member is "
+            f"{engine.procedure_match_status!r} (it reads TEXT_GROUP_PATH)",
+            file=sys.stderr,
+        )
+        return 3
     combiner_expected = bool(getattr(settings, "attribution_combiner_enabled", False))
     if (
         combiner_expected
@@ -2089,6 +2121,17 @@ def main(argv: list[str] | None = None) -> int:
                 }
             }
             if behavior_text_votes(settings)
+            else {}
+        ),
+        **(
+            {
+                "procedure_match": {
+                    "status": engine.procedure_match_status,
+                    "fingerprint": getattr(engine.procedure_match, "fingerprint", None),
+                    "params": getattr(engine.procedure_match, "params", None),
+                }
+            }
+            if procedure_match_votes(settings)
             else {}
         ),
         # only when the network votes, so a default run keeps its fingerprint inputs

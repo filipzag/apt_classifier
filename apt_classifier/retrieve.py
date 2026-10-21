@@ -3245,6 +3245,17 @@ def build_classifier_context(
     # the positive observations' texts in order, for the behaviour-text member (set after
     # construction: the context dataclass is hashed into the combiner fingerprint)
     context.statements = statements
+    # per accepted technique, the texts of its supporting statements (the procedure member)
+    texts_by_id = {
+        str(observation.id): str(observation.text)
+        for observation in ledger.observations
+        if observation.status is EvidenceStatus.POSITIVE
+    }
+    context.technique_statements = {
+        str(technique_id): tuple(texts_by_id[i] for i in ids if i in texts_by_id)
+        for technique_id, ids in technique_observations.items()
+        if technique_id in observed
+    }
     context.soft_techniques = soft
     context.soft_technique_observations = soft_observations
     # Contrastive near misses: same qualification as soft evidence, but they only reach the

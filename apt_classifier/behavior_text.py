@@ -45,6 +45,31 @@ DEFAULT_PARAMS: dict[str, Any] = {
 }
 
 
+def sentence_rows(base: TextGroupModel) -> tuple[np.ndarray, Any]:
+    """The text member's records as one TF-IDF row per sentence: ``(idf, rows_t)`` with the IDF
+    over sentences (not over group documents) and ``rows_t`` the L2-normalised rows transposed
+    (vocabulary x records, CSC) so that ``query @ rows_t`` is the cosine to every record."""
+    from scipy import sparse
+
+    counts = base._counts.tocsr()
+    n_rows, vocabulary = counts.shape
+    df = np.bincount(counts.indices, minlength=vocabulary)
+    idf = (np.log((1.0 + n_rows) / (1.0 + df)) + 1.0).astype(np.float32)
+    rows = counts.astype(np.float32).copy()
+    rows.data = np.log1p(rows.data)
+    rows = base._normalize(rows @ sparse.diags(idf), norm="l2")
+    return idf, rows.T.tocsc()
+
+
+def transform_queries(base: TextGroupModel, idf: np.ndarray, texts: Sequence[str]) -> Any:
+    """Query texts as L2-normalised TF-IDF rows in the same space as :func:`sentence_rows`."""
+    from scipy import sparse
+
+    query = base._vectorizer.transform(list(texts)).tocsr().astype(np.float32)
+    query.data = np.log1p(query.data)
+    return base._normalize(query @ sparse.diags(idf), norm="l2")
+
+
 class BehaviorTextModel:
     """The sentence index over a :class:`TextGroupModel`'s records."""
 
@@ -57,14 +82,8 @@ class BehaviorTextModel:
             raise ValueError(f"unknown aggregate {self.params['aggregate']!r}")
         self.group_ids = base.group_ids
         self.log_prior = base.log_prior
-        counts = base._counts.tocsr()
-        n_rows, vocabulary = counts.shape
-        df = np.bincount(counts.indices, minlength=vocabulary)
-        self._idf = (np.log((1.0 + n_rows) / (1.0 + df)) + 1.0).astype(np.float32)
-        rows = counts.astype(np.float32).copy()
-        rows.data = np.log1p(rows.data)
-        rows = base._normalize(rows @ sparse.diags(self._idf), norm="l2")
-        self._rows_t = rows.T.tocsc()
+        self._idf, self._rows_t = sentence_rows(base)
+        n_rows = self._rows_t.shape[1]
         index = {g: i for i, g in enumerate(self.group_ids)}
         weight = float(base.params.get("software_weight", 1.0))
         r_idx, g_idx, vals = [], [], []
@@ -100,15 +119,12 @@ class BehaviorTextModel:
     def votes(self, statements: Sequence[str]) -> np.ndarray:
         """(statements, groups): per statement each group's best cosine among the statement's
         ``top_k`` nearest corpus sentences (0 when none of them is the group's)."""
-        from scipy import sparse
 
         groups = len(self.group_ids)
         texts = [str(s) for s in statements if str(s).strip()]
         if not texts:
             return np.zeros((0, groups))
-        query = self.base._vectorizer.transform(texts).tocsr().astype(np.float32)
-        query.data = np.log1p(query.data)
-        query = self.base._normalize(query @ sparse.diags(self._idf), norm="l2")
+        query = transform_queries(self.base, self._idf, texts)
         similarity = (query @ self._rows_t).tocsr()
         top_k = max(int(self.params["top_k"]), 1)
         floor = float(self.params["min_similarity"])

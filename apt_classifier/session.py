@@ -61,6 +61,13 @@ from apt_classifier.origin import OriginAndThreatAssessment, assess_origin_and_t
 from apt_classifier.overlap_cluster import cluster_candidate
 from apt_classifier.platforms import ledger_platforms
 from apt_classifier.presets import apply_preset
+from apt_classifier.procedure_match import (
+    PROCEDURE_MATCH_NAME,
+    ProcedureMatchClassifier,
+    load_procedure_match_for,
+    procedure_match_bound_fingerprint,
+    procedure_match_votes,
+)
 from apt_classifier.profile_forest import load_profile_forest
 from apt_classifier.questions import (
     INTERVIEW_REVISION,
@@ -145,6 +152,9 @@ _CLASSIFIER_FAMILIES = {
     TEXT_GROUP_NAME: "learned_profile",
     # statements scored against the same corpus sentence by sentence: also a learned profile
     BEHAVIOR_TEXT_NAME: "learned_profile",
+    # accepted techniques' statements against the procedure sentences documented under each
+    # technique, with the software links: re-reads counted evidence, so also no new family
+    PROCEDURE_MATCH_NAME: "learned_profile",
 }
 
 
@@ -327,6 +337,18 @@ class AttributionEngine:
         )
         if self.behavior_text is not None:
             self.classifiers = (*self.classifiers, BehaviorTextClassifier(self.behavior_text))
+        # the procedure member reads the same artifact (loaded once when several vote)
+        self.procedure_match, self.procedure_match_status = load_procedure_match_for(
+            self.settings,
+            knowledge_base,
+            self.text_group
+            or (self.behavior_text.base if self.behavior_text is not None else None),
+        )
+        if self.procedure_match is not None:
+            self.classifiers = (
+                *self.classifiers,
+                ProcedureMatchClassifier(self.procedure_match),
+            )
         self.telemetry_profile: Any = None
         # the store's Chroma client serves a Chroma exemplar backend (never a client of its own)
         self.exemplar_index, self.exemplar_status = load_exemplar_index(
@@ -362,6 +384,10 @@ class AttributionEngine:
         if self.behavior_text is not None:
             self.combiner_fingerprint = behavior_text_bound_fingerprint(
                 self.combiner_fingerprint, self.behavior_text
+            )
+        if self.procedure_match is not None:
+            self.combiner_fingerprint = procedure_match_bound_fingerprint(
+                self.combiner_fingerprint, self.procedure_match
             )
         self.combiner, self.combiner_status = load_attribution_combiner(
             self.settings, knowledge_base, fingerprint=self.combiner_fingerprint
@@ -1369,6 +1395,17 @@ class AttributionEngine:
             if getattr(classifier, "name", None) == BEHAVIOR_TEXT_NAME:
                 classifier.model = model
 
+    def set_procedure_match(self, model: Any, status: str | None = None) -> None:
+        """Swap the procedure member (the benchmarks refit it without a fold's held-out
+        behaviour or a removed actor, as the text member)."""
+        self.procedure_match = model
+        self.procedure_match_status = status or (
+            "active (injected)" if model is not None else "disabled"
+        )
+        for classifier in self.classifiers:
+            if getattr(classifier, "name", None) == PROCEDURE_MATCH_NAME:
+                classifier.model = model
+
     def set_text_group(self, model: Any, status: str | None = None) -> None:
         """Swap the free-text model; the benchmarks refit it without a fold's held-out
         behaviour or a removed actor (and restore the loaded one with its status)."""
@@ -1423,6 +1460,11 @@ class AttributionEngine:
             **(
                 {BEHAVIOR_TEXT_NAME: float(self.settings.behavior_text_weight)}
                 if behavior_text_votes(self.settings)
+                else {}
+            ),
+            **(
+                {PROCEDURE_MATCH_NAME: float(self.settings.procedure_match_weight)}
+                if procedure_match_votes(self.settings)
                 else {}
             ),
         }

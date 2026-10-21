@@ -276,6 +276,22 @@ class Settings(BaseSettings):
     behavior_text_min_similarity: float = 0.0
     behavior_text_aggregate: str = "top5"
     behavior_text_prior: float = 0.0
+    # Technique-conditioned procedure member (apt_classifier/procedure_match.py, prereg
+    # attribution_procedure_match_2026-10-21): each accepted technique's statements against the
+    # procedure sentences documented under that technique (the group's own, its software's, its
+    # campaigns'), with ATT&CK's software-to-group links and a bonus for software the report
+    # names. Reads TEXT_GROUP_PATH; joins the ensemble only with a positive weight (0 until the
+    # gate passes); never an independent evidence family. The parameters are the dev choice of
+    # scripts/fit_procedure_match.py (vendor set + ATT&CK campaigns).
+    procedure_match_enabled: bool = True
+    procedure_match_weight: float = 0.0
+    procedure_match_min_similarity: float = 0.15
+    procedure_match_family: str = "parent"
+    procedure_match_software_route: bool = True
+    procedure_match_seen_bonus: float = 1.0
+    procedure_match_link_weight: float = 1.0
+    procedure_match_aggregate: str = "top5"
+    procedure_match_prior: float = 0.0
     cyberre_model: str = "openai/gpt-5.6-sol"
     cyberre_effort: str = "low"
     cyberre_weight: float = 0.35
