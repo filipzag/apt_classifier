@@ -44,6 +44,14 @@ country / nationality / sponsor words and, for tradecraft, ATT&CK malware names.
 pasted report; strict is its headline level). ``--open-set`` adds reports whose actor is in no
 ATT&CK group: they are analysed like the labelled ones and reported apart, since any name given
 there is unsupported (not proven wrong).
+
+The development report sets (``--report-set vendor|campaigns|advisories``; the combiner's
+real-report training lists, never a gate) carry ``hidden_texts``: the ATT&CK procedure examples
+that cite the report (vendor, advisories) or are near-copies of its statements (campaigns). Those
+and the report's own statements are hidden, under whichever group documents them, from the dense
+and lexical indexes and from the text-based members' corpora, and a campaign report hides its
+``campaign_id`` from the knowledge base while it runs (``hidden_campaign``). CTI-HAL and Elastic
+rows carry no ``hidden_texts`` and run unchanged.
 """
 
 from __future__ import annotations
@@ -56,6 +64,8 @@ import random
 import sys
 import time
 from collections import Counter
+from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
@@ -67,6 +77,7 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from apt_classifier.attack.kb import AttackKnowledgeBase  # noqa: E402
+from apt_classifier.attack.parse import strip_attack_citations  # noqa: E402
 from apt_classifier.attack.related import related_groups  # noqa: E402
 from apt_classifier.attribution import AttributionStage  # noqa: E402
 from apt_classifier.behavior_text import behavior_text_votes  # noqa: E402
@@ -171,6 +182,13 @@ class Fold:
     kind: str = ""
     # statements the strict level dropped as the report's own attribution prose, by reason
     attribution_dropped: tuple[tuple[str, int], ...] = ()
+    # development report sets (vendor, campaigns, advisories): a campaign report's campaign,
+    # hidden from the knowledge base while it runs; the normalized indexed forms of the ATT&CK
+    # texts that cite or copy the report and of its own statements, hidden from the dense and
+    # lexical indexes under any group; and the same texts raw, for the text-based members
+    hidden_campaign: str = ""
+    hidden_texts: frozenset[str] = frozenset()
+    hidden_raw: tuple[str, ...] = ()
 
 
 class FoldStore:
@@ -184,12 +202,15 @@ class FoldStore:
         held_out_techniques: frozenset[str],
         held_out_texts: frozenset[str],
         hide_group_entirely: bool = False,
+        any_group_texts: frozenset[str] = frozenset(),
     ) -> None:
         self._store = store
         self.group_id = group_id
         self.held_out_techniques = held_out_techniques
         self.held_out_texts = held_out_texts
         self.hide_group_entirely = hide_group_entirely
+        # a development report's cited or copied texts, hidden under whichever group owns them
+        self.any_group_texts = any_group_texts
         self.dropped = {"technique": 0, "behavior": 0, "profile": 0}
 
     def __getattr__(self, name: str) -> Any:
@@ -198,7 +219,9 @@ class FoldStore:
     def query_techniques(
         self, texts: list[str], *, n_results: int = 10, fields: tuple[str, ...] | None = None
     ) -> list[list[VectorHit]]:
-        extra = len(self.held_out_texts)
+        # over-fetch to refill what is hidden (a development report hides hundreds of texts; any
+        # query meets only a few of them, so the refill is capped; folds hide at most 24)
+        extra = min(len(self.held_out_texts), 40)
         raw = self._store.query_techniques(texts, n_results=n_results + extra, fields=fields)
         output: list[list[VectorHit]] = []
         for hits in raw:
@@ -212,6 +235,10 @@ class FoldStore:
         return output
 
     def _hides_behavior(self, hit: VectorHit) -> bool:
+        if self.any_group_texts and (
+            normalize_procedure_text(hit.document) in self.any_group_texts
+        ):
+            return True
         if str(hit.metadata.get("group_id") or "") != self.group_id:
             return False
         if self.hide_group_entirely:
@@ -354,6 +381,7 @@ def load_report_folds(
     max_observations: int | None,
     anonymizer: ReportAnonymizer | None = None,
     sample_seed: int | None = None,
+    kb: AttackKnowledgeBase | None = None,
 ) -> list[Fold]:
     """Real-report folds (one per report) from ``prepare_cti_hal.py`` or
     ``prepare_elastic_reports.py`` output.
@@ -366,7 +394,24 @@ def load_report_folds(
     kept (``None`` = all), the first ones, or a seeded random sample in report order when
     ``sample_seed`` is given (the volume diagnostic). Report-level ``technique_ids`` join the
     statements' labels as the gold set.
+
+    A development report (a row with ``hidden_texts``: vendor, campaigns, advisories) hides those
+    ATT&CK texts and its own statements in every indexed form (raw, and anonymized with the
+    index's and the evidence's pattern; needs ``kb``), and a campaign report names its
+    ``campaign_id``, hidden from the knowledge base while it runs.
     """
+    hide_forms = None
+    if kb is not None:
+        names = actor_names(kb)
+        evidence, index = _evidence_name_pattern(names), _actor_name_pattern(names)
+
+        def hide_forms(raw: str) -> set[str]:
+            return {
+                normalize_procedure_text(strip_attack_citations(raw).strip()),
+                normalize_procedure_text(_sanitize_procedure(raw, names, pattern=index)),
+                normalize_procedure_text(_sanitize_procedure(raw, names, pattern=evidence)),
+            } - {""}
+
     folds: list[Fold] = []
     for line in Path(path).read_text(encoding="utf-8").splitlines():
         if not line.strip():
@@ -408,6 +453,18 @@ def load_report_folds(
             for technique_id in item.get("technique_ids", [])
         ) | frozenset(row.get("technique_ids") or ())
         group_id = row.get("group_id")
+        hidden_raw: tuple[str, ...] = ()
+        hidden: frozenset[str] = frozenset()
+        if "hidden_texts" in row:
+            if hide_forms is None:
+                raise ValueError(f"{report_id}: hidden_texts need the knowledge base (kb=)")
+            hidden_raw = tuple(
+                dict.fromkeys(
+                    [str(text) for text in row.get("hidden_texts") or ()]
+                    + [str(item["text"]) for item in row.get("statements", [])]
+                )
+            )
+            hidden = frozenset(form for raw in hidden_raw for form in hide_forms(raw))
         folds.append(
             Fold(
                 group_id=str(group_id) if group_id is not None else None,
@@ -418,9 +475,39 @@ def load_report_folds(
                 accept=frozenset(row.get("accept") or ()),
                 kind=str(row.get("kind") or ""),
                 attribution_dropped=tuple(sorted(dropped.items())),
+                hidden_campaign=str(row.get("campaign_id") or ""),
+                hidden_texts=hidden,
+                hidden_raw=hidden_raw,
             )
         )
     return folds
+
+
+@contextmanager
+def hidden_campaign(kb: Any, campaign_id: str) -> Iterator[bool]:
+    """Hide one campaign from the knowledge base for a campaign report (its technique list feeds
+    the campaign-profile member, its description the strategic-context members); restores the
+    campaign and the groups' links afterwards. Yields whether anything was hidden."""
+    campaigns = getattr(kb, "campaigns", None)
+    if not campaign_id or not isinstance(campaigns, dict) or campaign_id not in campaigns:
+        yield False
+        return
+    original = dict(campaigns)
+    linked = [
+        (group, list(group.campaign_ids))
+        for group in kb.groups.values()
+        if campaign_id in (getattr(group, "campaign_ids", None) or ())
+    ]
+    del campaigns[campaign_id]
+    for group, ids in linked:
+        group.campaign_ids = [item for item in ids if item != campaign_id]
+    try:
+        yield True
+    finally:
+        campaigns.clear()
+        campaigns.update(original)
+        for group, ids in linked:
+            group.campaign_ids = ids
 
 
 def anonymize_report_folds(
@@ -1096,51 +1183,70 @@ def run_known(
     base_lexical = getattr(engine, "lexical_index", None)
     related = related_groups(engine.kb)
     dropped_total = {"technique": 0, "behavior": 0, "profile": 0, "lexical": 0}
+    members_changed = False
     try:
         for fold in folds:
-            if base_text is not None and hide_evidence:
+            # a development report hides its cited / copied texts even where nothing else is
+            member_hiding = hide_evidence or bool(fold.hidden_raw)
+            member_techniques = fold.held_out_techniques if hide_evidence else frozenset()
+            member_texts = (fold.held_out_texts if hide_evidence else frozenset()) | frozenset(
+                fold.hidden_raw
+            )
+            if base_text is not None and member_hiding:
                 # the text model's group documents hide the fold like the store does
                 engine.set_text_group(
                     base_text.without(
                         engine.kb,
                         group_id=fold.group_id,
-                        techniques=fold.held_out_techniques,
-                        texts=fold.held_out_texts,
+                        techniques=member_techniques,
+                        texts=member_texts,
                     )
                 )
-            if base_behavior is not None and hide_evidence:
+            if base_behavior is not None and member_hiding:
                 # the behaviour-text index hides the fold the same way
                 engine.set_behavior_text(
                     base_behavior.without(
                         engine.kb,
                         group_id=fold.group_id,
-                        techniques=fold.held_out_techniques,
-                        texts=fold.held_out_texts,
+                        techniques=member_techniques,
+                        texts=member_texts,
                     )
                 )
-            if base_procedure is not None and hide_evidence:
+            if base_procedure is not None and member_hiding:
                 # and so does the procedure member's technique-indexed corpus
                 engine.set_procedure_match(
                     base_procedure.without(
                         engine.kb,
                         group_id=fold.group_id,
-                        techniques=fold.held_out_techniques,
-                        texts=fold.held_out_texts,
+                        techniques=member_techniques,
+                        texts=member_texts,
                     )
                 )
+            if member_hiding:
+                members_changed = True
+            elif members_changed:
+                # a report without hidden texts after one with: the members as shipped
+                if base_text is not None:
+                    engine.set_text_group(base_text, base_text_status)
+                if base_behavior is not None:
+                    engine.set_behavior_text(base_behavior, base_behavior_status)
+                if base_procedure is not None:
+                    engine.set_procedure_match(base_procedure, base_procedure_status)
+                members_changed = False
             engine.lexical_index = base_lexical
-            hidden_lexical = hide_lexical(
-                engine, fold.held_out_texts if hide_evidence else frozenset()
-            )
+            held_texts = (fold.held_out_texts if hide_evidence else frozenset()) | fold.hidden_texts
+            hidden_lexical = hide_lexical(engine, held_texts)
             proxy = FoldStore(
                 base_store,
                 group_id=fold.group_id,
                 held_out_techniques=fold.held_out_techniques if hide_evidence else frozenset(),
-                held_out_texts=fold.held_out_texts if hide_evidence else frozenset(),
+                held_out_texts=held_texts,
+                any_group_texts=fold.hidden_texts,
             )
             engine.store = proxy
             cost_before = client.total_usage.cost_usd if client is not None else 0.0
-            state = engine.analyze(_ledger(fold))
+            with hidden_campaign(engine.kb, fold.hidden_campaign):
+                state = engine.analyze(_ledger(fold))
             # ``fusion`` is what the analyst sees (includes the LLM vote in production);
             # ``deterministic_fusion`` is the ranking before the vote and drives the stage.
             fusion = state.fusion
@@ -1735,7 +1841,15 @@ def _coerce(value: str) -> Any:
 
 
 # the anonymization level each real-report set publishes as its headline (``*_current``)
-HEADLINE_LEVEL = {"cti_hal": "names", "elastic": "strict"}
+# the development sets (vendor, campaigns, advisories) are the combiner's real-report training
+# lists (scripts/fit_attribution_combiner.py --real-reports); run here for diagnosis only
+HEADLINE_LEVEL = {
+    "advisories": "strict",
+    "campaigns": "names",
+    "cti_hal": "names",
+    "elastic": "strict",
+    "vendor": "strict",
+}
 
 
 def default_output(
@@ -1950,6 +2064,7 @@ def main(argv: list[str] | None = None) -> int:
             max_observations=report_cap,
             anonymizer=dropper,
             sample_seed=args.report_sample_seed,
+            kb=kb,
         )
         folds = [fold for fold in loaded if fold.group_id is not None]
         open_folds = [fold for fold in loaded if fold.group_id is None]
@@ -1959,6 +2074,7 @@ def main(argv: list[str] | None = None) -> int:
                 max_observations=report_cap,
                 anonymizer=dropper,
                 sample_seed=args.report_sample_seed,
+                kb=kb,
             )
         if args.sample is not None:
             folds = sample_folds(folds, args.sample, args.seed)

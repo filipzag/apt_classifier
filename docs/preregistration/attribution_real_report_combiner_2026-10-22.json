@@ -1,0 +1,34 @@
+{
+  "schema": "cribl_finetune_prereg/1",
+  "id": "attribution_real_report_combiner_2026-10-22",
+  "title": "The attribution combiner refitted with real-report lists (vendor reports, ATT&CK campaigns, government advisories) next to the ATT&CK fold lists",
+  "registered": "2026-10-22",
+  "parent": "docs 21.3.19 (diagnosis: the fusion was fitted where set overlap works; an oracle over the members has the truth first in 51 of 55 CTI-HAL reports, the ensemble in 24-26) and docs 21.3.20 (the procedure member alone 26/55 against the ensemble's 24/55 on ATT&CK 20.0); plan step 3",
+  "problem": "Every combiner so far was fitted on ATT&CK fold lists only: held-out procedure sentences of a group, in ATT&CK's own phrasing, plus randomised regimes. On real reports the members behave differently (set members and country earn trust on the folds they do not earn on reports), and the ensemble loses reports its best single member gets right.",
+  "training_lists": {
+    "folds": "the adopted combiner's own fold lists, reused unchanged: seeds 11/23/37, 5 randomised variants per fold, the unknown-actor arm for every fold of seed 11 (data/audits/procedure_match/training_lists_procedure_match.jsonl.gz, 2,700 lists, the same pipeline fingerprint as this run)",
+    "real_sets": {
+      "vendor": "data/benchmarks/vendor/reports_hide_cited_attack20.0.jsonl: the 34 vendor reports (34 groups outside CTI-HAL and Elastic), hidden texts refreshed on ATT&CK 20.0 by scripts/refresh_hidden_texts.py",
+      "campaigns": "data/benchmarks/campaigns/reports_attack20.0.jsonl: the 21 single-campaign reports (15 groups), each hiding its campaign from the knowledge base and its own and near-copied procedure examples",
+      "advisories": "data/benchmarks/advisories/reports.jsonl: 13 FBI/CISA joint advisories (12 groups) labelled by scripts/prepare_advisory_reports.py before any run (narrative advisories with 5+ technique tags; the group whose ATT&CK name or alias occurs 10+ times and 3x more often than any other; a re-issued advisory once; any statement overlapping a CTI-HAL or Elastic statement drops the advisory)"
+    },
+    "conditions": "each real report is read twice, as the two test sets are read: names level with the first 30 statements (CTI-HAL's headline) and strict level with every statement (Elastic's headline); one list each, truth = the report's group",
+    "real_unknown": "one removed-actor list per real report (names, 30 statements): the group removed from the knowledge base, its documents hidden, the forest refitted without it, the procedure member without it",
+    "leak_control": "per real report, the ATT&CK procedure examples that cite it (by source name) or share a 10-token run with one of its statements, and its own statements, are hidden from the dense technique index, the BM25 index, the group-behaviour index (under any group) and the text-based members' corpora; a campaign report hides its campaign object",
+    "never": "CTI-HAL and Elastic are never a source of training lists (the fitter refuses them)"
+  },
+  "selection_on_dev": "scripts/fit_attribution_combiner.py --real-reports ... --real-unknown --real-weights 0,3,10,30 --l2-grid 1,3,10: group-level 5-fold cross-validation over all lists (a group's fold and real lists in one split, split seed 97); each training split holds its fold lists once and its real lists w times (w = 0: the folds alone, the current recipe). Reference: the fold clean out-of-fold top-1 of w = 0 at its best mixed fold MRR l2. Among the grid points within 0.01 of that fold clean top-1, the one with the best out-of-fold real-report MRR (both conditions pooled, lists whose truth is in the top 20) is chosen; ties: the smaller w, then the larger l2. The final fit uses every list with the chosen w and l2. Written to data/models/combiner/attribution_combiner_real_reports.json (the shipped artifact untouched). Nothing is read from the fold seeds 83/89, CTI-HAL or Elastic before the gate",
+  "gate": {
+    "naming_gate": "ATT&CK folds on two seeds never used (83 and 89), the new combiner against the adopted default (attribution_combiner_procedure_match.json) under the same code and settings: top-1 not below the off arm by more than 2 cases per seed; 0 wrong names; the removed actors named by the on arm not more than by the off arm on the same seed, and none of them an unrelated group (not a documented same-activity partner of the removed actor)",
+    "real_reports": "CTI-HAL anonymised (55, names, 30 statements) and Elastic strict (8 + 22 open set), once each, both arms rerun on the same code: the on arm must not lose top-1 on either set, must keep 0 wrong names, and the open set must name nothing",
+    "adoption": "if every bar holds, ATTRIBUTION_COMBINER_PATH defaults to the new artifact, the design seeds 41/53 are rerun with it and the confidence labels refitted (they fail closed otherwise); a wrong name, a new open-set name, a lost real-report top-1 or a fold loss beyond 2 keeps the adopted combiner and the result is documented"
+  },
+  "secondary": [
+    "out-of-fold real-report top-1 / MRR by set and condition for every grid point, against the RRF order of the same lists",
+    "the combiner's weights that move between w = 0 and the chosen w (country, the four set members, the procedure member's columns, software, behaviour)",
+    "CTI-HAL top-3 / top-5 / MRR and named count, CTI-HAL as reported (names kept), Elastic top-3 / MRR",
+    "the combiner probability of every named leader on the gate seeds and both real sets (correct names, removed-actor names): the floor that would have held the removed-actor names and the correct names it would cost, as a measurement for the probability naming route (not adopted here; a floor rule needs its own registration on the design seeds)"
+  ],
+  "caveats": "the vendor reports and the advisories are cited by ATT&CK: citing and copied sentences are hidden, but the groups' documented technique lists still include what these reports describe (the folds' answer-key caveat), so real-list member scores are somewhat optimistic; the vendor set and the campaigns already served as development data for member choices (docs 21.3.19-21.3.20), so the cross-validated real numbers are development numbers, not tests; the advisory labels come from an automatic name-dominance rule (not hand-checked); 68 real reports over 50-odd groups is small against 2,700 fold lists, hence the weight grid; the technique head's fold contamination (docs 21.3.18) is the same in both arms",
+  "cost": "laptop only, no API credit: real lists about 1 h (the unknown arm rebuilds an engine per report), cross-validation about 1 h, gate (two fold seeds x two arms, CTI-HAL and Elastic x two arms) about 2.5 h"
+}

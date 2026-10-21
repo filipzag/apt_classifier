@@ -454,6 +454,229 @@ def generate_unknown_lists(
     return records
 
 
+@dataclass(frozen=True)
+class RealCondition:
+    """How a development report is read for its training list: the anonymization level and the
+    statement cap (``None`` = every statement). The defaults mirror the two test conditions:
+    CTI-HAL's headline (names, the first 30 statements) and Elastic's (strict, all)."""
+
+    level: str
+    cap: int | None
+
+    @classmethod
+    def parse(cls, value: str) -> RealCondition:
+        level, _, cap = value.partition(":")
+        return cls(level=level, cap=None if cap in ("", "all") else int(cap))
+
+    @property
+    def label(self) -> str:
+        return f"{self.level}:{self.cap if self.cap is not None else 'all'}"
+
+
+DEFAULT_REAL_CONDITIONS = (RealCondition("names", 30), RealCondition("strict", None))
+
+
+def load_real_folds(
+    bench: Any, kb: AttackKnowledgeBase, path: Path, condition: RealCondition
+) -> list[Any]:
+    """A development report set read under one condition (as the benchmark reads it)."""
+    from scripts.report_anonymizer import ReportAnonymizer
+
+    dropper = (
+        ReportAnonymizer(kb, condition.level)
+        if condition.level in ("strict", "tradecraft")
+        else None
+    )
+    folds = bench.load_report_folds(path, max_observations=condition.cap, anonymizer=dropper, kb=kb)
+    folds = [fold for fold in folds if fold.group_id is not None and fold.group_id in kb.groups]
+    folds, _, _ = bench.anonymize_report_folds(folds, kb, level=condition.level)
+    return folds
+
+
+def _hide_members(engine: AttributionEngine, kb: Any, fold: Any, *, remove_group: bool) -> None:
+    """The text-based members without the report's cited / copied texts (and, for the unknown
+    arm, without the actor)."""
+    texts = frozenset(fold.hidden_raw)
+    for attribute, setter in (
+        ("text_group", engine.set_text_group),
+        ("behavior_text", engine.set_behavior_text),
+        ("procedure_match", engine.set_procedure_match),
+    ):
+        member = getattr(engine, attribute, None)
+        if member is not None:
+            setter(
+                member.without(kb, group_id=fold.group_id, texts=texts, remove_group=remove_group)
+            )
+
+
+def generate_real_lists(
+    engine: AttributionEngine,
+    settings: Settings,
+    kb: AttackKnowledgeBase,
+    store: ChromaVectorStore,
+    bench: Any,
+    *,
+    sets: dict[str, Path],
+    conditions: Iterable[RealCondition],
+    unknown: bool,
+    top_n: int,
+    log: Any,
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    """One list per development report and condition (truth = its group), plus, with
+    ``unknown``, one removed-actor list per report under the first condition (truth = None).
+    Each report hides the ATT&CK texts that cite or copy it and its own statements (the
+    benchmark's development-set rule); a campaign report also hides its campaign."""
+    conditions = list(conditions)
+    base_store = engine.store
+    base_lexical = getattr(engine, "lexical_index", None)
+    saved = {
+        name: (getattr(engine, name, None), getattr(engine, f"{name}_status", None))
+        for name in ("text_group", "behavior_text", "procedure_match")
+    }
+    setters = {
+        "text_group": engine.set_text_group,
+        "behavior_text": engine.set_behavior_text,
+        "procedure_match": engine.set_procedure_match,
+    }
+    records: list[dict[str, Any]] = []
+    stats: dict[str, Any] = {"sets": {}, "conditions": [c.label for c in conditions]}
+    try:
+        for set_name, path in sets.items():
+            for variant, condition in enumerate(conditions):
+                folds = load_real_folds(bench, kb, path, condition)
+                started = time.time()
+                outside = 0
+                hidden = {"technique": 0, "behavior": 0, "profile": 0, "lexical": 0}
+                for fold in folds:
+                    for name, (member, status) in saved.items():
+                        if member is not None:
+                            setters[name](member, status)
+                    _hide_members(engine, kb, fold, remove_group=False)
+                    engine.lexical_index = base_lexical
+                    hidden["lexical"] += bench.hide_lexical(engine, fold.hidden_texts) or 0
+                    proxy = bench.FoldStore(
+                        base_store,
+                        group_id=fold.group_id,
+                        held_out_techniques=frozenset(),
+                        held_out_texts=fold.hidden_texts,
+                        any_group_texts=fold.hidden_texts,
+                    )
+                    engine.store = proxy
+                    with bench.hidden_campaign(engine.kb, fold.hidden_campaign):
+                        state = engine.analyze(bench._ledger(fold))  # noqa: SLF001
+                        lst = list_from_state(
+                            engine,
+                            state.classifier_results,
+                            state.deterministic_fusion or state.fusion,
+                            state.context,
+                            top_n=top_n,
+                            truth=fold.group_id,
+                        )
+                    outside += lst.truth_index is None
+                    for key, value in proxy.dropped.items():
+                        hidden[key] += value
+                    records.append(
+                        {
+                            "seed": None,
+                            "group_id": fold.group_id,
+                            "variant": variant,
+                            "source": f"real:{set_name}",
+                            "condition": condition.label,
+                            "report_id": fold.report_id,
+                            "leak_control": "dense+lexical+members (cited/copied texts)",
+                            **lst.to_dict(),
+                        }
+                    )
+                stats["sets"].setdefault(set_name, {})[condition.label] = {
+                    "reports": len(folds),
+                    "truth_outside_top_n": outside,
+                    "hidden_hits": hidden,
+                    "seconds": round(time.time() - started, 1),
+                }
+                log(
+                    f"real {set_name} {condition.label}: {len(folds)} lists, truth outside the "
+                    f"top {top_n} in {outside}; hidden hits {hidden}"
+                )
+    finally:
+        engine.store = base_store
+        engine.lexical_index = base_lexical
+        for name, (member, status) in saved.items():
+            if member is not None:
+                setters[name](member, status)
+    if unknown:
+        unknown_records = []
+        for set_name, path in sets.items():
+            folds = load_real_folds(bench, kb, path, conditions[0])
+            started = time.time()
+            for fold in folds:
+                reduced = copy.deepcopy(kb)
+                del reduced.groups[fold.group_id]
+                for campaign in reduced.campaigns.values():
+                    if fold.group_id in getattr(campaign, "group_ids", []):
+                        campaign.group_ids = [g for g in campaign.group_ids if g != fold.group_id]
+                for software in reduced.software.values():
+                    if fold.group_id in getattr(software, "group_ids", []):
+                        software.group_ids = [g for g in software.group_ids if g != fold.group_id]
+                reduced.recompute_statistics()
+                proxy = bench.FoldStore(
+                    store,
+                    group_id=fold.group_id,
+                    held_out_techniques=frozenset(),
+                    held_out_texts=fold.hidden_texts,
+                    hide_group_entirely=True,
+                    any_group_texts=fold.hidden_texts,
+                )
+                reduced_engine = AttributionEngine(settings, reduced, proxy, None)  # type: ignore[arg-type]
+                bench.hide_lexical(reduced_engine, fold.hidden_texts)
+                if bench._forest_votes(reduced_engine):  # noqa: SLF001
+                    reduced_engine.set_profile_forest(
+                        bench._refit_forest_without_actor(reduced_engine, reduced)  # noqa: SLF001
+                    )
+                if getattr(reduced_engine, "group_mlp", None) is not None:
+                    reduced_engine.set_group_mlp(
+                        refit_without_groups(reduced_engine.group_mlp, reduced)
+                    )
+                _hide_members(reduced_engine, reduced, fold, remove_group=True)
+                with bench.hidden_campaign(reduced, fold.hidden_campaign):
+                    state = reduced_engine.analyze(bench._ledger(fold))  # noqa: SLF001
+                    fusion = state.deterministic_fusion or state.fusion
+                    if not fusion.entries:
+                        continue
+                    lst = list_from_state(
+                        reduced_engine,
+                        state.classifier_results,
+                        fusion,
+                        state.context,
+                        top_n=top_n,
+                        truth=None,
+                    )
+                unknown_records.append(
+                    {
+                        "seed": None,
+                        "group_id": fold.group_id,
+                        "variant": -1,
+                        "source": f"real:{set_name}",
+                        "condition": conditions[0].label,
+                        "report_id": fold.report_id,
+                        "leak_control": "dense+lexical+members (cited/copied texts), actor removed",
+                        **lst.to_dict(),
+                    }
+                )
+            log(f"real {set_name} unknown: {len(folds)} reports ({time.time() - started:.0f} s)")
+        records += unknown_records
+        stats["unknown_lists"] = len(unknown_records)
+    return records, stats
+
+
+def is_real(record: dict[str, Any]) -> bool:
+    return str(record.get("source") or "").startswith("real:")
+
+
+def trainable(record: dict[str, Any]) -> bool:
+    """A list the fit can use: the unknown arm, or a known list whose truth is in it."""
+    return record.get("truth") is None or record["truth"] in record.get("group_ids", [])
+
+
 # ----------------------------------------------------------------------------- evaluation
 
 
@@ -516,30 +739,62 @@ def cross_validate(
     null_option: bool,
     seed: int,
     log: Any,
+    real_weights: Iterable[int] = (0,),
+    fold_top1_margin: float = 0.01,
 ) -> dict[str, Any]:
-    """Group-level K-fold: every list of a group (clean, randomised, unknown) sits in one split."""
-    groups = sorted({r["group_id"] for r in records})
+    """Group-level K-fold: every list of a group (clean, randomised, unknown, real) sits in one
+    split. Without real-report lists the l2 with the best mixed fold MRR is chosen (as before).
+    With them, each (real weight, l2) is scored out of fold; the reference is the fold clean
+    top-1 of weight 0 at its best-mixed-MRR l2, and among the points whose fold clean top-1 is
+    within ``fold_top1_margin`` of it the best real-report MRR wins (ties: the smaller weight,
+    then the larger l2)."""
+    usable = [r for r in records if trainable(r)]
+    has_real = any(is_real(r) for r in usable)
+    weights = sorted({int(w) for w in real_weights}) if has_real else [0]
+    groups = sorted({r["group_id"] for r in usable})
     rng = random.Random(seed)
     rng.shuffle(groups)
     split_of = {g: i % folds for i, g in enumerate(groups)}
     report: dict[str, Any] = {"folds": folds, "groups": len(groups), "grid": {}}
-    best_l2 = l2_grid[0]
-    best_mrr = -1.0
-    for l2 in l2_grid:
-        metrics = _cv_metrics(records, split_of, folds, l2, null_option)
-        report["grid"][str(l2)] = metrics
-        log(
-            f"l2={l2}: clean top1 {metrics['combiner']['clean']['top1']:.3f} "
-            f"(rrf {metrics['rrf']['clean']['top1']:.3f}), randomised top1 "
-            f"{metrics['combiner']['randomised']['top1']:.3f} "
-            f"(rrf {metrics['rrf']['randomised']['top1']:.3f}), mixed mrr "
-            f"{metrics['combiner']['mixed']['mrr']:.3f} (rrf {metrics['rrf']['mixed']['mrr']:.3f}), "
-            f"leader auc {metrics['calibration']['auc']:.3f}"
-        )
-        if metrics["combiner"]["mixed"]["mrr"] > best_mrr:
-            best_mrr = metrics["combiner"]["mixed"]["mrr"]
-            best_l2 = l2
-    report["chosen_l2"] = best_l2
+    entries: list[tuple[int, float, dict[str, Any]]] = []
+    for weight in weights:
+        for l2 in l2_grid:
+            metrics = _cv_metrics(usable, split_of, folds, l2, null_option, real_weight=weight)
+            key = f"w{weight}_l2{l2}" if has_real else str(l2)
+            report["grid"][key] = metrics
+            entries.append((weight, l2, metrics))
+            real = metrics["combiner"].get("real")
+            log(
+                f"w={weight} l2={l2}: clean top1 {metrics['combiner']['clean']['top1']:.3f} "
+                f"(rrf {metrics['rrf']['clean']['top1']:.3f}), randomised top1 "
+                f"{metrics['combiner']['randomised']['top1']:.3f}, mixed mrr "
+                f"{metrics['combiner']['mixed']['mrr']:.3f} (rrf {metrics['rrf']['mixed']['mrr']:.3f})"
+                + (
+                    f", real top1 {real['top1']:.3f} mrr {real['mrr']:.3f} "
+                    f"(rrf {metrics['rrf']['real']['top1']:.3f}/{metrics['rrf']['real']['mrr']:.3f})"
+                    if real
+                    else ""
+                )
+                + f", leader auc {metrics['calibration']['auc']:.3f}"
+            )
+    base = max((e for e in entries if e[0] == 0), key=lambda e: e[2]["combiner"]["mixed"]["mrr"])
+    if not has_real:
+        report["chosen_l2"] = base[1]
+        report["chosen_real_weight"] = 0
+        return report
+    reference = base[2]["combiner"]["clean"]["top1"]
+    eligible = [
+        e for e in entries if e[2]["combiner"]["clean"]["top1"] >= reference - fold_top1_margin
+    ]
+    chosen = max(eligible, key=lambda e: (e[2]["combiner"]["real"]["mrr"], -e[0], e[1]))
+    report["selection"] = {
+        "rule": "best real-report MRR among points within the fold clean top-1 margin of weight 0",
+        "reference": {"real_weight": 0, "l2": base[1], "clean_top1": reference},
+        "margin": fold_top1_margin,
+        "eligible": [f"w{e[0]}_l2{e[1]}" for e in eligible],
+    }
+    report["chosen_l2"] = chosen[1]
+    report["chosen_real_weight"] = chosen[0]
     return report
 
 
@@ -549,14 +804,29 @@ def _cv_metrics(
     folds: int,
     l2: float,
     null_option: bool,
+    *,
+    real_weight: int = 0,
 ) -> dict[str, Any]:
-    combiner_lists: dict[str, list[tuple[CombinerList, AttributionCombiner]]] = {
+    buckets: dict[str, list[tuple[CombinerList, AttributionCombiner]]] = {
         "clean": [],
         "randomised": [],
     }
+    real_buckets: dict[str, list[tuple[CombinerList, AttributionCombiner]]] = {}
     null_pairs: list[tuple[float, float]] = []
+    real_null_pairs: list[tuple[float, float]] = []
     for split in range(folds):
-        train = [CombinerList.from_dict(r) for r in records if split_of[r["group_id"]] != split]
+        train = [
+            CombinerList.from_dict(r)
+            for r in records
+            if split_of[r["group_id"]] != split and not is_real(r)
+        ]
+        if real_weight:
+            real_train = [
+                CombinerList.from_dict(r)
+                for r in records
+                if split_of[r["group_id"]] != split and is_real(r)
+            ]
+            train += real_train * real_weight
         model = AttributionCombiner.fit(
             train, attack_version="cv", pipeline_fingerprint="cv", l2=l2, null_option=null_option
         )
@@ -564,16 +834,28 @@ def _cv_metrics(
             if split_of[record["group_id"]] != split:
                 continue
             lst = CombinerList.from_dict(record)
+            real = is_real(record)
             if record["variant"] == -1:
                 if null_option:
-                    null_pairs.append((float(model.probabilities(lst)[1] or 0.0), 1.0))
+                    pair = (float(model.probabilities(lst)[1] or 0.0), 1.0)
+                    (real_null_pairs if real else null_pairs).append(pair)
+                continue
+            if real:
+                for key in (
+                    "real",
+                    f"real {record.get('condition')}",
+                    f"real {str(record['source']).removeprefix('real:')}",
+                ):
+                    real_buckets.setdefault(key, []).append((lst, model))
+                if null_option:
+                    real_null_pairs.append((float(model.probabilities(lst)[1] or 0.0), 0.0))
                 continue
             bucket = "clean" if record["variant"] == 0 else "randomised"
-            combiner_lists[bucket].append((lst, model))
+            buckets[bucket].append((lst, model))
             if null_option:
                 null_pairs.append((float(model.probabilities(lst)[1] or 0.0), 0.0))
 
-    def scored(items: list[tuple[CombinerList, AttributionCombiner]]) -> dict[str, float]:
+    def scored(items: list[tuple[CombinerList, AttributionCombiner]]) -> dict[str, Any]:
         hits1 = hits5 = 0
         reciprocal = 0.0
         pairs = []
@@ -597,10 +879,19 @@ def _cv_metrics(
             "_pairs": pairs,
         }
 
-    out: dict[str, Any] = {"combiner": {}, "rrf": {}, "l2": l2}
+    def auc(pairs: list[tuple[float, float]]) -> float:
+        pos = [p for p, y in pairs if y > 0]
+        neg = [p for p, y in pairs if y == 0]
+        if not pos or not neg:
+            return 0.0
+        return sum(1.0 if p > q else 0.5 if p == q else 0.0 for p in pos for q in neg) / (
+            len(pos) * len(neg)
+        )
+
+    out: dict[str, Any] = {"combiner": {}, "rrf": {}, "l2": l2, "real_weight": real_weight}
     all_pairs: list[tuple[float, float]] = []
     mixed_items: list[tuple[CombinerList, AttributionCombiner]] = []
-    for bucket, items in combiner_lists.items():
+    for bucket, items in buckets.items():
         result = scored(items)
         all_pairs += result.pop("_pairs")
         out["combiner"][bucket] = result
@@ -610,34 +901,39 @@ def _cv_metrics(
     mixed.pop("_pairs")
     out["combiner"]["mixed"] = mixed
     out["rrf"]["mixed"] = _rank_metrics([lst for lst, _ in mixed_items], None)
-    positives = [p for p, y in all_pairs if y > 0]
-    negatives = [p for p, y in all_pairs if y == 0]
+    real_pairs: list[tuple[float, float]] = []
+    for bucket, items in sorted(real_buckets.items()):
+        result = scored(items)
+        pairs = result.pop("_pairs")
+        if bucket == "real":
+            real_pairs = pairs
+        out["combiner"][bucket] = result
+        out["rrf"][bucket] = _rank_metrics([lst for lst, _ in items], None)
     brier = float(np.mean([(p - y) ** 2 for p, y in all_pairs])) if all_pairs else 0.0
-    auc = (
-        sum(1.0 if p > q else 0.5 if p == q else 0.0 for p in positives for q in negatives)
-        / (len(positives) * len(negatives))
-        if positives and negatives
-        else 0.0
-    )
     out["calibration"] = {
         "brier": brier,
-        "auc": auc,
-        "leader_correct_share": (len(positives) / len(all_pairs)) if all_pairs else 0.0,
+        "auc": auc(all_pairs),
+        "leader_correct_share": (
+            (sum(1 for _, y in all_pairs if y > 0) / len(all_pairs)) if all_pairs else 0.0
+        ),
     }
-    if null_pairs:
-        pos = [p for p, y in null_pairs if y > 0]
-        neg = [p for p, y in null_pairs if y == 0]
-        out["null_option"] = {
+    if real_pairs:
+        out["calibration_real"] = {
+            "brier": float(np.mean([(p - y) ** 2 for p, y in real_pairs])),
+            "auc": auc(real_pairs),
+            "leader_correct_share": sum(1 for _, y in real_pairs if y > 0) / len(real_pairs),
+        }
+    for name, pairs in (("null_option", null_pairs), ("null_option_real", real_null_pairs)):
+        if not pairs:
+            continue
+        pos = [p for p, y in pairs if y > 0]
+        neg = [p for p, y in pairs if y == 0]
+        out[name] = {
             "unknown_lists": len(pos),
             "known_lists": len(neg),
             "mean_null_probability_unknown": float(np.mean(pos)) if pos else 0.0,
             "mean_null_probability_known": float(np.mean(neg)) if neg else 0.0,
-            "auc": (
-                sum(1.0 if p > q else 0.5 if p == q else 0.0 for p in pos for q in neg)
-                / (len(pos) * len(neg))
-                if pos and neg
-                else 0.0
-            ),
+            "auc": auc(pairs),
         }
     return out
 
@@ -645,8 +941,11 @@ def _cv_metrics(
 # ----------------------------------------------------------------------------- main
 
 
-# fold seeds kept for evaluation and design (docs 21.3.13-21.3.15): never fitted on
-EVALUATION_SEEDS = frozenset({7, 41, 43, 47, 53, 59, 61})
+# fold seeds kept for evaluation and design (docs 21.3.13-21.3.15, the member gates of 21.3.19
+# and 21.3.20, the real-report combiner gate): never fitted on
+EVALUATION_SEEDS = frozenset({7, 41, 43, 47, 53, 59, 61, 67, 73, 79, 83, 89})
+# report sets that are tests: never a source of training lists
+TEST_REPORT_SETS = ("cti_hal", "elastic")
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -704,6 +1003,37 @@ def main(argv: list[str] | None = None) -> int:
         help="inject generic (widely documented) false positives preferentially",
     )
     parser.add_argument("--set", action="append", default=[], metavar="KEY=VALUE")
+    parser.add_argument(
+        "--real-reports",
+        nargs="+",
+        default=[],
+        metavar="SET=PATH",
+        help="development report sets (vendor, campaigns, advisories) whose lists join the fold "
+        "lists; never CTI-HAL or Elastic",
+    )
+    parser.add_argument(
+        "--real-conditions",
+        default=",".join(c.label for c in DEFAULT_REAL_CONDITIONS),
+        help="level:cap per real-report reading (cap 'all' = every statement)",
+    )
+    parser.add_argument(
+        "--real-unknown", action="store_true", help="removed-actor lists for the real reports"
+    )
+    parser.add_argument("--real-cache", type=Path, help="gzip JSONL of the real-report lists")
+    parser.add_argument(
+        "--reuse-real-cache", action="store_true", help="read the real-report lists from the cache"
+    )
+    parser.add_argument(
+        "--real-weights",
+        default="0,3,10,30",
+        help="cross-validated copies of each real-report list in the fit",
+    )
+    parser.add_argument(
+        "--fold-top1-margin",
+        type=float,
+        default=0.01,
+        help="fold clean top-1 a real-report weight may lose against weight 0",
+    )
     parser.add_argument("--quiet", action="store_true")
     parser.add_argument(
         "--lists-only",
@@ -739,9 +1069,23 @@ def main(argv: list[str] | None = None) -> int:
             f"{', '.join(shipped)} would overwrite the shipped files; pass other paths or "
             "--overwrite-production"
         )
+    real_sets: dict[str, Path] = {}
+    for item in args.real_reports:
+        name, _, value = item.partition("=")
+        if not value:
+            parser.error(f"--real-reports takes SET=PATH, got {item!r}")
+        if name in TEST_REPORT_SETS or any(t in value for t in ("cti_hal", "elastic")):
+            parser.error(f"{item}: CTI-HAL and Elastic are test sets, never training lists")
+        real_sets[name] = Path(value)
+    if real_sets and args.real_cache is None:
+        parser.error("--real-reports needs --real-cache")
+    real_conditions = [RealCondition.parse(v) for v in args.real_conditions.split(",") if v]
     # a reused cache is only read; every other output is written at the end of an hour-long run
     # (--lists-only writes the cache alone: no artifact, no report)
     writes_cache = not (args.reuse_cache and args.lists_cache.is_file())
+    writes_real_cache = bool(real_sets) and not (
+        args.reuse_real_cache and args.real_cache is not None and args.real_cache.is_file()
+    )
     enforce_output_guard(
         parser,
         args,
@@ -749,6 +1093,7 @@ def main(argv: list[str] | None = None) -> int:
             None if args.lists_only else args.output,
             None if args.lists_only else args.report,
             args.lists_cache if writes_cache else None,
+            args.real_cache if writes_real_cache else None,
         ],
         repo_root=REPO_ROOT,
     )
@@ -848,18 +1193,70 @@ def main(argv: list[str] | None = None) -> int:
                 handle.write(json.dumps(record) + "\n")
         stamp.write_text(engine.combiner_fingerprint + "\n")
         log(f"wrote {len(records)} lists to {args.lists_cache}")
+    real_records: list[dict[str, Any]] = []
+    if real_sets:
+        real_stamp = args.real_cache.with_name(args.real_cache.name + ".pipeline")
+        if not writes_real_cache:
+            cached_stamp = real_stamp.read_text().strip() if real_stamp.is_file() else None
+            if cached_stamp != engine.combiner_fingerprint:
+                raise SystemExit(
+                    f"refusing --reuse-real-cache: {args.real_cache} was generated by pipeline "
+                    f"{cached_stamp}, this run is {engine.combiner_fingerprint}"
+                )
+            with gzip.open(args.real_cache, "rt", encoding="utf-8") as handle:
+                real_records = [json.loads(line) for line in handle if line.strip()]
+            log(f"loaded {len(real_records)} real-report lists from {args.real_cache}")
+        else:
+            real_records, real_stats = generate_real_lists(
+                engine,
+                settings,
+                kb,
+                store,
+                bench,
+                sets=real_sets,
+                conditions=real_conditions,
+                unknown=args.real_unknown and null_option,
+                top_n=args.top_n,
+                log=log,
+            )
+            stats["real"] = real_stats
+            args.real_cache.parent.mkdir(parents=True, exist_ok=True)
+            with gzip.open(args.real_cache, "wt", encoding="utf-8") as handle:
+                for record in real_records:
+                    handle.write(json.dumps(record) + "\n")
+            real_stamp.write_text(engine.combiner_fingerprint + "\n")
+            log(f"wrote {len(real_records)} real-report lists to {args.real_cache}")
+        stats["real_counts"] = dict(
+            Counter(
+                f"{r['source']} {r.get('condition')} "
+                + ("unknown" if r["variant"] == -1 else "in list" if trainable(r) else "outside")
+                for r in real_records
+            )
+        )
     if args.lists_only:
         log("lists only: no fit")
         return 0
+    records = records + real_records
     if not records:
         print("no training lists", file=sys.stderr)
         return 1
     l2_grid = [float(v) for v in args.l2_grid.split(",")]
     cv = cross_validate(
-        records, folds=args.cv_folds, l2_grid=l2_grid, null_option=null_option, seed=97, log=log
+        records,
+        folds=args.cv_folds,
+        l2_grid=l2_grid,
+        null_option=null_option,
+        seed=97,
+        log=log,
+        real_weights=[int(v) for v in args.real_weights.split(",") if v != ""],
+        fold_top1_margin=args.fold_top1_margin,
     )
     chosen = float(cv["chosen_l2"])
-    lists = [CombinerList.from_dict(r) for r in records]
+    real_weight = int(cv.get("chosen_real_weight") or 0)
+    lists = [CombinerList.from_dict(r) for r in records if not is_real(r) and trainable(r)]
+    lists += [
+        CombinerList.from_dict(r) for r in records if is_real(r) and trainable(r)
+    ] * real_weight
     model = AttributionCombiner.fit(
         lists,
         attack_version=str(getattr(kb, "version", "") or ""),
@@ -876,6 +1273,9 @@ def main(argv: list[str] | None = None) -> int:
             "generation": stats,
             "cross_validation": cv,
             "records": len(records),
+            "real_reports": {name: str(path) for name, path in real_sets.items()},
+            "real_conditions": [c.label for c in real_conditions],
+            "real_weight": real_weight,
             "feature_count": len(FEATURE_NAMES),
             # the exemplar library the lists' technique mapping ran with
             "exemplar_status": engine.exemplar_status,
@@ -895,6 +1295,7 @@ def main(argv: list[str] | None = None) -> int:
                 "artifact": str(path),
                 "pipeline_fingerprint": engine.combiner_fingerprint,
                 "records": len(records),
+                "real_weight": real_weight,
                 "generation": stats,
                 "cross_validation": cv,
                 "weights": {
@@ -918,10 +1319,19 @@ def main(argv: list[str] | None = None) -> int:
         encoding="utf-8",
     )
     counts = Counter(
-        "unknown" if r["variant"] == -1 else "clean" if r["variant"] == 0 else "randomised"
+        (
+            f"real {r.get('condition')} " + ("unknown" if r["variant"] == -1 else "known")
+            if is_real(r)
+            else (
+                "unknown" if r["variant"] == -1 else "clean" if r["variant"] == 0 else "randomised"
+            )
+        )
         for r in records
     )
-    log(f"fitted l2={chosen}: {dict(counts)} lists -> {path}; report {args.report}")
+    log(
+        f"fitted l2={chosen}, real weight {real_weight}: {dict(counts)} lists -> {path}; "
+        f"report {args.report}"
+    )
     return 0
 
 
