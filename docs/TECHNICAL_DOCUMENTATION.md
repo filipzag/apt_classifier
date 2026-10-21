@@ -5971,9 +5971,10 @@ calibrated confidence labels could not be refitted: the registered "one of these
 misses the truth in at most 10% of the non-strong design rows with a one-sided 95% upper bound of 0.20)
 passed narrowly on 19.2 (24 rows, 1 miss, bound 0.183) and finds no threshold on the 20.0 design seeds
 (best point 12 rows, 1 miss, bound 0.339; the strong-answer rule still fits at 0.855 with 197 rows and 4
-errors). The labels are display-only and fail closed, so the Top-three view shows no label on 20.0 until
-a rule is re-registered. The verification artifact's pytest and compose gates fail for worktree reasons
-(no `.env`; one engine-loading test cannot get the GPU while the refits run), not for code.
+errors). The labels are display-only and fail closed, so the Top-three view would have shown no label
+on 20.0 under the member-off combiner; with the procedure member's combiner adopted below, the same
+registered rule fits again (see the end of this section). The verification artifact's compose gate
+fails for a worktree reason (no `.env`), not for code.
 
 **Technique-conditioned procedure member: gate trial.** Pre-registered as
 `docs/preregistration/attribution_procedure_match_2026-10-21.json` (member in 9.13; dev choice on the
@@ -6014,6 +6015,17 @@ member's strength on real reports is the named-software link conditioned on the 
 (the text routes alone reach MRR 0.64 on dev), which is a sharper form of the software member rather
 than behaviour matching; and the combiner can now weigh an optional member, which is what the behaviour
 member of 21.3.19 lacked.
+
+**Adopted baselines (member on, its combiner; the `*_current.json` artifacts).** ATT&CK folds seed 7:
+top-1 0.819 (127/155), top-5 0.942, MRR 0.874, 42 named, 0 wrong, 0 removed actors named (the member-off
+20.0 default: 129/155, 0.961, 0.886); CTI-HAL anonymised and Elastic strict as in the "On" column above.
+Design seeds 41/53 were regenerated with the adopted combiner and the confidence labels refitted on them
+under the registered rule, which now finds both thresholds: strong 0.985 (97 design rows, 1 error, upper
+bound 0.048) and set 0.76 (155 rows, 15 misses, upper bound 0.145; the member-off combiner had no set
+threshold, see above). Report-only evaluation of the refitted labels: seed 7 strong 44/44 right, set
+73/76, ECE 0.056; CTI-HAL anonymised strong 10/11, set 10/13; as reported strong 11/13, set 13/15. The
+labels artifact (`confidence_labels_fsum.json`) is pinned to the adopted combiner, so switching the
+combiner back disables them until a refit.
 
 ## 22. Failure modes and troubleshooting
 
