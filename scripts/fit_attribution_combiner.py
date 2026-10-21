@@ -521,9 +521,11 @@ def generate_real_lists(
     unknown: bool,
     top_n: int,
     log: Any,
+    known: bool = True,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
-    """One list per development report and condition (truth = its group), plus, with
-    ``unknown``, one removed-actor list per report under the first condition (truth = None).
+    """One list per development report and condition (truth = its group; skipped without
+    ``known``), plus, with ``unknown``, one removed-actor list per report under the first
+    condition (truth = None).
     Each report hides the ATT&CK texts that cite or copy it and its own statements (the
     benchmark's development-set rule); a campaign report also hides its campaign."""
     conditions = list(conditions)
@@ -541,7 +543,7 @@ def generate_real_lists(
     records: list[dict[str, Any]] = []
     stats: dict[str, Any] = {"sets": {}, "conditions": [c.label for c in conditions]}
     try:
-        for set_name, path in sets.items():
+        for set_name, path in sets.items() if known else ():
             for variant, condition in enumerate(conditions):
                 folds = load_real_folds(bench, kb, path, condition)
                 started = time.time()
@@ -604,11 +606,23 @@ def generate_real_lists(
             if member is not None:
                 setters[name](member, status)
     if unknown:
+        import gc
+
+        import torch
+
+        def release() -> None:
+            # each removed-actor engine refits the forest on the GPU next to the technique head
+            gc.collect()
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+
+        release()
         unknown_records = []
         for set_name, path in sets.items():
             folds = load_real_folds(bench, kb, path, conditions[0])
             started = time.time()
             for fold in folds:
+                release()
                 reduced = copy.deepcopy(kb)
                 del reduced.groups[fold.group_id]
                 for campaign in reduced.campaigns.values():
@@ -662,6 +676,7 @@ def generate_real_lists(
                         **lst.to_dict(),
                     }
                 )
+                del reduced_engine, reduced, proxy, state
             log(f"real {set_name} unknown: {len(folds)} reports ({time.time() - started:.0f} s)")
         records += unknown_records
         stats["unknown_lists"] = len(unknown_records)
@@ -1196,6 +1211,15 @@ def main(argv: list[str] | None = None) -> int:
     real_records: list[dict[str, Any]] = []
     if real_sets:
         real_stamp = args.real_cache.with_name(args.real_cache.name + ".pipeline")
+
+        def write_real(records_out: list[dict[str, Any]]) -> None:
+            args.real_cache.parent.mkdir(parents=True, exist_ok=True)
+            with gzip.open(args.real_cache, "wt", encoding="utf-8") as handle:
+                for record in records_out:
+                    handle.write(json.dumps(record) + "\n")
+            real_stamp.write_text(engine.combiner_fingerprint + "\n")
+            log(f"wrote {len(records_out)} real-report lists to {args.real_cache}")
+
         if not writes_real_cache:
             cached_stamp = real_stamp.read_text().strip() if real_stamp.is_file() else None
             if cached_stamp != engine.combiner_fingerprint:
@@ -1207,6 +1231,7 @@ def main(argv: list[str] | None = None) -> int:
                 real_records = [json.loads(line) for line in handle if line.strip()]
             log(f"loaded {len(real_records)} real-report lists from {args.real_cache}")
         else:
+            # the known lists are written before the (GPU-heavy) removed-actor arm starts
             real_records, real_stats = generate_real_lists(
                 engine,
                 settings,
@@ -1215,17 +1240,29 @@ def main(argv: list[str] | None = None) -> int:
                 bench,
                 sets=real_sets,
                 conditions=real_conditions,
-                unknown=args.real_unknown and null_option,
+                unknown=False,
                 top_n=args.top_n,
                 log=log,
             )
             stats["real"] = real_stats
-            args.real_cache.parent.mkdir(parents=True, exist_ok=True)
-            with gzip.open(args.real_cache, "wt", encoding="utf-8") as handle:
-                for record in real_records:
-                    handle.write(json.dumps(record) + "\n")
-            real_stamp.write_text(engine.combiner_fingerprint + "\n")
-            log(f"wrote {len(real_records)} real-report lists to {args.real_cache}")
+            write_real(real_records)
+        if args.real_unknown and null_option and not any(r["variant"] == -1 for r in real_records):
+            unknown_records, unknown_stats = generate_real_lists(
+                engine,
+                settings,
+                kb,
+                store,
+                bench,
+                sets=real_sets,
+                conditions=real_conditions,
+                unknown=True,
+                top_n=args.top_n,
+                log=log,
+                known=False,
+            )
+            stats.setdefault("real", {})["unknown_lists"] = unknown_stats.get("unknown_lists", 0)
+            real_records += unknown_records
+            write_real(real_records)
         stats["real_counts"] = dict(
             Counter(
                 f"{r['source']} {r.get('condition')} "
