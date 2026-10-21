@@ -1333,6 +1333,27 @@ fold's held-out sentences from it (`TextGroupModel.without`: the group's procedu
 held-out techniques, and any record crediting the group or no group whose text or sentence matches a
 held-out sentence, refitted exactly) and refit it without the removed actor.
 
+**Behaviour-text model (2026-10-21).** `apt_classifier/behavior_text.py` keeps the free-text model's
+corpus but scores the case **statement by statement** instead of as one narrative: every corpus record
+is a sentence in its own TF-IDF row (IDF over sentences), each positive observation is compared with every
+sentence, and the `top_k` nearest sentences (default 10) vote for their groups with the cosine, one vote
+per group per statement (the best). A group's case score is the mean of its votes over its five best
+statements (`BEHAVIOR_TEXT_AGGREGATE=top5`; `mean` averages over every statement with absent = 0),
+z-scored across the groups, plus `BEHAVIOR_TEXT_PRIOR` x the log prominence prior (default 0), and
+reported as a softmax over the groups that at least one statement reached. A group therefore wins by
+matching several of the report's statements with procedure text of its own, not by the size of its
+corpus. The parameters were chosen on the vendor set with the member alone (`scripts/fit_behavior_text.py`,
+`make fit-behavior-text`: top_k 10, top5, prior 0: MRR 0.809, top-1 0.676 over 34 reports; the mean
+variant had top-1 0.706 and a lower MRR). The `behavior_text` member votes in the `learned_profile` family
+only when `BEHAVIOR_TEXT_WEIGHT` > 0 (default 0), reads the text model's artifact (`TEXT_GROUP_PATH`),
+is listed in `attribution.NOT_INDEPENDENT_EVIDENCE` and binds the combiner fingerprint at weight > 0
+exactly as the text model does; the benchmarks hide a fold's held-out sentences and the removed actor from
+it through `BehaviorTextModel.without` (the text model's refit, re-indexed). The statements reach the
+member as a runtime attribute of the classifier context (`context.statements`, set in
+`retrieve.build_classifier_context`), not as a dataclass field: `classifiers/base.py` is hashed into the
+combiner fingerprint, so a new field there would invalidate the production combiner. Gate trial
+2026-10-21: 21.3.19.
+
 ---
 
 ## 10. Family-aware Reciprocal Rank Fusion
@@ -5781,6 +5802,107 @@ is already accepted, and where it is not, the head does not prefer it either. To
 head-first null this closes the question: the remaining gap to the model alone is not recoverable
 by trusting the head more inside the current gate; the parent-aware number rises by 0.4 points
 under the rule only because removed siblings were sub-technique members of the right family.
+
+#### 21.3.19 Attribution on TTPs and behaviour: diagnosis and the behaviour-text member (2026-10-20/21)
+
+**Question.** The product owner wants actors caught on their TTPs and behaviour, not on tool names.
+Where does real-report attribution stand after the technique head (21.3.18), and why do technique sets
+not carry it? Diagnosis from the head-on default artifacts (`attribution_cti_hal_current.json`, 55
+anonymised CTI-HAL reports, 6 groups; `attribution_heldout_current.json`, seed 7; `attribution_elastic_current.json`).
+
+**Findings.**
+
+1. *Named software carries the result.* CTI-HAL top-1 26/55 (named correct 9). With at least one
+   ATT&CK software named in the report the ensemble is right first in 22 of 31; without, in 4 of 24.
+   Elastic strict: 4/8, all four with named software, 0/3 without.
+2. *The technique-set members do not separate the groups.* A report yields about 10 accepted
+   techniques (median), mostly at parent level, and the median accepted technique is documented for
+   29 groups. The four set members (Bernoulli, IDF cosine, weighted Jaccard, semantic centroid) put the
+   truth first in 0, 0, 0 and 1 of the 55 reports (73 of 153 on the ATT&CK folds, whose cases are
+   ATT&CK's own phrasing); the group forest and the group network reach 13-18%. Giant profiles absorb
+   any long list (Kimsuky 130 techniques, Lazarus 93); thin ones lose everything (Carbanak, 9 documented
+   techniques, 0 of 10 reports; its activity sits under FIN7 and Cobalt Group, which the cluster step
+   knows but the members do not).
+3. *The one behaviour member is precise and rarely fires.* `specific_behavior` (dense cosine >= 0.55 on
+   ATT&CK's per-group procedure sentences) is right first in 11 of the 24 reports where it fires and
+   silent on 31. The free-text member (21.3.16, one TF-IDF document per group) is right first on 49% of
+   CTI-HAL alone, above the 47% ensemble, and sits at weight 0 after failing the fold naming gate by one
+   case.
+4. *The fusion was fitted where set overlap works.* The combiner learned on the ATT&CK folds; the origin
+   family (right for 28 of 55 reports, but it votes for every group of a country and counts as an
+   independent evidence family) and the set members get trust they do not earn on real reports. An oracle
+   over the members has the truth first in 51 of 55; the ensemble in 26. The campaign member is at weight 0.
+5. *The naming gate holds correct leaders.* 15 of the 26 correct leaders are held by the separation bar
+   (< 0.5) while the combiner gives them 0.9-1.0; 9 are named.
+
+**Plan (approved 2026-10-20).** (1) A behaviour member that fires on every report, selected on the vendor
+set and gated as in 21.3.16; (2) a specificity-weighted, sub-technique-aware set member that scores
+same-activity pairs as one unit; (3) a combiner refit that includes real reports (advisories, vendor set,
+campaigns) with the ATT&CK folds kept as the naming check, and a calibrated-probability naming route.
+This section records step 1.
+
+**Behaviour-text member** (9.13, `apt_classifier/behavior_text.py`, pre-registered as
+`docs/preregistration/attribution_behavior_text_2026-10-20.json`): the free-text member's corpus indexed
+sentence by sentence; every statement votes for the groups of its 10 nearest corpus sentences with the
+cosine, one vote per group per statement; the case score is the mean over a group's five best statements,
+z-scored, no prominence prior. The grid (top_k 10/20/50 x mean/top5 x prior 0/0.25/0.5) was scored on the
+vendor set with the member alone (34 reports, actor and campaign names replaced):
+
+| Variant | top-1 | top-3 | top-5 | MRR |
+| --- | --- | --- | --- | --- |
+| top_k 10, top5, prior 0 (chosen: best MRR) | 0.676 | 0.912 | 0.941 | 0.809 |
+| top_k 10, mean, prior 0 | 0.706 | 0.794 | 0.912 | 0.784 |
+| top_k 20, top5, prior 0 | 0.676 | 0.912 | 0.941 | 0.798 |
+| top_k 50, top5, prior 0 | 0.676 | 0.882 | 0.941 | 0.795 |
+| top_k 50, mean, prior 0.5 (worst) | 0.294 | 0.559 | 0.559 | 0.464 |
+
+A prior never helped on the vendor set; the mean aggregate decays with top_k (a group reached by stray
+sentences in many statements overtakes one matched strongly in a few), the five-best aggregate does not. The member reads the statements as a
+runtime attribute of the classifier context; an earlier commit had added them as a dataclass field of
+`classifiers/base.py`, which is hashed into the combiner fingerprint and silently invalidated the
+production combiner on the branch (fixed before the gate ran).
+
+**Gate trial (2026-10-21, `data/audits/cribl_ft/behavior/`).** Weight 1.0 with a combiner refitted on
+seeds 11/23/37 with the member voting (`data/models/combiner/attribution_combiner_behavior_text.json`,
+l2 3.0, 2,791 lists; cross-validated clean top-1 0.871, randomised 0.750, leader AUC 0.866) against
+weight 0 with the shipped combiner, head on in both arms, same code. The combiner's per-member features
+cover the eleven fixed classifiers only (`combiner.CLASSIFIERS`), so this member, like the text model and
+the group network before it, reaches the combiner only through the fusion's RRF features; the refit moved
+the RRF weight from 0.91 to 1.72 and lowered the set members'.
+
+| Set | Off (default) | On (member, refit) | Member alone | Names |
+| --- | --- | --- | --- | --- |
+| ATT&CK folds seed 67: top-1 / top-5 / MRR / named | 0.869 (133/153) / 0.967 / 0.914 / 42 | 0.882 (135) / 0.954 / 0.916 / 42 | 0.418 / top-3 0.529 / 0.500, 25 unreached | wrong 0 -> 0; removed actors named 1 -> 1 (different cases) |
+| ATT&CK folds seed 71 | 0.895 (137/153) / 0.961 / 0.929 / 42 | 0.882 (135) / 0.974 / 0.920 / 42 | 0.346 / 0.490 / 0.450, 27 unreached | 0 -> 0; removed 0 -> 0 |
+| ATT&CK folds seed 7 (reference, off only) | 0.837 (128/153) / 0.974 / 0.887 / 38 | | | 0; removed 0 |
+| CTI-HAL anonymised: top-1 / top-3 / top-5 / MRR / named | 0.473 (26/55) / 0.582 / 0.636 / 0.540 / 9 | 0.455 (25) / 0.636 / 0.636 / 0.547 / 10 | 0.455 / 0.545 / - / 0.541, 5 unreached | 0 -> 0 |
+| CTI-HAL, the 24 reports without ATT&CK software: top-1 | 4 | 3 | | |
+| Elastic strict: top-1 / top-3 / MRR / named | 4/8 / 0.625 / 0.549 / 1 | 4/8 / 0.625 / 0.576 / 1 | 0/8 / 2/8 / 0.184 | 0 -> 0; open set named 0/22 -> 2/22 |
+
+Paired: seed 67 gains 8 and loses 6 at top-1, seed 71 gains 3 and loses 5 (the losses are mostly cases the
+member does not reach at all: a fold hides the group's own sentences from the corpus, and the member then
+votes for a rival); CTI-HAL moves 16 reports up and 4 down in rank, the one lost top-1 (a FIN6 report) has
+the behaviour, specific-behaviour and description members all ranking FIN6 first while the refitted
+combiner gives Silence 0.54 and FIN6 0.0. Member alone per CTI-HAL group: FIN6 9/11, OilRig 5/8, Sandworm
+4/5, FIN7 5/18, Carbanak 1/10, Wizard Spider 1/3.
+
+Three registered bars fail: the member alone is right first on 45.5% of CTI-HAL (bar 50%); the ensemble
+loses one CTI-HAL top-1; and the names move. On seed 67 each arm names one removed actor, but not the same
+one: the default names Threat Group-3390 for a removed Earth Lusca on decisive shared SysUpdate (the member
+arm holds that case at separation 0.477), the member arm names Chimera for a removed Turla (behaviour
+member rank 2, specific-behaviour rank 1, combiner 0.64, separation 0.51), an unrelated group. On the
+Elastic open set the member arm names Kimsuky twice (an APT-style post with 55 accepted techniques whose
+separation rises from 0.24 to 0.52, and a commodity stealer post whose leader changes and reaches 0.61);
+the member itself ranks Kimsuky 7th and 8th there, so the names come from the refitted fusion, not from a
+behaviour match. **Not adopted**: `BEHAVIOR_TEXT_WEIGHT` stays 0 and the trial combiner is not the
+default. The member is kept (it is the strongest statement-level signal on the vendor set and the
+second-strongest single member on CTI-HAL) for step 3 of the plan, where it needs its own combiner
+features (a feature-schema bump) and a combiner fitted with real-report lists; the two false names show
+that the separation bar of the naming gate is sensitive to the fusion mix, which argues for the
+calibrated-probability route of step 3 rather than for more members under the current fusion.
+The registered secondary "text member under the same seeds" was not run: its 2026-10-03 trial combiner no
+longer matches the pipeline fingerprint (classifier code changed since) and a second one-hour refit was
+not spent on a member already rejected.
 
 ## 22. Failure modes and troubleshooting
 
