@@ -1020,3 +1020,33 @@ def test_sibling_replacement_swaps_the_accepted_sibling_for_the_heads_pick():
 
     assert parse_head_ratio("2.0") == 2.0 and parse_head_ratio("model") == "model"
     assert parse_head_ratio("0") is None and parse_head_ratio("x") is None
+
+
+def test_a_newer_knowledge_base_accepts_the_head_only_when_its_techniques_still_exist():
+    from apt_classifier.technique_head import newer_release_problem
+
+    listed = {**MANIFEST, "technique_ids": ["T1059", "T1059.001", "T1566"]}
+    known = frozenset({"T1059", "T1059.001", "T1566", "T1700"})
+    newer = TechniqueHeadConfig(enabled=True, attack_version="20.0", known_technique_ids=known)
+    # ATT&CK 20.0 knowledge base, head fitted on 19.2, every head technique present: accepted
+    assert manifest_problem(listed, newer) is None
+    assert newer_release_problem(listed, newer) is None
+    # a head technique the knowledge base no longer has: refused, naming it
+    gone = TechniqueHeadConfig(
+        enabled=True, attack_version="20.0", known_technique_ids=known - {"T1566"}
+    )
+    assert "T1566" in manifest_problem(listed, gone)
+    # the service must list its ids (an old service build does not)
+    assert "lists no technique ids" in manifest_problem(MANIFEST, newer)
+    # no knowledge base to check against: strict
+    strict = TechniqueHeadConfig(enabled=True, attack_version="20.0")
+    assert "no knowledge base" in manifest_problem(listed, strict)
+    # an older knowledge base than the head's release is never accepted
+    older = TechniqueHeadConfig(enabled=True, attack_version="18.1", known_technique_ids=known)
+    assert manifest_problem(listed, older) == "ATT&CK version 19.2 != 18.1"
+    # the status says what was accepted
+    client = TechniqueHeadClient(
+        newer, transport=FakeService(_rows_for, manifest=listed).transport()
+    )
+    assert client.probe().startswith("active")
+    assert "fitted on ATT&CK 19.2, knowledge base 20.0" in client.status

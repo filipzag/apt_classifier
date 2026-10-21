@@ -35,7 +35,7 @@ from __future__ import annotations
 import math
 import re
 from collections import OrderedDict
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -261,13 +261,21 @@ class TechniqueHeadConfig:
     timeout: float = DEFAULT_TIMEOUT
     expected_fingerprint: str = ""
     attack_version: str | None = None
+    # the knowledge base's technique ids: a head fitted on an older ATT&CK release is accepted
+    # on a newer one when every technique it knows still exists (new techniques are simply
+    # never proposed); empty = strict version match
+    known_technique_ids: frozenset[str] = frozenset()
     top_families: int = DEFAULT_TOP_FAMILIES
     new_candidates: int = DEFAULT_NEW_CANDIDATES
     batch: int = DEFAULT_BATCH
     cache_size: int = DEFAULT_CACHE_SIZE
 
 
-def config_from_settings(settings: Any, attack_version: str | None = None) -> TechniqueHeadConfig:
+def config_from_settings(
+    settings: Any,
+    attack_version: str | None = None,
+    known_technique_ids: Iterable[str] = (),
+) -> TechniqueHeadConfig:
     return TechniqueHeadConfig(
         enabled=bool(getattr(settings, "technique_head_enabled", False)),
         url=str(getattr(settings, "technique_head_url", DEFAULT_URL) or DEFAULT_URL),
@@ -276,6 +284,7 @@ def config_from_settings(settings: Any, attack_version: str | None = None) -> Te
             getattr(settings, "technique_head_expected_fingerprint", "") or ""
         ).strip(),
         attack_version=attack_version,
+        known_technique_ids=frozenset(str(t) for t in known_technique_ids),
         top_families=int(getattr(settings, "technique_head_top_families", DEFAULT_TOP_FAMILIES)),
         new_candidates=int(
             getattr(settings, "technique_head_new_candidates", DEFAULT_NEW_CANDIDATES)
@@ -356,6 +365,12 @@ class TechniqueHeadClient:
             return self.status
         self.manifest = dict(payload)
         self.status = "active" if self.config.expected_fingerprint else "active (unpinned)"
+        version = str(payload.get("attack_version") or "")
+        if self.config.attack_version and version and version != self.config.attack_version:
+            self.status += (
+                f" (head fitted on ATT&CK {version}, knowledge base {self.config.attack_version}: "
+                f"all {len(payload.get('technique_ids') or ())} head techniques present)"
+            )
         return self.status
 
     # ----- scoring -----
@@ -435,9 +450,45 @@ def manifest_problem(payload: Any, config: TechniqueHeadConfig) -> str | None:
         )
     version = str(payload.get("attack_version") or "")
     if config.attack_version and version and version != config.attack_version:
-        return f"ATT&CK version {version} != {config.attack_version}"
+        problem = newer_release_problem(payload, config)
+        if problem:
+            return problem
     if not payload.get("techniques"):
         return "the service carries no technique head (family only)"
+    return None
+
+
+def _release_key(version: str) -> tuple[int, ...] | None:
+    try:
+        return tuple(int(part) for part in version.strip().removeprefix("v").split("."))
+    except ValueError:
+        return None
+
+
+def newer_release_problem(payload: Mapping[str, Any], config: TechniqueHeadConfig) -> str | None:
+    """A head fitted on an older ATT&CK release may serve a newer knowledge base when the
+    service lists its technique ids and every one of them still exists there (ATT&CK only adds
+    techniques between releases; a revoked id would make the head's answers unmappable).
+    Returns the refusal, ``None`` when the newer release is accepted."""
+    version = str(payload.get("attack_version") or "")
+    expected = str(config.attack_version or "")
+    refusal = f"ATT&CK version {version} != {expected}"
+    head_key, kb_key = _release_key(version), _release_key(expected)
+    if head_key is None or kb_key is None or kb_key <= head_key:
+        return refusal
+    if not config.known_technique_ids:
+        return refusal + " (no knowledge base to check the head's techniques against)"
+    ids = payload.get("technique_ids")
+    if not isinstance(ids, list | tuple) or not ids:
+        return refusal + " (the service lists no technique ids; restart it on current code)"
+    missing = sorted(str(t) for t in ids if str(t) not in config.known_technique_ids)
+    if missing:
+        return (
+            refusal
+            + f" ({len(missing)} head techniques are missing from the knowledge base: "
+            + ", ".join(missing[:5])
+            + ")"
+        )
     return None
 
 
@@ -447,7 +498,9 @@ def load_technique_head(
     """The configured client, probed, fail-closed: ``(client, status)`` with ``client`` ``None``
     when the head is disabled or the service cannot be used (the status says why)."""
     attack_version = str(getattr(kb, "version", "") or "") or None
-    config = config_from_settings(settings, attack_version)
+    config = config_from_settings(
+        settings, attack_version, tuple(getattr(kb, "techniques", {}) or {})
+    )
     if not config.enabled:
         return None, "disabled"
     client = TechniqueHeadClient(config, transport=transport)

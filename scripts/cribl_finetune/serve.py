@@ -83,6 +83,9 @@ def build_scorer(checkpoint: Path, *, batch: int, top_kept: int) -> tuple[Scorer
         "task": str(info.get("task", "technique")),
         "families": len(families),
         "techniques": len(techniques.ids),
+        # the ids the head can answer with: a newer knowledge base accepts the head only when
+        # every one of them still exists (apt_classifier.technique_head.newer_release_problem)
+        "technique_ids": [str(t) for t in techniques.ids],
         "families_considered": techniques.considered,
         "top_kept": int(top_kept),
         "batch": int(batch),
