@@ -284,7 +284,9 @@ class Settings(BaseSettings):
     # gate passes); never an independent evidence family. The parameters are the dev choice of
     # scripts/fit_procedure_match.py (vendor set + ATT&CK campaigns).
     procedure_match_enabled: bool = True
-    procedure_match_weight: float = 0.0
+    # on by default since 2026-10-21 (gate trial, docs 21.3.20): the combiner below is fitted with
+    # it voting; 0 switches it off, which then needs a combiner fitted without it
+    procedure_match_weight: float = 1.0
     # dev choice 2026-10-21 (vendor set + campaigns, member alone, each report's own statements
     # hidden from the corpus, 64 variants): floor 0.30, exact technique, no software-sentence
     # route, the named-software link on, mean over the accepted techniques: MRR 0.820, top-1 0.782
@@ -380,10 +382,11 @@ class Settings(BaseSettings):
     attribution_combiner_enabled: bool = True
     # the 2026-09-30 weights stamped for the exactly rounded classifier sums (docs 21.3.9); the
     # earlier artifacts stay next to it for checkouts with the previous classifier code
-    # refitted on ATT&CK 20.0 (2026-10-21, feature schema 3, same pipeline fingerprint as the
-    # 2026-09-30 artifact it replaces; that one is pinned to 19.2 and fails closed on 20.0)
+    # fitted on ATT&CK 20.0 with the procedure member voting (2026-10-21, feature schema 3, docs
+    # 21.3.20); attribution_combiner_1021_fsum.json is the same refit without the member (for
+    # PROCEDURE_MATCH_WEIGHT=0), the 2026-09-30 artifact is pinned to 19.2 and fails closed
     attribution_combiner_path: Path = (
-        PROJECT_ROOT / "data" / "models" / "combiner" / "attribution_combiner_1021_fsum.json"
+        PROJECT_ROOT / "data" / "models" / "combiner" / "attribution_combiner_procedure_match.json"
     )
     attribution_combiner_top_n: int = 20
     attribution_combiner_blend: float = 0.5

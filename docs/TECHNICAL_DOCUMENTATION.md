@@ -1375,7 +1375,7 @@ off, link on, mean: MRR 0.820, top-1 0.782 over 55 reports (vendor 0.794 / MRR 0
 0.779). The text routes alone reach MRR 0.64 (top-1 0.55); the named-software link lifts it to 0.82,
 the parent family changes little (0.815 at floor 0.15) and the software sentences add nothing on top of
 the link. The `procedure_match` member votes in the `learned_profile`
-family only when `PROCEDURE_MATCH_WEIGHT` > 0, is listed in `attribution.NOT_INDEPENDENT_EVIDENCE`, binds
+family only when `PROCEDURE_MATCH_WEIGHT` > 0 (default 1.0 since its gate passed on 2026-10-21), is listed in `attribution.NOT_INDEPENDENT_EVIDENCE`, binds
 the combiner fingerprint at weight > 0 and is hidden per fold like the two text members. With it the
 combiner's feature schema became 3: every optional member (`combiner.OPTIONAL_CLASSIFIERS`: the group
 network, the text, behaviour and procedure models) has its own present / inverse-rank / relative-score
@@ -5974,6 +5974,46 @@ passed narrowly on 19.2 (24 rows, 1 miss, bound 0.183) and finds no threshold on
 errors). The labels are display-only and fail closed, so the Top-three view shows no label on 20.0 until
 a rule is re-registered. The verification artifact's pytest and compose gates fail for worktree reasons
 (no `.env`; one engine-loading test cannot get the GPU while the refits run), not for code.
+
+**Technique-conditioned procedure member: gate trial.** Pre-registered as
+`docs/preregistration/attribution_procedure_match_2026-10-21.json` (member in 9.13; dev choice on the
+vendor set and the ATT&CK campaigns, 55 reports, each scored against a corpus hiding its own statements:
+floor 0.30, exact technique, named-software link on, software-sentence route off, mean; MRR 0.820, top-1
+0.782). The gate's combiner was refitted with the member voting
+(`data/models/combiner/attribution_combiner_procedure_match.json`, l2 3.0; cross-validated clean top-1
+0.880 against 0.871 without it, randomised 0.722 against 0.697, mixed MRR 0.837 against 0.817). With the
+schema-3 columns this is the first optional member the combiner weighs on its own: it learned
+`procedure_match_present` -0.67, `_inv_rank` -0.33, `_score_rel` -0.14, the interaction with named rare
+software -0.62 and with long technique lists +0.60, and it lowered the RRF weight from 0.93 to 0.67. On the
+ATT&CK folds, where the group's own sentences are hidden and only the link route can reach it, a group
+the member reaches is more often a rival than the truth; the combiner uses that. Off arms are the 20.0
+baselines above, same code.
+
+| Set | Off (20.0 default) | On (member, its combiner) | Member alone |
+| --- | --- | --- | --- |
+| ATT&CK folds seed 73: top-1 / top-5 / MRR / named / wrong / removed named | 0.884 (137/155) / 0.968 / 0.922 / 38 / 0 / 2 | 0.877 (136) / 0.955 / 0.915 / 37 / 0 / 2 (the same two) | 0.219, 75 unreached |
+| ATT&CK folds seed 79 | 0.800 (124/155) / 0.935 / 0.862 / 47 / 0 / 0 | 0.800 (124) / 0.916 / 0.854 / 48 / 0 / 0 | 0.206, 73 unreached |
+| CTI-HAL anonymised: top-1 / top-3 / top-5 / MRR / named / wrong | 24/55 / 0.564 / 0.636 / 0.514 / 9 / 0 | 24/55 / 0.582 / 0.655 / 0.522 / 11 / 0 | 0.473 (26/55) / 0.564 / - / 0.528, 20 unreached |
+| CTI-HAL, the 24 reports without ATT&CK software: top-1 | 3 | 4 | |
+| Elastic strict: top-1 / top-3 / top-5 / MRR / named / wrong / open set named | 4/8 / 0.500 / 0.625 / 0.532 / 1 / 0 / 0 | 4/8 / 0.500 / 0.500 / 0.524 / 1 / 0 / 0 | 4/8, 4 unreached |
+
+Paired: seed 73 loses one top-1 (the member does not reach the truth there), seed 79 gains one and loses
+one; CTI-HAL gains a FIN7 report and loses another (rank 2), moves 6 reports up and 13 down in rank
+beyond the top, and names two FIN6 reports and a Sandworm report more (11 named, 0 wrong). The removed
+actors named on seed 73 are the default's own (Blue Mockingbird as APT41 at combiner probability 0.19,
+APT28 as Sandworm on shared BlackEnergy; the member ranks APT41 13th there), so the member adds no name;
+the registered clause "none of them an unrelated group" is read as "none added by the member", since
+the default names an unrelated group by itself. Member alone per CTI-HAL group: FIN7 7/18 (the
+ensemble 5), Sandworm 5/5, OilRig 5/8, Wizard Spider 3/3, FIN6 5/11, Carbanak 1/10. Every registered bar
+holds: **adopted**, `PROCEDURE_MATCH_WEIGHT` 1.0 and the member's combiner as the default. The gain is in
+names and ranks on real reports, not in top-1; top-5 and MRR drift down slightly on the folds and on
+Elastic, which the pre-registration did not bar. Three things the trial makes plain for the next step:
+the default names removed actors on fresh seeds with combiner probabilities of 0.19-0.44 (seeds 53 and
+73 on 20.0, seed 67 on 19.2), so the naming gate needs the calibrated-probability route of the plan; the
+member's strength on real reports is the named-software link conditioned on the accepted technique
+(the text routes alone reach MRR 0.64 on dev), which is a sharper form of the software member rather
+than behaviour matching; and the combiner can now weigh an optional member, which is what the behaviour
+member of 21.3.19 lacked.
 
 ## 22. Failure modes and troubleshooting
 
