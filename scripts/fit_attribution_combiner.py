@@ -519,6 +519,8 @@ def _known_real_lists(
     log: Any,
     records: list[dict[str, Any]],
     stats: dict[str, Any],
+    skip: frozenset[tuple[str, str]] = frozenset(),
+    on_done: Any = None,
 ) -> None:
     base_store = engine.store
     base_lexical = getattr(engine, "lexical_index", None)
@@ -534,6 +536,8 @@ def _known_real_lists(
     try:
         for set_name, path in sets.items():
             for variant, condition in enumerate(conditions):
+                if (set_name, condition.label) in skip:
+                    continue
                 folds = load_real_folds(bench, kb, path, condition)
                 started = time.time()
                 outside = 0
@@ -588,6 +592,8 @@ def _known_real_lists(
                     f"real {set_name} {condition.label}: {len(folds)} lists, truth outside the "
                     f"top {top_n} in {outside}; hidden hits {hidden}"
                 )
+                if on_done is not None:
+                    on_done(records)
     finally:
         engine.store = base_store
         engine.lexical_index = base_lexical
@@ -609,18 +615,25 @@ def generate_real_lists(
     top_n: int,
     log: Any,
     known: bool = True,
+    skip_known: frozenset[tuple[str, str]] = frozenset(),
+    skip_unknown: frozenset[str] = frozenset(),
+    on_done: Any = None,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     """One list per development report and condition (truth = its group; skipped without
     ``known``), plus, with ``unknown``, one removed-actor list per report under the first
     condition (truth = None).
     Each report hides the ATT&CK texts that cite or copy it and its own statements (the
-    benchmark's development-set rule); a campaign report also hides its campaign."""
+    benchmark's development-set rule); a campaign report also hides its campaign. ``on_done``
+    is called with the lists so far after every set and condition (a checkpoint); the
+    ``skip_*`` pairs and sets were done by an earlier run."""
     conditions = list(conditions)
     records: list[dict[str, Any]] = []
     stats: dict[str, Any] = {"sets": {}, "conditions": [c.label for c in conditions]}
     if known:
         assert engine is not None, "the known lists need the engine"
-        _known_real_lists(engine, kb, bench, sets, conditions, top_n, log, records, stats)
+        _known_real_lists(
+            engine, kb, bench, sets, conditions, top_n, log, records, stats, skip_known, on_done
+        )
     if unknown:
         import gc
 
@@ -633,8 +646,10 @@ def generate_real_lists(
                 torch.cuda.empty_cache()
 
         release()
-        unknown_records = []
+        unknown_count = 0
         for set_name, path in sets.items():
+            if set_name in skip_unknown:
+                continue
             folds = load_real_folds(bench, kb, path, conditions[0])
             started = time.time()
             for fold in folds:
@@ -680,7 +695,8 @@ def generate_real_lists(
                         top_n=top_n,
                         truth=None,
                     )
-                unknown_records.append(
+                unknown_count += 1
+                records.append(
                     {
                         "seed": None,
                         "group_id": fold.group_id,
@@ -694,8 +710,9 @@ def generate_real_lists(
                 )
                 del reduced_engine, reduced, proxy, state
             log(f"real {set_name} unknown: {len(folds)} reports ({time.time() - started:.0f} s)")
-        records += unknown_records
-        stats["unknown_lists"] = len(unknown_records)
+            if on_done is not None:
+                on_done(records)
+        stats["unknown_lists"] = unknown_count
     return records, stats
 
 
@@ -1212,6 +1229,7 @@ def main(argv: list[str] | None = None) -> int:
             real_stamp.write_text(fingerprint + "\n")
             log(f"wrote {len(records_out)} real-report lists to {args.real_cache}")
 
+        existing: list[dict[str, Any]] = []
         if not writes_real_cache:
             cached_stamp = real_stamp.read_text().strip() if real_stamp.is_file() else None
             if cached_stamp != fingerprint:
@@ -1220,11 +1238,26 @@ def main(argv: list[str] | None = None) -> int:
                     f"{cached_stamp}, this run is {fingerprint}"
                 )
             with gzip.open(args.real_cache, "rt", encoding="utf-8") as handle:
-                real_records = [json.loads(line) for line in handle if line.strip()]
-            log(f"loaded {len(real_records)} real-report lists from {args.real_cache}")
-        else:
-            # the known lists are written before the (GPU-heavy) removed-actor arm starts
-            real_records, real_stats = generate_real_lists(
+                existing = [json.loads(line) for line in handle if line.strip()]
+            log(f"loaded {len(existing)} real-report lists from {args.real_cache}")
+        # a cache is resumed: the sets and conditions it holds are not generated again
+        done_known = frozenset(
+            (str(r["source"]).removeprefix("real:"), str(r.get("condition")))
+            for r in existing
+            if r["variant"] != -1
+        )
+        done_unknown = frozenset(
+            str(r["source"]).removeprefix("real:") for r in existing if r["variant"] == -1
+        )
+        missing_known = [
+            (name, c.label)
+            for name in real_sets
+            for c in real_conditions
+            if (name, c.label) not in done_known
+        ]
+        if missing_known:
+            # checkpointed after every set and condition, before the removed-actor arm
+            new_known, real_stats = generate_real_lists(
                 engine,
                 settings,
                 kb,
@@ -1235,12 +1268,15 @@ def main(argv: list[str] | None = None) -> int:
                 unknown=False,
                 top_n=args.top_n,
                 log=log,
+                skip_known=done_known,
+                on_done=lambda so_far: write_real(existing + so_far),
             )
             stats["real"] = real_stats
-            write_real(real_records)
-        if args.real_unknown and null_option and not any(r["variant"] == -1 for r in real_records):
+            existing = existing + new_known
+        missing_unknown = [name for name in real_sets if name not in done_unknown]
+        if args.real_unknown and null_option and missing_unknown:
             release_engine()
-            unknown_records, unknown_stats = generate_real_lists(
+            new_unknown, unknown_stats = generate_real_lists(
                 engine,
                 settings,
                 kb,
@@ -1252,10 +1288,12 @@ def main(argv: list[str] | None = None) -> int:
                 top_n=args.top_n,
                 log=log,
                 known=False,
+                skip_unknown=done_unknown,
+                on_done=lambda so_far: write_real(existing + so_far),
             )
             stats.setdefault("real", {})["unknown_lists"] = unknown_stats.get("unknown_lists", 0)
-            real_records += unknown_records
-            write_real(real_records)
+            existing = existing + new_unknown
+        real_records = existing
         stats["real_counts"] = dict(
             Counter(
                 f"{r['source']} {r.get('condition')} "

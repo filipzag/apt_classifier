@@ -27,7 +27,9 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_CHECKPOINT = REPO_ROOT / "data" / "models" / "cribl_ft" / "E2" / "step_52706"
 
 
-def build_scorer(checkpoint: Path, *, batch: int, top_kept: int) -> tuple[Scorer, dict[str, Any]]:
+def build_scorer(
+    checkpoint: Path, *, batch: int, top_kept: int, release_memory: bool = True
+) -> tuple[Scorer, dict[str, Any]]:
     """``(scorer, manifest)`` for :class:`head_service.HeadService`."""
     family_head.TOP_KEPT = int(top_kept)
     model, encoder, head, info = family_head.load_checkpoint(checkpoint)
@@ -67,6 +69,9 @@ def build_scorer(checkpoint: Path, *, batch: int, top_kept: int) -> tuple[Scorer
                         "technique_p": row.get("technique_p"),
                     }
                 )
+        if release_memory and torch.cuda.is_available():
+            # the GPU is shared with the pipeline (8 GB): hand back what a long request cached
+            torch.cuda.empty_cache()
         return rows
 
     manifest = {
@@ -100,6 +105,12 @@ def main() -> None:
     parser.add_argument("--port", type=int, default=DEFAULT_PORT)
     parser.add_argument("--batch", type=int, default=16, help="sentences per forward pass")
     parser.add_argument(
+        "--keep-cache",
+        action="store_true",
+        help="keep the GPU memory a request cached (default: release it after each request, "
+        "the pipeline shares the GPU)",
+    )
+    parser.add_argument(
         "--top-kept", type=int, default=family_head.TOP_KEPT, help="families/techniques per row"
     )
     args = parser.parse_args()
@@ -107,7 +118,9 @@ def main() -> None:
     if not checkpoint.is_dir():
         raise SystemExit(f"checkpoint directory not found: {checkpoint}")
     started = time.monotonic()
-    scorer, manifest = build_scorer(checkpoint, batch=args.batch, top_kept=args.top_kept)
+    scorer, manifest = build_scorer(
+        checkpoint, batch=args.batch, top_kept=args.top_kept, release_memory=not args.keep_cache
+    )
     warm = scorer(["The adversary used PowerShell to download a second-stage payload."])
     print(
         f"technique head ready in {time.monotonic() - started:.0f}s: {manifest['checkpoint']} "
