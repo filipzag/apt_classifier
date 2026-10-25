@@ -1748,6 +1748,22 @@ newer schema, unknown feature names or mismatched vectors are still refused.
 - **Adoption rule.** Group-CV out-of-fold top-1 and MRR at or above RRF on the same lists; the
   seed-7 folds and CTI-HAL (run once on the frozen artifact) with no wrong named group, at most
   1/25 removed actors named and no top-1/MRR regression. Results in 21.3.9.
+- **Real-report lists (2026-10-25).** Every combiner until then learned from ATT&CK fold lists only,
+  where the case is ATT&CK's own phrasing of a group's procedures. `--real-reports SET=PATH` adds one
+  list per development report under each of the two test sets' readings (`--real-conditions`, default
+  names level with the first 30 statements and strict level with every statement) and, with
+  `--real-unknown`, one removed-actor list per report. The sets are the vendor reports, the ATT&CK
+  campaign reports and FBI/CISA advisories (`scripts/prepare_advisory_reports.py`); each row carries
+  `hidden_texts`, the ATT&CK procedure examples that cite or copy the report
+  (`scripts/refresh_hidden_texts.py` on the current ATT&CK), which with the report's own statements are
+  hidden from the dense, BM25 and group-behaviour indexes (under any group) and from the text-based
+  members, and a campaign report hides its campaign object. Training repeats every real list
+  `w` times; `--real-weights` is a grid, chosen by group-level cross-validation as the best
+  out-of-fold real-report MRR among the points within 0.01 of the folds-only clean top-1. CTI-HAL and
+  Elastic are refused as training sets. The lists are cached per set and condition
+  (`--real-cache`, `--reuse-real-cache`). The refit `attribution_combiner_real_reports.json` (w 10, l2 1)
+  passed its registered gate but is not the default: rerun on the design seeds it named one wrong group
+  (21.3.21). It is an opt-in with its own labels (`CONFIDENCE_LABELS_PATH=data/models/calibration/confidence_labels_real_reports.json`).
 
 ### 10.10 Distinguishing the top three (2026-10-01)
 
@@ -6026,6 +6042,112 @@ threshold, see above). Report-only evaluation of the refitted labels: seed 7 str
 73/76, ECE 0.056; CTI-HAL anonymised strong 10/11, set 10/13; as reported strong 11/13, set 13/15. The
 labels artifact (`confidence_labels_fsum.json`) is pinned to the adopted combiner, so switching the
 combiner back disables them until a refit.
+
+#### 21.3.21 The combiner refitted with real-report lists (2026-10-22/25)
+
+**Why.** The diagnosis of 21.3.19 found the fusion to be the bottleneck on real reports: some member has
+the truth first in 51 of 55 CTI-HAL reports, the ensemble in 24-26, and every combiner had been fitted on
+ATT&CK fold lists only, where the technique-set members and the country vote earn a trust they do not
+earn on reports. Pre-registered as `docs/preregistration/attribution_real_report_combiner_2026-10-22.json`
+(method in 10.9).
+
+**Training lists.** The adopted combiner's 2,700 fold lists (seeds 11/23/37, 5 randomised variants, the
+unknown arm of seed 11) unchanged, plus 68 development reports read twice (names level with 30
+statements, strict level with all): the 34 vendor reports, the 21 ATT&CK campaign reports and 13 FBI/CISA
+joint advisories labelled by an automatic rule before any run (MuddyWater, Turla, TA505, BlackTech, Star
+Blizzard, Volt Typhoon, APT28 twice, Fox Kitten, Ember Bear, Play, Scattered Spider, Akira; a group name or
+alias at least 10 times and 3x any other, at least 5 technique tags, re-issues once, any advisory sharing a
+statement with CTI-HAL or Elastic dropped). 124 of the 136 known lists have the truth in the top 20 and
+train; 68 removed-actor lists. Leak control per report: the ATT&CK procedure examples that cite it or share
+a 10-token run with its statements, and its statements, hidden from every index and the text members
+(hidden hits counted per set: for the vendor set 678 dense, 443 behaviour and 364 BM25 hits at the names
+level), and a campaign report's campaign object hidden. Two machine incidents during the run (a GPU
+out-of-memory in the removed-actor arm, then the nightly NVIDIA library update) made the list generation
+resumable per set and condition; the technique head service now empties its GPU cache after each request
+(`serve.py --keep-cache` keeps it). Every gate arm ran on the GPU.
+
+**Selection on development lists.** Group-level 5-fold cross-validation (split seed 97) over real weights
+0/3/10/30 x l2 1/3/10. Reference: weight 0 at l2 3 (its best mixed fold MRR), fold clean top-1 0.880.
+Weights 0-10 are within 0.01 of it; weight 30 is not (0.867). Chosen: **weight 10, l2 1** (best real MRR
+among the eligible). Out of fold, real lists with the truth in the top 20:
+
+| Lists | RRF order top-1 / MRR | Combiner w 0 top-1 / MRR | Combiner w 10 top-1 / MRR |
+| --- | --- | --- | --- |
+| All real (124) | 0.524 / 0.659 | 0.685 / 0.766 | 0.806 / 0.850 |
+| Vendor (62) | 0.500 / 0.634 | 0.677 / 0.768 | 0.806 / 0.862 |
+| Campaigns (38) | 0.605 / 0.710 | 0.789 / 0.835 | 0.895 / 0.906 |
+| Advisories (24) | 0.458 / 0.643 | 0.542 / 0.650 | 0.667 / 0.729 |
+| Names level / strict level | 0.525 / 0.524 | 0.705 / 0.667 | 0.803 / 0.810 |
+| ATT&CK folds clean / randomised top-1 | - | 0.880 / 0.725 | 0.891 / 0.684 |
+
+The real null-option AUC (P(no documented group) on the removed-actor lists) rises from 0.83 to 0.89,
+while the folds' falls from 0.75 to 0.72. The randomised fold regimes lose 0.04 top-1; the registered rule bars
+only the clean folds. These are development numbers: the vendor set and the campaigns already served
+member choices (21.3.19-21.3.20). Weights that move most against the procedure member's combiner: the
+procedure member's rank in long technique lists +0.60 -> +1.83 (its plain rank -0.33 -> -1.27), the
+software member's rank +0.18 -> +1.23, the shortlist discrimination total +0.15 -> +1.08 (its rank in long
+lists -0.13 -> -1.43), the semantic centroid's relative score +1.32 -> +0.79 and the software relative
+score +0.80 -> +0.25. The combiner trusts the procedure member and the software rank more on long real
+reports and the technique-set centroid less.
+
+**Gate (frozen artifact, both arms on the same code).** Off = the procedure member's combiner (the
+default until then), on = `attribution_combiner_real_reports.json`.
+
+| Set | Off | On |
+| --- | --- | --- |
+| ATT&CK folds seed 83: top-1 / top-5 / MRR / named / wrong / removed named | 0.845 (131/155) / 0.955 / 0.897 / 40 / 0 / 1 | 0.858 (133/155) / 0.948 / 0.902 / 40 / 0 / 1 (the same) |
+| ATT&CK folds seed 89 | 0.858 (133/155) / 0.948 / 0.898 / 44 / 0 / 0 | 0.845 (131/155) / 0.935 / 0.886 / 44 / 0 / 0 |
+| CTI-HAL anonymised: top-1 / top-3 / top-5 / MRR / named / wrong | 24/55 / 0.582 / 0.655 / 0.522 / 11 / 0 | 25/55 / 0.618 / 0.655 / 0.538 / 12 / 0 |
+| CTI-HAL, the 24 reports without / 31 with ATT&CK software: top-1 | 4/24 / 20/31 | 4/24 / 21/31 |
+| Elastic strict: top-1 / top-3 / MRR / named / wrong / open set named | 4/8 / 0.500 / 0.524 / 1 / 0 / 0/22 | 4/8 / 0.500 / 0.524 / 1 / 0 / 0/22 |
+
+Paired: seed 83 gains 5 folds and loses 3, seed 89 gains 3 and loses 5 (within the 2-case margin);
+CTI-HAL gains one FIN7 report (DeepWatch) and loses none; Elastic is unchanged report by report. The one
+removed actor named (seed 83: GOLD SOUTHFIELD named as FIN7) is named by both arms, at combiner
+probability 0.75 off and 0.50 on; it is the default's own name, as in 21.3.20. Every registered bar
+holds.
+
+**After the gate: design seeds and the decision.** The registered adoption step reran the design seeds
+41/53 and every baseline with the new combiner as the default (artifacts in
+`data/audits/real_combiner/on_default/`). Against the default on the same seeds:
+
+| Set | Default (procedure member's combiner) | Real-report combiner |
+| --- | --- | --- |
+| ATT&CK folds seed 7: top-1 / top-5 / MRR / named / wrong / removed named | 127/155 / 0.942 / 0.874 / 42 / 0 / 0 | 126/155 / 0.929 / 0.867 / 42 / 0 / 0 |
+| Design seed 41 | 137/155 / 0.955 / 0.912 / 37 / 0 / 1 | 135/155 / 0.955 / 0.907 / 38 / **1** / 1 |
+| Design seed 53 | 131/155 / 0.955 / 0.896 / 36 / 0 / 1 | 130/155 / 0.935 / 0.887 / 36 / 0 / **2** |
+| CTI-HAL as reported: top-1 / top-3 / MRR / named / wrong | 27/55 / 0.727 / 0.612 / 12 / 0 | 31/55 / 0.727 / 0.654 / 13 / 0 |
+| Elastic names / tradecraft: top-1 | 5/8 / 1/8 | 5/8 / 1/8 |
+
+On seed 41 the new combiner moves Threat Group-3390 from rank 7 by RRF (outside the default's top three)
+to first on an Agrius fold that names Mimikatz and ASPXSpy (an ASPXSpy user), and the separation gate
+names it at combiner probability 0.19 with Agrius second; the default leaves the fold unnamed with
+Agrius third. On seed 53 it adds a removed-actor name (Cinnamon Tempest as APT41, 0.45) to the
+default's own (Leviathan as APT39, 0.39 off and 0.33 on; seed 41's Storm-0501 as Scattered Spider is also
+named by both, 0.95 and 0.49). Over the five fold seeds
+both combiners have run on (7, 41, 53, 83, 89) top-1 is 659 against 655 of 775. The confidence labels
+refitted on the new design seeds pass the registered rule (strong 0.885 with 4 errors in 181 rows, set
+0.925 with 14 rows; `confidence_labels_real_reports.json`), with the "one of these" label now rare.
+**Decision (2026-10-25, product owner): not adopted.** The project has rejected candidates for one
+wrong fold name before (21.3.16), and the gain on the anonymised headline is one report; the procedure
+member's combiner stays the default with its labels, and the previous baselines are kept (the gate's
+off arms reproduce them report by report on the current code). The refit and its labels remain an
+opt-in pair. The next step is the probability route of the plan: a floor designed on the design seeds
+(a floor at 0.2 would have held the seed-41 name and costs no correct name on the gate sets, see
+below), registered before it is tried on fresh seeds.
+
+**Probability floor (measurement, not adopted).** Over the gate seeds and both real sets the on arm named
+98 correct leaders (combiner probability from 0.28 to 1.0), 0 wrong groups, 1 removed actor (0.50) and
+nothing on the open set. A floor at 0.2 changes nothing; 0.3-0.4 costs one correct name and holds nothing;
+0.5 costs two and still names the removed actor. On this combiner a probability floor alone would not
+have stopped the removed-actor name of seed 83.
+
+**Reading.** The real lists move the out-of-fold real numbers a lot (top-1 0.69 -> 0.81) and the tests
+little (CTI-HAL +1 top-1, +1 name, top-3 +2 reports; Elastic unchanged). The development lists are
+reports the members were tuned on and whose groups' technique lists ATT&CK partly built from them, so
+part of the development gain is optimism the gate removes; what survives is in ranks and names, not in a
+change of the CTI-HAL ceiling, which still sits with the 24 reports that name no ATT&CK software (4 of 24
+right first in either arm).
 
 ## 22. Failure modes and troubleshooting
 
