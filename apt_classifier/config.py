@@ -360,6 +360,10 @@ class Settings(BaseSettings):
     attribution_hypothesis_separation: float = 0.5
     attribution_hypothesis_min_discriminative: float = 3.0
     attribution_hypothesis_specificity: float = 0.0
+    # Naming probability floor: a single name also needs the learned combiner's leader
+    # probability at or above this (0 = off; a held leader can still be named through its
+    # documented cluster). Pre-registered 2026-10-25 (attribution_probability_floor), docs 10.6.
+    attribution_hypothesis_min_probability: float = 0.0
     # Blend the discriminative mass into the RRF score of the top-K (0 = pure RRF order).
     attribution_rerank_blend: float = 0.5
     # Shortlist size for the discriminative re-ranking; 0 = the gate's shortlist

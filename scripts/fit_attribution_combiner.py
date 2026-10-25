@@ -990,8 +990,8 @@ def _cv_metrics(
 
 
 # fold seeds kept for evaluation and design (docs 21.3.13-21.3.15, the member gates of 21.3.19
-# and 21.3.20, the real-report combiner gate): never fitted on
-EVALUATION_SEEDS = frozenset({7, 41, 43, 47, 53, 59, 61, 67, 73, 79, 83, 89})
+# and 21.3.20, the real-report combiner gate, the probability floor gate): never fitted on
+EVALUATION_SEEDS = frozenset({7, 41, 43, 47, 53, 59, 61, 67, 73, 79, 83, 89, 101, 103, 107})
 # report sets that are tests: never a source of training lists
 TEST_REPORT_SETS = ("cti_hal", "elastic")
 

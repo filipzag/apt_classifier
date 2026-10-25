@@ -136,6 +136,11 @@ class MaturityThresholds:
     hypothesis_separation: float = 0.5
     hypothesis_min_discriminative: float = 3.0
     hypothesis_specificity: float = 0.0
+    # Naming probability floor (prereg attribution_probability_floor_2026-10-25, docs 10.6): a
+    # single name also needs the learned combiner's probability for the leader at or above this
+    # (0: no floor; without an active combiner there is no probability and no floor). A leader it
+    # holds can still be named through its documented cluster, which has its own probability bar.
+    hypothesis_min_probability: float = 0.0
     # Documented-overlap clusters (overlap_cluster.py, docs 10.11): off unless enabled. A cluster
     # needs the separation bar, this mass (the single bar for a nested pair) and the members'
     # combined combiner probability. The scope says which ATT&CK links make a twin: "documented"
@@ -405,6 +410,13 @@ def assess_attribution(
         failed.append(
             f"the re-ranking placed {leading.group_id} above {discrimination.leader_id}, "
             "whose evidence the separation was scored for"
+        )
+    floor = float(getattr(thresholds, "hypothesis_min_probability", 0.0) or 0.0)
+    floor_probability = combiner.get("leader_probability") if isinstance(combiner, dict) else None
+    if floor > 0 and floor_probability is not None and float(floor_probability) < floor:
+        failed.append(
+            f"combiner probability {float(floor_probability):.2f} below the naming floor "
+            f"{floor:.2f}"
         )
     # (1) the single gate holds the "found" rules too
     guard = (

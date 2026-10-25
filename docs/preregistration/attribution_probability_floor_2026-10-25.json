@@ -1,0 +1,39 @@
+{
+  "schema": "cribl_finetune_prereg/1",
+  "id": "attribution_probability_floor_2026-10-25",
+  "title": "A naming probability floor: a single group name also needs the learned combiner's probability for the leader",
+  "registered": "2026-10-25",
+  "parent": "docs 21.3.20 (the default names removed actors on fresh seeds at combiner probabilities 0.19-0.44) and docs 21.3.21 (the real-report combiner passed its gate, then named a wrong group on design seed 41 at 0.19 and one more removed actor on seed 53 at 0.45, and was not adopted)",
+  "rule": "MaturityThresholds.hypothesis_min_probability (ATTRIBUTION_HYPOTHESIS_MIN_PROBABILITY, default 0 = off): when the combiner is active, a leader whose combiner probability is below the floor fails the single naming gate with the reason 'combiner probability p below the naming floor f'. The documented-cluster step then decides as for any single-gate failure (a cluster has its own combined-probability bar, 0.8). The ranking, the gate window and every other bar are unchanged. Without an active combiner there is no probability and no floor.",
+  "design": {
+    "data": "the design seeds 41/53 only (known and removed-actor rows): for the default combiner the 2026-10-21 design artifacts, for the real-report combiner the 2026-10-25 reruns (data/audits/real_combiner/before/ and on_default/)",
+    "rule": "scripts/probability_floor_replay.py --choose: on the grid 0.05..0.60 (step 0.05), the smallest floor that holds no correct single name and holds every bad single name (a known row whose leader is not the truth, any removed-actor name) whose probability lies below the lowest correct single name's; 0 when no bad name lies below it",
+    "result_default": "lowest correct 0.640; bad 0.387 (Leviathan as APT39, removed) and 0.948 (Storm-0501 as Scattered Spider, removed; not catchable); floor 0.40: holds 1 removed-actor name, 0 correct names, no cluster fallback",
+    "result_real_reports": "lowest correct 0.661; bad 0.190 (Agrius as Threat Group-3390, wrong), 0.329 (Leviathan as APT39), 0.455 (Cinnamon Tempest as APT41), 0.488 (Storm-0501 as Scattered Spider); floor 0.50: holds all four, 0 correct names, no cluster fallback"
+  },
+  "arms": {
+    "off": "the default: attribution_combiner_procedure_match.json with confidence_labels_fsum.json, no floor",
+    "A": "the default combiner with ATTRIBUTION_HYPOTHESIS_MIN_PROBABILITY=0.40",
+    "B": "ATTRIBUTION_COMBINER_PATH=attribution_combiner_real_reports.json, CONFIDENCE_LABELS_PATH=confidence_labels_real_reports.json, ATTRIBUTION_HYPOTHESIS_MIN_PROBABILITY=0.50"
+  },
+  "test": {
+    "fold_seeds": "101, 103 and 107: never used by any run (added to fit_attribution_combiner.EVALUATION_SEEDS)",
+    "real_reports": "CTI-HAL anonymised (55, names level, 30 statements) and Elastic strict (8 + the 22-post open set), once per arm",
+    "same_code": "all arms on the same code and settings except the arm's variables; the technique head service on as in the product"
+  },
+  "bars": {
+    "wrong_names": "0 wrong names on every test set for the arm (a cluster name is correct when the truth is a member)",
+    "open_set": "the Elastic open set names nothing",
+    "removed_actors": "removed actors named on the three fresh seeds, pooled: not more than the off arm",
+    "correct_names": "correct names on the three fresh seeds, pooled: at least 90% of the off arm's; CTI-HAL: at least the off arm's minus 2",
+    "top1": "arm B only (arm A keeps the off arm's ranking by construction): top-1 not below the off arm by more than 2 folds on any fresh seed; CTI-HAL and Elastic top-1 not below the off arm",
+    "implementation": "arm A's runs equal the replay of the off runs under floor 0.40 row for row (scripts/probability_floor_replay.py --on)"
+  },
+  "adoption": "B if it passes every bar; otherwise A if it passes every bar; otherwise the floor stays off and the result is documented. Adoption sets the arm's variables as the defaults, then reruns seed 7, the design seeds 41/53, CTI-HAL anonymised and as reported and the three Elastic levels as the new baselines and checks them for wrong names. The confidence labels read the stage only for their display wording, so a floor needs no refit; arm B uses the real-report combiner's own labels.",
+  "secondary": [
+    "the replay of both floors over the runs already made (seeds 7, 83, 89 under both combiners; seeds 73/79 under the default), reported, never a bar",
+    "per arm: named correct, wrong, removed-actor names, cluster fallbacks, and the names the floor held, with their probabilities"
+  ],
+  "caveats": "the combiner probabilities of the named leaders on seeds 83/89, CTI-HAL and Elastic under the real-report combiner were read in the 2026-10-25 gate (a registered secondary measurement of its pre-registration: floor 0.2 cost nothing there, 0.3-0.4 one correct name, 0.5 two); the floors here come from the design rule on seeds 41/53 alone, and the fresh seeds 101/103/107 are the clean test; the design seeds hold few bad names (2 and 4), so each floor rests on a handful of cases",
+  "cost": "laptop only, no API credit: three arms x three fresh fold seeds (about 20 min each) plus CTI-HAL and Elastic per arm, about 3.5-4 h"
+}
