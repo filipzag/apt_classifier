@@ -1596,6 +1596,8 @@ fusion only and is reproducible across processes.
   run made without the floor records everything the rule reads, so
   `scripts/probability_floor_replay.py` replays it exactly over recorded runs (`--on` checks a run
   made with it row for row; `--choose` applies the registered design rule). Gate trial: 21.3.22.
+  Removed actors named with high probability are out of its reach, and the combiner's null option
+  does not separate them from correct names either (21.3.23).
 - The UI treats "no named group" as a first-class outcome: for every stage below
   `KNOWN_GROUP_HYPOTHESIS` the Assessment view states that no documented group meets the
   evidence bar, labels the leader as the *closest documented group (not an attribution)*,
@@ -6235,6 +6237,62 @@ confidence labels need no refit (the floor does not change their inputs); their 
 on the new baselines: seed 7 strong 84/84 right, set 8/8; CTI-HAL anonymised strong 15/16, as reported
 15/17. Verification: pytest, ruff and the public regression check pass; the compose gate fails for the
 worktree reason (no `.env`).
+
+#### 21.3.23 The null option against confident removed-actor names (2026-10-26, development only)
+
+**Question.** After the floor (21.3.22), the removed actors still named are confident names
+(Storm-0501 as Scattered Spider at 0.94, Lazarus as Kimsuky at 0.57-0.65). Can the combiner's null
+option (P(no documented group), 10.9) hold them? Development data only: the recorded runs of the
+design seeds 41/53 and the spent gate seeds 83/89/101/103/107 under the adopted default, and
+cross-validation on the combiner's own training lists. Nothing was registered, refitted or changed.
+
+**The null option as fitted.** On those runs the default names 269 correct leaders and 3 removed
+actors (0 wrong groups). The removed names' null probabilities are 0.037 (Storm-0501 as Scattered
+Spider), 0.068 (Lazarus as Kimsuky) and 0.144 (GOLD SOUTHFIELD as FIN7, leader probability 0.504),
+inside the range of the correct names (median 0.001, 90th percentile 0.024, maximum 0.42). A ceiling
+that holds all three holds 17 correct names; one that holds two holds 6. The null's share of the
+non-leader mass and its ratio to the runner-up separate nothing (they would hold 98-176 correct names).
+
+**A null option that sees the fit** (`scripts/null_option_study.py`). The null utility reads only the
+evidence-regime features, so it cannot see how well the best candidate fits. Group-level five-fold CV
+on the real-report combiner's training lists (its recipe: real lists at weight 10, l2 1), with the
+best candidate's absolute fit added to the null row (matched share, distinctive share, exclusive
+software; then also the runner-up gap, member support and the discrimination channels). Because the
+null sits in the softmax, a better null lowers the leader's probability and the floor holds the name:
+
+| Null row | Folds clean at floor 0.5: correct / wrong / removed named | Development real lists: correct / wrong / removed named |
+| --- | --- | --- |
+| regime only (as fitted) | 364/459 / 24 / 50/155 | 89/124 / 7 / 13/68 |
+| + best candidate's fit | 363 / 24 / 49 | 89 / 7 / 13 |
+| + gap, support, discrimination | 362 / 26 / 48 | 87 / 7 / 14 |
+
+Every other floor from 0.3 to 0.7 shows the same: no variant trades better than moving the floor.
+
+**Upper bound.** Among the lists the fitted combiner names (leader probability at least 0.5), a
+gradient-boosted classifier on the leader's and runner-up's full feature rows, the regime and the
+probabilities, out of fold, against a higher floor at the same cost in correct names:
+
+| Lists | AUC classifier / leader probability | Removed names held at 1% / 2% / 5% of correct names: classifier | higher floor |
+| --- | --- | --- | --- |
+| Folds (50 removed, 1,445 correct) | 0.822 / 0.806 | 16 / 20 / 23 | 1 / 3 / 15 |
+| Development real reports (13 removed, 89 correct) | 0.832 / 0.874 | 1 / 1 / 2 | 3 / 3 / 3 |
+
+The gain exists only on the fold lists. Its main input is the rarest named software
+(`software_rarity_max`, permutation importance 0.16, three times the next input): deleting an actor from
+ATT&CK leaves its own malware as ATT&CK software with no user, a situation an undocumented real actor
+seldom produces (its malware is usually not in ATT&CK at all) and that known reports produce too (PS1
+and LockBit 3.0 have no documented group user in ATT&CK 20.0). On the development real reports the
+classifier holds fewer removed names than a higher floor.
+
+**Reading.** The three cases show why. GOLD SOUTHFIELD's report names REvil, which ATT&CK documents
+for FIN7 as well; Storm-0501's names BlackCat, documented only for Scattered Spider (and Embargo,
+whose only documented user is the removed actor); Lazarus's case names only netsh and Forfiles, so
+its name rests on techniques, where Kimsuky's large profile matches. The evidence supports the named group in each case, so no
+probability computed from that evidence, the null's included, can tell them from a correct name. A
+removed actor named with confidence is the open-set limit of attribution against a catalogue: it is
+reduced only by evidence ATT&CK does not hold (an undocumented tool or infrastructure link), not by
+re-weighting the evidence it does hold. The null option stays as fitted: it feeds the leader
+probability (and so the floor) and the confidence labels, and no naming rule reads it directly.
 
 ## 22. Failure modes and troubleshooting
 
