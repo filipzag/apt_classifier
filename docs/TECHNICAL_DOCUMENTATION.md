@@ -6294,6 +6294,100 @@ reduced only by evidence ATT&CK does not hold (an undocumented tool or infrastru
 re-weighting the evidence it does hold. The null option stays as fitted: it feeds the leader
 probability (and so the floor) and the confidence labels, and no naming rule reads it directly.
 
+#### 21.3.24 What separates the groups (2026-10-26, development only)
+
+**Question.** Which kind of evidence puts the right group first, so that work goes where the
+separation is? Development data only: ATT&CK itself, and the 68 development reports (34 vendor, 21
+ATT&CK campaign, 13 FBI/CISA advisories; every statement read; the ATT&CK texts that cite or copy a
+report hidden as in 10.9) at the three anonymization levels of 21.3.4c. CTI-HAL and Elastic were not
+read. Code and commands: `scripts/separation_study/` (README); nothing in the product changed.
+
+**ATT&CK itself** (`atlas.py`, 174 groups with techniques). A group's median technique is documented
+for 28 groups. 54 groups have a technique no other group has (20 at parent level: two thirds of every
+profile are sub-techniques), 128 have software no other group uses, and 60 groups have 80% or more of
+their techniques inside another group's profile (30 of them inside one of the ten largest). Drawing
+techniques from a group's own profile identifies it easily (10 exact ids: first 97% of the time,
+parent level 90%), but that is the profile reading itself. ATT&CK's 21 single-group campaigns are
+real operations documented without extraction error; only a median 50% of a campaign's techniques
+are in its group's profile, and against all 174 profiles:
+
+| Campaign evidence | Group first | In the top 5 |
+| --- | --- | --- |
+| Technique list, exact ids (IDF cosine) | 2/21 | 5/21 |
+| Technique list, parent level | 3/21 | 5/21 |
+| Rare techniques only (documented for at most 5 groups) | 1/21 | 9/21 |
+| The campaign's software, by rarity | 15/21 | 15/21 |
+
+(69% of a campaign's software links are also documented for its group, so the software reading is
+partly built into ATT&CK.)
+
+**Members on the development reports** (`run_reports.sh`, `members.py`). Every member voting (the
+optional text, behaviour-text and group-network members at weight 1, so the learned combiner was
+inactive and the ensemble row is the plain RRF over all members, not the product's default), each
+member's rank of the actor recorded, plus three rankings computed from the extracted evidence alone.
+The actor first, of 68 reports:
+
+| Signal | Names | Strict | Tradecraft (ATT&CK malware names removed) | Tradecraft, the 27 reports with no ATT&CK software left |
+| --- | --- | --- | --- | --- |
+| Free-text model (`text_group`) | 53 | 51 | 43 | 14 |
+| Behaviour text, statement by statement (`behavior_text`) | 47 | 48 | 44 | 14 |
+| Technique-conditioned procedures (`procedure_match`) | 51 | 51 | 34 | 10 |
+| Named software by rarity (evidence alone) | 50 | 49 | 23 | 0 |
+| Software member (`software_tools`) | 47 | 46 | 20 | 0 |
+| Group network (techniques + software) | 45 | 43 | 21 | 5 |
+| Source country | 21 | 21 | 21 | 7 |
+| Technique list by IDF cosine (evidence alone) | 19 | 21 | 20 | 4 |
+| Technique-set members (weighted Jaccard / IDF-TF-IDF / naive Bayes / forest / centroid) | 8-16 | 7-16 | 7-16 | 1-3 |
+| Rare techniques only (evidence alone; fires on 30-31 reports) | 14 | 13 | 13 | 3 |
+| Campaign profile / group description / dense behaviour hits | 6-9 | 7-8 | 7-8 | 2-5 |
+| Plain RRF over every member | 44 | 43 | 19 | 4 |
+
+Source country has the actor in its top 5 for 65 of 68 reports at every level: it narrows, it does
+not pick. Together, software or any text member puts the actor first in 61 (names) and 54
+(tradecraft) of 68; software or the technique list in 54 and 32.
+
+**Statements** (`statements.py`). Each statement against ATT&CK's anonymised procedure sentences; the
+share whose nearest sentence is the actor's (a random other report's actor: 0-1.7%):
+
+| Statement contains | Statements (names) | Actor's (names) | Actor's (tradecraft) | Reports with such a hit (tradecraft) |
+| --- | --- | --- | --- | --- |
+| Registry key | 13 | 77% | 77% | 6/68 |
+| An ATT&CK software name | 655 | 28% | 25% (187 left) | 20/68 |
+| A command or living-off-the-land binary | 320 | 22% | 21% | 23/68 |
+| A file name or path | 363 | 22% | 21% | 24/68 |
+| None of these (a plain description) | 4,902 | 14% | 13% | 59/68 |
+| A network indicator | 217 | 11% | 11% | 15/68 |
+| A victim sector or region | 279 | 9% | 5% | 7/68 |
+
+**Reading.**
+
+1. **How the actor does things, in its own words, separates groups best**, and it survives the loss of
+   names: the statement-level text members keep 43-44 of 68 at tradecraft while everything else
+   halves. The concrete artefacts of a procedure (commands, file names and paths, registry keys)
+   point at the actor about twice as often as a plain description, and the many plain descriptions
+   add up (a hit in 59 of 68 reports).
+2. **Named software is the sharpest single cue when present** (50 of 68 at names; 15 of 21 ATT&CK
+   campaigns), but it is a lookup: without the malware names it falls to 23.
+3. **Technique ids barely separate real operations.** A perfectly documented ATT&CK campaign shares half
+   its techniques with its group's profile and its id list ranks the group first in 2 of 21; on the
+   reports the id-set members stay at 7-21 of 68 at every level and add little to software (50 -> 54).
+   The id throws away the procedure, which is where groups differ; rare techniques fire on half the
+   reports and are right on 13-14.
+4. **Victimology and country narrow, they do not decide** (country top-5 65/68, first 21/68; victim
+   statements point at the actor 5-9% of the time).
+5. **The plain fusion is outvoted by the id-set members**: eight members read technique sets, so the
+   RRF over all members drops from 44 to 19 when the malware names go while the text members stay at
+   43-44. The product's learned combiner weights the members differently (and its default leaves the
+   text and behaviour-text members off), so this row measures the members' votes, not the default.
+
+The direction matches the test sets already documented: the free-text model alone ranks CTI-HAL's
+actor first in 27 of 55 against the default's 25 (21.3.16, 21.3.22). Caveats: the vendor set and the
+campaigns served earlier member choices (21.3.19-21.3.20), so the text members' numbers here lean
+optimistic; the statement tags are regular expressions and overlap; the two text members that lead
+were both held back by naming, not ranking (21.3.16: one wrong fold name; 21.3.19: removed actors and
+Elastic open-set names), so the work this points to is procedure-level evidence that the naming gate
+can trust, not more technique-id members.
+
 ## 22. Failure modes and troubleshooting
 
 ### 22.1 “ATT&CK knowledge base has not been ingested”
