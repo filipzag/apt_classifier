@@ -267,3 +267,53 @@ def test_fit_script_refuses_test_sets_as_training_lists(tmp_path):
         main([*common, "--real-reports", "mine=data/benchmarks/elastic/reports.jsonl"])
     with pytest.raises(SystemExit):
         main(["--output", str(tmp_path / "c.json"), "--real-reports", "vendor=x.jsonl"])
+
+
+def test_list_generation_resumes_from_its_checkpoint_without_regenerating():
+    from types import SimpleNamespace
+
+    from scripts.fit_attribution_combiner import generate_lists, generate_unknown_lists
+
+    class Bench:
+        def __init__(self, folds):
+            self.folds = folds
+
+        def build_folds(self, knowledge_base, **_):
+            if self.folds is None:
+                raise AssertionError("a resumed seed was generated again")
+            return self.folds
+
+    engine = SimpleNamespace(kb=None, store="store", lexical_index="lexical")
+    saved = {
+        "records": [{"seed": 11, "group_id": "G1", "variant": 0}],
+        "pool": {"T1": [0.5]},
+        "stats": {"seeds": {"11": {"folds": 1}}, "pool_techniques": 1},
+    }
+    records, stats = generate_lists(
+        engine,
+        Bench(None),
+        seeds=[11],
+        variants=5,
+        top_n=20,
+        fold_args={},
+        limit=None,
+        log=lambda _: None,
+        resume=saved,
+    )
+    assert records == saved["records"] and stats["seeds"] == {"11": {"folds": 1}}
+    assert engine.store == "store" and engine.lexical_index == "lexical"
+    # the removed-actor arm skips the folds its checkpoint already processed
+    folds = [SimpleNamespace(group_id="G1"), SimpleNamespace(group_id="G2")]
+    unknown = generate_unknown_lists(
+        None,
+        None,
+        None,
+        Bench(folds),
+        seed=11,
+        top_n=20,
+        fold_args={},
+        limit=None,
+        log=lambda _: None,
+        resume={"records": [{"group_id": "G1", "variant": -1}], "processed": 2},
+    )
+    assert unknown == [{"group_id": "G1", "variant": -1}]

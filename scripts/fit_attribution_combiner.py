@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import argparse
 import copy
+import gc
 import gzip
 import importlib.util
 import json
@@ -234,8 +235,14 @@ def generate_lists(
     limit: int | None,
     log: Any,
     regime: Regime = DEFAULT_REGIME,
+    resume: dict[str, Any] | None = None,
+    checkpoint: Any = None,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
-    """Clean and randomised lists for every training seed; returns (lists, stats)."""
+    """Clean and randomised lists for every training seed; returns (lists, stats).
+
+    ``checkpoint`` (when given) is called after every seed with ``{"records", "pool", "stats"}``;
+    ``resume`` is such a checkpoint: its seeds are not generated again and the false-positive
+    pool carries over, so a resumed run writes the lists an uninterrupted one would."""
     kb = engine.kb
     base_store = engine.store
     base_text = getattr(engine, "text_group", None)
@@ -276,11 +283,14 @@ def generate_lists(
             )
 
     base_lexical = getattr(engine, "lexical_index", None)
-    records: list[dict[str, Any]] = []
-    stats: dict[str, Any] = {"seeds": {}, "pool_techniques": 0}
-    pool: dict[str, list[float]] = {}
+    records: list[dict[str, Any]] = list((resume or {}).get("records") or [])
+    stats: dict[str, Any] = dict((resume or {}).get("stats") or {"seeds": {}, "pool_techniques": 0})
+    pool: dict[str, list[float]] = dict((resume or {}).get("pool") or {})
     try:
         for seed in seeds:
+            if str(seed) in stats["seeds"]:
+                log(f"seed {seed}: resumed from the checkpoint")
+                continue
             folds = bench.build_folds(kb, seed=seed, limit=limit, **fold_args)
             log(f"seed {seed}: {len(folds)} folds")
             started = time.time()
@@ -358,6 +368,8 @@ def generate_lists(
                 "seconds": round(time.time() - started, 1),
             }
             log(f"seed {seed}: {clean} clean + {randomised} randomised lists, {skipped} skipped")
+            if checkpoint is not None:
+                checkpoint({"records": records, "pool": pool, "stats": stats})
     finally:
         engine.store = base_store
         if base_text is not None:
@@ -381,12 +393,21 @@ def generate_unknown_lists(
     fold_args: dict[str, Any],
     limit: int | None,
     log: Any,
+    resume: dict[str, Any] | None = None,
+    checkpoint: Any = None,
 ) -> list[dict[str, Any]]:
+    """One removed-actor list per fold of ``seed``. ``checkpoint`` (when given) is called every 25
+    folds with ``{"records", "processed"}``; ``resume`` is such a checkpoint (its folds skipped)."""
     folds = bench.build_folds(kb, seed=seed, limit=limit, **fold_args)
-    records = []
+    records = list((resume or {}).get("records") or [])
+    processed = int((resume or {}).get("processed") or 0)
+    if processed:
+        log(f"  unknown: resumed after {processed}/{len(folds)} folds")
     started = time.time()
     draws = None
     for index, fold in enumerate(folds, 1):
+        if index <= processed:
+            continue
         reduced = copy.deepcopy(kb)
         del reduced.groups[fold.group_id]
         for campaign in reduced.campaigns.values():
@@ -435,22 +456,26 @@ def generate_unknown_lists(
             )
         state = engine.analyze(bench._ledger(fold))  # noqa: SLF001
         fusion = state.deterministic_fusion or state.fusion
-        if not fusion.entries:
-            continue
-        lst = list_from_state(
-            engine, state.classifier_results, fusion, state.context, top_n=top_n, truth=None
-        )
-        records.append(
-            {
-                "seed": seed,
-                "group_id": fold.group_id,
-                "variant": -1,
-                "leak_control": bench.LEAK_CONTROL,
-                **lst.to_dict(),
-            }
-        )
+        if fusion.entries:
+            lst = list_from_state(
+                engine, state.classifier_results, fusion, state.context, top_n=top_n, truth=None
+            )
+            records.append(
+                {
+                    "seed": seed,
+                    "group_id": fold.group_id,
+                    "variant": -1,
+                    "leak_control": bench.LEAK_CONTROL,
+                    **lst.to_dict(),
+                }
+            )
+        # one engine (and knowledge-base copy) per fold: release it before the next one is built
+        del engine, state, reduced, proxy
+        gc.collect()
         if index % 25 == 0:
             log(f"  unknown {index}/{len(folds)} ({time.time() - started:.0f} s)")
+            if checkpoint is not None:
+                checkpoint({"records": records, "processed": index})
     return records
 
 
@@ -1315,6 +1340,27 @@ def main(argv: list[str] | None = None) -> int:
             records = [json.loads(line) for line in handle if line.strip()]
         log(f"loaded {len(records)} lists from {args.lists_cache}")
     else:
+        # the fold lists are checkpointed after every seed and every 25 removed-actor folds (a
+        # memory watchdog may stop a long run); a checkpoint of another pipeline is ignored
+        partial = args.lists_cache.with_name(args.lists_cache.name + ".partial")
+        saved: dict[str, Any] = {}
+        if partial.is_file():
+            with gzip.open(partial, "rt", encoding="utf-8") as handle:
+                saved = json.load(handle)
+            if saved.get("pipeline") != fingerprint:
+                log(f"ignoring {partial}: another pipeline")
+                saved = {}
+            else:
+                log(f"resuming from {partial}")
+
+        def save(**update: Any) -> None:
+            saved.update(update, pipeline=fingerprint)
+            partial.parent.mkdir(parents=True, exist_ok=True)
+            temporary = partial.with_name(partial.name + ".tmp")
+            with gzip.open(temporary, "wt", encoding="utf-8") as handle:
+                json.dump(saved, handle)
+            temporary.replace(partial)
+
         records, fold_stats = generate_lists(
             engine,
             bench,
@@ -1325,6 +1371,8 @@ def main(argv: list[str] | None = None) -> int:
             limit=args.limit,
             log=log,
             regime=regime,
+            resume=saved.get("folds"),
+            checkpoint=lambda state: save(folds=state),
         )
         stats.update(fold_stats)
         stats["regime"] = regime.__dict__
@@ -1339,6 +1387,8 @@ def main(argv: list[str] | None = None) -> int:
                 fold_args=fold_args,
                 limit=None if args.unknown_all else args.unknown,
                 log=log,
+                resume=saved.get("unknown"),
+                checkpoint=lambda state: save(unknown=state),
             )
             records += unknown
             stats["unknown_lists"] = len(unknown)
@@ -1347,6 +1397,7 @@ def main(argv: list[str] | None = None) -> int:
             for record in records:
                 handle.write(json.dumps(record) + "\n")
         stamp.write_text(fingerprint + "\n")
+        partial.unlink(missing_ok=True)
         log(f"wrote {len(records)} lists to {args.lists_cache}")
     if args.lists_only:
         log("lists only: no fit")
