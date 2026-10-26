@@ -1,0 +1,40 @@
+{
+  "schema": "cribl_finetune_prereg/1",
+  "id": "attribution_procedure_core_2026-10-26",
+  "title": "Procedure text as the core of attribution: the free-text and behaviour-text members vote next to the procedure member, under a combiner refitted with them on the fold and real-report lists",
+  "registered": "2026-10-26",
+  "parent": "docs 21.3.24 (what separates the groups, development only): the three procedure-text members put the actor first in 47-53 of 68 development reports and keep 43-44 when the malware names are removed, against 7-21 for the technique-id members and 50 -> 23 for named software; the product owner chose procedure text as the core (2026-10-26) and asked to keep the current work for rollback",
+  "rollback": {
+    "git_tag": "rollback/pre-procedure-core-2026-10-26 (commit 5e51b7e)",
+    "settings": "TEXT_GROUP_WEIGHT=0, BEHAVIOR_TEXT_WEIGHT=0, ATTRIBUTION_COMBINER_PATH=data/models/combiner/attribution_combiner_real_reports.json, CONFIDENCE_LABELS_PATH=data/models/calibration/confidence_labels_real_reports.json, ATTRIBUTION_HYPOTHESIS_MIN_PROBABILITY=0.5",
+    "artifacts": "every current model file stays as it is (new file names only); the current baselines are copied to data/audits/procedure_core/before/ before an adoption rewrites them"
+  },
+  "change": {
+    "members": "TEXT_GROUP_WEIGHT 0 -> 1.0 and BEHAVIOR_TEXT_WEIGHT 0 -> 1.0 (both read TEXT_GROUP_PATH, ATT&CK 20.0, unchanged); PROCEDURE_MATCH_WEIGHT stays 1.0; every other member and weight unchanged (the group network stays off)",
+    "combiner": "the real-report recipe of attribution_real_report_combiner_2026-10-22, unchanged, on lists rebuilt with the two members voting: fold lists seeds 11/23/37, 5 randomised variants, the unknown-actor arm for every fold of seed 11 (data/audits/procedure_core/training_lists_procedure_core.jsonl.gz); real lists vendor / campaigns / advisories at names:30 and strict:all plus one removed-actor list per report (data/audits/procedure_core/training_lists_real_procedure_core.jsonl.gz); the same leak control (each fold's held-out sentences and each real report's cited and copied texts hidden from every index and from all three text members, refitted per list); group-level 5-fold CV, real weights 0/3/10/30, l2 1/3/10, the registered selection (best out-of-fold real-report MRR among the points within 0.01 of the fold clean top-1 of weight 0). Written to data/models/combiner/attribution_combiner_procedure_core.json",
+    "floor": "re-chosen for the new combiner by the registered rule of attribution_probability_floor_2026-10-25 (scripts/probability_floor_replay.py --choose) on the design seeds 41/53 run with the new configuration and no floor; if the rule finds no separating grid point the arm keeps 0.50, the current value",
+    "labels": "confidence labels refitted on those design runs, pinned to the new combiner: data/models/calibration/confidence_labels_procedure_core.json"
+  },
+  "never": "nothing is read from the fresh fold seeds 109/113/127, CTI-HAL or Elastic before the gate; CTI-HAL and Elastic are never training lists",
+  "gate": {
+    "arms": "off = the current default (rollback settings above); core = the change; one run per arm on the same code",
+    "sets": "ATT&CK folds on seeds 109, 113 and 127 (never used; reserved in fit_attribution_combiner.EVALUATION_SEEDS by this registration), CTI-HAL anonymised (55, names, 30 statements), Elastic strict (8 + 22 open set)",
+    "bars": [
+      "0 wrong names on every set (fold known rows, CTI-HAL, Elastic labelled; single and cluster names)",
+      "the Elastic open set names nothing",
+      "removed actors named on the fold unknown arms, pooled over the three seeds: core <= off",
+      "fold top-1 pooled over the three seeds: core >= off - 6 (the folds are the group's own ATT&CK sentences, where the technique-id members are favoured by construction, docs 21.3.24; they guard the naming, not the ranking target)",
+      "correct fold names (single + cluster) pooled: core >= 90% of off",
+      "CTI-HAL anonymised: core top-1 >= off and MRR >= off; correct names >= off - 2",
+      "Elastic strict: core top-1 >= off"
+    ],
+    "adoption": "every bar holds: the defaults become the change (both weights 1.0, the new combiner, its floor, its labels), the current baselines move to before/ and every *_current.json baseline is rerun on the new defaults; any bar fails: nothing changes and the result is documented"
+  },
+  "secondary": [
+    "CTI-HAL at the tradecraft level and as reported, Elastic at the names and tradecraft levels, both arms (the readings the change targets; reported, not bars)",
+    "fold top-5 / MRR per seed, CTI-HAL top-3 / top-5, named counts, the combiner weights of the text members' columns against the technique-id members'",
+    "shortlist recall: the actor inside the combiner's top-20 window per set and arm"
+  ],
+  "caveats": "the vendor set and the campaigns served member choices (docs 21.3.19-21.3.20) and the study that motivated this (21.3.24), so the cross-validated real numbers are development numbers; both text members failed earlier gates on naming (21.3.16 one wrong fold name, 21.3.19 a removed actor and two Elastic open-set names) before the floor and the real-report lists existed; the technique head's fold contamination (21.3.18) is the same in both arms",
+  "cost": "laptop only, no API credit: fold lists about 1.5 h, real lists about 1 h, CV and fit about 1 h, design seeds about 40 min, gate about 2.5 h, adoption baselines about 1.5 h"
+}
