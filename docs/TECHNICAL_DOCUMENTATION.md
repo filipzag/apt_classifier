@@ -1585,6 +1585,17 @@ fusion only and is reproducible across processes.
 - No separate calibration artifact exists. With the learned combiner active (the default, 10.9)
   `is_calibrated` is true and `calibrated_probability` is the combiner's leader probability;
   without it `is_calibrated` is false and the UI shows qualitative maturity only.
+- **Naming probability floor (2026-10-25).** `ATTRIBUTION_HYPOTHESIS_MIN_PROBABILITY`
+  (`MaturityThresholds.hypothesis_min_probability`; 0 = off, default 0.50 since 2026-10-26 together
+  with the real-report combiner, for which it was chosen) adds one condition to the
+  single naming gate: the combiner's probability for the leader must reach the floor, else the
+  decision says "combiner probability p below the naming floor f" and the leader fails the single
+  gate. The documented-cluster step then decides as for any single-gate failure (a cluster has its
+  own combined-probability bar of 0.8, 10.11), so a held FIN7 can still be named as FIN7 / Carbanak.
+  Without an active combiner there is no probability and no floor. The ranking never changes, and a
+  run made without the floor records everything the rule reads, so
+  `scripts/probability_floor_replay.py` replays it exactly over recorded runs (`--on` checks a run
+  made with it row for row; `--choose` applies the registered design rule). Gate trial: 21.3.22.
 - The UI treats "no named group" as a first-class outcome: for every stage below
   `KNOWN_GROUP_HYPOTHESIS` the Assessment view states that no documented group meets the
   evidence bar, labels the leader as the *closest documented group (not an attribution)*,
@@ -1762,8 +1773,9 @@ newer schema, unknown feature names or mismatched vectors are still refused.
   out-of-fold real-report MRR among the points within 0.01 of the folds-only clean top-1. CTI-HAL and
   Elastic are refused as training sets. The lists are cached per set and condition
   (`--real-cache`, `--reuse-real-cache`). The refit `attribution_combiner_real_reports.json` (w 10, l2 1)
-  passed its registered gate but is not the default: rerun on the design seeds it named one wrong group
-  (21.3.21). It is an opt-in with its own labels (`CONFIDENCE_LABELS_PATH=data/models/calibration/confidence_labels_real_reports.json`).
+  passed its registered gate but was not adopted alone: rerun on the design seeds it named one wrong
+  group (21.3.21). Since 2026-10-26 it is the default together with the naming probability floor of
+  0.50 (10.6, 21.3.22) and its own labels (`confidence_labels_real_reports.json`).
 
 ### 10.10 Distinguishing the top three (2026-10-01)
 
@@ -6132,7 +6144,7 @@ refitted on the new design seeds pass the registered rule (strong 0.885 with 4 e
 wrong fold name before (21.3.16), and the gain on the anonymised headline is one report; the procedure
 member's combiner stays the default with its labels, and the previous baselines are kept (the gate's
 off arms reproduce them report by report on the current code). The refit and its labels remain an
-opt-in pair. The next step is the probability route of the plan: a floor designed on the design seeds
+opt-in pair. (Superseded on 2026-10-26: adopted together with the naming probability floor, 21.3.22.) The next step is the probability route of the plan: a floor designed on the design seeds
 (a floor at 0.2 would have held the seed-41 name and costs no correct name on the gate sets, see
 below), registered before it is tried on fresh seeds.
 
@@ -6148,6 +6160,81 @@ reports the members were tuned on and whose groups' technique lists ATT&CK partl
 part of the development gain is optimism the gate removes; what survives is in ranks and names, not in a
 change of the CTI-HAL ceiling, which still sits with the 24 reports that name no ATT&CK software (4 of 24
 right first in either arm).
+
+#### 21.3.22 Naming probability floor (2026-10-25/26)
+
+**Why.** The separation gate names a leader on candidate-relative evidence alone; the combiner's
+probability for that leader was only displayed. The default named removed actors on fresh seeds at
+combiner probabilities of 0.16-0.44 (21.3.20), and the real-report combiner named a wrong group at
+0.19 (21.3.21). Pre-registered as `docs/preregistration/attribution_probability_floor_2026-10-25.json`
+(rule in 10.6).
+
+**Design (seeds 41/53 only).** The registered rule takes the smallest floor on a 0.05 grid that holds
+no correct single name and every bad single name below the lowest correct one
+(`scripts/probability_floor_replay.py --choose`). The default combiner: lowest correct name 0.640, bad
+names 0.387 (Leviathan as APT39, removed) and 0.948 (Storm-0501 as Scattered Spider, removed, above
+every correct name): floor **0.40**. The real-report combiner: lowest correct 0.661, bad names 0.190
+(Agrius as Threat Group-3390, wrong), 0.329, 0.455 and 0.488 (removed actors): floor **0.50**. Neither
+floor costs a design name or sends a held leader to a cluster.
+
+**Gate.** Arms: off (the default then: the procedure member's combiner, no floor), A (the default
+combiner with 0.40), B (the real-report combiner with its labels and 0.50); fresh fold seeds 101, 103
+and 107 (never used, now reserved in `fit_attribution_combiner.EVALUATION_SEEDS`), CTI-HAL anonymised
+and Elastic strict with the open set, one run per arm on the same code. "Correct names" count single and
+cluster names (a cluster is correct when the truth is a member), as the registration reads them.
+
+| Set | Off | A (default + 0.40) | B (real-report + 0.50) |
+| --- | --- | --- | --- |
+| Seed 101: top-1 / MRR / correct names / wrong / removed named | 136/155 / 0.904 / 42 / 0 / 2 | 136 / 0.904 / 42 / 0 / 2 | 136 / 0.905 / 42 / 0 / 2 |
+| Seed 103 | 134/155 / 0.905 / 36 / **1** / 0 | 134 / 0.905 / 36 / 0 / 0 | 134 / 0.901 / 35 / 0 / 0 |
+| Seed 107 | 133/155 / 0.902 / 34 / 0 / 0 | 133 / 0.902 / 33 / 0 / 0 | 131 / 0.893 / 33 / 0 / 0 |
+| Fresh seeds pooled: correct names / wrong / removed named | 112 / 1 / 2 | 111 / 0 / 2 | 110 / 0 / 2 |
+| CTI-HAL anonymised: top-1 / MRR / correct names / wrong | 24/55 / 0.522 / 11 / 0 | 24 / 0.522 / 10 / 0 | 25 / 0.538 / 10 / 0 |
+| Elastic strict: top-1 / MRR / named / wrong / open set named | 4/8 / 0.524 / 1 / 0 / 0/22 | 4/8 / 0.524 / 1 / 0 / 0/22 | 4/8 / 0.524 / 1 / 0 / 0/22 |
+
+The default itself named a wrong group on the fresh seed 103 (FIN5 as TA505, combiner probability
+0.06, separation 0.71); both floors hold it. What the floors hold: A, that name and one correct name
+(Ke3chang on seed 107, 0.18) and on CTI-HAL one correct FIN7 report (0.35); B, the same wrong name
+(0.28 under its combiner), Ke3chang (0.49), and on CTI-HAL two FIN7 reports, one of them the report its
+combiner moves to rank 1 (0.47). B also loses an APT41 name on seed 103 through its ranking, not the
+floor (separation 0.47 under the refit). Neither floor held a removed actor on the fresh seeds: the
+two named there (Storm-0501 as Scattered Spider at 0.94-1.00, Lazarus as Kimsuky at 0.57-0.65) are
+confident names a probability rule cannot reach. Arm A's runs equal the replay of the off runs under
+0.40 on every row of every set. Every bar holds for both arms (0 wrong names, open set 0/22, removed
+actors 2 = 2, correct fold names 99% and 98% of the off arm, CTI-HAL names 10 against 11, B's top-1
+within 2 per seed and not lower on CTI-HAL or Elastic), and the registered order adopts **B**: the
+real-report combiner, its labels and the floor 0.50 are the defaults since 2026-10-26.
+
+Secondary (replays over runs made before the registration, not a bar): the default with 0.40 on seeds
+7, 73, 79, 83 and 89 holds one removed actor (Blue Mockingbird as APT41 on seed 73, 0.16) and no
+correct fold name; the real-report combiner with 0.50 on seeds 7, 83 and 89 holds nothing (GOLD
+SOUTHFIELD as FIN7 on seed 83 sits at 0.504).
+
+**Reading.** The floor removes the low-probability names the separation gate gives on borrowed
+evidence (both wrong known names seen since 21.3.20 sat at 0.06-0.28) at a cost of about one correct
+name in a hundred on the folds and one or two FIN7 reports on CTI-HAL, whose FIN7 probabilities are
+low because Carbanak and Cobalt Group share its evidence. It does not touch confident removed-actor
+names (Storm-0501, whose documented activity overlaps Scattered Spider's, and Lazarus as Kimsuky); those
+need a different signal, such as the null option or the documented overlap of the named group.
+
+**Adopted baselines (the `*_current.json` artifacts, 2026-10-26; the previous ones in
+`data/audits/floor_gate/before/`).** Every one was rerun with the new defaults and checked for wrong
+names; none has one.
+
+| Set | Previous default | Real-report combiner + floor 0.50 |
+| --- | --- | --- |
+| ATT&CK folds seed 7: top-1 / top-5 / MRR / correct names / wrong / removed named | 127/155 / 0.942 / 0.874 / 42 / 0 / 0 | 126/155 / 0.929 / 0.867 / 42 / 0 / 0 |
+| Design seed 41 | 137/155 / 0.955 / 0.912 / 38 / 0 / 1 | 135/155 / 0.955 / 0.907 / 38 / 0 / 0 |
+| Design seed 53 | 131/155 / 0.955 / 0.896 / 36 / 0 / 1 | 130/155 / 0.935 / 0.887 / 36 / 0 / 0 |
+| CTI-HAL anonymised: top-1 / top-3 / MRR / correct names / wrong | 24/55 / 0.582 / 0.522 / 11 / 0 | 25/55 / 0.618 / 0.538 / 10 / 0 |
+| CTI-HAL as reported: top-1 / top-3 / MRR / single + cluster names / wrong | 27/55 / 0.727 / 0.612 / 12 + 5 / 0 | 31/55 / 0.727 / 0.654 / 11 + 5 / 0 |
+| Elastic strict / names / tradecraft: top-1, wrong, open set named | 4/8, 5/8, 1/8; 0; 0/22 | 4/8, 5/8, 1/8; 0; 0/22 |
+
+The design seeds equal the replay of their floor-off reruns (21.3.21) under 0.50 row for row. The
+confidence labels need no refit (the floor does not change their inputs); their report-only evaluation
+on the new baselines: seed 7 strong 84/84 right, set 8/8; CTI-HAL anonymised strong 15/16, as reported
+15/17. Verification: pytest, ruff and the public regression check pass; the compose gate fails for the
+worktree reason (no `.env`).
 
 ## 22. Failure modes and troubleshooting
 

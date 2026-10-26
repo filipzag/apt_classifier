@@ -362,8 +362,11 @@ class Settings(BaseSettings):
     attribution_hypothesis_specificity: float = 0.0
     # Naming probability floor: a single name also needs the learned combiner's leader
     # probability at or above this (0 = off; a held leader can still be named through its
-    # documented cluster). Pre-registered 2026-10-25 (attribution_probability_floor), docs 10.6.
-    attribution_hypothesis_min_probability: float = 0.0
+    # documented cluster). Pre-registered 2026-10-25 (attribution_probability_floor), docs 10.6;
+    # 0.50 (chosen on the design seeds for the real-report combiner) since 2026-10-26: fresh seeds
+    # 101/103/107 and CTI-HAL/Elastic with 0 wrong names, 110 of 112 correct fold names kept
+    # (docs 21.3.22). The floor belongs to that combiner; with another combiner set it anew.
+    attribution_hypothesis_min_probability: float = 0.5
     # Blend the discriminative mass into the RRF score of the top-K (0 = pure RRF order).
     attribution_rerank_blend: float = 0.5
     # Shortlist size for the discriminative re-ranking; 0 = the gate's shortlist
@@ -388,9 +391,13 @@ class Settings(BaseSettings):
     # earlier artifacts stay next to it for checkouts with the previous classifier code
     # fitted on ATT&CK 20.0 with the procedure member voting (2026-10-21, feature schema 3, docs
     # 21.3.20); attribution_combiner_1021_fsum.json is the same refit without the member (for
-    # PROCEDURE_MATCH_WEIGHT=0), the 2026-09-30 artifact is pinned to 19.2 and fails closed
+    # PROCEDURE_MATCH_WEIGHT=0), the 2026-09-30 artifact is pinned to 19.2 and fails closed.
+    # Since 2026-10-26 the default is the same pipeline refitted with real-report lists (docs
+    # 21.3.21), adopted together with the naming probability floor of 0.50 below (prereg
+    # attribution_probability_floor_2026-10-25, docs 21.3.22); without the floor it named a wrong
+    # group on a design seed. attribution_combiner_procedure_match.json is the fold-only refit.
     attribution_combiner_path: Path = (
-        PROJECT_ROOT / "data" / "models" / "combiner" / "attribution_combiner_procedure_match.json"
+        PROJECT_ROOT / "data" / "models" / "combiner" / "attribution_combiner_real_reports.json"
     )
     attribution_combiner_top_n: int = 20
     attribution_combiner_blend: float = 0.5
@@ -421,9 +428,11 @@ class Settings(BaseSettings):
     # labels) when the artifact is missing or was fitted against a different combiner.
     confidence_labels_enabled: bool = True
     # the 2026-10-02 labels re-pinned to attribution_combiner_0930_fsum.json (same weights, same
-    # rankings); confidence_labels.json stays for checkouts with the earlier combiner
+    # rankings); confidence_labels.json stays for checkouts with the earlier combiner;
+    # confidence_labels_fsum.json holds the labels of attribution_combiner_procedure_match.json.
+    # Since 2026-10-26 the labels fitted for the real-report combiner (docs 21.3.21/21.3.22)
     confidence_labels_path: Path = (
-        PROJECT_ROOT / "data" / "models" / "calibration" / "confidence_labels_fsum.json"
+        PROJECT_ROOT / "data" / "models" / "calibration" / "confidence_labels_real_reports.json"
     )
     # Activity clustering (opt-in)
     activity_clusters_enabled: bool = False
