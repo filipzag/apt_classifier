@@ -6522,6 +6522,85 @@ Verification:
 - The web type check passes.
 - The compose gate fails for the worktree reason (no `.env`).
 
+#### 21.3.26 The full pipeline on CTIBench and AthenaBench attribution (2026-10-27, evaluation only)
+
+21.3.18 scored single models (the actor head, the TF-IDF text model) on the two public
+threat-actor-attribution tasks. This run puts the whole product through them. Pre-registered as
+`docs/preregistration/product_external_taa_2026-10-27.json`; both benchmarks are non-commercial,
+so nothing is tuned on them.
+
+- Inputs: the texts of 21.3.18, anonymised and split. Every statement is read, at the names level,
+  with the gate's local protocol.
+- Gold: the ATT&CK groups alias-connected to the answer, through AthenaBench's alias list plus
+  ATT&CK's names.
+- Scoring: AthenaBench's rule on the top-ranked group (the product always has one, as the
+  published models always answer), and on the product's own names (a held report gives no answer).
+- Arms: the procedure-text core (the default) and the previous default (the rollback settings).
+- Harness: `scripts/cribl_finetune/external_product_taa.py` (prepare, score) and
+  `data/audits/external_product/run.sh`. About 30 min per arm on the laptop, no credit.
+
+| Correct (top-ranked group) | Core | Previous | Single models (21.3.18) | Published |
+| --- | --- | --- | --- | --- |
+| CTI-TAA (50; 48 answers in ATT&CK) | **0.54** (top-3 0.62, top-5 0.64) | 0.54 (0.64, 0.66) | text 0.38, actor head 0.38 | ChatGPT-4 52, Llama3-70B 52, ChatGPT-3.5 44, Gemini-1.5 38, Llama3-8B 28 |
+| AthenaBench TAA (100; 75 in ATT&CK) | **0.23** (0.31, 0.36) | 0.22 (0.30, 0.33) | text 0.23, actor head 0.16 | GPT-5 39, GPT-4o 35, GPT-4 31, Gemini-2.5-Pro 31, Llama 3.1-8B 24, Qwen3-14B 17, Qwen3-4B 15 |
+| AthenaBench, the 75 answers in ATT&CK | 0.31 | 0.29 | | |
+
+- Exact-group reading. The registered strict reading (the top group's own name or alias equals the
+  answer) gives 0.36 and 0.21, but it counts spelling variants as wrong. On CTI-TAA all 9
+  alias-only hits are the same actor under another spelling or vendor name: Lazarus as Lazarus
+  Group (4), Gamaredon as Gamaredon Group (2), CharmingCypress as Magic Hound, and CHRYSENE as
+  OilRig (2). On AthenaBench there are two: Lazarus as AppleJeus, and UNC4393 as Storm-1811. The
+  alias walk's loose links (APT28–APT29) gave the product no top-1 hit.
+- The plausible column (0.98 / 0.79) follows the authors' transitive walk and is not comparable
+  with the papers'.
+
+**Names.** The product's own answers are scored by the benchmarks' keys.
+
+| | Core: names / right | Previous: names / right |
+| --- | --- | --- |
+| CTI-TAA | 11 / 8 | 9 / 7 |
+| AthenaBench | 18 / 8 | 17 / 8 |
+
+Read case by case, the names the keys mark wrong fall into three groups.
+
+*Likely key errors* (both arms):
+- A Rapid7 email-bombing and Quick Assist campaign keyed UNC2452 was named Storm-1811. The report
+  names Cobalt Strike, ConnectWise and Quick Assist, and Rapid7 tied that campaign to the Black
+  Basta operators.
+- A Symantec PowerExchange report keyed MuddyWater was named OilRig. ATT&CK documents
+  PowerExchange for OilRig only, and Symantec's cluster there is Crambus/OilRig.
+
+*The fake-job-interview activity* (both arms): 8 AthenaBench profiles were named Contagious
+Interview, which ATT&CK keeps apart from Lazarus Group. The keys say Lazarus (4), WageMole (2),
+Famous Chollima and WaterPlum: vendor names for the same or overlapping North Korean activity that
+no alias list connects. BladedFeline was named OilRig; ESET describes it as a likely OilRig
+subgroup.
+
+*Genuine wrong names, core only:*
+- An APT41 profile (DodgeBox, MoonWalk; neither is in ATT&CK) was named Lazarus Group at 0.93, on
+  technique evidence alone.
+- A CTI-TAA report keyed Lazarus was named Storm-1811 at 0.36, because its text names Black Basta.
+
+Reading:
+
+- Always answering, the full product ties the best published models on CTI-TAA (0.54 against
+  ChatGPT-4's and Llama3-70B's 0.52) and sits with Llama 3.1-8B on AthenaBench (0.23 against 0.24),
+  under GPT-5 (0.39) and GPT-4o (0.35).
+- A quarter of AthenaBench's answers are not ATT&CK groups. Its profiles are short GPT-written
+  bullet lists, closer to an LLM's home ground than to a report.
+- The core and the previous default rank alike here. The core names three more reports and has
+  two more wrong names that are not label disputes.
+- The 0-wrong-name record of CTI-HAL, Elastic and the folds does not carry over to text this far
+  from ATT&CK's own sentences.
+
+Caveats:
+
+- ATT&CK procedure examples may cite the CTI-TAA reports, as for CTI-HAL (21.3.16), and nothing
+  here hides them.
+- The published numbers come from the papers' own runs, on CTI-TAA without our extra name
+  anonymisation.
+- One run per arm.
+
 ## 22. Failure modes and troubleshooting
 
 ### 22.1 “ATT&CK knowledge base has not been ingested”
