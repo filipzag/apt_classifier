@@ -431,6 +431,61 @@ def test_named_cluster_is_the_pair_and_never_strong():
     assert other["label"] != "strong"
 
 
+def test_strong_only_artifact_never_shows_a_set_but_keeps_strong_and_the_cluster(tmp_path: Path):
+    calibrator = _calibrator(thresholds={"strong": 0.88, "set": None})
+    ids = ["G0046", "G0008", "G0016"]
+    # P(top two) and P(top three) far above any set threshold, the leader below strong
+    inputs = ConfidenceInputs((0.5, 0.45, 0.04), 0.0, 0.01, 8, 0)
+    assert calibrator.predict(inputs)["leader"] < 0.88 < calibrator.predict(inputs)["top2"]
+    block = decide(
+        calibrator, inputs, stage="known_group_shortlist", group_ids=ids, probabilities={}
+    )
+    assert (block["label"], block["text_key"]) == ("open", "open")
+    strong = confidence_label(calibrator, _state((0.95, 0.03, 0.01), separation=0.9), kb=_kb())
+    assert strong["label"] == "strong" and strong["thresholds"] == {"strong": 0.88, "set": None}
+    cluster = _state(
+        (0.93, 0.02, 0.03),
+        stage=SimpleNamespace(value="known_cluster_hypothesis"),
+        separation=0.9,
+        named_cluster=("G0046", "G0016"),
+    )
+    assert confidence_label(calibrator, cluster)["text_key"] == "named_cluster"
+    # the null set threshold survives the artifact round trip and loads active
+    combiner_file = tmp_path / "combiner.json"
+    combiner_file.write_text('{"kind": "x"}', encoding="utf-8")
+    path = tmp_path / "labels.json"
+    pinned = {"combiner_sha256": combiner_sha256(combiner_file)}
+    _calibrator(thresholds={"strong": 0.88, "set": None}, **pinned).save(path)
+    assert json.loads(path.read_text())["thresholds"] == {"strong": 0.88, "set": None}
+    model, status = _load(path)
+    assert status == "active" and model.thresholds == {"strong": 0.88, "set": None}
+    # the key itself stays required
+    payload = json.loads(path.read_text())
+    payload["thresholds"] = {"strong": 0.88}
+    path.write_text(json.dumps(payload), encoding="utf-8")
+    assert _load(path)[1].startswith("invalid artifact:")
+
+
+def test_fit_keeps_the_strong_label_alone_only_when_asked():
+    from scripts.fit_confidence_labels import Row, select_thresholds
+
+    def row(i: int, right: bool) -> Row:
+        truth = "G1" if right else "G9"
+        return Row(
+            None, "known_group_shortlist", ("G1", "G2", "G3"), {}, (), truth, f"g{i}", False, False
+        )
+
+    rows = [row(i, i % 2 == 0) for i in range(200)]
+    # every leader confident and right on even rows: the strong label fits on those only
+    predictions = [
+        {"leader": 0.99 if i % 2 == 0 else 0.5, "top2": 0.99, "top3": 0.99} for i in range(200)
+    ]
+    with pytest.raises(SystemExit, match="no set threshold"):
+        select_thresholds(rows, predictions)
+    chosen = select_thresholds(rows, predictions, strong_only=True)
+    assert chosen["set"] is None and chosen["strong"]["t"] > 0.5 and chosen["strong"]["errors"] == 0
+
+
 # ----- 7. summary keys
 
 

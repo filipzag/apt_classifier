@@ -1133,7 +1133,7 @@ Presets are applied using Pydantic's `model_copy(update=...)` on the `Settings` 
 
 ## 9. Classifiers
 
-The registry currently creates ten deterministic classifiers, the opt-in CyberRE-LLM classifier (it votes only after an analyst runs CyberRE) and the two random-forest members of 9.13. The PyTorch group network (`group_mlp`, 9.13) is added only when `GROUP_MLP_WEIGHT` > 0 (default 0), and the free-text model (`text_group`, 9.13) only when `TEXT_GROUP_WEIGHT` > 0 (default 0). The LLM zero-shot opinion was removed from the ensemble on 2026-09-30 (9.11):
+The registry currently creates ten deterministic classifiers, the opt-in CyberRE-LLM classifier (it votes only after an analyst runs CyberRE) and the two random-forest members of 9.13. The PyTorch group network (`group_mlp`, 9.13) is added only when `GROUP_MLP_WEIGHT` > 0 (default 0), and the free-text model (`text_group`, 9.13) only when `TEXT_GROUP_WEIGHT` > 0 (default 1.0 since 2026-10-27 with the behaviour-text member, 21.3.25). The LLM zero-shot opinion was removed from the ensemble on 2026-09-30 (9.11):
 
 ```text
 bernoulli_naive_bayes
@@ -1345,7 +1345,7 @@ matching several of the report's statements with procedure text of its own, not 
 corpus. The parameters were chosen on the vendor set with the member alone (`scripts/fit_behavior_text.py`,
 `make fit-behavior-text`: top_k 10, top5, prior 0: MRR 0.809, top-1 0.676 over 34 reports; the mean
 variant had top-1 0.706 and a lower MRR). The `behavior_text` member votes in the `learned_profile` family
-only when `BEHAVIOR_TEXT_WEIGHT` > 0 (default 0), reads the text model's artifact (`TEXT_GROUP_PATH`),
+only when `BEHAVIOR_TEXT_WEIGHT` > 0 (default 1.0 since 2026-10-27, 21.3.25), reads the text model's artifact (`TEXT_GROUP_PATH`),
 is listed in `attribution.NOT_INDEPENDENT_EVIDENCE` and binds the combiner fingerprint at weight > 0
 exactly as the text model does; the benchmarks hide a fold's held-out sentences and the removed actor from
 it through `BehaviorTextModel.without` (the text model's refit, re-indexed). The statements reach the
@@ -1586,8 +1586,9 @@ fusion only and is reproducible across processes.
   `is_calibrated` is true and `calibrated_probability` is the combiner's leader probability;
   without it `is_calibrated` is false and the UI shows qualitative maturity only.
 - **Naming probability floor (2026-10-25).** `ATTRIBUTION_HYPOTHESIS_MIN_PROBABILITY`
-  (`MaturityThresholds.hypothesis_min_probability`; 0 = off, default 0.50 since 2026-10-26 together
-  with the real-report combiner, for which it was chosen) adds one condition to the
+  (`MaturityThresholds.hypothesis_min_probability`; 0 = off; 0.50 from 2026-10-26 with the
+  real-report combiner, default 0.20 since 2026-10-27 with the procedure-core combiner, each chosen
+  for its combiner on the design seeds, 21.3.22 and 21.3.25) adds one condition to the
   single naming gate: the combiner's probability for the leader must reach the floor, else the
   decision says "combiner probability p below the naming floor f" and the leader fails the single
   gate. The documented-cluster step then decides as for any single-gate failure (a cluster has its
@@ -1776,8 +1777,12 @@ newer schema, unknown feature names or mismatched vectors are still refused.
   Elastic are refused as training sets. The lists are cached per set and condition
   (`--real-cache`, `--reuse-real-cache`). The refit `attribution_combiner_real_reports.json` (w 10, l2 1)
   passed its registered gate but was not adopted alone: rerun on the design seeds it named one wrong
-  group (21.3.21). Since 2026-10-26 it is the default together with the naming probability floor of
-  0.50 (10.6, 21.3.22) and its own labels (`confidence_labels_real_reports.json`).
+  group (21.3.21). From 2026-10-26 it was the default together with the naming probability floor of
+  0.50 (10.6, 21.3.22) and its own labels (`confidence_labels_real_reports.json`). Since 2026-10-27
+  the default is the same recipe refitted with the free-text and behaviour-text members voting
+  (`attribution_combiner_procedure_core.json`, w 10, l2 10), with the floor 0.20 and strong-only
+  labels (`confidence_labels_procedure_core.json`); procedure text as the core, 21.3.25, which also
+  gives the rollback settings.
 
 ### 10.10 Distinguishing the top three (2026-10-01)
 
@@ -1980,7 +1985,12 @@ one-sided Clopper-Pearson bounds. The artifact is pinned to the ATT&CK version a
 combiner artifact; when either differs the labels are hidden. Refit after `make fit-combiner`.
 On real reports the labels run overconfident: on anonymized CTI-HAL 21 of 24 "strong" leaders
 were right, against 184 of 192 on the fresh folds. The view says so ("Calibrated on ATT&CK test
-folds; real reports run overconfident").
+folds; real reports run overconfident"). The thresholds above are the first artifact's; each refit
+picks its own. When no "one of these" threshold meets its bound the fit stops, unless
+`--strong-only` keeps the strong label alone: the artifact's set threshold is null and the view
+shows only "strong single answer" or "open" (a cluster the gate named is still shown as its pair).
+The procedure-core combiner's labels (default since 2026-10-27) are strong-only, threshold 0.76
+(21.3.25).
 
 **Software questions (pilot, off by default)** (`apt_classifier/software_questions.py`,
 `INTERVIEW_SOFTWARE_QUESTIONS=false`). While a case is not named, the interview first asks about
@@ -6387,6 +6397,130 @@ optimistic; the statement tags are regular expressions and overlap; the two text
 were both held back by naming, not ranking (21.3.16: one wrong fold name; 21.3.19: removed actors and
 Elastic open-set names), so the work this points to is procedure-level evidence that the naming gate
 can trust, not more technique-id members.
+
+#### 21.3.25 Procedure text as the core of attribution (2026-10-26/27)
+
+**Why.** 21.3.24: the statement-level text members separate the groups best and keep doing so when
+the malware names go, while the technique-id members do not. Both text members had been held back by
+naming, not ranking (21.3.16, 21.3.19), before the naming floor and the real-report lists existed.
+The product owner chose procedure text as the core (2026-10-26) and asked to keep the previous
+default for rollback. Pre-registered as `docs/preregistration/attribution_procedure_core_2026-10-26.json`.
+
+**Change.**
+
+- Members: `TEXT_GROUP_WEIGHT` and `BEHAVIOR_TEXT_WEIGHT` 0 -> 1.0, next to the procedure member
+  (1.0 since 21.3.20); every other member and weight unchanged.
+- Combiner: the real-report recipe of 10.9 unchanged, on lists rebuilt with the two members voting:
+  2,870 fold lists (seeds 11/23/37: clean, five randomised variants, the unknown arm for every seed-11
+  fold) and 204 real lists (the 68 development reports at names:30 and strict:all, plus one
+  removed-actor list each). Group-level CV chose real weight 10 and l2 10: out-of-fold clean fold
+  top-1 0.903 against 0.910 at weight 0, real-report top-1 / MRR 0.882 / 0.916 against 0.819 / 0.879.
+  Written to `data/models/combiner/attribution_combiner_procedure_core.json`. Of the fitted weights'
+  absolute sum (23.4), the three procedure-text members carry 5.7, the five technique-id set members
+  5.3, software 2.1 and the separation features 4.5.
+- Floor: the registered rule of 21.3.22 on the design seeds 41/53, run with the new combiner and no
+  floor. Lowest correct name 0.690; one bad name (Storm-0501 as Scattered Spider, removed, 0.18). The
+  floor is **0.20**, and it holds no correct design name.
+- Labels: the registered rule fits the strong label (0.76: 253 out-of-fold rows, 6 errors, bound
+  0.046), but no "one of these" threshold meets its bound (best: 20 rows, 4 misses, bound 0.40). The
+  product owner chose the strong label alone (2026-10-27). `scripts/fit_confidence_labels.py
+  --strong-only` writes `confidence_labels_procedure_core.json` with a null set threshold (10.11).
+  Out-of-fold on the design seeds: strong 244 of 250 right, leader calibration error 0.033.
+
+**Gate.** Two arms on the same code, one run each:
+
+- off: the default then (the real-report combiner, its labels, floor 0.50, both text members off);
+- core: the change.
+
+The sets were fresh fold seeds 109/113/127 (reserved by the registration), CTI-HAL anonymised and
+Elastic strict with the open set. The off run of seed 127 hung once: 48 min on one CPU core, with no
+GPU work and no memory activity. It was stopped. The identical command with a stack dumper finished
+in 17 min and is the off arm's run; the gate runner now stops a step after 60 min.
+
+| Set | Off | Core |
+| --- | --- | --- |
+| Seed 109: top-1 / top-5 / MRR / correct names / wrong / removed named | 136/155 / 0.948 / 0.911 / 36 / **1** / 1 | 141/155 / 0.974 / 0.938 / 37 / 0 / 0 |
+| Seed 113 | 135/155 / 0.916 / 0.900 / 41 / 0 / 1 | 139/155 / 0.948 / 0.923 / 40 / 0 / 1 |
+| Seed 127 | 135/155 / 0.948 / 0.910 / 38 / 0 / 1 | 141/155 / 0.974 / 0.935 / 38 / 0 / 1 |
+| Fresh seeds pooled: top-1 / correct names / wrong / removed named | 406/465 / 115 / 1 / 3 | 421/465 / 115 / 0 / 2 |
+| CTI-HAL anonymised: top-1 / top-3 / top-5 / MRR / correct names / wrong | 25/55 / 0.618 / 0.655 / 0.538 / 10 / 0 | 27/55 / 0.655 / 0.673 / 0.573 / 12 / 0 |
+| Elastic strict: top-1 / top-5 / MRR / named / wrong / open set named | 4/8 / 0.500 / 0.524 / 1 / 0 / 0/22 | 4/8 / 0.625 / 0.574 / 1 / 0 / 0/22 |
+
+The off arm's wrong name was The Gentlemen as ShinyHunters (0.95), also named when The Gentlemen was
+removed. The removed actor both arms name is GOLD SOUTHFIELD as FIN7, which shares REvil with it:
+off at 0.86 and 0.98, core at 0.60 and 0.89. Every bar holds:
+
+- 0 wrong names, and the open set names nothing;
+- removed actors named 2 against 3;
+- fold top-1 421 against 406 (bar: at least 400);
+- correct fold names 115 against 115;
+- CTI-HAL top-1 and MRR up, names 12 against 10;
+- Elastic top-1 4 against 4.
+
+The change is adopted.
+
+Secondary readings (not bars). "Names" counts single and cluster names; no reading names a wrong
+group.
+
+| Reading: top-1 / top-5 / MRR / names | Off | Core |
+| --- | --- | --- |
+| CTI-HAL tradecraft (ATT&CK malware names removed) | 11/55 / 0.382 / 0.299 / 1 | **20/55** / 0.564 / 0.458 / 1 |
+| CTI-HAL as reported | 31/55 / 0.764 / 0.654 / 16 | 31/55 / 0.782 / 0.668 / 18 |
+| Elastic names | 5/8 / 0.625 / 0.647 / 1 | 5/8 / 0.750 / 0.695 / 1 |
+| Elastic tradecraft | 1/8 / 0.250 / 0.192 / 0 | 2/8 / 0.375 / 0.308 / 0 |
+
+The actor sits inside the combiner's top-20 window about equally often in both arms: CTI-HAL 39 and
+39 (tradecraft 36 and 37), Elastic 5 and 6, folds 153-154 and 154.
+
+**Reading.** The gain lands where 21.3.24 pointed. Without the malware names the actor is first in
+20 of 55 CTI-HAL reports instead of 11, and in 2 of 8 Elastic posts instead of 1. With the names the
+gain is smaller (anonymised 25 -> 27, as reported 31 = 31), because named software already decides
+those cases. The folds gain as well (+15 of 465), with the text members refitted per fold so that
+the held-out sentences never reach them.
+
+Naming did not get worse. The off arm's one wrong fold name is gone, and the remaining removed-actor
+name rests on malware ATT&CK documents for both groups, at a lower probability than before. The
+floor of 0.20 sits below every correct design name, so it holds only what the combiner itself
+doubts.
+
+Caveats:
+
+- The development reports served the member choices and the study behind this, so the
+  cross-validated real-report numbers are development numbers.
+- The floor rests on one bad design name.
+- The "one of these" label is gone for this combiner.
+
+**Rollback.** Tag `rollback/pre-procedure-core-2026-10-26` (commit 5e51b7e), or the settings
+`TEXT_GROUP_WEIGHT=0`, `BEHAVIOR_TEXT_WEIGHT=0`,
+`ATTRIBUTION_COMBINER_PATH=data/models/combiner/attribution_combiner_real_reports.json`,
+`CONFIDENCE_LABELS_PATH=data/models/calibration/confidence_labels_real_reports.json` and
+`ATTRIBUTION_HYPOTHESIS_MIN_PROBABILITY=0.5`. Every earlier model file is unchanged; the earlier
+baselines are in `data/audits/procedure_core/before/`.
+
+**Adopted baselines (2026-10-27).** These are the `*_current.json` artifacts; the previous ones are
+in `data/audits/procedure_core/before/`. Every one was rerun with the new defaults and checked for
+wrong names; none has one. The CTI-HAL and Elastic runs equal the gate's core runs.
+
+| Set | Previous default | Procedure core |
+| --- | --- | --- |
+| ATT&CK folds seed 7: top-1 / top-5 / MRR / correct names / wrong / removed named | 126/155 / 0.929 / 0.867 / 42 / 0 / 0 | 137/155 / 0.942 / 0.913 / 44 / 0 / 0 |
+| Design seed 41 | 135/155 / 0.955 / 0.907 / 38 / 0 / 0 | 140/155 / 0.974 / 0.931 / 39 / 0 / 0 |
+| Design seed 53 | 130/155 / 0.935 / 0.887 / 36 / 0 / 0 | 139/155 / 0.987 / 0.936 / 39 / 0 / 0 |
+| CTI-HAL anonymised: top-1 / top-3 / MRR / names / wrong | 25/55 / 0.618 / 0.538 / 10 / 0 | 27/55 / 0.655 / 0.573 / 12 / 0 |
+| CTI-HAL as reported (names: single + cluster) | 31/55 / 0.727 / 0.654 / 16 / 0 | 31/55 / 0.764 / 0.668 / 18 / 0 |
+| Elastic strict / names / tradecraft: top-1, wrong, open set named | 4/8, 5/8, 1/8; 0; 0/22 | 4/8, 5/8, 2/8; 0; 0/22 |
+
+On the design seeds the floor holds the one removed actor that its no-floor run named. The
+strong-only labels on the new baselines (report-only): seed 7 strong 117 of 119 right (both misses
+are removed actors); CTI-HAL anonymised 22 of 24; CTI-HAL as reported 23 of 26.
+
+Verification:
+
+- pytest (whole suite) and ruff pass.
+- The public regression check passes against the main checkout's baseline; technique mapping is
+  unchanged.
+- The web type check passes.
+- The compose gate fails for the worktree reason (no `.env`).
 
 ## 22. Failure modes and troubleshooting
 

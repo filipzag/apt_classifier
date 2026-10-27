@@ -9,7 +9,9 @@ groups) with one-sided 95% Clopper-Pearson bounds:
 
 - strong: the smallest grid value at which the leader-error upper bound is <= 0.05;
 - set: the smallest grid value at which, among the non-strong rows, the shown set misses the
-  truth in <= 10% of rows with an upper bound <= 0.20.
+  truth in <= 10% of rows with an upper bound <= 0.20. When none does the fit stops, unless
+  ``--strong-only`` keeps the strong label alone (the artifact's set threshold is null and
+  "one of these" is never shown; first used for the procedure-core combiner, docs 21.3.25).
 
 Selection uses the probability rule alone; the insufficient-evidence -> open override is
 definitional and applied at display time (and in every evaluation below). CTI-HAL and the
@@ -251,10 +253,15 @@ def fold_calibrators(
 
 
 def select_thresholds(
-    rows: Sequence[Row], predictions: Sequence[dict[str, float]], *, override: bool = False
+    rows: Sequence[Row],
+    predictions: Sequence[dict[str, float]],
+    *,
+    override: bool = False,
+    strong_only: bool = False,
 ) -> dict[str, Any]:
     """Smallest grid values meeting the strong and set rules (out-of-fold predictions).
-    ``override`` applies the insufficient-evidence -> open rule first (a robustness check)."""
+    ``override`` applies the insufficient-evidence -> open rule first (a robustness check);
+    ``strong_only`` returns ``"set": None`` instead of stopping when no set value qualifies."""
     eligible = [
         not override or (row.stage != INSUFFICIENT_STAGE and bool(row.group_ids)) for row in rows
     ]
@@ -287,7 +294,7 @@ def select_thresholds(
         if n and misses / n <= SET_MAX_MISS and bound <= SET_BOUND:
             shown = {"t": t, "n": n, "misses": misses, "upper": round(bound, 4)}
             break
-    if shown is None:
+    if shown is None and not strong_only:
         raise SystemExit("no set threshold meets the bound on the design data")
     return {"strong": strong, "set": shown}
 
@@ -582,6 +589,11 @@ def main(argv: list[str] | None = None) -> int:
         default=Path(settings.confidence_labels_path),
     )
     parser.add_argument("--report", type=Path)
+    parser.add_argument(
+        "--strong-only",
+        action="store_true",
+        help="when no set threshold meets its bound, keep the strong label alone (set null)",
+    )
     args = parser.parse_args(argv)
     evaluated = [load_benchmark(path) for path in args.evaluate]
     generated_at = datetime.now(UTC).isoformat(timespec="seconds")
@@ -637,8 +649,11 @@ def main(argv: list[str] | None = None) -> int:
     )
     folds = fold_calibrators(rows, template)
     oof = [model.predict(row.inputs) for row, model in zip(rows, folds, strict=True)]  # type: ignore[arg-type]
-    chosen = select_thresholds(rows, oof)
-    thresholds = {"strong": chosen["strong"]["t"], "set": chosen["set"]["t"]}
+    chosen = select_thresholds(rows, oof, strong_only=args.strong_only)
+    thresholds = {
+        "strong": chosen["strong"]["t"],
+        "set": chosen["set"]["t"] if chosen["set"] is not None else None,
+    }
     calibrator = replace(
         template,
         thresholds=thresholds,
@@ -653,7 +668,14 @@ def main(argv: list[str] | None = None) -> int:
             "display and in every evaluation",
             "strong": chosen["strong"],
             "set": chosen["set"],
-            "with_override": select_thresholds(rows, oof, override=True),
+            **(
+                {"strong_only": "no set threshold met its bound; 'one of these' is never shown"}
+                if chosen["set"] is None
+                else {}
+            ),
+            "with_override": select_thresholds(
+                rows, oof, override=True, strong_only=args.strong_only
+            ),
         },
         provenance={
             "fitted_at": generated_at,

@@ -8,7 +8,9 @@ candidate" probability, the gate's separation, the number of accepted techniques
 named software supports the leader -- and give P(leader right), P(truth in the top two) and
 P(truth in the top three). ``scripts/fit_confidence_labels.py`` fits them on the design folds
 (seeds 41 and 53, removed actors count as wrong) and picks the thresholds on out-of-fold
-predictions with one-sided Clopper-Pearson bounds.
+predictions with one-sided Clopper-Pearson bounds. A strong-only artifact (``thresholds["set"]``
+null: no set threshold met its bound and the fit was told to keep the strong label) never shows
+"one of these"; a cluster the gate named is still shown as its pair.
 
 Nothing here changes the stage, the ranking, the gate window or an export, and the engine never
 imports this module (like ``top3_view``). A label can say "strong" where the gate holds back,
@@ -98,6 +100,10 @@ def _active_combiner(context: Any) -> dict[str, Any] | None:
     return combiner
 
 
+def _threshold(value: Any) -> float | None:
+    return None if value is None else float(value)
+
+
 def _three(values: Sequence[float]) -> tuple[float, float, float]:
     padded = [float(v) for v in values[:3]] + [0.0] * (3 - min(3, len(values)))
     return padded[0], padded[1], padded[2]
@@ -165,7 +171,8 @@ def row_shortlist(row: Mapping[str, Any]) -> tuple[list[str], dict[str, float]]:
 class ConfidenceCalibrator:
     intercepts: dict[str, float]
     weights: dict[str, tuple[float, ...]]
-    thresholds: dict[str, float]  # "strong" (leader) and "set" (top two / top three)
+    # "strong" (leader) and "set" (top two / top three; None in a strong-only artifact)
+    thresholds: dict[str, float | None]
     attack_version: str
     combiner_fingerprint: str
     combiner_sha256: str  # sha256[:24] of the combiner artifact file
@@ -225,7 +232,7 @@ class ConfidenceCalibrator:
                 }
                 for model in MODELS
             },
-            "thresholds": {key: float(self.thresholds[key]) for key in ("strong", "set")},
+            "thresholds": {key: _threshold(self.thresholds.get(key)) for key in ("strong", "set")},
             "selection": dict(self.selection),
             "attack_version": self.attack_version,
             "combiner": {
@@ -268,10 +275,10 @@ class ConfidenceCalibrator:
                 raise ValueError(f"weights of {model} are not finite")
             intercepts[model] = values[0]
             weights[model] = tuple(values[1:])
-        thresholds = {
-            key: float((payload.get("thresholds") or {})[key]) for key in ("strong", "set")
-        }
-        if not all(0.0 < value < 1.0 for value in thresholds.values()):
+        stored = payload.get("thresholds") or {}
+        # the set threshold may be null (a strong-only artifact); the key must still be there
+        thresholds = {"strong": float(stored["strong"]), "set": _threshold(stored["set"])}
+        if not all(value is None or 0.0 < value < 1.0 for value in thresholds.values()):
             raise ValueError("thresholds must lie in (0, 1)")
         combiner = payload.get("combiner") or {}
         fingerprint = str(combiner.get("pipeline_fingerprint") or "")
@@ -362,10 +369,11 @@ def decide(
     insufficient evidence or no shortlist -> open; a named two-group cluster -> that pair
     (top-two model on the pair's summed probability, never "strong"); P(leader) >= strong ->
     strong single answer; else P(top two) >= set -> one of these 2, else P(top three) >= set ->
-    one of these 3; otherwise open."""
+    one of these 3; otherwise open. Without a set threshold (strong-only) the last two never apply."""
     predicted = calibrator.predict(inputs) if inputs is not None else None
-    strong = float(calibrator.thresholds["strong"])
-    set_bar = float(calibrator.thresholds["set"])
+    strong = float(calibrator.thresholds["strong"])  # type: ignore[arg-type]
+    shown = calibrator.thresholds.get("set")
+    set_bar = math.inf if shown is None else float(shown)
     ids = [str(gid) for gid in group_ids][:3]
     cluster = [str(gid) for gid in named_cluster or ()]
     label, key, members, probability = "open", "open", [], None

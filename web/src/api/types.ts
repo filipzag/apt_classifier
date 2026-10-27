@@ -600,7 +600,8 @@ export interface Top3Confidence {
   set_size: number
   group_ids: string[]
   members: { group_id: string; name: string }[]
-  thresholds: { strong: number; set: number }
+  /** set is null in a strong-only artifact: "one of these" is never shown */
+  thresholds: { strong: number; set: number | null }
   measured: { folds: Top3ConfidenceMeasured | null; real_reports: Top3ConfidenceMeasured | null }
   note: string
 }

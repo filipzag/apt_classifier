@@ -259,17 +259,22 @@ class Settings(BaseSettings):
     # MRR 0.512 -> 0.572, as reported MRR 0.636 -> 0.666, Elastic strict 4 better / 0 worse, no
     # wrong names anywhere; but ATT&CK folds top-1 0.830 -> 0.824 (5 gained / 6 lost), so the
     # pre-registered no-regression rule fails by one case and it stays at 0 (the product owner decides).
+    # Since 2026-10-27 1.0 with the behaviour-text member: procedure text as the core of
+    # attribution (prereg attribution_procedure_core_2026-10-26, docs 21.3.25; rollback = both
+    # weights 0 with the real-report combiner, its labels and the floor 0.5, tag
+    # rollback/pre-procedure-core-2026-10-26).
     text_group_enabled: bool = True
     text_group_path: Path = PROJECT_ROOT / "data" / "models" / "text_group" / "text_group.json.gz"
-    text_group_weight: float = 0.0
+    text_group_weight: float = 1.0
     # Behaviour-text member (apt_classifier/behavior_text.py, prereg
     # attribution_behavior_text_2026-10-20): the text member's corpus indexed sentence by
     # sentence, every case statement voting for the groups of its nearest procedure sentences.
     # Reads TEXT_GROUP_PATH; joins the ensemble only with a positive weight (0 until the gate
     # passes); a learned profile that never counts as an independent evidence family. The
-    # parameters are the dev choice of scripts/fit_behavior_text.py (vendor set).
+    # parameters are the dev choice of scripts/fit_behavior_text.py (vendor set). 1.0 since
+    # 2026-10-27 with the free-text member and the procedure-core combiner (docs 21.3.25).
     behavior_text_enabled: bool = True
-    behavior_text_weight: float = 0.0
+    behavior_text_weight: float = 1.0
     # dev choice 2026-10-21 (vendor set, member alone): top_k 10, the five best statements, no
     # prior: MRR 0.809, top-1 0.676, top-3 0.912 (mean over all statements: top-1 0.706, MRR 0.784)
     behavior_text_top_k: int = 10
@@ -366,7 +371,9 @@ class Settings(BaseSettings):
     # 0.50 (chosen on the design seeds for the real-report combiner) since 2026-10-26: fresh seeds
     # 101/103/107 and CTI-HAL/Elastic with 0 wrong names, 110 of 112 correct fold names kept
     # (docs 21.3.22). The floor belongs to that combiner; with another combiner set it anew.
-    attribution_hypothesis_min_probability: float = 0.5
+    # 0.20 since 2026-10-27, chosen by the same rule on the design seeds for the procedure-core
+    # combiner (docs 21.3.25); 0.5 belongs to attribution_combiner_real_reports.json.
+    attribution_hypothesis_min_probability: float = 0.2
     # Blend the discriminative mass into the RRF score of the top-K (0 = pure RRF order).
     attribution_rerank_blend: float = 0.5
     # Shortlist size for the discriminative re-ranking; 0 = the gate's shortlist
@@ -396,8 +403,10 @@ class Settings(BaseSettings):
     # 21.3.21), adopted together with the naming probability floor of 0.50 below (prereg
     # attribution_probability_floor_2026-10-25, docs 21.3.22); without the floor it named a wrong
     # group on a design seed. attribution_combiner_procedure_match.json is the fold-only refit.
+    # Since 2026-10-27 the same recipe refitted with the free-text and behaviour-text members
+    # voting (procedure text as the core, docs 21.3.25), with the floor 0.20 above.
     attribution_combiner_path: Path = (
-        PROJECT_ROOT / "data" / "models" / "combiner" / "attribution_combiner_real_reports.json"
+        PROJECT_ROOT / "data" / "models" / "combiner" / "attribution_combiner_procedure_core.json"
     )
     attribution_combiner_top_n: int = 20
     attribution_combiner_blend: float = 0.5
@@ -431,8 +440,10 @@ class Settings(BaseSettings):
     # rankings); confidence_labels.json stays for checkouts with the earlier combiner;
     # confidence_labels_fsum.json holds the labels of attribution_combiner_procedure_match.json.
     # Since 2026-10-26 the labels fitted for the real-report combiner (docs 21.3.21/21.3.22)
+    # (confidence_labels_real_reports.json); since 2026-10-27 the procedure-core combiner's, strong
+    # label only: no "one of these" threshold met its bound (docs 21.3.25).
     confidence_labels_path: Path = (
-        PROJECT_ROOT / "data" / "models" / "calibration" / "confidence_labels_real_reports.json"
+        PROJECT_ROOT / "data" / "models" / "calibration" / "confidence_labels_procedure_core.json"
     )
     # Activity clustering (opt-in)
     activity_clusters_enabled: bool = False

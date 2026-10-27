@@ -955,9 +955,14 @@ def test_text_group_at_weight_zero_leaves_the_pipeline_unchanged(tmp_path):
     }
     model = fit_text_group(kb, None, {"min_df": 1})
     path = model.save(tmp_path / "text.json.gz")
-    off = AttributionEngine(_settings(text_group_path=path), kb, FakeStore(), FakeLLM())
+    off = AttributionEngine(
+        _settings(text_group_path=path, text_group_weight=0.0), kb, FakeStore(), FakeLLM()
+    )
     plain = AttributionEngine(
-        _settings(text_group_enabled=False, text_group_path=path), kb, FakeStore(), FakeLLM()
+        _settings(text_group_enabled=False, text_group_path=path, text_group_weight=0.0),
+        kb,
+        FakeStore(),
+        FakeLLM(),
     )
     assert off.text_group is None and off.text_group_status == "disabled (weight 0)"
     assert TEXT_GROUP_NAME not in off.default_weights()
