@@ -415,6 +415,12 @@ class AttributionEngine:
             hypothesis_min_probability=float(
                 getattr(self.settings, "attribution_hypothesis_min_probability", 0.0) or 0.0
             ),
+            technique_list_one_family=bool(
+                getattr(self.settings, "attribution_technique_list_one_family", False)
+            ),
+            hypothesis_above_null=bool(
+                getattr(self.settings, "attribution_hypothesis_above_null", False)
+            ),
             cluster_naming=bool(getattr(self.settings, "attribution_cluster_naming", False)),
             cluster_min_probability=float(
                 getattr(self.settings, "attribution_cluster_min_probability", 0.8)

@@ -27,6 +27,7 @@ Key design decisions:
 from __future__ import annotations
 
 import hashlib
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import Any
@@ -141,6 +142,15 @@ class MaturityThresholds:
     # (0: no floor; without an active combiner there is no probability and no floor). A leader it
     # holds can still be named through its documented cluster, which has its own probability bar.
     hypothesis_min_probability: float = 0.0
+    # Independent inputs (prereg attribution_independent_inputs_2026-10-27, docs 10.6): True
+    # counts the families in TECHNIQUE_LIST_FAMILIES, which all read the accepted technique list,
+    # as one evidence family, so a name needs a second kind of input (software, a behaviour
+    # match, the narrative, the analyst's context) besides that list.
+    technique_list_one_family: bool = False
+    # Same prereg: True also holds a single name whose combiner leader probability does not exceed
+    # the combiner's null ("none of these") probability; the held leader falls through to the
+    # documented-cluster step as under the floor.
+    hypothesis_above_null: bool = False
     # Documented-overlap clusters (overlap_cluster.py, docs 10.11): off unless enabled. A cluster
     # needs the separation bar, this mass (the single bar for a nested pair) and the members'
     # combined combiner probability. The scope says which ATT&CK links make a twin: "documented"
@@ -166,12 +176,42 @@ SUPPORT_RANK_LIMIT = 10
 # the same case narrative the technique, software and behaviour classifiers read.
 NOT_INDEPENDENT_EVIDENCE = frozenset({"text_group", "behavior_text", "procedure_match"})
 
+# Families whose members read nothing but the accepted technique list (the learned profiles and the
+# country model also read the analyst's stated context, which strategic_context and
+# motivation_alignment count on their own). With ``technique_list_one_family`` they count once:
+# an APT41 profile was named Lazarus Group on technique overlap plus the country model's reading of
+# the same techniques (docs 21.3.27).
+TECHNIQUE_LIST_FAMILIES = frozenset({"technique_overlap", "campaign", "learned_profile", "origin"})
+TECHNIQUE_LIST = "technique_list"
+
+
+def supporting_families(
+    classifier_ranks: Mapping[str, Any],
+    classifier_families: Mapping[str, str] | None = None,
+    *,
+    technique_list_one_family: bool = False,
+    support_rank_limit: int = SUPPORT_RANK_LIMIT,
+) -> set[str]:
+    """The evidence families whose classifiers rank a group within ``support_rank_limit``."""
+    families: set[str] = set()
+    for classifier_name, rank in classifier_ranks.items():
+        if rank is None or int(rank) > support_rank_limit:
+            continue
+        if classifier_name in NOT_INDEPENDENT_EVIDENCE:
+            continue
+        family = (classifier_families or {}).get(classifier_name, classifier_name)
+        if technique_list_one_family and family in TECHNIQUE_LIST_FAMILIES:
+            family = TECHNIQUE_LIST
+        families.add(family)
+    return families
+
 
 def _evidence_family_count(
     fusion: FusionResult,
     classifier_families: dict[str, str] | None = None,
     *,
     support_rank_limit: int = SUPPORT_RANK_LIMIT,
+    technique_list_one_family: bool = False,
 ) -> int:
     """Count distinct evidence families that *support* the top entry.
 
@@ -181,16 +221,14 @@ def _evidence_family_count(
     """
     if not fusion.entries:
         return 0
-    top = fusion.entries[0]
-    families: set[str] = set()
-    for classifier_name, rank in top.classifier_ranks.items():
-        if rank is None or int(rank) > support_rank_limit:
-            continue
-        if classifier_name in NOT_INDEPENDENT_EVIDENCE:
-            continue
-        family = (classifier_families or {}).get(classifier_name, classifier_name)
-        families.add(family)
-    return len(families)
+    return len(
+        supporting_families(
+            fusion.entries[0].classifier_ranks,
+            classifier_families,
+            technique_list_one_family=technique_list_one_family,
+            support_rank_limit=support_rank_limit,
+        )
+    )
 
 
 def _compute_maturity(
@@ -224,7 +262,11 @@ def _compute_maturity(
     )
     factors["evidence_volume"] = round(volume, 3)
     # Independent families
-    family_count = _evidence_family_count(fusion, classifier_families)
+    family_count = _evidence_family_count(
+        fusion,
+        classifier_families,
+        technique_list_one_family=thresholds.technique_list_one_family,
+    )
     families = min(1.0, family_count / max(thresholds.min_independent_evidence_families, 1))
     factors["independent_families"] = round(families, 3)
     # Classifier agreement (inverse of rank_std)
@@ -374,7 +416,11 @@ def assess_attribution(
         getattr(leading_group, "name", leading.group_id) if leading_group else leading.group_id
     )
     # Check family count
-    family_count = _evidence_family_count(fusion, classifier_families)
+    family_count = _evidence_family_count(
+        fusion,
+        classifier_families,
+        technique_list_one_family=thresholds.technique_list_one_family,
+    )
     # Stage decision
     if (
         maturity < thresholds.min_maturity_score
@@ -397,7 +443,13 @@ def assess_attribution(
                 f"Unresolved activity cluster {cluster_id}: maturity {maturity:.3f} "
                 f"below threshold {thresholds.min_maturity_score:.3f} or "
                 f"{family_count} independent families below minimum "
-                f"{thresholds.min_independent_evidence_families}. "
+                f"{thresholds.min_independent_evidence_families}"
+                + (
+                    " (the members that read only the technique list count once)"
+                    if thresholds.technique_list_one_family
+                    else ""
+                )
+                + ". "
                 f"Leading candidate: {leading_name} ({leading.group_id}) at "
                 f"{leading.relative_score:.2f}, but named attribution maturity not met."
             ),
@@ -417,6 +469,17 @@ def assess_attribution(
         failed.append(
             f"combiner probability {float(floor_probability):.2f} below the naming floor "
             f"{floor:.2f}"
+        )
+    null_probability = combiner.get("null_probability") if isinstance(combiner, dict) else None
+    if (
+        thresholds.hypothesis_above_null
+        and floor_probability is not None
+        and null_probability is not None
+        and float(null_probability) >= float(floor_probability)
+    ):
+        failed.append(
+            f"combiner probability {float(floor_probability):.2f} not above its none-of-these "
+            f"probability {float(null_probability):.2f}"
         )
     # (1) the single gate holds the "found" rules too
     guard = (

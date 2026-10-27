@@ -1599,6 +1599,19 @@ fusion only and is reproducible across processes.
   made with it row for row; `--choose` applies the registered design rule). Gate trial: 21.3.22.
   Removed actors named with high probability are out of its reach, and the combiner's null option
   does not separate them from correct names either (21.3.23).
+- **Independent inputs (2026-10-27).** Two rules, both on by default, each a setting (21.3.27):
+  - `ATTRIBUTION_TECHNIQUE_LIST_ONE_FAMILY` (`MaturityThresholds.technique_list_one_family`): the
+    technique-overlap, campaign, learned-profile and country families all read the accepted
+    technique list (`attribution.TECHNIQUE_LIST_FAMILIES`), so the independent-family check counts
+    them once. A name then needs a second kind of input: named software, a behaviour match, the
+    narrative against the group descriptions, or the analyst's stated context. Below two families
+    the leader goes to the unresolved stage before any other step. Only the gate changes; the
+    family map that the fusion and the combiner use does not.
+  - `ATTRIBUTION_HYPOTHESIS_ABOVE_NULL` (`hypothesis_above_null`): a single name also needs the
+    combiner's leader probability above its null ("none of these") probability. A held leader falls
+    through to the documented-cluster step, as under the floor.
+  - `scripts/naming_rules_replay.py` replays both exactly over recorded runs (`--on` checks runs
+    made with them row for row).
 - The UI treats "no named group" as a first-class outcome: for every stage below
   `KNOWN_GROUP_HYPOTHESIS` the Assessment view states that no documented group meets the
   evidence bar, labels the leader as the *closest documented group (not an attribution)*,
@@ -6600,6 +6613,63 @@ Caveats:
 - The published numbers come from the papers' own runs, on CTI-TAA without our extra name
   anonymisation.
 - One run per arm.
+
+#### 21.3.27 Independent inputs: the two external wrong names (2026-10-27)
+
+The product owner asked to fix the two genuine wrong names of 21.3.26. Pre-registered as
+`docs/preregistration/attribution_independent_inputs_2026-10-27.json`, after an exact replay of
+recorded runs. Both rules are on by default (10.6).
+
+**What went wrong.**
+- *APT41 profile named Lazarus Group at 0.93.* The profile names no ATT&CK software, and no report
+  sentence matched a Lazarus procedure closely enough for a behaviour match. The gate counted two
+  independent families: technique overlap (Naive Bayes rank 3, IDF cosine rank 7) and the country
+  model (rank 5). The country model reads the same accepted technique list, so one input passed as
+  two. The text members also ranked Lazarus first, but they never count as independent evidence.
+- *Lazarus report named Storm-1811 at 0.36.* The report's only ATT&CK-documented ransomware is
+  Black Basta. It appears where the report says the IP addresses also sit in community collections
+  that track Black Basta activity, which it does not attribute to the adversary. The extraction
+  read the mention as use, and the software channel made Black Basta decisive. The
+  combiner itself was unsure: its null probability (0.62) was above the leader's.
+
+**Rules.** Each comes from its mechanism, not from a threshold placed between cases.
+- *Technique list once.* Technique overlap, campaign, learned profiles and the country model count
+  as one family in the gate.
+- *Above null.* A single name needs the leader's combiner probability above the null probability.
+
+**Replay** (`scripts/naming_rules_replay.py`, exact; recorded procedure-core runs):
+
+| Run | Correct names | Technique list once | Above null | Wrong names held |
+| --- | --- | --- | --- | --- |
+| Design seeds 41 / 53 | 39 / 39 | −3 / −2 | 0 / 0 | – |
+| Seed 7 | 44 | −3 | 0 | – |
+| Gate seeds 109 / 113 / 127 | 37 / 40 / 38 | −2 / 0 / −1 | 0 | – |
+| CTI-HAL names / as reported / tradecraft | 12 / 18 / 1 | 0 | −1 / 0 / 0 | – |
+| Elastic strict / names / tradecraft | 1 / 1 / 0 | 0 | 0 | – |
+| CTI-TAA (11 names) | 8 | 0 | −1 | Lazarus → Storm-1811 |
+| AthenaBench (18 names) | 8 | 0 | 0 | APT41 → Lazarus Group |
+
+- The technique-list rule costs 11 of 237 correct fold names. Those cases are ATT&CK's own
+  phrasing, where technique lists work best. On the real reports no correct name rested on the
+  technique list alone.
+- The null rule costs one CTI-HAL name in the headline reading (FIN7, FIREEYE6: p 0.42 against
+  null 0.54; 12 → 11 named) and one correct CTI-TAA name (Lazarus, 0.34 against 0.54).
+- Neither rule changes a ranking, adds a name or falls through to a cluster name in any run. The
+  removed-actor names of seeds 113 and 127 (confident, 21.3.23) stay.
+
+**Confirmation.** Runs with both rules on: AthenaBench, CTI-TAA, the CTI-HAL headline and design
+seed 41 (`data/audits/naming_rules/run.sh`). The replay of the runs made without the rules
+matches all four row for row (stage and named members, `naming_rules_replay.py --on`): both wrong
+names are held, and design seed 41 loses its three technique-list names. The baselines were then
+rerun with the rules on (`data/audits/naming_rules/adopt.sh`; the earlier ones are in
+`data/audits/naming_rules/before/`).
+
+Caveats:
+- The rules were designed from the two cases they fix, so the external sets no longer measure them.
+- The Black Basta mention is an extraction problem. The null rule catches it only because the
+  combiner was unsure; a confidently misread mention would still name.
+- The remaining external "wrong" names are the likely key errors and the fake-job-interview label
+  disputes of 21.3.26.
 
 ## 22. Failure modes and troubleshooting
 

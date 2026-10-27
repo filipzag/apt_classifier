@@ -374,6 +374,13 @@ class Settings(BaseSettings):
     # 0.20 since 2026-10-27, chosen by the same rule on the design seeds for the procedure-core
     # combiner (docs 21.3.25); 0.5 belongs to attribution_combiner_real_reports.json.
     attribution_hypothesis_min_probability: float = 0.2
+    # Independent inputs (prereg attribution_independent_inputs_2026-10-27, docs 10.6/21.3.27):
+    # the technique-overlap, campaign, learned-profile and country members all read the accepted
+    # technique list, so the gate counts them as one family; and a single name needs the
+    # combiner's leader probability above its "none of these" probability. Both on since
+    # 2026-10-27 (they held the two wrong names of the external benchmarks, 21.3.26).
+    attribution_technique_list_one_family: bool = True
+    attribution_hypothesis_above_null: bool = True
     # Blend the discriminative mass into the RRF score of the top-K (0 = pure RRF order).
     attribution_rerank_blend: float = 0.5
     # Shortlist size for the discriminative re-ranking; 0 = the gate's shortlist
