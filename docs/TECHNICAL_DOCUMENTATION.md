@@ -6664,6 +6664,21 @@ names are held, and design seed 41 loses its three technique-list names. The bas
 rerun with the rules on (`data/audits/naming_rules/adopt.sh`; the earlier ones are in
 `data/audits/naming_rules/before/`).
 
+**Development report sets (2026-10-28).** The vendor (34), ATT&CK campaign (21) and FBI/CISA
+advisory (13) reports at names, strict and tradecraft, all statements, with both rules off and
+replayed (`data/audits/naming_rules/run_sets.sh`; the campaign readings also run with the rules
+on, 0 mismatches). The rules hold no name on any of the nine runs:
+
+| Set | Names: top-1 / named | Strict: top-1 / named | Tradecraft: top-1 / named |
+|---|---|---|---|
+| Campaigns (21) | 18 / 8 | 18 / 8 | 10 / 0 |
+| Advisories (13) | 9 / 3 | 9 / 3 | 6 / 0 |
+| Vendor (34) | 32 / 7 | 30 / 6 | 23 / 2 |
+
+Every name is correct. These are the procedure-core combiner's training reports (names:30 and
+strict:all lists, 21.3.25), so the top-1 is in-sample for the combiner; the runs show what the
+rules cost on report-style text, not accuracy on unseen reports.
+
 Caveats:
 - The rules were designed from the two cases they fix, so the external sets no longer measure them.
 - The Black Basta mention is an extraction problem. The null rule catches it only because the
