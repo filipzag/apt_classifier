@@ -1848,6 +1848,7 @@ HEADLINE_LEVEL = {
     "campaigns": "names",
     "cti_hal": "names",
     "elastic": "strict",
+    "fresh": "strict",
     "vendor": "strict",
 }
 

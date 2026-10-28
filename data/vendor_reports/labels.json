@@ -1,0 +1,1175 @@
+{
+  "description": "Pre-registered selection and labels for the vendor-report development set (small-group lean in group ranking, docs 21.3.14). Only ATT&CK ids, URLs and citation names are stored here; the pages are downloaded by scripts/prepare_vendor_reports.py into data/benchmarks/vendor/ (gitignored, local evaluation only, (c) each vendor).",
+  "attack_version": "19.2",
+  "registered": "2026-10-12",
+  "role": "development set for group ranking; never CTI-HAL or Elastic groups",
+  "rule": {
+    "excluded_groups": {
+      "cti_hal": [
+        "G0008",
+        "G0016",
+        "G0034",
+        "G0037",
+        "G0046",
+        "G0049",
+        "G0102"
+      ],
+      "elastic": [
+        "G0032",
+        "G0047",
+        "G0050",
+        "G0065",
+        "G0082",
+        "G0092",
+        "G1052"
+      ]
+    },
+    "min_group_techniques": 5,
+    "large_group_techniques": 40,
+    "small_sample": 10,
+    "seed": 7,
+    "candidates": "vendor-research web pages ATT&CK cites for the group and for no other group, newest citation date first (PDFs, news, court papers, product docs left out)",
+    "check": "the page prose names the group (ATT&CK name or alias, case-sensitive) more often than any other ATT&CK group (ties fail) and has at least 15 sentences; else the next candidate, at most 3 per group",
+    "vendor_sites": [
+      "anomali.com",
+      "blackberry.com",
+      "blog.google/threat-analysis-group",
+      "blog.qualys.com",
+      "clearskysec.com",
+      "cloud.google.com/blog",
+      "crowdstrike.com",
+      "cybereason.com",
+      "cyble.com",
+      "cybleinc.com",
+      "cisa.gov",
+      "deepinstinct.com",
+      "dragos.com",
+      "eset.com",
+      "fireeye.com",
+      "fortinet.com",
+      "group-ib.com",
+      "huntress.com",
+      "intezer.com",
+      "kaspersky.com",
+      "lookout.com",
+      "malwarebytes.com",
+      "mandiant.com",
+      "microsoft.com/en-us/security/blog",
+      "microsoft.com/security/blog",
+      "nccgroup",
+      "paloaltonetworks.com",
+      "proofpoint.com",
+      "recordedfuture.com",
+      "redcanary.com",
+      "research.checkpoint.com",
+      "secureworks.com",
+      "securelist.com",
+      "securityintelligence.com",
+      "security.com/threat-intelligence",
+      "sekoia.io",
+      "sentinelone.com",
+      "symantec-enterprise-blogs.security.com",
+      "talosintelligence.com",
+      "team-cymru",
+      "threatconnect.com",
+      "trendmicro.com",
+      "volexity.com",
+      "welivesecurity.com",
+      "zscaler.com"
+    ]
+  },
+  "eligible_groups": 116,
+  "reports": [
+    {
+      "group_id": "G0094",
+      "name": "Kimsuky",
+      "techniques": 130,
+      "stratum": "large",
+      "accept": [],
+      "candidates": [
+        {
+          "source_name": "Symantec Troll Stealer 2024",
+          "url": "https://www.security.com/threat-intelligence/springtail-kimsuky-backdoor-espionage",
+          "date": "2024-05-16"
+        },
+        {
+          "source_name": "Proofpoint TA427 April 2024",
+          "url": "https://www.proofpoint.com/us/blog/threat-insight/social-engineering-dmarc-abuse-ta427s-art-information-gathering",
+          "date": "2024-04-16"
+        },
+        {
+          "source_name": "MSFT-AI",
+          "url": "https://www.microsoft.com/en-us/security/blog/2024/02/14/staying-ahead-of-threat-actors-in-the-age-of-ai/",
+          "date": "2024-02-14"
+        },
+        {
+          "source_name": "Malwarebytes Kimsuky June 2021",
+          "url": "https://blog.malwarebytes.com/threat-analysis/2021/06/kimsuky-apt-continues-to-target-south-korean-government-using-appleseed-backdoor/",
+          "date": "2021-06-01"
+        },
+        {
+          "source_name": "Cybereason Kimsuky November 2020",
+          "url": "https://www.cybereason.com/blog/back-to-the-future-inside-the-kimsuky-kgh-spyware-suite",
+          "date": "2020-11-02"
+        }
+      ]
+    },
+    {
+      "group_id": "G0007",
+      "name": "APT28",
+      "techniques": 93,
+      "stratum": "large",
+      "accept": [],
+      "candidates": [
+        {
+          "source_name": "Nearest Neighbor Volexity",
+          "url": "https://www.volexity.com/blog/2024/11/22/the-nearest-neighbor-attack-how-a-russian-apt-weaponized-nearby-wi-fi-networks-for-covert-access/",
+          "date": "2024-11-22"
+        },
+        {
+          "source_name": "TrendMicro Pawn Storm Dec 2020",
+          "url": "https://www.trendmicro.com/en_us/research/20/l/pawn-storm-lack-of-sophistication-as-a-strategy.html",
+          "date": "2020-12-17"
+        },
+        {
+          "source_name": "Microsoft STRONTIUM New Patterns Cred Harvesting Sept 2020",
+          "url": "https://www.microsoft.com/security/blog/2020/09/10/strontium-detecting-new-patters-credential-harvesting/",
+          "date": "2020-09-10"
+        },
+        {
+          "source_name": "ESET Zebrocy May 2019",
+          "url": "https://www.welivesecurity.com/2019/05/22/journey-zebrocy-land/",
+          "date": "2019-05-22"
+        },
+        {
+          "source_name": "Palo Alto Sofacy 06-2018",
+          "url": "https://researchcenter.paloaltonetworks.com/2018/06/unit42-sofacy-groups-parallel-attacks/",
+          "date": "2018-06-06"
+        }
+      ]
+    },
+    {
+      "group_id": "G0129",
+      "name": "Mustang Panda",
+      "techniques": 85,
+      "stratum": "large",
+      "accept": [],
+      "candidates": [
+        {
+          "source_name": "Google Threat Intelligence Group MUSTANG PANDA PLUGX August 2025",
+          "url": "https://cloud.google.com/blog/topics/threat-intelligence/prc-nexus-espionage-targets-diplomats",
+          "date": "2025-08-25"
+        },
+        {
+          "source_name": "Zscaler",
+          "url": "https://www.zscaler.com/blogs/security-research/latest-mustang-panda-arsenal-toneshell-and-starproxy-p1",
+          "date": "2025-04-16"
+        },
+        {
+          "source_name": "Palo Alto Networks, Unit 42",
+          "url": "https://unit42.paloaltonetworks.com/stately-taurus-uses-bookworm-malware/",
+          "date": "2025-02-20"
+        },
+        {
+          "source_name": "Trend Micro Mustang Panda Earth Preta Toneshell February 2025",
+          "url": "https://www.trendmicro.com/en_us/research/25/b/earth-preta-mixes-legitimate-and-malicious-components-to-sidestep-detection.html",
+          "date": "2025-02-18"
+        },
+        {
+          "source_name": "Trend Micro MUSTANG PANDA PUBLOAD HIUPAN SEPTEMBER 2024",
+          "url": "https://www.trendmicro.com/en_us/research/24/i/earth-preta-new-malware-and-strategies.html",
+          "date": "2024-09-09"
+        }
+      ]
+    },
+    {
+      "group_id": "G0096",
+      "name": "APT41",
+      "techniques": 82,
+      "stratum": "large",
+      "accept": [],
+      "candidates": [
+        {
+          "source_name": "Group IB APT 41 June 2021",
+          "url": "https://www.group-ib.com/blog/colunmtk-apt41/",
+          "date": "2021-06-10"
+        }
+      ]
+    },
+    {
+      "group_id": "G1017",
+      "name": "Volt Typhoon",
+      "techniques": 81,
+      "stratum": "large",
+      "accept": [],
+      "candidates": [
+        {
+          "source_name": "Microsoft Volt Typhoon May 2023",
+          "url": "https://www.microsoft.com/en-us/security/blog/2023/05/24/volt-typhoon-targets-us-critical-infrastructure-with-living-off-the-land-techniques/",
+          "date": "2023-05-24"
+        },
+        {
+          "source_name": "Secureworks BRONZE SILHOUETTE May 2023",
+          "url": "https://web.archive.org/web/20230601025540/https://www.secureworks.com/blog/chinese-cyberespionage-group-bronze-silhouette-targets-us-government-and-defense-organizations",
+          "date": "2023-05-24"
+        }
+      ]
+    },
+    {
+      "group_id": "G0059",
+      "name": "Magic Hound",
+      "techniques": 78,
+      "stratum": "large",
+      "accept": [],
+      "candidates": [
+        {
+          "source_name": "Check Point APT35 CharmPower January 2022",
+          "url": "https://research.checkpoint.com/2022/apt35-exploits-log4j-vulnerability-to-distribute-new-modular-powershell-toolkit/",
+          "date": "2022-01-11"
+        },
+        {
+          "source_name": "Proofpoint TA453 July2021",
+          "url": "https://www.proofpoint.com/us/blog/threat-insight/operation-spoofedscholars-conversation-ta453",
+          "date": "2021-07-13"
+        },
+        {
+          "source_name": "Proofpoint TA453 March 2021",
+          "url": "https://www.proofpoint.com/us/blog/threat-insight/badblood-ta453-targets-us-and-israeli-medical-research-personnel-credential",
+          "date": "2021-03-30"
+        },
+        {
+          "source_name": "IBM ITG18 2020",
+          "url": "https://securityintelligence.com/posts/new-research-exposes-iranian-threat-group-operations/",
+          "date": "2020-07-16"
+        },
+        {
+          "source_name": "Unit 42 Magic Hound Feb 2017",
+          "url": "https://researchcenter.paloaltonetworks.com/2017/02/unit42-magic-hound-campaign-attacks-saudi-targets/",
+          "date": "2017-02-15"
+        }
+      ]
+    },
+    {
+      "group_id": "G0010",
+      "name": "Turla",
+      "techniques": 68,
+      "stratum": "large",
+      "accept": [],
+      "candidates": [
+        {
+          "source_name": "Talos TinyTurla September 2021",
+          "url": "https://blog.talosintelligence.com/2021/09/tinyturla.html",
+          "date": "2021-09-21"
+        },
+        {
+          "source_name": "ESET Turla PowerShell May 2019",
+          "url": "https://www.welivesecurity.com/2019/05/29/turla-powershell-usage/",
+          "date": "2019-05-29"
+        },
+        {
+          "source_name": "CrowdStrike VENOMOUS BEAR",
+          "url": "https://www.crowdstrike.com/blog/meet-crowdstrikes-adversary-of-the-month-for-march-venomous-bear/",
+          "date": "2018-03-12"
+        },
+        {
+          "source_name": "Securelist WhiteBear Aug 2017",
+          "url": "https://securelist.com/introducing-whitebear/81638/",
+          "date": "2017-08-30"
+        },
+        {
+          "source_name": "Kaspersky Turla",
+          "url": "https://securelist.com/the-epic-turla-operation/65545/",
+          "date": "2014-08-07"
+        }
+      ]
+    },
+    {
+      "group_id": "G0069",
+      "name": "MuddyWater",
+      "techniques": 68,
+      "stratum": "large",
+      "accept": [],
+      "candidates": [
+        {
+          "source_name": "SymantecCarbonBlack_Seedworm_Mar2026",
+          "url": "https://www.security.com/threat-intelligence/iran-cyber-threat-activity-us",
+          "date": "2026-03-05"
+        },
+        {
+          "source_name": "ESET_MuddyWater_Dec2025",
+          "url": "https://www.welivesecurity.com/en/eset-research/muddywater-snakes-riverbank/",
+          "date": "2025-12-02"
+        },
+        {
+          "source_name": "NaumaanProofpoint_GlobalClickFix_April2025",
+          "url": "https://www.proofpoint.com/us/blog/threat-insight/around-world-90-days-state-sponsored-actors-try-clickfix",
+          "date": "2025-04-17"
+        },
+        {
+          "source_name": "Proofpoint TA450 Phishing March 2024",
+          "url": "https://www.proofpoint.com/us/blog/threat-insight/security-brief-ta450-uses-embedded-links-pdf-attachments-latest-campaign",
+          "date": "2024-03-21"
+        },
+        {
+          "source_name": "DHS CISA AA22-055A MuddyWater February 2022",
+          "url": "https://www.cisa.gov/uscert/ncas/alerts/aa22-055a",
+          "date": "2022-02-24"
+        }
+      ]
+    },
+    {
+      "group_id": "G1015",
+      "name": "Scattered Spider",
+      "techniques": 64,
+      "stratum": "large",
+      "accept": [],
+      "candidates": [
+        {
+          "source_name": "Mandiant VMware vSphere JUL 2025",
+          "url": "https://cloud.google.com/blog/topics/threat-intelligence/defending-vsphere-from-unc3944",
+          "date": "2025-07-23"
+        },
+        {
+          "source_name": "Mandiant UNC3944 May 2025",
+          "url": "https://cloud.google.com/blog/topics/threat-intelligence/unc3944-proactive-hardening-recommendations",
+          "date": "2025-05-06"
+        },
+        {
+          "source_name": "CISA Scattered Spider Advisory November 2023",
+          "url": "https://www.cisa.gov/news-events/cybersecurity-advisories/aa23-320a",
+          "date": "2023-11-16"
+        },
+        {
+          "source_name": "MSTIC Octo Tempest Operations October 2023",
+          "url": "https://www.microsoft.com/en-us/security/blog/2023/10/25/octo-tempest-crosses-boundaries-to-facilitate-extortion-encryption-and-destruction/",
+          "date": "2023-10-25"
+        },
+        {
+          "source_name": "CrowdStrike Scattered Spider BYOVD January 2023",
+          "url": "https://www.crowdstrike.com/blog/scattered-spider-attempts-to-avoid-detection-with-bring-your-own-vulnerable-driver-tactic/",
+          "date": "2023-01-10"
+        }
+      ]
+    },
+    {
+      "group_id": "G1055",
+      "name": "VOID MANTICORE",
+      "techniques": 63,
+      "stratum": "large",
+      "accept": [],
+      "candidates": [
+        {
+          "source_name": "Palo Alto VOID MANTICORE Iran Cyber Threats March 2026",
+          "url": "https://unit42.paloaltonetworks.com/evolution-of-iran-cyber-threats/",
+          "date": "2026-03-16"
+        },
+        {
+          "source_name": "Check Point VOID MANTICORE Handala Hack March 2026",
+          "url": "https://research.checkpoint.com/2026/handala-hack-unveiling-groups-modus-operandi/",
+          "date": "2026-03-12"
+        }
+      ]
+    },
+    {
+      "group_id": "G0114",
+      "name": "Chimera",
+      "techniques": 59,
+      "stratum": "large",
+      "accept": [],
+      "candidates": [
+        {
+          "source_name": "NCC Group Chimera January 2021",
+          "url": "https://web.archive.org/web/20230218064220/https://research.nccgroup.com/2021/01/12/abusing-cloud-services-to-fly-under-the-radar/",
+          "date": "2021-01-12"
+        }
+      ]
+    },
+    {
+      "group_id": "G0027",
+      "name": "Threat Group-3390",
+      "techniques": 57,
+      "stratum": "large",
+      "accept": [],
+      "candidates": [
+        {
+          "source_name": "Trend Micro Iron Tiger April 2021",
+          "url": "https://www.trendmicro.com/en_us/research/21/d/iron-tiger-apt-updates-toolkit-with-evolved-sysupdate-malware-va.html",
+          "date": "2021-04-09"
+        },
+        {
+          "source_name": "Unit42 Emissary Panda May 2019",
+          "url": "https://unit42.paloaltonetworks.com/emissary-panda-attacks-middle-east-government-sharepoint-servers/",
+          "date": "2019-05-28"
+        },
+        {
+          "source_name": "Securelist LuckyMouse June 2018",
+          "url": "https://securelist.com/luckymouse-hits-national-data-center/86083/",
+          "date": "2018-06-13"
+        },
+        {
+          "source_name": "Nccgroup Emissary Panda May 2018",
+          "url": "https://research.nccgroup.com/2018/05/18/emissary-panda-a-potential-new-malicious-tool/",
+          "date": "2018-05-18"
+        },
+        {
+          "source_name": "SecureWorks BRONZE UNION June 2017",
+          "url": "https://www.secureworks.com/research/bronze-union",
+          "date": "2017-06-27"
+        }
+      ]
+    },
+    {
+      "group_id": "G1051",
+      "name": "Medusa Group",
+      "techniques": 57,
+      "stratum": "large",
+      "accept": [],
+      "candidates": [
+        {
+          "source_name": "CISA Medusa Group Medusa Ransomware March 2025",
+          "url": "https://www.cisa.gov/news-events/cybersecurity-advisories/aa25-071a",
+          "date": "2025-03-12"
+        },
+        {
+          "source_name": "Broadcom Medusa Ransomware Medusa Group March 2025",
+          "url": "https://www.security.com/threat-intelligence/medusa-ransomware-attacks",
+          "date": "2025-03-06"
+        }
+      ]
+    },
+    {
+      "group_id": "G0035",
+      "name": "Dragonfly",
+      "techniques": 56,
+      "stratum": "large",
+      "accept": [],
+      "candidates": [
+        {
+          "source_name": "Mandiant Ukraine Cyber Threats January 2022",
+          "url": "https://www.mandiant.com/resources/ukraine-crisis-cyber-threats",
+          "date": "2022-01-20"
+        },
+        {
+          "source_name": "CISA AA20-296A Berserk Bear December 2020",
+          "url": "https://www.cisa.gov/uscert/ncas/alerts/aa20-296a#revisions",
+          "date": "2020-12-01"
+        },
+        {
+          "source_name": "Secureworks Karagany July 2019",
+          "url": "https://www.secureworks.com/research/updated-karagany-malware-targets-energy-sector",
+          "date": "2019-07-24"
+        },
+        {
+          "source_name": "Secureworks IRON LIBERTY July 2019",
+          "url": "https://www.secureworks.com/research/resurgent-iron-liberty-targeting-energy-sector",
+          "date": "2019-07-24"
+        },
+        {
+          "source_name": "Secureworks MCMD July 2019",
+          "url": "https://www.secureworks.com/research/mcmd-malware-analysis",
+          "date": "2019-07-24"
+        }
+      ]
+    },
+    {
+      "group_id": "G0139",
+      "name": "TeamTNT",
+      "techniques": 56,
+      "stratum": "large",
+      "accept": [],
+      "candidates": [
+        {
+          "source_name": "Unit 42 Hildegard Malware",
+          "url": "https://unit42.paloaltonetworks.com/hildegard-malware-teamtnt/",
+          "date": "2021-02-03"
+        },
+        {
+          "source_name": "Palo Alto Black-T October 2020",
+          "url": "https://unit42.paloaltonetworks.com/black-t-cryptojacking-variant/",
+          "date": "2020-10-05"
+        },
+        {
+          "source_name": "Intezer TeamTNT September 2020",
+          "url": "https://www.intezer.com/blog/cloud-security/attackers-abusing-legitimate-cloud-monitoring-tools-to-conduct-cyber-attacks/",
+          "date": "2020-09-08"
+        }
+      ]
+    },
+    {
+      "group_id": "G0087",
+      "name": "APT39",
+      "techniques": 53,
+      "stratum": "large",
+      "accept": [],
+      "candidates": [
+        {
+          "source_name": "FireEye APT39 Jan 2019",
+          "url": "https://www.fireeye.com/blog/threat-research/2019/01/apt39-iranian-cyber-espionage-group-focused-on-personal-information.html",
+          "date": "2019-01-29"
+        }
+      ]
+    },
+    {
+      "group_id": "G1016",
+      "name": "FIN13",
+      "techniques": 53,
+      "stratum": "large",
+      "accept": [],
+      "candidates": [
+        {
+          "source_name": "Mandiant FIN13 Aug 2022",
+          "url": "https://www.mandiant.com/resources/blog/fin13-cybercriminal-mexico",
+          "date": "2022-08-08"
+        }
+      ]
+    },
+    {
+      "group_id": "G1048",
+      "name": "UNC3886",
+      "techniques": 49,
+      "stratum": "large",
+      "accept": [],
+      "candidates": [
+        {
+          "source_name": "Google Cloud Threat Intelligence VMWare ESXi Zero-Day 2023",
+          "url": "https://cloud.google.com/blog/topics/threat-intelligence/vmware-esxi-zero-day-bypass/",
+          "date": "2023-06-13"
+        },
+        {
+          "source_name": "Mandiant Fortinet Zero Day",
+          "url": "https://www.mandiant.com/resources/blog/fortinet-malware-ecosystem",
+          "date": "2023-03-16"
+        }
+      ]
+    },
+    {
+      "group_id": "G1043",
+      "name": "BlackByte",
+      "techniques": 48,
+      "stratum": "large",
+      "accept": [],
+      "candidates": [
+        {
+          "source_name": "Cisco BlackByte 2024",
+          "url": "https://blog.talosintelligence.com/blackbyte-blends-tried-and-true-tradecraft-with-newly-disclosed-vulnerabilities-to-support-ongoing-attacks/",
+          "date": "2024-08-28"
+        },
+        {
+          "source_name": "Microsoft BlackByte 2023",
+          "url": "https://www.microsoft.com/en-us/security/blog/2023/07/06/the-five-day-job-a-blackbyte-ransomware-intrusion-case-study/",
+          "date": "2023-07-06"
+        },
+        {
+          "source_name": "Symantec BlackByte 2022",
+          "url": "https://www.security.com/threat-intelligence/blackbyte-exbyte-ransomware",
+          "date": "2022-10-21"
+        }
+      ]
+    },
+    {
+      "group_id": "G1003",
+      "name": "Ember Bear",
+      "techniques": 47,
+      "stratum": "large",
+      "accept": [],
+      "candidates": [
+        {
+          "source_name": "CrowdStrike Ember Bear Profile March 2022",
+          "url": "https://www.crowdstrike.com/blog/who-is-ember-bear/",
+          "date": "2022-03-30"
+        },
+        {
+          "source_name": "Mandiant UNC2589 March 2022",
+          "url": "https://www.mandiant.com/resources/russia-invasion-ukraine-retaliation",
+          "date": "2022-03-04"
+        }
+      ]
+    },
+    {
+      "group_id": "G0004",
+      "name": "Ke3chang",
+      "techniques": 46,
+      "stratum": "large",
+      "accept": [],
+      "candidates": [
+        {
+          "source_name": "Microsoft NICKEL December 2021",
+          "url": "https://www.microsoft.com/security/blog/2021/12/06/nickel-targeting-government-organizations-across-latin-america-and-europe",
+          "date": "2021-12-06"
+        },
+        {
+          "source_name": "APT15 Intezer June 2018",
+          "url": "https://web.archive.org/web/20180615122133/https://www.intezer.com/miragefox-apt15-resurfaces-with-new-tools-based-on-old-ones/",
+          "date": "2018-06-14"
+        },
+        {
+          "source_name": "NCC Group APT15 Alive and Strong",
+          "url": "https://research.nccgroup.com/2018/03/10/apt15-is-alive-and-strong-an-analysis-of-royalcli-and-royaldns/",
+          "date": "2018-03-10"
+        },
+        {
+          "source_name": "Mandiant Operation Ke3chang November 2014",
+          "url": "https://www.mandiant.com/resources/operation-ke3chang-targeted-attacks-against-ministries-of-foreign-affairs",
+          "date": "2014-00-00"
+        }
+      ]
+    },
+    {
+      "group_id": "G0045",
+      "name": "menuPass",
+      "techniques": 46,
+      "stratum": "large",
+      "accept": [],
+      "candidates": [
+        {
+          "source_name": "Symantec Cicada November 2020",
+          "url": "https://symantec-enterprise-blogs.security.com/blogs/threat-intelligence/cicada-apt10-japan-espionage",
+          "date": "2020-11-17"
+        },
+        {
+          "source_name": "FireEye APT10 Sept 2018",
+          "url": "https://www.fireeye.com/blog/threat-research/2018/09/apt10-targeting-japanese-corporations-using-updated-ttps.html",
+          "date": "2018-09-13"
+        },
+        {
+          "source_name": "FireEye APT10 April 2017",
+          "url": "https://www.fireeye.com/blog/threat-research/2017/04/apt10_menupass_grou.html",
+          "date": "2017-04-06"
+        },
+        {
+          "source_name": "Palo Alto menuPass Feb 2017",
+          "url": "http://researchcenter.paloaltonetworks.com/2017/02/unit42-menupass-returns-new-malware-new-attacks-japanese-academics-organizations/",
+          "date": "2017-02-16"
+        }
+      ]
+    },
+    {
+      "group_id": "G1057",
+      "name": "ShinyHunters",
+      "techniques": 46,
+      "stratum": "large",
+      "accept": [],
+      "candidates": [
+        {
+          "source_name": "Google_SHOracle_Jun2026",
+          "url": "https://cloud.google.com/blog/topics/threat-intelligence/shinyhunters-targets-education-sector-oracle-exploit",
+          "date": "2026-06-11"
+        },
+        {
+          "source_name": "Mandiant_SHDataTheft_Jan2026",
+          "url": "https://cloud.google.com/blog/topics/threat-intelligence/expansion-shinyhunters-saas-data-theft",
+          "date": "2026-01-30"
+        },
+        {
+          "source_name": "Google Salesforce JUN 2025",
+          "url": "https://cloud.google.com/blog/topics/threat-intelligence/voice-phishing-data-extortion",
+          "date": "2025-06-04"
+        },
+        {
+          "source_name": "Unit42KelleyVaya_BlingLibra_Aug2024",
+          "url": "https://unit42.paloaltonetworks.com/shinyhunters-ransomware-extortion/",
+          "date": "2024-08-23"
+        }
+      ]
+    },
+    {
+      "group_id": "G0022",
+      "name": "APT3",
+      "techniques": 44,
+      "stratum": "large",
+      "accept": [],
+      "candidates": [
+        {
+          "source_name": "Recorded Future APT3 May 2017",
+          "url": "https://www.recordedfuture.com/research/chinese-mss-behind-apt3",
+          "date": "2017-05-17"
+        },
+        {
+          "source_name": "FireEye Clandestine Wolf",
+          "url": "https://www.fireeye.com/blog/threat-research/2015/06/operation-clandestine-wolf-adobe-flash-zero-day.html",
+          "date": "2015-06-23"
+        },
+        {
+          "source_name": "FireEye Operation Double Tap",
+          "url": "https://www.fireeye.com/blog/threat-research/2014/11/operation_doubletap.html",
+          "date": "2014-11-21"
+        }
+      ]
+    },
+    {
+      "group_id": "G0125",
+      "name": "HAFNIUM",
+      "techniques": 44,
+      "stratum": "large",
+      "accept": [],
+      "candidates": [
+        {
+          "source_name": "Microsoft Silk Typhoon MAR 2025",
+          "url": "https://www.microsoft.com/en-us/security/blog/2025/03/05/silk-typhoon-targeting-it-supply-chain/",
+          "date": "2025-03-05"
+        },
+        {
+          "source_name": "Volexity Exchange Marauder March 2021",
+          "url": "https://www.volexity.com/blog/2021/03/02/active-exploitation-of-microsoft-exchange-zero-day-vulnerabilities/",
+          "date": "2021-03-02"
+        },
+        {
+          "source_name": "Microsoft HAFNIUM March 2020",
+          "url": "https://www.microsoft.com/security/blog/2021/03/02/hafnium-targeting-exchange-servers/",
+          "date": "2021-03-02"
+        }
+      ]
+    },
+    {
+      "group_id": "G1006",
+      "name": "Earth Lusca",
+      "techniques": 44,
+      "stratum": "large",
+      "accept": [],
+      "candidates": [
+        {
+          "source_name": "Recorded Future TAG-22 July 2021",
+          "url": "https://www.recordedfuture.com/research/chinese-group-tag-22-targets-nepal-philippines-taiwan",
+          "date": "2021-07-08"
+        }
+      ]
+    },
+    {
+      "group_id": "G1004",
+      "name": "LAPSUS$",
+      "techniques": 43,
+      "stratum": "large",
+      "accept": [],
+      "candidates": [
+        {
+          "source_name": "MSTIC DEV-0537 Mar 2022",
+          "url": "https://www.microsoft.com/security/blog/2022/03/22/dev-0537-criminal-actor-targeting-organizations-for-data-exfiltration-and-destruction/",
+          "date": "2022-03-24"
+        },
+        {
+          "source_name": "UNIT 42 LAPSUS Mar 2022",
+          "url": "https://unit42.paloaltonetworks.com/lapsus-group/",
+          "date": "2022-03-24"
+        }
+      ]
+    },
+    {
+      "group_id": "G1054",
+      "name": "MirrorFace",
+      "techniques": 43,
+      "stratum": "large",
+      "accept": [],
+      "candidates": [
+        {
+          "source_name": "Trend Micro Earth Kasha Updates APR 2025",
+          "url": "https://www.trendmicro.com/en_us/research/25/d/earth-kasha-updates-ttps.html",
+          "date": "2025-04-30"
+        },
+        {
+          "source_name": "Trend Micro Earth Kasha NOV 2024",
+          "url": "https://www.trendmicro.com/en_us/research/24/k/lodeinfo-campaign-of-earth-kasha.html",
+          "date": "2024-11-19"
+        },
+        {
+          "source_name": "ESET MirrorFace DEC 2022",
+          "url": "https://www.welivesecurity.com/2022/12/14/unmasking-mirrorface-operation-liberalface-targeting-japanese-political-entities/",
+          "date": "2022-12-14"
+        },
+        {
+          "source_name": "Kaspersky LODEINFO Part II OCT 2022",
+          "url": "https://securelist.com/apt10-tracking-down-lodeinfo-2022-part-ii/107745/",
+          "date": "2022-10-31"
+        },
+        {
+          "source_name": "Kaspersky LODEINFO OCT 2022",
+          "url": "https://securelist.com/apt10-tracking-down-lodeinfo-2022-part-i/107742/",
+          "date": "2022-10-31"
+        }
+      ]
+    },
+    {
+      "group_id": "G1053",
+      "name": "Storm-0501",
+      "techniques": 42,
+      "stratum": "large",
+      "accept": [],
+      "candidates": [
+        {
+          "source_name": "Microsoft Storm-0501 Embargo Ransomware August 2025",
+          "url": "https://www.microsoft.com/en-us/security/blog/2025/08/27/storm-0501s-evolving-techniques-lead-to-cloud-based-ransomware/",
+          "date": "2025-08-27"
+        },
+        {
+          "source_name": "Microsoft Storm-501 Sabbath Ransomware Embargo September 2024",
+          "url": "https://www.microsoft.com/en-us/security/blog/2024/09/26/storm-0501-ransomware-attacks-expanding-to-hybrid-cloud-environments/",
+          "date": "2024-09-26"
+        },
+        {
+          "source_name": "Google Mandiant Storm-0501 Sabbath Ransomware November 2021",
+          "url": "https://cloud.google.com/blog/topics/threat-intelligence/sabbath-ransomware-affiliate/",
+          "date": "2021-11-29"
+        }
+      ]
+    },
+    {
+      "group_id": "G0040",
+      "name": "Patchwork",
+      "techniques": 41,
+      "stratum": "large",
+      "accept": [],
+      "candidates": [
+        {
+          "source_name": "Unit 42 BackConfig May 2020",
+          "url": "https://unit42.paloaltonetworks.com/updated-backconfig-malware-targeting-government-and-military-organizations/",
+          "date": "2020-05-11"
+        },
+        {
+          "source_name": "Volexity Patchwork June 2018",
+          "url": "https://www.volexity.com/blog/2018/06/07/patchwork-apt-group-targets-us-think-tanks/",
+          "date": "2018-06-07"
+        },
+        {
+          "source_name": "PaloAlto Patchwork Mar 2018",
+          "url": "https://researchcenter.paloaltonetworks.com/2018/03/unit42-patchwork-continues-deliver-badnews-indian-subcontinent/",
+          "date": "2018-03-07"
+        },
+        {
+          "source_name": "Securelist Dropping Elephant",
+          "url": "https://securelist.com/the-dropping-elephant-actor/75328/",
+          "date": "2016-07-08"
+        }
+      ]
+    },
+    {
+      "group_id": "G0117",
+      "name": "Fox Kitten",
+      "techniques": 41,
+      "stratum": "large",
+      "accept": [],
+      "candidates": [
+        {
+          "source_name": "CISA AA20-259A Iran-Based Actor September 2020",
+          "url": "https://us-cert.cisa.gov/ncas/alerts/aa20-259a",
+          "date": "2020-09-15"
+        },
+        {
+          "source_name": "CrowdStrike PIONEER KITTEN August 2020",
+          "url": "https://www.crowdstrike.com/blog/who-is-pioneer-kitten/",
+          "date": "2020-08-31"
+        },
+        {
+          "source_name": "ClearkSky Fox Kitten February 2020",
+          "url": "https://www.clearskysec.com/fox-kitten/",
+          "date": "2020-02-16"
+        },
+        {
+          "source_name": "Dragos PARISITE ",
+          "url": "https://www.dragos.com/threat/parisite/",
+          "date": "00-00-00"
+        }
+      ]
+    },
+    {
+      "group_id": "G1039",
+      "name": "RedCurl",
+      "techniques": 41,
+      "stratum": "large",
+      "accept": [],
+      "candidates": [
+        {
+          "source_name": "group-ib_redcurl2",
+          "url": "https://www.group-ib.com/resources/research-hub/red-curl-2/",
+          "date": "2021-11-00"
+        },
+        {
+          "source_name": "group-ib_redcurl1",
+          "url": "https://www.group-ib.com/resources/research-hub/red-curl/",
+          "date": "2020-08-00"
+        }
+      ]
+    },
+    {
+      "group_id": "G0060",
+      "name": "BRONZE BUTLER",
+      "techniques": 40,
+      "stratum": "large",
+      "accept": [],
+      "candidates": [
+        {
+          "source_name": "Trend Micro Daserf Nov 2017",
+          "url": "http://blog.trendmicro.com/trendlabs-security-intelligence/redbaldknight-bronze-butler-daserf-backdoor-now-using-steganography/",
+          "date": "2017-11-07"
+        },
+        {
+          "source_name": "Secureworks BRONZE BUTLER Oct 2017",
+          "url": "https://www.secureworks.com/research/bronze-butler-targets-japanese-businesses",
+          "date": "2017-10-12"
+        }
+      ]
+    },
+    {
+      "group_id": "G0081",
+      "name": "Tropic Trooper",
+      "techniques": 40,
+      "stratum": "large",
+      "accept": [],
+      "candidates": [
+        {
+          "source_name": "Crowdstrike Pirate Panda April 2020",
+          "url": "https://www.crowdstrike.com/blog/on-demand-webcast-crowdstrike-experts-on-covid-19-cybersecurity-challenges-and-recommendations/",
+          "date": "2020-04-07"
+        },
+        {
+          "source_name": "TrendMicro Tropic Trooper Mar 2018",
+          "url": "https://blog.trendmicro.com/trendlabs-security-intelligence/tropic-trooper-new-strategy/",
+          "date": "2018-03-14"
+        },
+        {
+          "source_name": "Unit 42 Tropic Trooper Nov 2016",
+          "url": "https://researchcenter.paloaltonetworks.com/2016/11/unit42-tropic-trooper-targets-taiwanese-government-and-fossil-fuel-provider-with-poison-ivy/",
+          "date": "2016-11-22"
+        }
+      ],
+      "not_a_report": [
+        0
+      ]
+    },
+    {
+      "group_id": "G0061",
+      "name": "FIN8",
+      "techniques": 36,
+      "stratum": "small",
+      "accept": [],
+      "candidates": [
+        {
+          "source_name": "Symantec FIN8 Jul 2023",
+          "url": "https://symantec-enterprise-blogs.security.com/blogs/threat-intelligence/syssphinx-fin8-backdoor",
+          "date": "2023-07-18"
+        },
+        {
+          "source_name": "FireEye Obfuscation June 2017",
+          "url": "https://web.archive.org/web/20170923102302/https://www.fireeye.com/blog/threat-research/2017/06/obfuscation-in-the-wild.html",
+          "date": "2017-06-30"
+        },
+        {
+          "source_name": "FireEye Fin8 May 2016",
+          "url": "https://www.fireeye.com/blog/threat-research/2016/05/windows-zero-day-payment-cards.html",
+          "date": "2016-05-11"
+        }
+      ]
+    },
+    {
+      "group_id": "G1023",
+      "name": "APT5",
+      "techniques": 29,
+      "stratum": "small",
+      "accept": [],
+      "candidates": [
+        {
+          "source_name": "Mandiant Pulse Secure Update May 2021",
+          "url": "https://www.mandiant.com/resources/blog/updates-on-chinese-apt-compromising-pulse-secure-vpn-devices",
+          "date": "2021-05-27"
+        },
+        {
+          "source_name": "Mandiant Pulse Secure Zero-Day April 2021",
+          "url": "https://www.mandiant.com/resources/blog/suspected-apt-actors-leverage-bypass-techniques-pulse-secure-zero-day",
+          "date": "2021-04-20"
+        },
+        {
+          "source_name": "Secureworks BRONZE FLEETWOOD Profile",
+          "url": "https://www.secureworks.com/research/threat-profiles/bronze-fleetwood",
+          "date": "00-00-00"
+        },
+        {
+          "source_name": "Mandiant Advanced Persistent Threats",
+          "url": "https://www.mandiant.com/resources/insights/apt-groups",
+          "date": "00-00-00"
+        }
+      ]
+    },
+    {
+      "group_id": "G0030",
+      "name": "Lotus Blossom",
+      "techniques": 21,
+      "stratum": "small",
+      "accept": [],
+      "candidates": [
+        {
+          "source_name": "Cisco LotusBlossom 2025",
+          "url": "https://blog.talosintelligence.com/lotus-blossom-espionage-group/",
+          "date": "2025-02-27"
+        },
+        {
+          "source_name": "Symantec Bilbug 2022",
+          "url": "https://www.security.com/threat-intelligence/espionage-asia-governments-cert-authority",
+          "date": "2022-11-12"
+        },
+        {
+          "source_name": "Spring Dragon Jun 2015",
+          "url": "https://securelist.com/the-spring-dragon-apt/70726/",
+          "date": "2015-06-17"
+        },
+        {
+          "source_name": "Lotus Blossom Jun 2015",
+          "url": "https://www.paloaltonetworks.com/resources/research/unit42-operation-lotus-blossom.html",
+          "date": "2015-06-16"
+        }
+      ]
+    },
+    {
+      "group_id": "G0078",
+      "name": "Gorgon Group",
+      "techniques": 16,
+      "stratum": "small",
+      "accept": [],
+      "candidates": [
+        {
+          "source_name": "Unit 42 Gorgon Group Aug 2018",
+          "url": "https://researchcenter.paloaltonetworks.com/2018/08/unit42-gorgon-group-slithering-nation-state-cybercrime/",
+          "date": "2018-08-02"
+        }
+      ]
+    },
+    {
+      "group_id": "G0127",
+      "name": "TA551",
+      "techniques": 14,
+      "stratum": "small",
+      "accept": [],
+      "candidates": [
+        {
+          "source_name": "Unit 42 TA551 Jan 2021",
+          "url": "https://unit42.paloaltonetworks.com/ta551-shathak-icedid/",
+          "date": "2021-01-07"
+        },
+        {
+          "source_name": "Unit 42 Valak July 2020",
+          "url": "https://unit42.paloaltonetworks.com/valak-evolution/",
+          "date": "2020-07-24"
+        },
+        {
+          "source_name": "Secureworks GOLD CABIN",
+          "url": "https://www.secureworks.com/research/threat-profiles/gold-cabin",
+          "date": "00-00-00"
+        }
+      ]
+    },
+    {
+      "group_id": "G0134",
+      "name": "Transparent Tribe",
+      "techniques": 14,
+      "stratum": "small",
+      "accept": [],
+      "candidates": [
+        {
+          "source_name": "Talos Transparent Tribe May 2021",
+          "url": "https://blog.talosintelligence.com/2021/05/transparent-tribe-infra-and-targeting.html",
+          "date": "2021-05-13"
+        },
+        {
+          "source_name": "Kaspersky Transparent Tribe August 2020",
+          "url": "https://securelist.com/transparent-tribe-part-1/98127/",
+          "date": "2020-08-20"
+        },
+        {
+          "source_name": "Unit 42 ProjectM March 2016",
+          "url": "https://unit42.paloaltonetworks.com/unit42-projectm-link-found-between-pakistani-actor-and-operation-transparent-tribe/",
+          "date": "2016-03-25"
+        },
+        {
+          "source_name": "Secureworks COPPER FIELDSTONE Profile",
+          "url": "https://www.secureworks.com/research/threat-profiles/copper-fieldstone",
+          "date": "00-00-00"
+        },
+        {
+          "source_name": "Crowdstrike Mythic Leopard Profile",
+          "url": "https://adversary.crowdstrike.com/en-US/adversary/mythic-leopard/",
+          "date": "00-00-00"
+        }
+      ]
+    },
+    {
+      "group_id": "G0026",
+      "name": "APT18",
+      "techniques": 12,
+      "stratum": "small",
+      "accept": [],
+      "candidates": [
+        {
+          "source_name": "Anomali Evasive Maneuvers July 2015",
+          "url": "https://www.anomali.com/blog/evasive-maneuvers-the-wekby-group-attempts-to-evade-analysis-via-custom-rop",
+          "date": "2015-07-06"
+        },
+        {
+          "source_name": "Dell Lateral Movement",
+          "url": "http://www.secureworks.com/resources/blog/where-you-at-indicators-of-lateral-movement-using-at-exe-on-windows-7-systems/",
+          "date": "2014-09-02"
+        }
+      ]
+    },
+    {
+      "group_id": "G0138",
+      "name": "Andariel",
+      "techniques": 12,
+      "stratum": "small",
+      "accept": [],
+      "candidates": [
+        {
+          "source_name": "CrowdStrike Silent Chollima Adversary September 2021",
+          "url": "https://adversary.crowdstrike.com/en-US/adversary/silent-chollima/",
+          "date": "2021-09-29"
+        },
+        {
+          "source_name": "TrendMicro New Andariel Tactics July 2018",
+          "url": "https://www.trendmicro.com/en_us/research/18/g/new-andariel-reconnaissance-tactics-hint-at-next-targets.html",
+          "date": "2018-07-16"
+        }
+      ],
+      "not_a_report": [
+        0
+      ]
+    },
+    {
+      "group_id": "G0052",
+      "name": "CopyKittens",
+      "techniques": 8,
+      "stratum": "small",
+      "accept": [],
+      "candidates": [
+        {
+          "source_name": "ClearSky CopyKittens March 2017",
+          "url": "http://www.clearskysec.com/copykitten-jpost/",
+          "date": "2017-03-30"
+        }
+      ]
+    },
+    {
+      "group_id": "G1019",
+      "name": "MoustachedBouncer",
+      "techniques": 8,
+      "stratum": "small",
+      "accept": [],
+      "candidates": [
+        {
+          "source_name": "MoustachedBouncer ESET August 2023",
+          "url": "https://www.welivesecurity.com/en/eset-research/moustachedbouncer-espionage-against-foreign-diplomats-in-belarus/",
+          "date": "2023-08-10"
+        }
+      ]
+    }
+  ],
+  "amendments": [
+    {
+      "date": "2026-10-12",
+      "before_any_ranking_run": true,
+      "change": "extraction: lines found on two or more downloaded pages of the same site (cookie notices, sidebars, related-post cards) and blocks whose text is mostly link text are dropped before the check; a timeout, rate limit or server error is retried once",
+      "reason": "site chrome let two non-report pages pass the 15-sentence check"
+    },
+    {
+      "date": "2026-10-12",
+      "before_any_ranking_run": true,
+      "change": "candidate pages read and found not to be a report on the group fail the check (not_a_report): G0081 candidate 0 (a webcast announcement), G0138 candidate 0 (an adversary profile page whose text is site chrome only)",
+      "reason": "they passed the mechanical check on site chrome; decided from the page text alone, before any ranking run"
+    }
+  ]
+}
