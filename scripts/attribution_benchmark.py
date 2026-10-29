@@ -119,6 +119,7 @@ from apt_classifier.vectorstore import (  # noqa: E402
 )
 from scripts.report_anonymizer import (  # noqa: E402
     LEVELS,
+    MALWARE_LEVELS,
     ReportAnonymizer,
     actor_names,
 )
@@ -632,6 +633,7 @@ def anonymize_report_folds(
         protected: Counter[str] = Counter()
         lost_beyond: Counter[str] = Counter()
         malware: Counter[str] = Counter()
+        behavior: Counter[str] = Counter()
         for item in strict:
             masked_counts.update(item["replacements"])
             roles.update(item["gazetteer_roles"])
@@ -640,6 +642,7 @@ def anonymize_report_folds(
             protected.update(item["protected_by_software"])
             lost_beyond.update(item["software_lost_beyond_names"])
             malware.update(item.get("malware_masked", {}))
+            behavior.update(item.get("behavior_masked", {}))
         totals["strict"] = {
             "level": level,
             "replacements": dict(sorted(masked_counts.items())),
@@ -651,7 +654,10 @@ def anonymize_report_folds(
             # software id -> reports where masking removed it beyond the names pass
             "software_lost_beyond_names": dict(sorted(lost_beyond.items())),
             "residuals": sum(len(item["residuals"]) for item in strict),
-            **({"malware_masked": dict(sorted(malware.items()))} if level == "tradecraft" else {}),
+            **(
+                {"malware_masked": dict(sorted(malware.items()))} if level in MALWARE_LEVELS else {}
+            ),
+            **({"behavior_masked": dict(behavior.most_common())} if level == "behavior" else {}),
         }
     return anonymized, records, totals
 
@@ -1959,8 +1965,9 @@ def main(argv: list[str] | None = None) -> int:
         "--anonymize",
         choices=LEVELS,
         help="real-report mode: names (as --anonymize-actors), strict (also the report's own "
-        "attribution prose, vendor cluster names, places and sponsors) or tradecraft (strict "
-        "plus ATT&CK malware names); see scripts/report_anonymizer.py",
+        "attribution prose, vendor cluster names, places and sponsors), tradecraft (strict "
+        "plus ATT&CK malware names) or behavior (tradecraft plus malware names ATT&CK does not "
+        "list, evaluation only); see scripts/report_anonymizer.py",
     )
     parser.add_argument(
         "--report-set",
@@ -2059,7 +2066,7 @@ def main(argv: list[str] | None = None) -> int:
             report_cap = args.report_observations or None
         elif args.report_set == "cti_hal":
             report_cap = max(args.max_observations, 30)
-        dropper = ReportAnonymizer(kb, level) if level in ("strict", "tradecraft") else None
+        dropper = ReportAnonymizer(kb, level) if level != "names" else None
         loaded = load_report_folds(
             args.cti_hal,
             max_observations=report_cap,

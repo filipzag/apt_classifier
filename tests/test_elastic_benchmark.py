@@ -577,3 +577,46 @@ def test_diagnostic_arms_need_their_own_output():
 
     with pytest.raises(SystemExit):
         main(["--cti-hal", "reports.jsonl", "--report-observations", "30"])
+
+
+def test_behavior_masks_unlisted_malware_and_operation_names_but_keeps_tools(
+    kb, tmp_path, monkeypatch
+):
+    import json
+    from dataclasses import replace
+
+    from scripts import report_anonymizer
+    from scripts.attribution_benchmark import anonymize_report_folds
+
+    lists = tmp_path / "misp"
+    lists.mkdir()
+    for name in report_anonymizer.BEHAVIOR_FILES:
+        values = []
+        if name == "malpedia":
+            values = [{"value": "Headlace", "meta": {"synonyms": ["Black Basta"]}}]
+        (lists / f"{name}.json").write_text(json.dumps({"values": values}), encoding="utf-8")
+    words = tmp_path / "words"
+    words.write_text("the\nbackdoor\nran\nloader\nblack\nstub\n", encoding="utf-8")
+    monkeypatch.setattr(report_anonymizer, "BEHAVIOR_DICTIONARY", lists)
+    monkeypatch.setattr(report_anonymizer, "WORDS", words)
+    kb.techniques["T1059.001"] = replace(kb.techniques["T1059.001"], name="PowerShell")
+    texts = [
+        "the PHOREAL backdoor ran PsExec and the Umbrij loader; Headlace and Black Basta followed.",
+        "HOOKEDGE and PteroSand ran PowerShell during Operation RoundPress.",
+        "Umbrij ran again in the Olalampo campaign.",
+    ]
+    (fold,), records, totals = anonymize_report_folds(_folds(texts), kb, level="behavior")
+    assert fold.observations == (
+        "the malware backdoor ran PsExec and the malware loader; the malware and the malware "
+        "followed.",
+        "the malware and the malware ran PowerShell during the operation.",
+        "the malware ran again in the campaign.",
+    )
+    masked = records[0]["strict"]["behavior_masked"]
+    assert masked["Umbrij"] == 2  # a name the report gives a malware noun goes everywhere
+    assert {"HOOKEDGE", "PteroSand", "Headlace", "Black Basta"} <= set(masked)
+    assert "PsExec" not in masked and "PowerShell" not in masked  # a tool, technique text
+    assert totals["strict"]["behavior_masked"]["Umbrij"] == 2
+    monkeypatch.setattr(report_anonymizer, "BEHAVIOR_DICTIONARY", tmp_path / "missing")
+    with pytest.raises(FileNotFoundError):
+        report_anonymizer.ReportAnonymizer(kb, "behavior")

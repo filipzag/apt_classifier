@@ -49,6 +49,14 @@
       "label_review": "extended from the open set and MISP-only labels to every known report after the dictionary bugs; 18 reports excluded with reasons (docs/preregistration/fresh_reports_label_review_2026-10-29.json, copy of data/benchmarks/fresh/amendments.json): 'Alibaba' as a MISP synonym of Cleaver (3), 'Mirage' (a Ke3chang alias) inside 'Mirage Kitten' (2), roundups or several actors (7), a cluster the vendor keeps distinct, split or unconfirmed attribution (3), a container overview, a living overview, a Shadow Brokers reference implying an ATT&CK group",
       "frozen_set": "45 known reports (25 groups) and 54 open-set reports from 18 sources: reports.jsonl sha256 d1d7a3ca5a559a20643426fab336989b92578b3cc138dbd55ee1d965a1c030d8, open_set.jsonl sha256 6b9d505065314dd588b9b0646e6f7de5d33a85c54d14170960cc1df46bcd510f, candidates.json (relisted 2026-10-29, 2,340 URLs) sha256 32a4db7934fc1bcef0a5beb14f615b7341933a37029518c89765a017868af877, builder sha256 c7a5b1860165a90f5386f7df2cd30b35b8991710d08670daefcbfa22b4d2605e, LLM runner sha256 7f64cc4b7b7a659fbd45aaab77a15e939defdf9722d7a3f69aa4aa47f77a505e (prompt unchanged), scorer unchanged",
       "power": "45 known reports give a 95% interval of about +/-0.15 on a first-choice difference: only a large gap reads as 'clearly ahead'; the 54 open-set reports carry the wrong-name comparison"
+    },
+    {
+      "date": "2026-10-29",
+      "kind": "post hoc secondary arm, logged before it ran; evaluation only, never an input to a decision or a default",
+      "made_after": "the registered results (docs 21.3.28) and the miss diagnosis (docs 21.3.29), at the product owner's request: does the model's lead remain when attribution has to come from behaviour?",
+      "level": "behavior (scripts/report_anonymizer.py): tradecraft plus malware and tool names ATT&CK does not list (MISP galaxy malware lists and Malpedia family names at commit 24877de2, code-name shapes, names the report gives a malware noun, masked everywhere in that report) and operation names; English words, ATT&CK technique and data-component text and ATT&CK tools stay; audited on this set before any run (about 1,100 distinct names masked in 11,462 statements; some product and vendor names are masked too, the same text for both arms)",
+      "arms": "product with the same defaults as the registered run (attribution_benchmark.py --report-set fresh --anonymize behavior); GPT-5.6 Sol with the same prompt and effort (scripts/fresh_llm_attribution.py --level behavior), cost cap USD 8",
+      "scoring": "scripts/fresh_h2h_score.py as registered; reported beside the strict results as a secondary reading, with the product's strict and tradecraft runs for reference"
     }
   ]
 }

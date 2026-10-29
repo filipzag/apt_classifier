@@ -17,6 +17,12 @@ Three cumulative levels:
   too: strict is a no-victimology regime.
 - ``tradecraft``: strict, plus every ATT&CK *malware* name -> "the malware" (tools stay, they are
   technique evidence), so only behaviour is left.
+- ``behavior``: tradecraft, plus malware and tool names ATT&CK does not list -> "the malware"
+  and operation names -> "the operation" (evaluation only, docs 21.3.30): the MISP galaxy
+  malware lists and Malpedia's family names, code-name shapes (HOOKEDGE, PteroSand) and names a
+  report gives a malware noun ("the Umbrij backdoor"), each masked everywhere in that report.
+  Words of the English dictionary, ATT&CK technique and data-component text and ATT&CK tools
+  stay. Needs the local MISP download; fails closed without it.
 
 Every rule reads the text, never the label, so labelled and open-set reports are cleaned alike.
 Malware names stay at strict on purpose (an analyst reads them); the per-report records say
@@ -25,17 +31,26 @@ which ATT&CK software survived so a lookup is never mistaken for tradecraft.
 
 from __future__ import annotations
 
+import json
 import re
 from collections import Counter
 from collections.abc import Sequence
+from pathlib import Path
 from typing import Any
 
 from apt_classifier.attack.parse import strip_attack_citations
 from apt_classifier.evidence.iocs import match_software_aliases
 
-LEVELS = ("names", "strict", "tradecraft")
+LEVELS = ("names", "strict", "tradecraft", "behavior")
+MALWARE_LEVELS = ("tradecraft", "behavior")
 REPLACEMENT = "the adversary"
 MALWARE_REPLACEMENT = "the malware"
+OPERATION_REPLACEMENT = "the operation"
+# MISP galaxy at a pinned commit (docs 21.3.29); malpedia.json is CC BY-NC-SA: a masking
+# dictionary for evaluation only, never shipped
+BEHAVIOR_DICTIONARY = Path(__file__).resolve().parents[1] / "data" / "raw" / "misp_galaxy_24877de2"
+BEHAVIOR_FILES = ("malpedia", "tool", "rat", "backdoor", "botnet", "stealer", "ransomware")
+WORDS = Path("/usr/share/dict/words")
 _DELETED = "\x00"  # marks a deletion point until the article and spacing repair
 
 
@@ -486,6 +501,147 @@ def _merge_spans(spans: list[tuple[int, int, Any]]) -> list[tuple[int, int, Any]
     return merged
 
 
+_TOKEN_RE = re.compile(r"(?<![\w.@/\\])[A-Za-z][A-Za-z0-9]*(?![\w@])")
+_CODENAME_CAPS_RE = re.compile(r"[A-Z0-9]*[A-Z][A-Z0-9]*")
+_CODENAME_CAMEL_RE = re.compile(r"[A-Z][a-z0-9]+(?:[A-Z][a-z0-9]*)+")
+_MALWARE_NOUNS = (
+    r"backdoors?|loaders?|malware|implants?|RATs?|stealers?|droppers?|downloaders?|variants?|"
+    r"famil(?:y|ies)|frameworks?|toolkits?|payloads?|trojans?|wipers?|ransomware|webshells?|"
+    r"rootkits?|keyloggers?|infostealers?|botnets?|worms?|utility|utilities|tools?"
+)
+_NAME_BEFORE_NOUN_RE = re.compile(
+    r"\b(?P<name>[A-Z][\w-]*[A-Za-z0-9])(?:\s+(?:" + _MALWARE_NOUNS + r"))\b"
+)
+_NAME_AFTER_CUE_RE = re.compile(
+    r"\b(?:" + _MALWARE_NOUNS + r")\s+(?:called|named|dubbed|known as|tracked as)\s+"
+    r"[\"“']?(?P<name>[A-Z][\w-]*[A-Za-z0-9])"
+)
+_OPERATION_RE = re.compile(
+    r"\b(?:Operation|Campaign)\s+[\"“']?(?P<name>[A-Z][\w-]*[A-Za-z0-9])[\"”']?"
+    r"|\b(?:(?P<the>[Tt]he)\s+)?(?P<before>[A-Z][\w-]*[A-Za-z0-9])\s+"
+    r"(?P<noun>(?:campaign|operation)s?)\b"
+)
+
+
+class _BehaviorMask:
+    """Names of malware and tools ATT&CK does not list, and operation names (``behavior``)."""
+
+    def __init__(self, kb: Any, directory: Path | None = None) -> None:
+        directory = directory or BEHAVIOR_DICTIONARY
+        missing = [name for name in BEHAVIOR_FILES if not (directory / f"{name}.json").is_file()]
+        if missing or not WORDS.is_file():
+            raise FileNotFoundError(
+                f"behavior masking needs {directory} ({', '.join(missing) or 'ok'}) and {WORDS}"
+            )
+        self.ordinary = {
+            line.strip().casefold() for line in WORDS.read_text(encoding="utf-8").splitlines()
+        }
+        # technology words ATT&CK's technique text uses (PowerShell, OneDrive, LSASS) and the
+        # tools tradecraft keeps are behaviour, never a name to mask
+        texts = [
+            text
+            for technique in kb.techniques.values()
+            for text in (technique.name, technique.description, technique.detection)
+            if text
+        ]
+        texts += [
+            text
+            for component in getattr(kb, "data_components", {}).values()
+            for text in (getattr(component, "name", ""), getattr(component, "description", ""))
+            if text
+        ]
+        self.protected = {token.casefold() for text in texts for token in _TOKEN_RE.findall(text)}
+        for software in kb.software.values():
+            if software.software_type != "malware":
+                for name in (software.name, *software.aliases):
+                    self.protected.update(token.casefold() for token in _TOKEN_RE.findall(name))
+        single: set[str] = set()
+        multi: set[str] = set()
+        for name in BEHAVIOR_FILES:
+            cluster = json.loads((directory / f"{name}.json").read_text(encoding="utf-8"))
+            for value in cluster.get("values", []):
+                for label in (value.get("value", ""), *value.get("meta", {}).get("synonyms", [])):
+                    label = label.strip()
+                    tokens = _TOKEN_RE.findall(label)
+                    if not tokens or label != " ".join(tokens) or len(label) < 4:
+                        continue
+                    if len(tokens) == 1:
+                        if self.maskable(label):
+                            single.add(label.casefold())
+                    elif any(self.maskable(token) for token in tokens):
+                        multi.add(label)
+        self.single = single
+        ordered = sorted(multi, key=lambda item: (-len(item), item.casefold()))
+        self.multi_pattern = (
+            re.compile(
+                r"(?<![\w-])(?:" + "|".join(re.escape(name) for name in ordered) + r")(?![\w-])",
+                re.IGNORECASE,
+            )
+            if ordered
+            else None
+        )
+
+    def maskable(self, token: str) -> bool:
+        key = token.casefold()
+        return (
+            len(token) >= 4
+            and key not in self.ordinary
+            and key not in self.protected
+            and not token.isdigit()
+        )
+
+    def codename(self, token: str) -> bool:
+        caps = _CODENAME_CAPS_RE.fullmatch(token) and sum(c.isalpha() for c in token) >= 4
+        camel = _CODENAME_CAMEL_RE.fullmatch(token)
+        return bool((caps or camel) and self.maskable(token))
+
+    def report_names(self, texts: Sequence[str]) -> set[str]:
+        """Names the report itself gives a malware noun or an operation (masked everywhere)."""
+        found: set[str] = set()
+        for text in texts:
+            for pattern in (_NAME_BEFORE_NOUN_RE, _NAME_AFTER_CUE_RE):
+                for match in pattern.finditer(text):
+                    if self.maskable(match.group("name")):
+                        found.add(match.group("name").casefold())
+        return found
+
+    def mask(self, texts: Sequence[str]) -> tuple[list[str], Counter[str]]:
+        masked: Counter[str] = Counter()
+        named = self.report_names(texts)
+        output: list[str] = []
+        for text in texts:
+
+            def operation(match: re.Match[str]) -> str:
+                name = match.group("name") or match.group("before")
+                if not self.maskable(name):
+                    return match.group(0)
+                masked[f"operation:{name}"] += 1
+                if match.group("name"):
+                    return OPERATION_REPLACEMENT
+                return f"{match.group('the') or 'the'} {match.group('noun')}"
+
+            text = _OPERATION_RE.sub(operation, text)
+            if self.multi_pattern is not None:
+
+                def multi(match: re.Match[str]) -> str:
+                    masked[match.group(0)] += 1
+                    return MALWARE_REPLACEMENT
+
+                text = self.multi_pattern.sub(multi, text)
+
+            def token(match: re.Match[str]) -> str:
+                word = match.group(0)
+                key = word.casefold()
+                listed = key in self.single or key in named or self.codename(word)
+                if listed and self.maskable(word):
+                    masked[word] += 1
+                    return MALWARE_REPLACEMENT
+                return word
+
+            output.append(_TOKEN_RE.sub(token, text))
+        return output, masked
+
+
 class ReportAnonymizer:
     """The strict and tradecraft passes, built once per knowledge base.
 
@@ -516,6 +672,7 @@ class ReportAnonymizer:
         for name in self.names:
             self._spellings.setdefault(name.casefold(), set()).add(name)
         self._guarded = {alias.casefold() for alias in GUARDED_ALIASES}
+        self._behavior = _BehaviorMask(kb) if level == "behavior" else None
 
     # -- names, guarded ----------------------------------------------------------------
     def keeps_name_match(self, match: re.Match[str]) -> bool:
@@ -755,7 +912,7 @@ class ReportAnonymizer:
         texts = stage
         malware_masked: Counter[str] = Counter()
         tools_kept: Counter[str] = Counter()
-        if self.level == "tradecraft":
+        if self.level in MALWARE_LEVELS:
             software = self._software_spans([text.replace(_DELETED, " ") for text in texts])
             stage = []
             for index, text in enumerate(texts):
@@ -770,6 +927,9 @@ class ReportAnonymizer:
                     text = text[:start] + MALWARE_REPLACEMENT + text[end:]
                 stage.append(text)
             texts = stage
+        behavior_masked: Counter[str] = Counter()
+        if self._behavior is not None:
+            texts, behavior_masked = self._behavior.mask(texts)
         output: list[str] = []
         seen: set[str] = set()
         merged = 0
@@ -789,9 +949,11 @@ class ReportAnonymizer:
             "protected_by_software": dict(sorted(protected.items())),
             "duplicates_merged": merged,
         }
-        if self.level == "tradecraft":
+        if self.level in MALWARE_LEVELS:
             record["malware_masked"] = dict(sorted(malware_masked.items()))
             record["tools_kept"] = dict(sorted(tools_kept.items()))
+        if self._behavior is not None:
+            record["behavior_masked"] = dict(sorted(behavior_masked.items()))
         return output, record
 
     # -- residual audit ------------------------------------------------------------------

@@ -34,7 +34,7 @@ from scripts.attribution_benchmark import (  # noqa: E402
     anonymize_report_folds,
     load_report_folds,
 )
-from scripts.report_anonymizer import ReportAnonymizer  # noqa: E402
+from scripts.report_anonymizer import LEVELS, ReportAnonymizer  # noqa: E402
 
 OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
 DEFAULT_MODEL = "openai/gpt-5.6-sol"
@@ -86,7 +86,7 @@ def report_texts(path: Path, kb: AttackKnowledgeBase, level: str) -> list[dict[s
         row["report_id"]: row.get("published")
         for row in map(json.loads, path.read_text(encoding="utf-8").splitlines())
     }
-    anonymizer = ReportAnonymizer(kb, level) if level in ("strict", "tradecraft") else None
+    anonymizer = ReportAnonymizer(kb, level) if level != "names" else None
     folds = load_report_folds(path, max_observations=None, anonymizer=anonymizer, kb=kb)
     folds, _, _ = anonymize_report_folds(folds, kb, level=level)
     return [
@@ -185,7 +185,7 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--reports", type=Path, default=FRESH / "reports.jsonl")
     parser.add_argument("--open-set", type=Path, default=FRESH / "open_set.jsonl")
-    parser.add_argument("--level", choices=("names", "strict", "tradecraft"), default="strict")
+    parser.add_argument("--level", choices=LEVELS, default="strict")
     parser.add_argument("--model", default=DEFAULT_MODEL)
     parser.add_argument("--effort", default="medium")
     parser.add_argument("--kb", type=Path, default=REPO_ROOT / "data" / "kb" / "attack_kb.json")
