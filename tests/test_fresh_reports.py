@@ -22,8 +22,14 @@ def _kb():
             "G0129": group("Mustang Panda", ["Mustang Panda"]),
             "G1014": group("LuminousMoth", ["LuminousMoth"]),
             "G1045": group("Salt Typhoon", ["Salt Typhoon", "GhostEmperor"]),
+            "G0080": group("Cobalt Group", ["Cobalt Group", "Cobalt"]),
+            "G0006": group("APT1", ["APT1", "Comment Group"]),
+            "G0047": group("Gamaredon Group", ["Gamaredon Group"]),
         },
-        software={"S0001": SimpleNamespace(name="Sednit", aliases=("Sofacy",))},
+        software={
+            "S0001": SimpleNamespace(name="Sednit", aliases=("Sofacy",)),
+            "S0154": SimpleNamespace(name="Cobalt Strike", aliases=()),
+        },
     )
 
 
@@ -54,14 +60,20 @@ def _misp():
     }
 
 
-def _dictionary():
+def _dictionary(tmp_path=None, monkeypatch=None):
+    if monkeypatch is not None:
+        words = tmp_path / "words"
+        words.write_text("comment\nLazarus\nbeijing\n", encoding="utf-8")
+        monkeypatch.setattr(fresh, "WORDS", words)
     dictionary = fresh.actor_dictionary(_kb(), _misp())
     return dictionary, fresh.name_pattern(list(dictionary["surface"]))
 
 
-def test_actor_dictionary_maps_vendor_names_and_keeps_attack_names():
-    surface = _dictionary()[0]["surface"]
-    assert surface["Lazarus"] == "G0032"  # short form of "Lazarus Group"
+def test_actor_dictionary_maps_vendor_names_and_keeps_attack_names(tmp_path, monkeypatch):
+    surface = _dictionary(tmp_path, monkeypatch)[0]["surface"]
+    assert surface["Lazarus"] == "G0032"  # short form; a proper noun, not an ordinary word
+    assert surface["Gamaredon"] == "G0047"
+    assert "Comment" not in surface  # short form that is an ordinary word
     assert surface["Fighting Ursa"] == "G0007"  # MISP synonym, ATT&CK reference
     assert surface["Stately Taurus"] == "G0129"  # MISP actor mapped by its own name
     assert surface["LuminousMoth"] == "G1014"  # an ATT&CK name keeps its own group
@@ -115,12 +127,17 @@ def test_label_known_open_and_excluded():
     assert short["reason"] == "too_short"
 
 
-def test_mask_removes_actor_names_and_cluster_codes_but_not_software():
-    _, pattern = _dictionary()
-    text = "Fighting Ursa (UNC1234) dropped Sednit; Lazarus and Storm-0001 too."
-    assert fresh.mask_text(text, pattern) == (
-        "the adversary (the adversary) dropped Sednit; the adversary and the adversary too."
+def test_mask_removes_actor_names_and_cluster_codes_but_not_software(tmp_path, monkeypatch):
+    dictionary, pattern = _dictionary(tmp_path, monkeypatch)
+    software = dictionary["software_pattern"]
+    text = "Fighting Ursa (UNC1234) dropped Sednit and Cobalt Strike; Lazarus and Storm-0001 too."
+    assert fresh.mask_text(text, pattern, software) == (
+        "the adversary (the adversary) dropped Sednit and Cobalt Strike; the adversary and "
+        "the adversary too."
     )
+    # "Cobalt" inside "Cobalt Strike" is the software, not the Cobalt Group
+    counts = fresh.actor_mentions(["Cobalt Strike beacons", "Cobalt used it"], dictionary, pattern)
+    assert counts["G0080"] == 1
 
 
 def test_dates_from_urls_and_pages():
@@ -203,3 +220,24 @@ def test_combination_and_scores():
     assert arms["combination"]["names_known"] == 1 and arms["combination"]["names_right"] == 1
     assert arms["combination"]["names_open_set"] == 0
     assert result["pairs"]["llm_vs_product"]["mcnemar_first"]["only_first"] == 2
+
+
+def test_page_dates_prefer_the_research_date_and_reject_batch_stamps():
+    html = (
+        '<meta name="published-date" content="2020-07-28">'
+        '<script>{"datePublished": "2026-06-29"}</script>'
+    )
+    assert fresh.page_date(html) == date(2020, 7, 28)
+    visible = "<html><nav>Menu</nav><span>20 Oct 2017</span> ... related: 22 Oct 2026</html>"
+    assert fresh.page_date(visible, "symantec") == date(2017, 10, 20)
+    pages = {f"rapid7-{i}": {"date": date(2026, 6, 16)} for i in range(5)}
+    pages["rapid7-x"] = {"date": date(2026, 5, 6)}
+    batches = fresh.batch_dates(pages, {key: "rapid7" for key in pages})
+    assert batches == {"rapid7": {date(2026, 6, 16)}}
+    sitemap = {"source": "rapid7", "url_date": None, "method": "sitemap", "listed": "2026-06-16"}
+    assert fresh.publication_date(sitemap, date(2026, 6, 16), batches) is None
+    assert fresh.publication_date(sitemap, date(2026, 5, 6), batches) == date(2026, 5, 6)
+    feed = {**sitemap, "method": "feed", "listed": "2026-07-23"}
+    assert fresh.publication_date(feed, date(2026, 6, 16), batches) == date(2026, 7, 23)
+    assert fresh.LIVING_TITLE_RE.search("Threat Brief: Credential Attacks (Updated August 18)")
+    assert not fresh.LIVING_TITLE_RE.search("UAT-7810 continues building ORB networks")

@@ -89,7 +89,11 @@ LEAD_STATEMENTS = 10
 OPEN_MAX_ATTACK_MENTIONS = 1
 GROUP_CAP = 8
 DUPLICATE_SHARE = 0.5
+BATCH_PAGES = 5
+# living documents ("Threat Brief: ... (Updated August 18)") carry content from before the window
+LIVING_TITLE_RE = re.compile(r"\(Updated\b|\bUpdated (?:on )?[A-Z][a-z]+ \d", re.IGNORECASE)
 MASK = "the adversary"
+WORDS = Path("/usr/share/dict/words")
 # vendor cluster codes (an actor ATT&CK does not document unless the code is an ATT&CK alias)
 CLUSTER_CODE_RE = re.compile(
     r"(?<![\w-])(?:UNC\d{3,5}|Storm-\d{4,5}|DEV-\d{4}|TA\d{3,4}|TAG-\d{2,5}|UAC-\d{4,5}|UAT-\d{4,5}"
@@ -97,6 +101,12 @@ CLUSTER_CODE_RE = re.compile(
     r"|Void [A-Z][a-z]+|SHADOW-[A-Z]+-\d+|REF\d{4}|STAC\d{3,5}|TAC\d{3,5})(?![\w-])"
 )
 _TREND_MONTH = {letter: index for index, letter in enumerate("abcdefghijkl", 1)}
+_MONTHS_SHORT = {
+    name: index
+    for index, name in enumerate(
+        ("jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"), 1
+    )
+}
 # MISP relations that tie an unmapped actor to an ATT&CK group's activity
 RELATION_TYPES = frozenset(
     {"similar", "overlaps", "linked-to", "part-of", "related-to", "associated-with"}
@@ -415,18 +425,56 @@ def excluded_url_set(bundle: dict[str, Any], other_sets: list[Path]) -> set[str]
 # --------------------------------------------------------------------------- page dates
 
 
-def page_date(html: str) -> date | None:
-    """The publication date a page states (Open Graph / article meta, JSON-LD, ``<time>``)."""
-    patterns = (
-        r"<meta[^>]+(?:property|name)=\"(?:article:published_time|og:published_time"
-        r"|datePublished|publish-date|publication_date|pubdate|date|dc\.date)\"[^>]+"
-        r"content=\"([^\"]+)\"",
-        r"<meta[^>]+content=\"([^\"]+)\"[^>]+(?:property|name)=\"(?:article:published_time"
-        r"|og:published_time|datePublished|publish-date|publication_date|pubdate)\"",
-        r"\"datePublished\"\s*:\s*\"([^\"]+)\"",
-        r"<time[^>]+datetime=\"([^\"]+)\"",
+# meta names that state a publication date, most specific first (Recorded Future's
+# "published-date" is the research date; its JSON-LD datePublished is a re-dating stamp)
+_DATE_META = (
+    "published-date",
+    "article:published_time",
+    "og:published_time",
+    "publish-date",
+    "publication_date",
+    "pubdate",
+    "datePublished",
+    "date",
+    "dc.date",
+)
+_MONTH_RE = r"(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\.?"
+_VISIBLE_DATE_RE = re.compile(
+    rf"\b(\d{{1,2}})\s+({_MONTH_RE}),?\s+(20\d\d)\b|\b({_MONTH_RE})\s+(\d{{1,2}}),?\s+(20\d\d)\b"
+)
+# sources whose pages state the post date only as visible text, first on the page
+VISIBLE_DATE_SOURCES = frozenset({"symantec", "rapid7"})
+
+
+def _visible_date(html: str) -> date | None:
+    match = _VISIBLE_DATE_RE.search(html)
+    if not match:
+        return None
+    day, month, year = (
+        (match[1], match[2], match[3]) if match[1] else (match[5], match[4], match[6])
     )
-    for pattern in patterns:
+    try:
+        return date(int(year), _MONTHS_SHORT[month[:3].lower()], int(day))
+    except (KeyError, ValueError):
+        return None
+
+
+def page_date(html: str, source: str | None = None) -> date | None:
+    """The publication date a page states: meta names in ``_DATE_META`` order, then JSON-LD
+    ``datePublished`` and ``<time>``; for ``VISIBLE_DATE_SOURCES`` the first date on the page."""
+    if source in VISIBLE_DATE_SOURCES:
+        return _visible_date(html)
+    for name in _DATE_META:
+        escaped = re.escape(name)
+        for pattern in (
+            rf"<meta[^>]+(?:property|name|itemprop)=\"{escaped}\"[^>]+content=\"([^\"]+)\"",
+            rf"<meta[^>]+content=\"([^\"]+)\"[^>]+(?:property|name|itemprop)=\"{escaped}\"",
+        ):
+            for match in re.finditer(pattern, html, flags=re.I):
+                found = _iso_date(match.group(1))
+                if found is not None:
+                    return found
+    for pattern in (r"\"datePublished\"\s*:\s*\"([^\"]+)\"", r"<time[^>]+datetime=\"([^\"]+)\""):
         for match in re.finditer(pattern, html, flags=re.I):
             found = _iso_date(match.group(1))
             if found is not None:
@@ -455,11 +503,41 @@ def software_names(kb: AttackKnowledgeBase) -> set[str]:
     return {name.lower() for name in names}
 
 
-def _name_forms(name: str) -> list[str]:
-    """A group name and its short form ("Lazarus Group" -> "Lazarus", as vendors write it)."""
+def ordinary_words(path: Path | None = None) -> frozenset[str]:
+    """Lower-case entries of the system word list (ordinary English words, as the anonymiser's
+    guarded aliases); empty when the list is missing, which drops every short form."""
+    path = path or WORDS
+    if not path.is_file():
+        return frozenset()
+    return frozenset(
+        line.strip() for line in path.read_text(encoding="utf-8", errors="replace").splitlines()
+    )
+
+
+def _short_form_blocked(short: str, software: set[str], words: frozenset[str]) -> bool:
+    """A short form is no name when it is an ordinary lower-case word ("Comment", "Cobalt"),
+    a word inside an ATT&CK software name ("Cobalt Strike", "Medusa Ransomware") or a country
+    or capital ("Beijing"); without a word list every short form is blocked."""
+    from scripts.report_anonymizer import _CAPITALS, _COUNTRIES
+
+    if not words or short.lower() in words:
+        return True
+    if short in _CAPITALS or short in _COUNTRIES:
+        return True
+    pattern = re.compile(r"(?<![\w-])" + re.escape(short.lower()) + r"(?![\w-])")
+    return any(pattern.search(name) for name in software)
+
+
+def _name_forms(
+    name: str, software: set[str] | None = None, words: frozenset[str] = frozenset()
+) -> list[str]:
+    """A group name and its short form ("Lazarus Group" -> "Lazarus", as vendors write it),
+    unless the short form is blocked (``_short_form_blocked``)."""
     forms = [name]
     if name.endswith(" Group") and len(name) - len(" Group") > 3:
-        forms.append(name[: -len(" Group")])
+        short = name[: -len(" Group")]
+        if not _short_form_blocked(short, software or set(), words):
+            forms.append(short)
     return forms
 
 
@@ -479,17 +557,18 @@ def actor_dictionary(kb: AttackKnowledgeBase, misp: dict[str, Any] | None) -> di
     two actors share, a name that is also an ATT&CK software name and a name of three characters
     or fewer are left out."""
     software = software_names(kb)
+    words = ordinary_words()
     attack_names: dict[str, set[str]] = {}
     for group_id, group in kb.groups.items():
         for name in (group.name, *group.aliases):
-            for form in _name_forms(name) if name else ():
+            for form in _name_forms(name, software, words) if name else ():
                 attack_names.setdefault(form.lower(), set()).add(group_id)
     surface: dict[str, str] = {}
     origin: dict[str, str] = {}
     clashes: set[str] = set()
     for group_id, group in kb.groups.items():
         for name in (group.name, *group.aliases):
-            for form in _name_forms(name) if name else ():
+            for form in _name_forms(name, software, words) if name else ():
                 if len(form) <= 3 or form.lower() in software:
                     continue
                 if len(attack_names[form.lower()]) > 1:
@@ -564,6 +643,14 @@ def actor_dictionary(kb: AttackKnowledgeBase, misp: dict[str, Any] | None) -> di
     return {
         "surface": surface,
         "origin": origin,
+        "software_pattern": name_pattern(
+            [
+                name
+                for item in kb.software.values()
+                for name in (item.name, *item.aliases)
+                if name and len(name) > 3
+            ]
+        ),
         "stats": {
             "names": len(surface),
             "misp_mapped_clusters": stats["mapped"],
@@ -584,17 +671,29 @@ def name_pattern(names: list[str]) -> re.Pattern[str] | None:
     )
 
 
+def _inside(span: tuple[int, int], spans: list[tuple[int, int]]) -> bool:
+    return any(start <= span[0] and span[1] <= end for start, end in spans)
+
+
+def _software_spans(text: str, software: re.Pattern[str] | None) -> list[tuple[int, int]]:
+    return [match.span() for match in software.finditer(text)] if software is not None else []
+
+
 def actor_mentions(
     texts: list[str], dictionary: dict[str, Any], pattern: re.Pattern[str] | None
 ) -> Counter[str]:
-    """Mentions per actor: dictionary names (case-sensitive, whole words) and cluster codes that
-    are no dictionary name (``code:<code>``)."""
+    """Mentions per actor: dictionary names (case-sensitive, whole words; a name inside an
+    ATT&CK software name such as "Cobalt Strike" is the software) and cluster codes that are no
+    dictionary name (``code:<code>``)."""
     surface = dictionary["surface"]
     counts: Counter[str] = Counter()
     for text in texts:
         spans: list[tuple[int, int]] = []
+        software = _software_spans(text, dictionary.get("software_pattern"))
         if pattern is not None:
             for match in pattern.finditer(text):
+                if _inside(match.span(), [span for span in software if span != match.span()]):
+                    continue
                 counts[surface[match.group(0)]] += 1
                 spans.append(match.span())
         for match in CLUSTER_CODE_RE.finditer(text):
@@ -660,10 +759,19 @@ def label_report(
     return {"label": "excluded", "reason": "no_dominant_actor", "mentions": top}
 
 
-def mask_text(text: str, pattern: re.Pattern[str] | None) -> str:
-    """Every dictionary actor name and every vendor cluster code -> "the adversary"."""
+def mask_text(
+    text: str, pattern: re.Pattern[str] | None, software: re.Pattern[str] | None = None
+) -> str:
+    """Every dictionary actor name and every vendor cluster code -> "the adversary"; a name
+    inside a longer ATT&CK software name ("Cobalt Strike") stays."""
     if pattern is not None:
-        text = pattern.sub(MASK, text)
+        spans = _software_spans(text, software)
+
+        def replace(match: re.Match[str]) -> str:
+            longer = [span for span in spans if span != match.span()]
+            return match.group(0) if _inside(match.span(), longer) else MASK
+
+        text = pattern.sub(replace, text)
     return CLUSTER_CODE_RE.sub(MASK, text)
 
 
@@ -704,6 +812,34 @@ def download(candidates: dict[str, Any], output: Path, *, delay: float = 1.0) ->
     return log
 
 
+def batch_dates(pages: dict[str, dict[str, Any]], sources: dict[str, str]) -> dict[str, set[date]]:
+    """Per source, the page dates shared by ``BATCH_PAGES`` or more pages: a site migration or
+    re-dating stamps one date on many old pages (Rapid7, Recorded Future), so such a date is no
+    publication date."""
+    counts: dict[str, Counter[date]] = {}
+    for page_id, page in pages.items():
+        if page.get("date") is not None:
+            counts.setdefault(sources[page_id], Counter())[page["date"]] += 1
+    return {
+        source: {day for day, count in counted.items() if count >= BATCH_PAGES}
+        for source, counted in counts.items()
+    }
+
+
+def publication_date(
+    candidate: dict[str, Any], stated: date | None, batches: dict[str, set[date]]
+) -> date | None:
+    """The page's stated date unless it is a batch date, else the URL's date, else a feed's
+    publication date; a sitemap's lastmod is a modification date and never counts."""
+    if stated is not None and stated not in batches.get(candidate["source"], set()):
+        return stated
+    if candidate.get("url_date"):
+        return date.fromisoformat(candidate["url_date"])
+    if candidate.get("method") == "feed" and candidate.get("listed"):
+        return date.fromisoformat(candidate["listed"])
+    return None
+
+
 def _overlap(a: set[str], b: set[str]) -> float:
     return len(a & b) / max(1, min(len(a), len(b)))
 
@@ -717,7 +853,16 @@ def build(
 ) -> dict[str, Any]:
     anonymizer = ReportAnonymizer(kb, "strict")
     dictionary = actor_dictionary(kb, misp)
+    # the registered label review: reports whose rule label disagrees with the vendor's own
+    # attribution are excluded (never relabelled), logged in amendments.json
+    amendments_path = output / "amendments.json"
+    amended = (
+        json.loads(amendments_path.read_text(encoding="utf-8")).get("exclude", {})
+        if amendments_path.is_file()
+        else {}
+    )
     pattern = name_pattern(list(dictionary["surface"]))
+    software = dictionary["software_pattern"]
     pages: dict[str, dict[str, Any]] = {}
     for candidate in candidates["candidates"]:
         path = _raw_path(output, candidate)
@@ -728,9 +873,10 @@ def build(
                 **parsed,
                 "site": candidate["source"],
                 "path": path,
-                "date": page_date(html),
+                "date": page_date(html, candidate["source"]),
             }
     chrome = repeated_lines(pages)
+    batches = batch_dates(pages, {c["id"]: c["source"] for c in candidates["candidates"]})
     excluded: Counter[str] = Counter()
     decisions: dict[str, Any] = {}
     kept: list[dict[str, Any]] = []
@@ -740,20 +886,28 @@ def build(
             excluded["not_downloaded"] += 1
             decisions[candidate["id"]] = {"label": "excluded", "reason": "not_downloaded"}
             continue
-        published = (
-            page["date"]
-            or (date.fromisoformat(candidate["url_date"]) if candidate["url_date"] else None)
-            or (date.fromisoformat(candidate["listed"]) if candidate["listed"] else None)
-        )
+        published = publication_date(candidate, page["date"], batches)
         if published is None or not WINDOW_START <= published <= WINDOW_END:
             reason = "no_date" if published is None else "outside_window"
             excluded[reason] += 1
             decisions[candidate["id"]] = {"label": "excluded", "reason": reason}
             continue
+        if LIVING_TITLE_RE.search(page["title"]):
+            excluded["living_document"] += 1
+            decisions[candidate["id"]] = {"label": "excluded", "reason": "living_document"}
+            continue
         statements = statements_of(page, anonymizer, chrome.get(page["site"], frozenset()))
         texts = [statement["text"] for statement in statements]
         decision = label_report(page["title"], texts, dictionary, pattern)
         decision["published"] = published.isoformat()
+        if candidate["id"] in amended and decision["label"] != "excluded":
+            decision = {
+                **decision,
+                "label": "excluded",
+                "reason": "label_review",
+                "review_note": amended[candidate["id"]],
+                "rule_label": decision["label"],
+            }
         decisions[candidate["id"]] = decision
         if decision["label"] == "excluded":
             excluded[decision["reason"]] += 1
@@ -802,7 +956,7 @@ def build(
     for item in chosen:
         candidate, page, decision = item["candidate"], item["page"], item["decision"]
         statements = [
-            {**statement, "text": mask_text(statement["text"], pattern)}
+            {**statement, "text": mask_text(statement["text"], pattern, software)}
             for statement in item["statements"]
         ]
         row = {
@@ -811,7 +965,7 @@ def build(
             "accept": [],
             "kind": "fresh",
             "source": candidate["source"],
-            "title": mask_text(page["title"], pattern),
+            "title": mask_text(page["title"], pattern, software),
             "url": candidate["url"],
             "published": item["published"].isoformat(),
             "statements": statements,
@@ -845,6 +999,10 @@ def build(
             "open_max_attack_mentions": OPEN_MAX_ATTACK_MENTIONS,
             "group_cap": GROUP_CAP,
             "duplicate_share": DUPLICATE_SHARE,
+            "batch_pages": BATCH_PAGES,
+            "batch_dates": {
+                source: sorted(map(str, days)) for source, days in batches.items() if days
+            },
         },
         "dictionary": dictionary["stats"],
         "candidates": len(candidates["candidates"]),
