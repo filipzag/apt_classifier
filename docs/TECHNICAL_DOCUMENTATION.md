@@ -6839,6 +6839,57 @@ public reports an organisation chooses to follow, and keep them as a local, date
 store. That is a larger build and needs a time-split test (knowledge from reports before a date,
 test on reports after it); the fresh set cannot be that test.
 
+#### 21.3.30 Fresh reports, behaviour only: does the model's lead survive without names? (2026-10-29, post hoc)
+
+Question (product owner): the model's wins in 21.3.29 cite malware lineage; when attribution
+has to come from behaviour, does its lead remain? A post hoc secondary arm on the fresh set,
+logged in the pre-registration before it ran (last amendment); evaluation only.
+
+Masking: a new level `behavior` (`scripts/report_anonymizer.py`): tradecraft (strict plus ATT&CK
+malware), plus malware and tool names ATT&CK does not list (MISP galaxy malware lists and
+Malpedia family names, code-name shapes such as HOOKEDGE or PteroSand, names the report gives a
+malware noun, masked everywhere in that report) and operation names. English words, ATT&CK
+technique and data-component text and ATT&CK tools stay (PowerShell, rundll32, LSASS, PsExec).
+Audit before the run: about 1,100 distinct names masked in 11,462 statements; some product, API
+and vendor names go too (PeopleSoft, VirtualAlloc, ESET), the same text for both systems.
+
+Result (44 known reports, 54 open set; product with the defaults, GPT-5.6 Sol with the same
+prompt; `data/audits/fresh_h2h/score_gpt56sol_behavior.json`):
+
+| | Product strict | Product behaviour | GPT strict | GPT behaviour |
+|---|---|---|---|---|
+| right group first (registered, id-first) | 19 | 10 | 24 | 18 |
+| right group first (name-first reading) | 19 | 10 | 24 | 23 |
+| names on known reports (right / wrong, registered) | 8 (7/1) | 0 | 32 (24/8) | 34 (18/16) |
+| names on open-set reports | 2 | 1 | 19 | 13 |
+
+- GPT minus product at behaviour: +0.182, CI [−0.045, +0.409], McNemar p 0.17 (17 reports only
+  the model got, 9 only the product got, 1 both). The combination puts 14 first and names 1
+  report (right).
+- Removing every malware name costs the product half its first places (19 to 10: its hits came
+  from software only one group uses, 21.3.29) and the model almost nothing under the name-first
+  reading (24 to 23). In the registered reading the model's drop to 18 is mostly matching: it
+  wrote the right name with an invented id on five more reports than at strict.
+- What the model still uses: behaviour and target patterns it knows from years of vendor
+  reporting (Gamaredon's HTA and removable-drive habits, SideCopy's LNK-mshta-HTA chain, ToddyCat's
+  Gmail OAuth collector, Star Blizzard's rapport-building phishing), and in about five reports
+  history the masking leaves: actor-history paragraphs ("behind the 2016 DNC compromise",
+  TV5Monde, the anti-doping leaks; BMW, Hyundai and Wuhan for APT32; Korean code page 949),
+  NotDoor in two mentions the code-name rule missed, and the frozen set's "handoff-to-Sandworm"
+  (21.3.28). Discounting those five, the model is still ahead (about 13 against 10).
+- Naming without names: the model keeps naming (34 known reports, 16 wrong in the registered
+  reading; 6 wrong ATT&CK names and 5 non-ATT&CK names name-first) and names 13 of 54 open-set
+  reports; the product names none of the known reports and one open-set report.
+
+Reading: the model's lead is not a malware-name lookup; it is broad knowledge of how each actor
+operates and what it targets, which survives the masking better than the product's evidence does.
+The product's attribution from behaviour alone (10 of 44) is well below the model's. The product
+and the model are partly complementary (9 reports only the product got), which the combination
+rule does not yet exploit (14). Without names the product's naming gate stays silent, the safe
+outcome, while the model's wrong names double.
+
+Cost: OpenRouter $5.79 (the head-to-head total is now $12.66); product 29 minutes.
+
 ## 22. Failure modes and troubleshooting
 
 ### 22.1 “ATT&CK knowledge base has not been ingested”
