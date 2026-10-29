@@ -6686,6 +6686,109 @@ Caveats:
 - The remaining external "wrong" names are the likely key errors and the fake-job-interview label
   disputes of 21.3.26.
 
+#### 21.3.28 Fresh reports, head to head: the product against frontier LLMs (2026-10-28/29, test set)
+
+The product owner asked whether a zero-shot frontier LLM makes the approach pointless: the product
+ties ChatGPT-4 on CTI-TAA but trails GPT-5 on AthenaBench (21.3.26), and public benchmark reports
+may be remembered by the models. Pre-registered as
+`docs/preregistration/fresh_reports_head_to_head_2026-10-28.json` (two amendments before any run;
+label review `fresh_reports_label_review_2026-10-29.json`). Test set: evaluation only, never tuned
+on, local only.
+
+**Set** (`scripts/prepare_fresh_reports.py`). Research posts and CISA advisories from 18 sources,
+published 2026-03-01 to 2026-10-27 (after GPT-5.6 Sol's stated cutoff), none cited by ATT&CK 20.0
+or in another report set. Labels by a pre-registered name-count rule over ATT&CK names and aliases
+plus the MISP threat-actor galaxy; every actor name and vendor cluster code masked as "the
+adversary"; the benchmark's strict anonymiser on top. 45 known reports on 25 groups (44 keep
+statements at strict) and 54 reports on actors ATT&CK does not document (open set: every name is
+wrong). 18 reports were excluded by the label review before any run.
+
+**Arms** (all read the same statements, strict reading):
+- *Product*: the defaults of 806269b, local pipeline, `data/audits/fresh_h2h/run_product.sh`.
+- *GPT-5.6 Sol* (main arm, every report) and *Claude Opus 5.5* (secondary, the 41 reports from
+  2026-07-01, after its June cutoff): `scripts/fresh_llm_attribution.py`, reasoning effort medium,
+  structured output (up to three groups with ATT&CK ids and a decision: name, open, not in ATT&CK),
+  `data/audits/fresh_h2h/run_llm.sh`.
+- *Combination* (no fitting): first choice = the LLM's first candidate when the product ranks it in
+  its top five, else the product's leader; a name only when both agree and the LLM decides to name.
+- Scoring: `scripts/fresh_h2h_score.py`; paired bootstrap (10,000, seed 7) and exact McNemar.
+
+**Main result (44 known, 54 open set):**
+
+| | Product | GPT-5.6 Sol | Combination |
+|---|---|---|---|
+| First choice right | 19 (0.432) | **24 (0.545)** | 18 (0.409) |
+| Per-group macro | 0.429 | **0.652** | 0.423 |
+| Top three | 21 | 25 | 21 |
+| Known: names / right / wrong | 8 / 7 / 1 | 32 / 24 / 8 | **13 / 13 / 0** |
+| Open set: names (all wrong) | 2 | 19 | **1** |
+
+- GPT minus product, first choice: +0.114, 95% CI [−0.068, +0.296], McNemar p 0.33. Under the
+  registered reading guide (clearly ahead = at least +0.10 with the interval above 0) the two are
+  **comparable**: the approach stands and the LLM is optional. The point estimate and the
+  per-group macro (+0.22) lean towards the LLM; 44 reports cannot separate them.
+- The combination keeps the product's first choice (−1 report, CI [−0.068, 0]) and its naming
+  discipline, and nearly doubles its correct names (7 → 13) with no wrong name on a known group
+  and one on the open set (product 1 and 2).
+- The product's names: Tropic Trooper named as Mustang Panda (known); a CISA advisory on Void
+  Blizzard named as the Kimsuky/Lazarus cluster and a Microsoft post on JadePuffer as Storm-0501
+  (open set). Names and tradecraft readings: first 22/45 and 10/44, 7 and 1 names, 2 open-set names
+  each.
+
+**Second reading: how the LLM's answers were matched.** The registered matching takes a
+candidate's ATT&CK id first and its name second. GPT-5.6 Sol often wrote a real actor name with an
+invented ATT&CK id (SloppyLemming as G1048, which is UNC3886; FIN11 as G0061, FIN8), so the
+registered score turns names of actors outside ATT&CK into names of unrelated ATT&CK groups.
+Matched by name (a name ATT&CK does not list counts as "not an ATT&CK group"), not registered:
+- first choice and top three unchanged (24, 25);
+- known: 28 ATT&CK names, 24 right, 4 wrong, plus 4 names of actors outside ATT&CK (FamousSparrow
+  for Salt Typhoon, Famous Chollima for Contagious Interview, KONNI for Patchwork, FIN11 for
+  ShinyHunters);
+- open set: 6 ATT&CK names (Scattered Spider for Storm-2949 and UNC6671, Winter Vivern for
+  CL-STA-1114 and Void Blizzard, Lazarus for Storm-3069, HAFNIUM for Storm-0940), all wrong, and 13
+  names of actors outside ATT&CK, of which 8 are the vendor's actor or a widely reported equivalent
+  despite the masking (SloppyLemming, Storm-1175, UAT-4356, DragonForce twice, UNC5221 for UTA0178,
+  UNC1151 for FrostyNeighbor, Laundry Bear for Void Blizzard). The product cannot name actors
+  outside ATT&CK at all.
+
+**Secondary arm: Claude Opus 5.5 on the July–October reports (11 known on 10 groups, 30 open set).**
+
+| | Product | Opus 5.5 | GPT-5.6 Sol (same reports) | Combination with Opus |
+|---|---|---|---|---|
+| First choice right | 4 | **8** | 7 | 4 |
+| Known: names / right / wrong | 2 / 2 / 0 | 8 / 7 / 1 | 10 / 7 / 3 | 4 / 4 / 0 |
+| Open set: names | 2 | 2 | 12 | **0** |
+
+- Opus minus product: +0.364, CI [+0.091, +0.636], McNemar p 0.125 (4 discordant reports against
+  0), on 11 reports. Opus is the more careful model: it said "not in ATT&CK" on 26 of 30
+  open-set reports (GPT-5.6 Sol named 12 of the same 30). Its one wrong known name is FamousSparrow
+  for Salt Typhoon; of its two open-set names, Laundry Bear is the right actor outside ATT&CK and
+  HAFNIUM (for Storm-0940) is wrong.
+
+Reading:
+- As a stand-alone attribution system the product is not better than a current frontier model:
+  both models put the right group first at least as often, name far more reports, and recognise
+  actors ATT&CK does not document. The registered verdict is "comparable" only because 44 reports
+  are too few.
+- The product's measurable value here is naming discipline (2 wrong open-set names against GPT's
+  6–19) and, as the second opinion in the combination, turning the model's recall into names
+  without its wrong ones. It also runs locally and free (GPT-5.6 Sol cost about $0.05 per report)
+  and shows its evidence.
+- Direction proposed to the product owner: the model proposes when a cloud key is allowed, the
+  product's evidence and naming gate decide whether to name; without a key the product runs alone.
+  Making that a default needs its own pre-registered test on a new set; this one is spent.
+
+Caveats:
+- Labels are the vendors' attribution under a name-count rule; several model "errors" are label
+  disputes (FamousSparrow / Salt Typhoon, Famous Chollima / Contagious Interview).
+- Posts in the window may retell research from before the cutoff; one sample per report;
+  reasoning effort medium only.
+- The registered id-first matching was not designed for invented ids; the second reading is
+  post hoc and reported beside, not instead of, the registered numbers.
+
+**Cost.** OpenRouter $6.87 (GPT-5.6 Sol $5.32 on 98 reports, Opus 5.5 $1.55 on 41); product runs
+about 85 minutes on the laptop. Downloads about 2,300 pages (714 MB raw HTML, local only).
+
 ## 22. Failure modes and troubleshooting
 
 ### 22.1 “ATT&CK knowledge base has not been ingested”
