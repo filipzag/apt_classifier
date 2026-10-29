@@ -29,5 +29,17 @@
     "consequence": "LLM clearly ahead and not less safe -> recommend rebuilding attribution around the LLM, the product's evidence and naming gate as the explanation and safety layer; LLM clearly ahead but less safe -> recommend the combination if it keeps the product's wrong-name level; comparable or product ahead -> the approach stands, the LLM optional"
   },
   "caveats": "labels are the vendors' own attribution (vendors can be wrong or disagree); a post in the window may retell research from before the cutoff; the cutoff is the model maker's stated one; one sample per report; the product's ATT&CK 20.0 knowledge legitimately includes earlier reports on the same actors (so does the model's training)",
-  "cost": "downloads free (about 750 pages at one request per second, approved 2026-10-28); product runs about 2-4 hours on the laptop; the LLM arm needs an OpenRouter top-up (1.20 USD left on 2026-10-28) and is priced by --dry-run on the built set before any spend"
+  "cost": "downloads free (about 750 pages at one request per second, approved 2026-10-28); product runs about 2-4 hours on the laptop; the LLM arm needs an OpenRouter top-up (1.20 USD left on 2026-10-28) and is priced by --dry-run on the built set before any spend",
+  "amendments": [
+    {
+      "date": "2026-10-29",
+      "made_before": "any system (product or LLM) ran on any report of the set; only label counts of a preliminary build were seen",
+      "reason": "the July-October window gave about 20 known-group reports and 30 open-set reports from the 15 sources (fresh reporting mostly names new clusters), too few to show a 0.10 first-choice difference (about 120 needed); the product owner chose a longer window with an earlier-cutoff model plus more sources",
+      "window": "2026-03-01 to 2026-10-27 (builder WINDOW_START; LIST_FROM 2026-02-20)",
+      "llm": "main arm: openai/gpt-5.6-sol (OpenRouter's stated knowledge cutoff 2026-02-16), reasoning effort medium, the same prompt and schema, on every report; secondary arm: anthropic/claude-opus-5.5 on the reports published from 2026-07-01 (fresh_llm_attribution.py --since 2026-07-01). The reading guide applies to the main arm; the combination is scored with each model on its reports",
+      "sources_added": "approved by the product owner on 2026-10-29 and listable with dates: Seqrite, Bitdefender Labs, Silent Push, Fortinet threat research, Arctic Wolf, Rapid7, Hunt.io; Google is also listed from its blog sitemap and Recorded Future from its sitemap (their feeds reach back only to June/July). Approved but not used: AhnLab ASEC (serves a browser check), Sophos (timeouts), Huntress and HarfangLab (403), Positive Technologies (certificate error), Genians (Korean only), Kroll and Intezer (no threat-research listing)",
+      "bug_fix": "the vendor cluster-code pattern missed five-digit codes (UAT-11587, Storm-10001, UAC-10001, TAG-10001); fixed before the build",
+      "downloads": "a rate limit, a server error or a '202 Accepted' holding page is retried once at one request per 5 s; Check Point answered 24 pages with '202 Accepted' again (bot protection, not bypassed): left out"
+    }
+  ]
 }

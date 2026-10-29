@@ -1,10 +1,11 @@
 """Fresh real reports: vendor research posts published after the frontier model's training cutoff.
 
-A head-to-head test set (prereg ``fresh_reports_head_to_head_2026-10-28.json``): the product and a
-frontier LLM read the same anonymised statements of reports no model and no ATT&CK release has
-seen. Window: posts published from ``WINDOW_START`` (after Claude Opus 5.5's June 2026 cutoff)
-to ``WINDOW_END``; the URLs MITRE ATT&CK cites are left out, so ATT&CK's own texts and profiles
-do not contain the report either.
+A head-to-head test set (prereg ``fresh_reports_head_to_head_2026-10-28.json`` and its amendment
+of 2026-10-29): the product and frontier LLMs read the same anonymised statements of reports the
+models have not seen. Window: posts published from ``WINDOW_START`` (after GPT-5.6 Sol's
+February 2026 cutoff; Claude Opus 5.5, cutoff June 2026, is scored on the reports from
+``OPUS_START``) to ``WINDOW_END``; the URLs MITRE ATT&CK cites are left out, so ATT&CK's own
+texts and profiles do not contain the report either.
 
 Steps, each re-runnable:
 
@@ -77,9 +78,10 @@ LICENCE = (
     "do not redistribute"
 )
 MISP_URL = "https://raw.githubusercontent.com/MISP/misp-galaxy/main/clusters/threat-actor.json"
-WINDOW_START = date(2026, 7, 1)
+WINDOW_START = date(2026, 3, 1)
+OPUS_START = date(2026, 7, 1)
 WINDOW_END = date(2026, 10, 27)
-LIST_FROM = date(2026, 6, 20)
+LIST_FROM = date(2026, 2, 20)
 MIN_STATEMENTS = 15
 MIN_MENTIONS = 3
 DOMINANCE = 2.0
@@ -90,7 +92,7 @@ DUPLICATE_SHARE = 0.5
 MASK = "the adversary"
 # vendor cluster codes (an actor ATT&CK does not document unless the code is an ATT&CK alias)
 CLUSTER_CODE_RE = re.compile(
-    r"(?<![\w-])(?:UNC\d{3,5}|Storm-\d{4}|DEV-\d{4}|TA\d{3,4}|TAG-\d{2,4}|UAC-\d{4}|UAT-\d{4}"
+    r"(?<![\w-])(?:UNC\d{3,5}|Storm-\d{4,5}|DEV-\d{4}|TA\d{3,4}|TAG-\d{2,5}|UAC-\d{4,5}|UAT-\d{4,5}"
     r"|CL-(?:STA|CRI|UNK)-\d{4}|TGR-(?:STA|CRI|UNK)-\d{4}|Earth [A-Z][a-z]+|Water [A-Z][a-z]+"
     r"|Void [A-Z][a-z]+|SHADOW-[A-Z]+-\d+|REF\d{4}|STAC\d{3,5}|TAC\d{3,5})(?![\w-])"
 )
@@ -145,8 +147,10 @@ SOURCES: dict[str, dict[str, Any]] = {
         "post": r"^https://www\.proofpoint\.com/us/blog/threat-insight/[a-z0-9-]+$",
     },
     "google": {
+        "sitemaps": ["https://cloud.google.com/transform/sitemapsummary/cloudblog"],
+        "child": r"/cloudblog/en/2026-(?:0[2-9]|1[0-2])-",
         "feeds": ["https://feeds.feedburner.com/threatintelligence/pvexyqv7v0v"],
-        "post": r"^https://cloud\.google\.com/blog/topics/threat-intelligence/[a-z0-9-]+",
+        "post": r"^https://cloud\.google\.com/blog/topics/threat-intelligence/[a-z0-9-]+/?$",
     },
     "trendmicro": {
         "sitemaps": ["https://www.trendmicro.com/en_us/sitemap.xml"],
@@ -158,6 +162,7 @@ SOURCES: dict[str, dict[str, Any]] = {
         "post": r"^https://www\.security\.com/threat-intelligence/[a-z0-9-]+$",
     },
     "recordedfuture": {
+        "sitemaps": ["https://www.recordedfuture.com/sitemap-main.xml"],
         "feeds": ["https://www.recordedfuture.com/feed"],
         "post": r"^https://www\.recordedfuture\.com/research/[a-z0-9-]+$",
     },
@@ -166,6 +171,43 @@ SOURCES: dict[str, dict[str, Any]] = {
         "child": r"/post-sitemap\d*\.xml$",
         "post": r"^https://www\.volexity\.com/blog/\d{4}/\d{2}/\d{2}/[a-z0-9-]+/$",
         "dated": "ymd",
+    },
+    # added 2026-10-29 (amendment): the approved sources that can be listed with dates
+    "asec": {
+        "feeds": ["https://asec.ahnlab.com/en/feed/?paged={page}"],
+        "post": r"^https://asec\.ahnlab\.com/en/\d+/?$",
+    },
+    "seqrite": {
+        "feeds": ["https://www.seqrite.com/blog/feed/?paged={page}"],
+        "post": r"^https://www\.seqrite\.com/blog/[a-z0-9-]+/?$",
+    },
+    "bitdefender": {
+        "feeds": ["https://www.bitdefender.com/blog/api/rss/labs/"],
+        "post": r"^https://www\.bitdefender\.com/en-us/blog/labs/[a-z0-9-]+/?$",
+    },
+    "silentpush": {
+        "sitemaps": ["https://www.silentpush.com/sitemap_index.xml"],
+        "child": r"post|blog",
+        "post": r"^https://www\.silentpush\.com/blog/[a-z0-9-]+/?$",
+    },
+    "fortinet": {
+        "sitemaps": ["https://www.fortinet.com/sitemap-index.xml"],
+        "child": r"blog",
+        "post": r"^https://www\.fortinet\.com/blog/threat-research/[a-z0-9-]+$",
+    },
+    "arcticwolf": {
+        "sitemaps": ["https://arcticwolf.com/sitemap_index.xml"],
+        "child": r"post|blog|resource",
+        "post": r"^https://arcticwolf\.com/resources/blog/[a-z0-9-]+/$",
+    },
+    "rapid7": {
+        "sitemaps": ["https://www.rapid7.com/sitemap.xml"],
+        "child": r"blog",
+        "post": r"^https://www\.rapid7\.com/blog/post/[a-z0-9-]+/?$",
+    },
+    "hunt": {
+        "sitemaps": ["https://hunt.io/sitemap.xml"],
+        "post": r"^https://hunt\.io/blog/[a-z0-9-]+/?$",
     },
     "cisa": {
         "sitemaps": ["https://www.cisa.gov/default/sitemap.xml"],
@@ -643,7 +685,11 @@ def download(candidates: dict[str, Any], output: Path, *, delay: float = 1.0) ->
         if path.is_file():
             continue
         attempts = log.get(candidate["id"], [])
-        if attempts and (len(attempts) >= 2 or not _transient(attempts[-1])):
+        # a rate limit, a server error or a "202 Accepted" holding page is retried once, slower
+        retryable = attempts and (
+            _transient(attempts[-1]) or attempts[-1].get("status") == "http_202"
+        )
+        if attempts and (len(attempts) >= 2 or not retryable):
             continue
         if attempts and attempts[-1].get("status") == "http_429":
             time.sleep(10)
@@ -824,6 +870,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--list", action="store_true", help="list candidate post URLs")
     parser.add_argument("--aliases", action="store_true", help="download the MISP actor list")
     parser.add_argument("--download", action="store_true", help="download candidate pages")
+    parser.add_argument("--delay", type=float, default=1.0, help="seconds between requests")
     parser.add_argument("--kb", type=Path, default=REPO_ROOT / "data" / "kb" / "attack_kb.json")
     parser.add_argument(
         "--bundle", type=Path, default=REPO_ROOT / "data" / "raw" / "enterprise-attack.json"
@@ -868,7 +915,7 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     candidates = json.loads(candidates_path.read_text(encoding="utf-8"))
     if args.download:
-        download(candidates, output)
+        download(candidates, output, delay=args.delay)
         return 0
     misp = json.loads(misp_path.read_text(encoding="utf-8")) if misp_path.is_file() else None
     manifest = build(candidates, output, kb=kb, misp=misp)

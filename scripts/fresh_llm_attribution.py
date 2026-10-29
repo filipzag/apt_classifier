@@ -1,6 +1,7 @@
 """Zero-shot frontier-LLM attribution on the fresh reports (the head-to-head arm).
 
-Prereg ``fresh_reports_head_to_head_2026-10-28.json``. The model reads exactly the statements the
+Prereg ``fresh_reports_head_to_head_2026-10-28.json`` (amended 2026-10-29: GPT-5.6 Sol on every
+report, Claude Opus 5.5 on the reports published from 2026-07-01, ``--since``). The model reads exactly the statements the
 product reads: the same report file, the same statement selection and anonymisation
 (``attribution_benchmark.load_report_folds`` + ``anonymize_report_folds`` at the given level), all
 statements, in report order. It returns up to three ATT&CK groups and a decision: name the first
@@ -9,7 +10,8 @@ report (``--cache``), so a stopped run resumes and a rerun costs nothing.
 
     PYTHONPATH=. .venv/bin/python scripts/fresh_llm_attribution.py --dry-run
     OPENROUTER_API_KEY=... PYTHONPATH=. .venv/bin/python scripts/fresh_llm_attribution.py \
-        --max-cost 20 --output data/audits/fresh_h2h/llm_opus55_strict.json
+        --model openai/gpt-5.6-sol --max-cost 30 --output data/audits/fresh_h2h/llm_gpt56sol_strict.json
+    ... --model anthropic/claude-opus-5.5 --since 2026-07-01 --output .../llm_opus55_strict.json
 """
 
 from __future__ import annotations
@@ -35,7 +37,7 @@ from scripts.attribution_benchmark import (  # noqa: E402
 from scripts.report_anonymizer import ReportAnonymizer  # noqa: E402
 
 OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
-DEFAULT_MODEL = "anthropic/claude-opus-5.5"
+DEFAULT_MODEL = "openai/gpt-5.6-sol"
 FRESH = REPO_ROOT / "data" / "benchmarks" / "fresh"
 SYSTEM = "You are an experienced cyber threat intelligence analyst."
 PROMPT = """Below are the statements of one threat report, in report order. Every threat-actor \
@@ -80,6 +82,10 @@ SCHEMA = {
 
 def report_texts(path: Path, kb: AttackKnowledgeBase, level: str) -> list[dict[str, Any]]:
     """The statements the product reads for each report at ``level``."""
+    published = {
+        row["report_id"]: row.get("published")
+        for row in map(json.loads, path.read_text(encoding="utf-8").splitlines())
+    }
     anonymizer = ReportAnonymizer(kb, level) if level in ("strict", "tradecraft") else None
     folds = load_report_folds(path, max_observations=None, anonymizer=anonymizer, kb=kb)
     folds, _, _ = anonymize_report_folds(folds, kb, level=level)
@@ -87,6 +93,7 @@ def report_texts(path: Path, kb: AttackKnowledgeBase, level: str) -> list[dict[s
         {
             "report_id": fold.report_id,
             "group_id": fold.group_id,
+            "published": published.get(fold.report_id),
             "statements": list(fold.observations),
         }
         for fold in folds
@@ -188,6 +195,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--price", type=float, nargs=2, default=(4.0, 20.0), help="USD per M tokens in/out"
     )
+    parser.add_argument("--since", help="only reports published on or after this date (ISO)")
     parser.add_argument("--dry-run", action="store_true", help="count tokens and estimate cost")
     args = parser.parse_args(argv)
     kb = AttackKnowledgeBase.load(args.kb)
@@ -196,6 +204,7 @@ def main(argv: list[str] | None = None) -> int:
         for arm, path in (("known", args.reports), ("open_set", args.open_set))
         if path.is_file()
         for row in report_texts(path, kb, args.level)
+        if not args.since or (row["published"] or "") >= args.since
     ]
     prompts = {row["report_id"]: prompt_for(row["statements"]) for row in rows}
     input_tokens = sum(len(SYSTEM + text) / 3.6 for text in prompts.values())
@@ -245,6 +254,7 @@ def main(argv: list[str] | None = None) -> int:
             {
                 "report_id": row["report_id"],
                 "arm": row["arm"],
+                "published": row["published"],
                 "group_id": row["group_id"],
                 "statements": len(row["statements"]),
                 "candidates": mapped,
@@ -265,6 +275,7 @@ def main(argv: list[str] | None = None) -> int:
                 "model": args.model,
                 "effort": args.effort,
                 "level": args.level,
+                "since": args.since,
                 "prompt": PROMPT,
                 "system": SYSTEM,
                 "reports": str(args.reports),
