@@ -6785,9 +6785,59 @@ Caveats:
   reasoning effort medium only.
 - The registered id-first matching was not designed for invented ids; the second reading is
   post hoc and reported beside, not instead of, the registered numbers.
+- Masking gap (found 2026-10-29, after scoring): the set's name pattern skipped a name joined to a
+  word by a hyphen, so three names survived in three known reports: "BlueDelta-related" (an APT28
+  report the model got and the product missed; the model cites it), "FamousSparrow-exclusive" (a
+  Salt Typhoon report, where Opus named FamousSparrow) and "handoff-to-Sandworm" (both right).
+  Without the first, GPT-5.6 Sol is at most 23 of 44; the reading does not change. The pattern now
+  masks such compounds for later sets (`scripts/prepare_fresh_reports.py`). The benchmark's own
+  masking leaves no truth name on CTI-HAL (55) or Elastic (8).
 
 **Cost.** OpenRouter $6.87 (GPT-5.6 Sol $5.32 on 98 reports, Opus 5.5 $1.55 on 41); product runs
 about 85 minutes on the laptop. Downloads about 2,300 pages (714 MB raw HTML, local only).
+
+#### 21.3.29 Knowledge beyond ATT&CK: what the open sources hold (2026-10-29, diagnosis)
+
+Question: the fresh head-to-head (21.3.28) showed where the models win. Can open data close that
+gap locally?
+
+Where the gap is (fresh set, aggregate, evaluation only; nothing was fitted on it):
+- On the 11 known reports GPT-5.6 Sol got and the product missed, the right group was never in
+  the product's top 5 (ranks 6–59), and no software that ATT&CK documents for that group alone was
+  found. On 11 of the 13 reports both got right, such software was found.
+- The model's rationales cite knowledge ATT&CK does not hold: new malware tied to the actor in
+  about 8 of the 11 (HOOKEDGE evolved from HEADLACE for APT28; the Ptero tools for Gamaredon;
+  NotDoor; TomBerBil; TOSHIS and EntryShell for Tropic Trooper; Stagecomp and Darkcomp), vendor
+  operation names (Operation RoundPress, Olalampo) and in one report a vendor actor name the
+  masking missed (BlueDelta, see 21.3.28).
+- So the product loses on current knowledge, not on gating or reasoning.
+
+What the open sources hold (MISP galaxy at commit 24877de2 of 2026-10-29, downloaded to
+`data/raw/misp_galaxy_24877de2/` with `SOURCE.json`; JSON metadata only, no samples):
+- Licences: the MISP galaxy JSON files are CC0 1.0 or BSD-2-Clause, so they can ship. Malpedia
+  is CC BY-NC-SA 3.0 (non-commercial). MISP's `malpedia.json` derives from it, so it is
+  evaluation only.
+- MISP's actor lists hold 165 distinct malware-to-group links; 86 are for actors ATT&CK does not
+  document, 21 ATT&CK already has, 58 are new for an ATT&CK group. That is 5% on top of ATT&CK's
+  1,166 group-software links, and the new ones are concentrated (most are Kimsuky, from one report).
+- Malpedia's 3,683 families carry no structured actor link in MISP's copy; 113 descriptions name an
+  ATT&CK group, 83 of them not already linked in ATT&CK (noisy: "Play" matches the verb).
+- The vendor names are covered: the MISP threat-actor list (1,113 actors) maps BlueDelta,
+  COLDRIVER, Sednit and similar names to their groups.
+- On the 11 misses, with a copy taken after the reports were published (an upper bound): the
+  shippable lists cover one malware link (HOOKEDGE to APT28, used in two of the reports); with
+  Malpedia at most three reports (EntryShell's description names KeyBoy; Headlace and NotDoor are
+  listed by name only, without an actor).
+  None of the Ptero tools, TomBerBil, Umbrij, TOSHIS, Stagecomp, Darkcomp, COLDCOPY or MiniDoor is
+  in any of the lists.
+
+Reading: the knowledge the models use comes from reading vendor reports, and the open structured
+lists hold little of it. Importing them is cheap but would recover at most one or two of the 11
+reports. Closing the gap locally needs the product to read the reports itself: extract the facts
+(this malware is attributed to that actor by this vendor on this date, with a link) from the
+public reports an organisation chooses to follow, and keep them as a local, dated knowledge
+store. That is a larger build and needs a time-split test (knowledge from reports before a date,
+test on reports after it); the fresh set cannot be that test.
 
 ## 22. Failure modes and troubleshooting
 

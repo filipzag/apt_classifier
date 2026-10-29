@@ -135,6 +135,10 @@ def test_mask_removes_actor_names_and_cluster_codes_but_not_software(tmp_path, m
         "the adversary (the adversary) dropped Sednit and Cobalt Strike; the adversary and "
         "the adversary too."
     )
+    # a name joined to a lower-case word by a hyphen is masked; a code-like suffix is not a name
+    assert fresh.mask_text(
+        "Laundry Bear-linked hosts; a handoff-to-Gamaredon; Lazarus-2", pattern, software
+    ) == ("the adversary-linked hosts; a handoff-to-the adversary; Lazarus-2")
     # "Cobalt" inside "Cobalt Strike" is the software, not the Cobalt Group
     counts = fresh.actor_mentions(["Cobalt Strike beacons", "Cobalt used it"], dictionary, pattern)
     assert counts["G0080"] == 1

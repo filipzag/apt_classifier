@@ -666,8 +666,13 @@ def name_pattern(names: list[str]) -> re.Pattern[str] | None:
     names = sorted(set(names), key=lambda name: (-len(name), name))
     if not names:
         return None
+    # a name joined to a lower-case word by a hyphen is still the name ("BlueDelta-related",
+    # "handoff-to-Sandworm"); the set frozen on 2026-10-29 was built before this and kept three
+    # such names (docs 21.3.28)
     return re.compile(
-        r"(?<![\w-])(?:" + "|".join(re.escape(name) for name in names) + r")(?![\w-])"
+        r"(?:(?<![\w-])|(?<=[a-z]-))(?:"
+        + "|".join(re.escape(name) for name in names)
+        + r")(?:(?![\w-])|(?=-[a-z]))"
     )
 
 
