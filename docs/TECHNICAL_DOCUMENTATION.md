@@ -6890,7 +6890,7 @@ outcome, while the model's wrong names double.
 
 Cost: OpenRouter $5.79 (the head-to-head total is now $12.66); product 29 minutes.
 
-#### 21.3.31 The model's own confidence as the naming rule (registered 2026-11-02, not yet run)
+#### 21.3.31 The model's own confidence as the naming rule (2026-11-02)
 
 Question (product owner): after 21.3.30, GPT-5.6 Sol's names at a stated probability of at least
 0.99 were all right on the fresh set (17 of 17 at strict, 8 of 8 at behaviour). That cut-off was
@@ -6919,8 +6919,50 @@ Test set (`data/benchmarks/fresh2/`, the same builder with `--window`, `--source
 `--exclude-listed` and `--twin-sets`): reports published from 2026-03-01 to the listing date that
 the first set's listing never considered, from the first set's sources and new sources the product
 owner approves, minus retellings of first-set reports; same labels, masking and label review.
-Primary readings at strict: names of the confident model against the product's (wrong names in
+The product owner chose the behaviour reading only (malware, tool and operation names hidden as
+well) for both systems, logged before any listing; the development choices hold at that reading
+alone. Primary readings: names of the confident model against the product's (wrong names in
 total, right names), and the switch's first choice against the model's.
+
+**The set.** Ten of the twenty approved new sources could be listed with a plain request (Group-IB,
+StrikeReady, Kaspersky ICS CERT, JPCERT/CC, Gen Digital, Resecurity, Intrinsec, Infoblox,
+ThreatBook, Sekoia); the others refused automated listing or had no listable posts and were dropped,
+not worked around. 600 candidate posts (26 new posts of the first set's sources) gave 29 labelled
+reports; the label review excluded 8 (two "Alibaba" MISP-synonym errors, overviews and roundups of
+several actors, an open-set post the vendor ties to INC Ransomware). Final: 12 known reports on 10
+groups and 9 open-set reports, below the registered 30 known reports, so every reading below is
+descriptive only. One ShinyHunters report keeps a member handle ("Shiny", @shinycorp).
+
+**Result** (`data/audits/fresh2_h2h/score_gpt56sol_behavior.json`, behaviour reading, matching by
+name):
+
+| new fresh set (12 known, 9 open set) | first right | names right / wrong (incl. open set) |
+|---|---|---|
+| product | 4 | 0 / 0 |
+| model, every name | 8 | 8 / 2 |
+| model, names at >= 0.99 | 8 | **6 / 0** (exact 95% interval of the share right [0.54, 1.00]) |
+| registered combination | 7 | 2 / 0 |
+| switch (model's first at >= 0.5, else the product's leader) | **10** | 6 / 0 |
+
+- Naming: the confident model named 6 known reports, all right, and no open-set report with an
+  ATT&CK name; the product named nothing. Under the guide "at least as safe" holds, but with 6
+  names the share is descriptive, and the 6 are not independent: three are one vendor's
+  three-part series on one actor (Gamaredon) and one is the ShinyHunters report with the handle.
+  The model's two wrong ATT&CK names (CURIUM as MuddyWater, an open-set Russian actor as APT28)
+  were at 0.97 and 0.86, below the cut-off. At 0.99 it also named two open-set actors outside
+  ATT&CK correctly (Luna Moth, TA558), names the product cannot give.
+- First choice: the switch put 10 of 12 first against the model's 8 (+0.167, CI [0.0, +0.42],
+  "comparable" under the guide): the product's leader was right on the two reports where the model
+  was unsure (The Gentlemen, TeamPCP) and wrong on one (VOID MANTICORE). Same direction as on the
+  development set (29 against 24 of 44).
+
+Reading: the new reports agree with what the development set suggested, the model's confident
+names were right and the switch ranked best, but 12 known reports and 6 confident names cannot
+establish either rule. Nothing changes in the product. A test that can decide needs about 100
+reports, for example posts collected from November on under the same rules.
+
+Cost: OpenRouter $1.11 (the head-to-head total is now $13.77); product 9 minutes; downloads 600
+pages (146 MB, local only).
 
 ## 22. Failure modes and troubleshooting
 
