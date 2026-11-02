@@ -224,6 +224,57 @@ SOURCES: dict[str, dict[str, Any]] = {
         "post": r"^https://www\.cisa\.gov/news-events/cybersecurity-advisories/aa\d{2}-\d{3}[a-z]$",
         "dated": "cisa",
     },
+    # added 2026-11-02 for the second set (prereg llm_confidence_cutoff_2026-11-02): the
+    # approved sources whose posts can be listed with a plain request
+    "groupib": {
+        "sitemaps": ["https://www.group-ib.com/sitemap.xml"],
+        "child": r"blog|post",
+        # translated copies ("...-es/") are left out: the duplicate check compares statements
+        "post": r"^https://www\.group-ib\.com/blog/(?![a-z0-9-]+-(?:es|pt|br|fr|de|ar|tr|id)/$)"
+        r"[a-z0-9-]+/$",
+    },
+    "strikeready": {
+        "sitemaps": ["https://www.strikeready.com/sitemap.xml"],
+        "post": r"^https://www\.strikeready\.com/blog/[^/?#]+$",
+    },
+    "kaspersky_ics": {
+        "sitemaps": ["https://ics-cert.kaspersky.com/sitemap.xml"],
+        "child": r"publication",
+        "post": r"^https://ics-cert\.kaspersky\.com/publications/(?:reports|blog)/\d{4}/\d{2}/\d{2}/"
+        r"[a-z0-9-]+/$",
+        "dated": "ymd",
+    },
+    "jpcert": {
+        "sitemaps": ["https://blogs.jpcert.or.jp/sitemap.xml"],
+        "post": r"^https://blogs\.jpcert\.or\.jp/en/\d{4}/\d{2}/[A-Za-z0-9_.-]+\.html$",
+    },
+    "gendigital": {
+        "sitemaps": ["https://www.gendigital.com/blogentries/sitemap.xml"],
+        "post": r"^https://www\.gendigital\.com/blog/insights/research/[a-z0-9-]+$",
+    },
+    "resecurity": {
+        "sitemaps": ["https://www.resecurity.com/sitemap.xml"],
+        "post": r"^https://www\.resecurity\.com/blog/article/[a-z0-9-]+$",
+    },
+    "intrinsec": {
+        "sitemaps": ["https://www.intrinsec.com/sitemap_index.xml"],
+        "child": r"/post-sitemap\d*\.xml$",
+        "post": r"^https://www\.intrinsec\.com/[a-z0-9_-]+/$",
+    },
+    "infoblox": {
+        "sitemaps": ["https://www.infoblox.com/blog/sitemap_index.xml"],
+        "child": r"/post-sitemap\d*\.xml$",
+        "post": r"^https://www\.infoblox\.com/blog/threat-intelligence/(?:[a-z0-9-]+/)?[a-z0-9-]+/$",
+    },
+    "threatbook": {
+        "sitemaps": ["https://threatbook.io/sitemap.xml"],
+        "post": r"^https://threatbook\.io/blog/[a-z0-9-]+$",
+    },
+    "sekoia": {
+        # the feed reaches back to June 2026; the blog has no sitemap
+        "feeds": ["https://blog.sekoia.io/feed/?paged={page}"],
+        "post": r"^https://www\.sekoia\.com/blog/[a-z0-9-]+/?$",
+    },
 }
 
 
@@ -296,7 +347,8 @@ def sitemap_entries(url: str, child: str | None, *, seen: set[str] | None = None
         if not loc:
             continue
         lastmod = re.search(r"<lastmod>\s*(.*?)\s*</lastmod>", block, flags=re.S)
-        location = loc.group(1).replace("&amp;", "&")
+        location = re.sub(r"^<!\[CDATA\[(.*)\]\]>$", r"\1", loc.group(1).strip())
+        location = location.replace("&amp;", "&")
         if kind == "sitemap":
             if child is None or re.search(child, location):
                 modified = _iso_date(lastmod.group(1)) if lastmod else None

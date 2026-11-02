@@ -49,6 +49,15 @@
       "reading": "the product owner chose the behaviour reading only (malware, tool and operation names hidden as well, --anonymize behavior / --level behavior) for both systems; there is no strict run. Both hypotheses are read at the behaviour reading. The development choices hold at that reading alone: at 0.99 no wrong name (0.98: 2), switch 0.5 the best first choice (28 of 44; 0.7-0.9: 27)",
       "sources_approved": "the 23 sources of the first set (new posts) and, as proposed on 2026-11-02: Sekoia, Lab52, Cyble, Group-IB, StrikeReady, Netskope Threat Labs, Trellix research, Malwarebytes Labs, CYFIRMA, ThreatBook, Kaspersky ICS CERT, IBM X-Force, CrowdStrike, JPCERT/CC, DomainTools, Gen Digital, Resecurity, Intrinsec, Infoblox, Dr.Web; each is probed (robots.txt, sitemap or feed) and kept when its posts can be listed with dates without working around a block",
       "cost": "OpenRouter credit 5.45 USD; the behaviour run cost about 0.059 USD per report on the first set; cap 5 USD"
+    },
+    {
+      "date": "2026-11-02",
+      "made_before": "the listing; no post of the new sources was opened",
+      "sources_kept": "probed with the builder's own sitemap/feed reader (one plain request per listing page): Group-IB blog (translated '-es' copies left out), StrikeReady blog, Kaspersky ICS CERT publications, JPCERT/CC Eyes (English), Gen Digital research, Resecurity blog, Intrinsec, Infoblox threat intelligence, ThreatBook blog, Sekoia (feed, reaches back to June 2026)",
+      "sources_dropped": "no listing for a plain request (never worked around): Cyble, Netskope, Malwarebytes (sitemaps refused), CrowdStrike, IBM X-Force, DomainTools (no listable posts), Lab52 (TLS refused), Trellix (time-outs); Dr.Web (post URLs differ only in the query string, which the URL key drops); CYFIRMA (the research section has no current sitemap)",
+      "builder": "scripts/prepare_fresh_reports.py sha256 f939697dbfaf36df1cc7c61d3cccb426e1fdaba4f75de42fdc0a16443ac7f270 (the ten sources added; sitemap locations wrapped in CDATA are read)",
+      "commands": "--output data/benchmarks/fresh2 --window 2026-03-01 2026-11-02 --exclude-listed data/benchmarks/fresh/candidates_2026-10-28.json data/benchmarks/fresh/candidates.json --list; --download; build with --twin-sets data/benchmarks/fresh/reports.jsonl data/benchmarks/fresh/open_set.jsonl",
+      "actor_list": "the first set's MISP threat-actor list (data/benchmarks/fresh/misp_threat_actor.json, sha256 4db1bf03...) is copied, not downloaded again, so both sets use the same names"
     }
   ]
 }
