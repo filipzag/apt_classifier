@@ -4,6 +4,7 @@ registered combination. Synthetic knowledge base, MISP list and artifacts; nothi
 
 from __future__ import annotations
 
+import json
 from datetime import date
 from types import SimpleNamespace
 
@@ -245,3 +246,66 @@ def test_page_dates_prefer_the_research_date_and_reject_batch_stamps():
     assert fresh.publication_date(feed, date(2026, 6, 16), batches) == date(2026, 7, 23)
     assert fresh.LIVING_TITLE_RE.search("Threat Brief: Credential Attacks (Updated August 18)")
     assert not fresh.LIVING_TITLE_RE.search("UAT-7810 continues building ORB networks")
+
+
+def _answer(report_id, truth, names, probability, decision="name", arm="known"):
+    raw = [{"group_id": "G9999", "group_name": name, "probability": probability} for name in names]
+    return {
+        "report_id": report_id,
+        "arm": arm,
+        "group_id": truth,
+        "candidates": [],
+        "raw_candidates": raw,
+        "decision": decision,
+    }
+
+
+def test_name_matching_confidence_cutoff_and_switch():
+    names = h2h.group_names(_kb().groups)
+    assert names["apt28"] == "G0007" and names["fancybear"] == "G0007"
+    product = {
+        "known": [
+            _product("r1", "G0007", "G0047", ["G0047", "G0007"]),
+            _product("r2", "G0032", "G0032", ["G0032"], stage="known_group_hypothesis"),
+            _product("r3", "G0129", "G0129", ["G0129"]),
+            _product("r4", "G0047", "G0047", ["G0047"]),
+        ],
+        "open_set": [_product("o1", None, "G0006", ["G0006"])],
+    }
+    llm = {
+        "rows": [
+            # the right name with an invented id: matched by its name
+            _answer("r1", "G0007", ["APT 28"], 0.99),
+            _answer("r2", "G0032", ["Lazarus Group"], 0.98),
+            # a name ATT&CK does not list is no ATT&CK name
+            _answer("r3", "G0129", ["Void Blizzard", "Mustang Panda"], 0.99),
+            _answer("r4", "G0047", ["APT1"], 0.3, decision="open"),
+            _answer("o1", None, ["APT1"], 0.95, arm="open_set"),
+        ]
+    }
+    result = h2h.score(product, llm, names=names, min_probability=0.99, switch_probability=0.5)
+    arms = result["arms"]
+    assert arms["llm"]["names_known"] == 2 and arms["llm"]["names_right"] == 2
+    assert arms["llm"]["names_outside_attack_known"] == 1 and arms["llm"]["names_open_set"] == 1
+    # only r1 is named at 0.99; r3's 0.99 is a name outside ATT&CK
+    assert arms["llm_confident"]["names_given"] == 1 and arms["llm_confident"]["names_right"] == 1
+    # r2: the product's leader agrees with the model's name below the cut-off
+    assert arms["agreed_or_confident"]["names_right"] == 2
+    # first choice: the model where it states >= 0.5 (r1, r2, r3 -> Mustang Panda), else the
+    # product (r4)
+    assert arms["switch"]["first_right"] == 4 and arms["llm"]["first_right"] == 3
+    assert arms["switch"]["names_open_set"] == 0
+    assert h2h.exact_interval(7, 10) == [0.3475, 0.9333]
+    assert h2h.exact_interval(17, 17)[0] == 0.8049 and h2h.exact_interval(0, 0) is None
+
+
+def test_second_set_leaves_out_every_url_the_first_listing_considered(tmp_path):
+    listed = tmp_path / "candidates.json"
+    listed.write_text(
+        json.dumps({"candidates": [{"url": "https://www.Example.com/a/b/?x=1"}]}), encoding="utf-8"
+    )
+    other = tmp_path / "reports.jsonl"
+    other.write_text(json.dumps({"url": "https://example.com/c"}) + "\n", encoding="utf-8")
+    bundle = {"objects": [{"external_references": [{"url": "https://example.com/d"}]}]}
+    urls = fresh.excluded_url_set(bundle, [other], [listed])
+    assert urls == {"example.com/a/b", "example.com/c", "example.com/d"}

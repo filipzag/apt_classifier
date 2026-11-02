@@ -1,0 +1,46 @@
+{
+  "schema": "attribution_prereg/1",
+  "id": "llm_confidence_cutoff_2026-11-02",
+  "title": "The model's own confidence as the naming rule, and a switch between the model and the product, tested on new fresh reports",
+  "registered": "2026-11-02",
+  "request": "the product owner asked (2026-11-02) for a proper test of a post hoc reading of the spent fresh set (docs 21.3.30): GPT-5.6 Sol's names at a stated probability of at least 0.99 were all right (17 of 17 at the strict reading, 8 of 8 at the behaviour reading), so the model's own confidence might replace the product's naming gate. The cut-off was picked after seeing those results, so it is chosen on that set (now development data) and tested once on reports neither system has read.",
+  "question": "On new threat reports published after GPT-5.6 Sol's training cutoff and not cited by ATT&CK, (1) are the model's names at a stated probability of at least 0.99 as safe as the product's names, with at least as many right; (2) does a switch (the model's first choice where it states at least 0.5, else the product's leader) put the right group first more often than the model alone?",
+  "role": "test set: evaluation only, never tuned on, never a training or calibration set; local only (the text belongs to each vendor; CISA advisories are US government works); not redistributed. The fresh set of 2026-10-28 is development data for this question from today.",
+  "design": {
+    "data": "the spent fresh set (data/benchmarks/fresh, 44 known reports on 25 groups and 54 open-set reports), the product and GPT-5.6 Sol runs at the strict and behaviour readings of 2026-10-29 (data/audits/fresh_h2h/product_{strict,behavior}.json, llm_gpt56sol_{strict,behavior}.json); no new run",
+    "matching": "the model's candidates are matched by name (ATT&CK 20.0 group names and aliases, case and punctuation ignored; a name ATT&CK does not list is not an ATT&CK group, so naming it gives no ATT&CK name). The registered matching of 2026-10-28 takes the id first; the model often writes a real name with an invented id (docs 21.3.28), which an integration would not use",
+    "naming_cutoff": "grid 0.90, 0.95, 0.97, 0.98, 0.99; rule: the lowest cut-off with no wrong ATT&CK name (a wrong name on a known report or any name on the open set) at both readings -> 0.99. Wrong names at strict / behaviour: 0.90 2/5, 0.95 1/3, 0.97 1/3, 0.98 1/2, 0.99 0/0",
+    "switch_cutoff": "grid 0.5, 0.7, 0.8, 0.9, 0.95, 0.99; rule: the highest first-choice count summed over both readings -> 0.5 (strict 29 for 0.5-0.9, behaviour 28 at 0.5, 27 at 0.7-0.9). Rejected on the same data: switching to the combination instead of the product's leader (28 / 26) and adding the product's names where the model is unsure (strict 1 right and 3 wrong names more)",
+    "development_result": {
+      "strict": "first choice product 19, model 24, switch 29 of 44 (switch - model +0.114, CI [+0.023, +0.205]); names right/wrong incl. open set: product 7/3, model 24/10, model at >= 0.99 17/0 (exact 95% interval of the share right [0.80, 1.00]), registered combination 13/1, agreed or confident 18/1",
+      "behaviour": "first choice product 10, model 23, switch 28 of 44; names: product 0/1, model 23/12, model at >= 0.99 8/0 ([0.63, 1.00]), agreed or confident 12/3"
+    },
+    "scorer": "scripts/fresh_h2h_score.py --matching name --llm-min-probability 0.99 --switch-probability 0.5 (sha256 9fe424094274006d6cdb0920e40bcc1c54046956365706e42f091bcd1bfdf233); arms product, llm, combination (registered 2026-10-28, here with name matching), llm_confident, agreed_or_confident, switch"
+  },
+  "set": {
+    "builder": "scripts/prepare_fresh_reports.py (sha256 bcc753761b8da9d31f63eab21523f3a8c9167dfafb6ab944ffdd4eebac2b754f before the new sources are added; the hash of the version that lists them is recorded in an amendment before the listing) -> data/benchmarks/fresh2/",
+    "sources": "the 23 sources of the first set plus new research blogs the product owner approves before the listing (recorded in an amendment with the probe result: a source that blocks automated access, serves a browser check or answers 403 is dropped, never worked around)",
+    "window": "published 2026-03-01 to the listing date by the date the page states (GPT-5.6 Sol's knowledge cutoff 2026-02-16)",
+    "exclusions": "every URL the first set's listing considered (data/benchmarks/fresh/candidates.json, so the first set's sources contribute only posts listed after 2026-10-28), URLs ATT&CK 20.0 cites, URLs of the other report sets, retellings of a first-set report (at least half of the masked statements shared, --twin-sets data/benchmarks/fresh/reports.jsonl data/benchmarks/fresh/open_set.jsonl)",
+    "labels_and_masking": "unchanged from the first set: label_report (known / open set / excluded), every actor name and vendor cluster code masked (hyphen-joined names too, since 86ffa03), at most 8 reports per actor, cross-posts once; a label review of the rule labels against the vendors' own attribution before any system runs, exclusions logged in data/benchmarks/fresh2/amendments.json, never relabelled",
+    "size": "whatever the listing yields; with fewer than 30 known reports the result is reported as descriptive only. Posts published after this listing may form a later confirmation set under the same rules; it is scored on its own, not pooled after looking"
+  },
+  "arms": {
+    "product": "the current defaults at the registering commit, local pipeline (no API key, local LLM off, technique head service on): scripts/attribution_benchmark.py --report-set fresh --cti-hal data/benchmarks/fresh2/reports.jsonl --open-set data/benchmarks/fresh2/open_set.jsonl --anonymize strict --report-observations 0; behaviour reading --anonymize behavior",
+    "llm": "openai/gpt-5.6-sol via OpenRouter, reasoning effort medium, the prompt and schema of scripts/fresh_llm_attribution.py (sha256 365dc81f6c7456ebadc95455b69d3d5a3737157fc37915374603eed176a102f2), one call per report, the statements the product reads; --reports/--open-set on data/benchmarks/fresh2, its own cache (--cache data/audits/fresh2_h2h)",
+    "readings": "strict (headline); behaviour (secondary, runs only if the credit allows)"
+  },
+  "hypotheses": {
+    "primary_naming": "llm_confident against product at the strict reading: wrong ATT&CK names in total (wrong names on known reports plus every name on the open set) and right names",
+    "primary_first_choice": "switch against llm at the strict reading: first choice right on known reports, paired bootstrap 95% interval (10,000 resamples, seed 7) and exact McNemar",
+    "secondary": "agreed_or_confident against llm_confident (does the product's agreement add right names without wrong ones); the behaviour reading of both hypotheses; the registered id-first matching reported beside; names of actors outside ATT&CK counted separately"
+  },
+  "reading_guide": {
+    "naming": "'at least as safe' = llm_confident has no more wrong names in total than the product and at least as many right names; the share of right names is read with its exact 95% interval, and with fewer than 10 confident names it is descriptive only",
+    "first_choice": "'clearly ahead' = at least 0.10 higher with the bootstrap interval above 0; otherwise 'comparable'",
+    "consequence": "naming at least as safe -> recommend, when a cloud key is allowed, naming by the model's confident answer, the product showing its evidence and shortlist beside it, and the product's gate alone without a key; otherwise names stay with the product's gate. Switch clearly ahead -> recommend the switch as the first choice when a cloud key is allowed; otherwise no recommendation on ranking from this test. No default changes without the product owner"
+  },
+  "caveats": "one sample per report; the model's probabilities are self-reported and coarse (many answers at exactly 0.99); labels are the vendors' attribution under the name-count rule; new sources may write differently from the first set's; posts may retell research from before the cutoff; both systems know earlier reporting on the same actors",
+  "cost": "OpenRouter credit 5.45 USD on 2026-11-02; GPT-5.6 Sol cost about 0.054 USD per report at the strict reading on the first set; the run is priced by --dry-run on the built set before any spend, cap 15 USD; downloads at one request per second, local only, after the product owner approves the new sources; product runs about 30 minutes per reading",
+  "amendments": []
+}

@@ -348,12 +348,18 @@ def feed_entries(url: str):
             return
 
 
-def list_candidates(excluded_urls: set[str]) -> dict[str, Any]:
+def list_candidates(
+    excluded_urls: set[str],
+    sources: list[str] | None = None,
+    window: tuple[date, date] = (WINDOW_START, WINDOW_END),
+) -> dict[str, Any]:
     """Every source's post URLs listed (leniently) from LIST_FROM; the window is applied to the
     date read from each page at build time."""
     candidates: dict[str, dict[str, Any]] = {}
     per_source: dict[str, Counter[str]] = {}
     for source, config in SOURCES.items():
+        if sources and source not in sources:
+            continue
         counts: Counter[str] = Counter()
         entries = []
         for sitemap in config.get("sitemaps", ()):
@@ -397,14 +403,17 @@ def list_candidates(excluded_urls: set[str]) -> dict[str, Any]:
     return {
         "listed_at": datetime.now(UTC).isoformat(),
         "list_from": LIST_FROM.isoformat(),
-        "window": [WINDOW_START.isoformat(), WINDOW_END.isoformat()],
+        "window": [window[0].isoformat(), window[1].isoformat()],
         "per_source": {source: dict(counts) for source, counts in per_source.items()},
         "candidates": rows,
     }
 
 
-def excluded_url_set(bundle: dict[str, Any], other_sets: list[Path]) -> set[str]:
-    """URLs ATT&CK cites anywhere, plus the URLs of the other report sets."""
+def excluded_url_set(
+    bundle: dict[str, Any], other_sets: list[Path], listed: list[Path] | None = None
+) -> set[str]:
+    """URLs ATT&CK cites anywhere, plus the URLs of the other report sets and every URL an
+    earlier listing (``candidates.json``) considered."""
     urls = {
         normalise_url(reference["url"])
         for item in bundle.get("objects", [])
@@ -419,6 +428,11 @@ def excluded_url_set(bundle: dict[str, Any], other_sets: list[Path]) -> set[str]
                 url = json.loads(line).get("url")
                 if url:
                     urls.add(normalise_url(url))
+    for path in listed or ():
+        urls.update(
+            normalise_url(row["url"])
+            for row in json.loads(path.read_text(encoding="utf-8"))["candidates"]
+        )
     return urls
 
 
@@ -855,7 +869,12 @@ def build(
     *,
     kb: AttackKnowledgeBase,
     misp: dict[str, Any] | None,
+    window: tuple[date, date] = (WINDOW_START, WINDOW_END),
+    twin_sets: list[Path] | None = None,
 ) -> dict[str, Any]:
+    """``twin_sets``: reports of other sets (masked statements); a report sharing at least
+    ``DUPLICATE_SHARE`` of its masked statements with one of them is left out."""
+    window_start, window_end = window
     anonymizer = ReportAnonymizer(kb, "strict")
     dictionary = actor_dictionary(kb, misp)
     # the registered label review: reports whose rule label disagrees with the vendor's own
@@ -892,7 +911,7 @@ def build(
             decisions[candidate["id"]] = {"label": "excluded", "reason": "not_downloaded"}
             continue
         published = publication_date(candidate, page["date"], batches)
-        if published is None or not WINDOW_START <= published <= WINDOW_END:
+        if published is None or not window_start <= published <= window_end:
             reason = "no_date" if published is None else "outside_window"
             excluded[reason] += 1
             decisions[candidate["id"]] = {"label": "excluded", "reason": reason}
@@ -944,6 +963,23 @@ def build(
             decisions[item["candidate"]["id"]]["duplicate_of"] = twin["candidate"]["id"]
             continue
         unique.append(item)
+    # a retelling of a report of another set (cross-posts, syndicated copies)
+    others = [
+        {statement["text"] for statement in json.loads(line)["statements"]}
+        for path in twin_sets or ()
+        for line in path.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    if others:
+        fresh_items = []
+        for item in unique:
+            texts = {mask_text(s["text"], pattern, software) for s in item["statements"]}
+            if any(_overlap(texts, other) >= DUPLICATE_SHARE for other in others):
+                excluded["twin_of_other_set"] += 1
+                decisions[item["candidate"]["id"]]["twin_of_other_set"] = True
+                continue
+            fresh_items.append(item)
+        unique = fresh_items
     # at most GROUP_CAP reports per actor, newest first
     by_actor: dict[str, list[dict[str, Any]]] = {}
     for item in unique:
@@ -991,12 +1027,13 @@ def build(
     groups = Counter(row["group_id"] for row in known_rows)
     manifest = {
         "source": "vendor research posts and CISA advisories published "
-        f"{WINDOW_START}..{WINDOW_END}, not cited by ATT&CK (scripts/prepare_fresh_reports.py)",
+        f"{window_start}..{window_end}, not cited by ATT&CK (scripts/prepare_fresh_reports.py)",
         "licence": LICENCE,
         "prepared_at": datetime.now(UTC).isoformat(),
         "attack_version": kb.version,
         "rule": {
-            "window": [WINDOW_START.isoformat(), WINDOW_END.isoformat()],
+            "window": [window_start.isoformat(), window_end.isoformat()],
+            "twin_sets": [str(path) for path in twin_sets or ()],
             "min_statements": MIN_STATEMENTS,
             "min_mentions": MIN_MENTIONS,
             "dominance": DOMINANCE,
@@ -1056,7 +1093,31 @@ def main(argv: list[str] | None = None) -> int:
             )
         ],
     )
+    parser.add_argument(
+        "--window",
+        nargs=2,
+        type=date.fromisoformat,
+        default=(WINDOW_START, WINDOW_END),
+        metavar=("START", "END"),
+        help="publication window (default: the first set's)",
+    )
+    parser.add_argument("--sources", nargs="*", help="list only these SOURCES (default: all)")
+    parser.add_argument(
+        "--exclude-listed",
+        nargs="*",
+        type=Path,
+        default=[],
+        help="earlier candidates.json files: every URL they listed is left out",
+    )
+    parser.add_argument(
+        "--twin-sets",
+        nargs="*",
+        type=Path,
+        default=[],
+        help="report files of other sets: retellings of their reports are left out",
+    )
     args = parser.parse_args(argv)
+    window = tuple(args.window)
     kb = AttackKnowledgeBase.load(args.kb)
     bundle = json.loads(args.bundle.read_text(encoding="utf-8"))
     output: Path = args.output
@@ -1064,7 +1125,9 @@ def main(argv: list[str] | None = None) -> int:
     candidates_path = output / "candidates.json"
     misp_path = output / "misp_threat_actor.json"
     if args.list:
-        listed = list_candidates(excluded_url_set(bundle, args.other_sets))
+        listed = list_candidates(
+            excluded_url_set(bundle, args.other_sets, args.exclude_listed), args.sources, window
+        )
         candidates_path.write_text(json.dumps(listed, indent=1), encoding="utf-8")
         print(f"{len(listed['candidates'])} candidates -> {candidates_path}")
         return 0
@@ -1081,7 +1144,7 @@ def main(argv: list[str] | None = None) -> int:
         download(candidates, output, delay=args.delay)
         return 0
     misp = json.loads(misp_path.read_text(encoding="utf-8")) if misp_path.is_file() else None
-    manifest = build(candidates, output, kb=kb, misp=misp)
+    manifest = build(candidates, output, kb=kb, misp=misp, window=window, twin_sets=args.twin_sets)
     print(
         json.dumps(
             {

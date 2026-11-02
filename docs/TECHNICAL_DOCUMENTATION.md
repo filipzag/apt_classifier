@@ -6890,6 +6890,38 @@ outcome, while the model's wrong names double.
 
 Cost: OpenRouter $5.79 (the head-to-head total is now $12.66); product 29 minutes.
 
+#### 21.3.31 The model's own confidence as the naming rule (registered 2026-11-02, not yet run)
+
+Question (product owner): after 21.3.30, GPT-5.6 Sol's names at a stated probability of at least
+0.99 were all right on the fresh set (17 of 17 at strict, 8 of 8 at behaviour). That cut-off was
+picked after seeing the results, so the fresh set is now development data for it and the test runs
+once on new reports (prereg `llm_confidence_cutoff_2026-11-02.json`).
+
+Chosen on the fresh set (`scripts/fresh_h2h_score.py --matching name --llm-min-probability 0.99
+--switch-probability 0.5`; the model's answers matched by name, a name ATT&CK does not list is no
+ATT&CK name):
+
+| fresh set (development) | strict: first / names right / wrong | behaviour: first / right / wrong |
+|---|---|---|
+| product | 19 / 7 / 3 | 10 / 0 / 1 |
+| model, every name | 24 / 24 / 10 | 23 / 23 / 12 |
+| model, names at >= 0.99 | 24 / 17 / 0 | 23 / 8 / 0 |
+| registered combination (product must agree) | 18 / 13 / 1 | 14 / 5 / 3 |
+| switch: model's first at >= 0.5, else the product's leader; names at >= 0.99 | **29** / 17 / 0 | **28** / 8 / 0 |
+
+(Wrong names include every ATT&CK name on the 54 open-set reports.) The naming cut-off is the
+lowest on a fixed grid with no wrong name at either reading; the switch cut-off the best first
+choice over both readings. The switch uses the complementarity of 21.3.30: where the model is
+unsure, the product's leader is often right (switch − model +0.114, CI [+0.023, +0.205] at strict,
+in-sample). Adding the product's names where the model is unsure added 1 right and 3 wrong names.
+
+Test set (`data/benchmarks/fresh2/`, the same builder with `--window`, `--sources`,
+`--exclude-listed` and `--twin-sets`): reports published from 2026-03-01 to the listing date that
+the first set's listing never considered, from the first set's sources and new sources the product
+owner approves, minus retellings of first-set reports; same labels, masking and label review.
+Primary readings at strict: names of the confident model against the product's (wrong names in
+total, right names), and the switch's first choice against the model's.
+
 ## 22. Failure modes and troubleshooting
 
 ### 22.1 “ATT&CK knowledge base has not been ingested”
