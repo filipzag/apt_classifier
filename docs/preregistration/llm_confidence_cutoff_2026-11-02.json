@@ -58,6 +58,14 @@
       "builder": "scripts/prepare_fresh_reports.py sha256 f939697dbfaf36df1cc7c61d3cccb426e1fdaba4f75de42fdc0a16443ac7f270 (the ten sources added; sitemap locations wrapped in CDATA are read)",
       "commands": "--output data/benchmarks/fresh2 --window 2026-03-01 2026-11-02 --exclude-listed data/benchmarks/fresh/candidates_2026-10-28.json data/benchmarks/fresh/candidates.json --list; --download; build with --twin-sets data/benchmarks/fresh/reports.jsonl data/benchmarks/fresh/open_set.jsonl",
       "actor_list": "the first set's MISP threat-actor list (data/benchmarks/fresh/misp_threat_actor.json, sha256 4db1bf03...) is copied, not downloaded again, so both sets use the same names"
+    },
+    {
+      "date": "2026-11-02",
+      "made_before": "any system ran on the set (only the build counts, the label review sheet and a check of the masked text were seen)",
+      "set_frozen": "listed 2026-11-02 (600 candidates: 26 new posts from the first set's sources, 574 from the new ones; SentinelOne and Silent Push sitemaps were unavailable this time), all 600 downloaded (146 MB); build: 291 outside the window, 204 no actor, 47 no dominant actor, 29 too short; 29 labelled, 8 excluded by the label review (data/benchmarks/fresh2/amendments.json: two 'Alibaba' MISP-synonym errors, a tool write-up, three multi-actor overviews or roundups, a fraud post on four actors, an open-set post the vendor ties to INC Ransomware). Final: 12 known reports on 10 groups (APT28, Lazarus Group, Gamaredon Group x3, BITTER, CURIUM, Scattered Spider, VOID MANTICORE, TeamPCP, ShinyHunters, The Gentlemen) and 9 open-set reports; sha256 reports.jsonl 48dc36114bcd3048..., open_set.jsonl 6499fb429e73cb61..., candidates.json 23aa889f07d0b603...",
+      "size": "12 known reports is below the registered 30: both hypotheses are read as descriptive only (the registered rule); a larger test needs a later confirmation set",
+      "masking_note": "after the behaviour masking no truth name is left; one ShinyHunters report keeps a member handle ('Shiny', @shinycorp) in one statement, the same text for both systems",
+      "cost": "dry run 1.15-2.62 USD for 21 reports at the behaviour reading; cap 5 USD"
     }
   ]
 }
