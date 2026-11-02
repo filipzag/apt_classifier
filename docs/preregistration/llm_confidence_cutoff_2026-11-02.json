@@ -42,5 +42,13 @@
   },
   "caveats": "one sample per report; the model's probabilities are self-reported and coarse (many answers at exactly 0.99); labels are the vendors' attribution under the name-count rule; new sources may write differently from the first set's; posts may retell research from before the cutoff; both systems know earlier reporting on the same actors",
   "cost": "OpenRouter credit 5.45 USD on 2026-11-02; GPT-5.6 Sol cost about 0.054 USD per report at the strict reading on the first set; the run is priced by --dry-run on the built set before any spend, cap 15 USD; downloads at one request per second, local only, after the product owner approves the new sources; product runs about 30 minutes per reading",
-  "amendments": []
+  "amendments": [
+    {
+      "date": "2026-11-02",
+      "made_before": "any listing, download or run on the test set",
+      "reading": "the product owner chose the behaviour reading only (malware, tool and operation names hidden as well, --anonymize behavior / --level behavior) for both systems; there is no strict run. Both hypotheses are read at the behaviour reading. The development choices hold at that reading alone: at 0.99 no wrong name (0.98: 2), switch 0.5 the best first choice (28 of 44; 0.7-0.9: 27)",
+      "sources_approved": "the 23 sources of the first set (new posts) and, as proposed on 2026-11-02: Sekoia, Lab52, Cyble, Group-IB, StrikeReady, Netskope Threat Labs, Trellix research, Malwarebytes Labs, CYFIRMA, ThreatBook, Kaspersky ICS CERT, IBM X-Force, CrowdStrike, JPCERT/CC, DomainTools, Gen Digital, Resecurity, Intrinsec, Infoblox, Dr.Web; each is probed (robots.txt, sitemap or feed) and kept when its posts can be listed with dates without working around a block",
+      "cost": "OpenRouter credit 5.45 USD; the behaviour run cost about 0.059 USD per report on the first set; cap 5 USD"
+    }
+  ]
 }
