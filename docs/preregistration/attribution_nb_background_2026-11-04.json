@@ -1,9 +1,9 @@
 {
  "schema": "attribution_prereg/1",
  "id": "attribution_nb_background_2026-11-04",
- "status": "draft: not registered until the product owner approves it; nothing below has run",
+ "status": "registered: approved by the product owner on 2026-11-04 before any run; the code is commit eab270e",
  "title": "Group-background correction of the Naive Bayes member: a combiner refitted with the corrected member, gated on fresh fold seeds, CTI-HAL and Elastic",
- "registered": null,
+ "registered": "2026-11-04",
  "parent": "docs 21.3.33 (profile-size bias, development only). The Naive Bayes member favours long ATT&CK technique lists on long reports; Kimsuky, with 130 techniques, led 18 of the member's 58 misses on the 68 development reports. The correction z-scores the member within each case, then each group against its own scores on the design folds.",
  "request": "the product owner chose the size bias as the first fix (2026-11-04) and asked that nothing interfere with the other session's work",
  "rollback": {
@@ -17,7 +17,7 @@
  },
  "change": {
   "member": "NAIVE_BAYES_BACKGROUND_ENABLED=true; NAIVE_BAYES_BACKGROUND_PATH=data/models/nb_background/nb_background_design.json (fingerprint 8023fdd904d99af52514a5e6, sha256 dc338921948787285f976245d3a833fb60f92f7472e3c70d070d8c4a6d0e6b5d). Built by scripts/fit_nb_background.py from the recorded design runs of the current defaults, procedure_core/design41_core.json (sha256 ac07353d…4868) and design53_core.json (sha256 eb6f9082…af9c): 360 cases, 358 to 360 reference cases per group, ATT&CK 20.0. Every other member, weight and naming rule is unchanged; the independent-inputs rules stay on in both arms.",
-  "code": "apt_classifier/nb_background.py (sha256 ec0d8d07…6e86) and scripts/fit_nb_background.py (sha256 daf4f1ea…e207), with the wiring in config.py, session.py, attribution_benchmark.py and fit_attribution_combiner.py. They are committed before any run, and the commit is recorded here.",
+  "code": "apt_classifier/nb_background.py (sha256 ec0d8d07…6e86) and scripts/fit_nb_background.py (sha256 daf4f1ea…e207), with the wiring in config.py, session.py, attribution_benchmark.py and fit_attribution_combiner.py. They were committed before any run, as commit eab270e.",
   "combiner": "the procedure-core recipe (attribution_procedure_core_2026-10-26), unchanged, on lists rebuilt with the corrected member voting. Fold lists: seeds 11/23/37, 5 randomised variants, the unknown-actor arm for every fold (data/audits/nb_background/training_lists_nb_background.jsonl.gz). Real lists: vendor, campaigns and advisories at names:30 and strict:all, plus one removed-actor list per report (data/audits/nb_background/training_lists_real_nb_background.jsonl.gz). The same leak control, group-level 5-fold CV, real weights 0/3/10/30, l2 1/3/10 and the registered selection rule. Written to data/models/combiner/attribution_combiner_nb_background.json.",
   "floor": "re-chosen for the new combiner by the registered rule of attribution_probability_floor_2026-10-25 (scripts/probability_floor_replay.py --choose), on the design seeds 41/53 run with the new configuration and no floor. If the rule finds no separating grid point, the arm keeps 0.20, the current value.",
   "labels": "confidence labels refitted on those design runs and pinned to the new combiner (display only, never a bar): data/models/calibration/confidence_labels_nb_background.json. If no set threshold meets its bound, they are fitted with --strong-only, as for the procedure core.",

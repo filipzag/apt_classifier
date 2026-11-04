@@ -7095,19 +7095,20 @@ Implementation, off by default (`NAIVE_BAYES_BACKGROUND_ENABLED=false`):
   load.
 
 Reading: a member-level result on development data. The product effect depends on the combiner,
-where the procedure-text members dominate. The gate is drafted in
-`docs/preregistration/attribution_nb_background_2026-11-04.json`, not yet registered:
+where the procedure-text members dominate. The gate is registered in
+`docs/preregistration/attribution_nb_background_2026-11-04.json` (2026-11-04, code commit
+eab270e, before any run):
 - a combiner fitted with the corrected member under its own file name;
 - the probability floor re-chosen on design seeds 41/53;
 - the bars on fresh fold seeds 149/151/157, CTI-HAL and Elastic.
 
 Fold seeds 131/137/139 are reserved for the knowledge-store test.
 
-The runners in `data/audits/nb_background/` refuse to start while the registration is a draft.
+The runners are in `data/audits/nb_background/`.
 `supervise.sh` starts only when no other process holds the GPU and nothing listens on port 8102,
 and it stops only the head service it started.
 
-Cost: CPU only, minutes; no credit.
+Cost: the study CPU only, minutes; the gate about 8 to 9 hours of laptop GPU; no credit.
 
 ## 22. Failure modes and troubleshooting
 
