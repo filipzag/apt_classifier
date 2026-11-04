@@ -6964,6 +6964,70 @@ reports, for example posts collected from November on under the same rules.
 Cost: OpenRouter $1.11 (the head-to-head total is now $13.77); product 9 minutes; downloads 600
 pages (146 MB, local only).
 
+#### 21.3.32 Exact procedure artefacts (2026-11-03, development only)
+
+Question: the literature's strongest attribution signal after malware family is the exact
+artefact an operator leaves behind: a registry key, a file path or name, a named pipe, a mutex, a
+service or task name, a PDB path, a user agent, a DLL export name. Do these put the right group
+first where the text members miss, and is the knowledge to weigh them there? Development data only
+(the 68 vendor, campaign and advisory reports of 21.3.24); CTI-HAL, Elastic and the fresh sets
+are not read.
+
+Method: `apt_classifier/evidence/artefacts.py` extracts and normalises the artefacts (hive
+spellings unified, user and environment folders folded into `%appdata%`-style variables, GUIDs,
+SIDs, long hex and digit runs replaced by placeholders, case folded; system binaries, LOLBins,
+generic folders and prose words dropped). Nothing in the pipeline imports it. The same extractor
+runs over the text member's ATT&CK corpus with each report's cited and copied texts and its own
+statements hidden (`TextGroupModel.without`). Each artefact is credited to the groups of the
+records that carry it and weighted by rarity, log(178 / groups). An artefact credited to more than
+8 groups never scores. Groups are ranked by the summed weight of what they share with the report,
+with ties counted against the actor (`scripts/separation_study/artefacts.py`, CPU, minutes).
+
+ATT&CK holds few exact artefacts: 435 file names, 176 paths, 114 registry keys, 26 task names,
+25 service names, 4 mutexes, 5 user agents, 2 PDB paths, 1 export name and no pipes (at most 8
+groups each).
+
+| 68 development reports (names / strict / tradecraft alike) | result |
+|---|---|
+| reports with any artefact | 43 / 42 / 42 |
+| reports sharing an artefact with ATT&CK (at most 8 groups) | 24 |
+| actor first / top-5 / MRR | 14 / 17 / 0.225 |
+| of the 14 firsts, a text member also first | **14 (0 new)** |
+| artefacts lead with another group | **10** |
+| text members (any) put the actor first, for comparison | 52 |
+
+Per matched artefact, the actor's share against a random other group: file names 51 matches,
+68.6% against 0%; paths 18, 88.9% against 5.6%; registry keys 8, 100%; service names 2, 100%.
+Dropping file names that are ATT&CK software names changes nothing (one match).
+
+- Every first place the artefacts give, a text member already gives: the text members read the
+  same tokens in the same sentences.
+- The 10 wrong leads are commodity tools and system files that ATT&CK happens to record for only
+  one or two groups: `wsmprovhost.exe`, `vlc.exe` (a side-loading host), `taskmgr.exe`,
+  `wmiprvse.exe`, `wmiexec.py`, `secretsdump.py`, `netscan.exe`, `/etc/passwd`, `info.txt`, and
+  one tie. ATT&CK's sparse coverage makes them look rare. Rarity needs many reports per artefact,
+  and ATT&CK has one or two.
+- An earlier extractor version gave 13 wrong leads; three came from extractor noise (prose such
+  as "in.zip", "and.log", an unquoted "exports the requests ...", `/dev/null`, `c:\temp`) and were
+  fixed as general hygiene. The same version backtracked exponentially on lines full of slashes
+  (the PDB pattern); it is now linear and tested.
+
+Where the knowledge could come from: the dated knowledge store outside its decisive window
+(2025-01-01 to 2026-02-28, never inspected; counts only, no text read). Of 757 posts with an
+actor reading (497 known, 260 open set), 521 carry an artefact (median 3 per post). Of 4,371
+distinct artefacts, 261 appear at two or more sources, and only 45 of those belong to one actor
+(35 file names, 7 paths, 1 registry key, 1 export, 1 user agent), spread over 232 actors. The
+store does see commodity tools as shared (`rar.exe` 8 actors, `secretsdump.py` 3, `/etc/passwd`
+3), which ATT&CK cannot.
+
+Reading: no artefact member over ATT&CK. It adds no first place and leads wrongly on 10 of 68
+reports. The store weighs artefacts better than ATT&CK does, but 45 single-actor artefacts that
+recur across sources are too few to build a member on. The extractor is kept so the store can
+record each post's artefacts as it grows. The question returns only in the store's own time-split
+test, when far more reports per actor exist. Nothing changes in the product.
+
+Cost: CPU only, about 10 minutes in total; no credit.
+
 ## 22. Failure modes and troubleshooting
 
 ### 22.1 “ATT&CK knowledge base has not been ingested”
