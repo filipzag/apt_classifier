@@ -57,6 +57,11 @@ from apt_classifier.group_mlp import (
     load_group_mlp_for,
 )
 from apt_classifier.llm import OpenRouterClient
+from apt_classifier.nb_background import (
+    load_nb_background_for,
+    nb_background_bound_fingerprint,
+    with_nb_background,
+)
 from apt_classifier.origin import OriginAndThreatAssessment, assess_origin_and_threat_type
 from apt_classifier.overlap_cluster import cluster_candidate
 from apt_classifier.platforms import ledger_platforms
@@ -325,6 +330,12 @@ class AttributionEngine:
             software_idf=bool(getattr(self.settings, "software_idf_enabled", True)),
             profile_forest=self.profile_forest,
         )
+        # the Naive Bayes member's group-background correction (off by default; fail closed to
+        # the shipped member)
+        self.nb_background, self.nb_background_status = load_nb_background_for(
+            self.settings, knowledge_base
+        )
+        self.classifiers = with_nb_background(self.classifiers, self.nb_background)
         self.group_mlp, self.group_mlp_status = load_group_mlp_for(self.settings, knowledge_base)
         if self.group_mlp is not None:
             self.classifiers = (*self.classifiers, GroupMLPClassifier(self.group_mlp))
@@ -376,6 +387,11 @@ class AttributionEngine:
             weights=self.default_weights(),
             family_weights=self.family_weights(),
         )
+        if self.nb_background is not None:
+            # a combiner fitted with the corrected Naive Bayes is bound to its reference
+            self.combiner_fingerprint = nb_background_bound_fingerprint(
+                self.combiner_fingerprint, self.nb_background
+            )
         if self.text_group is not None:
             # a combiner fitted with the text model voting is bound to that model and code
             self.combiner_fingerprint = text_group_bound_fingerprint(

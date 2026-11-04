@@ -7028,6 +7028,87 @@ test, when far more reports per actor exist. Nothing changes in the product.
 
 Cost: CPU only, about 10 minutes in total; no credit.
 
+#### 21.3.33 Profile-size bias of the technique-list members (2026-11-04, development only)
+
+Question: when the product ranks a similar group above the true one, what makes it pick that
+group, and can it be corrected?
+
+Diagnosis, from the recorded runs of the current defaults: 652 known-actor cases (fold seeds
+109/113/127, CTI-HAL, Elastic, the vendor, campaign and advisory sets, both fresh sets), 120 not
+ranked first. The evaluation sets were read as totals only: who led and how long each group's
+ATT&CK technique list is. Documented siblings explain little. The leader is a same-activity pair
+of the reviewed table in 7 misses, linked only by rarely used shared software in 5, a reviewed
+distinct pair in 2, and from the same country without a link in 18. The length of the leader's
+technique list explains more, in opposite directions:
+
+- Short inputs (at most 10 accepted techniques) are led by short lists. On the folds the wrong
+  leaders have a median of 7 documented techniques against 9 for the truth. APT30, documented
+  with only spearphishing attachment and user execution, led 12 fold misses and is never a fold
+  truth.
+- Long real reports (more than 10 accepted) are led by long lists: median 67 against 48 for the
+  truth. Kimsuky (130 techniques) led 10 real-report misses and was the truth in 2. Naive Bayes
+  ranked it first in 9 of the 10.
+
+Cause: Naive Bayes (`classifiers/naive_bayes.py`) scores the observed techniques only. A
+documented one adds log(alpha), an undocumented one log(beta), and a documented technique the
+report lacks costs nothing, so a long list covers most of a long report. IDF cosine and Jaccard
+divide by the whole list, so a two-technique list matches two observed techniques perfectly.
+
+The ATT&CK folds cannot judge this. A known fold keeps the true group's technique list, so every
+observed technique is in it, and any scorer that rewards "all observed techniques documented"
+wins (the "self-consistency over the technique table" of 10.3). The members were therefore
+replayed on the 68 development reports (vendor, campaigns, advisories): each report's accepted
+techniques from its recorded run, every group rescored on the CPU, strict ranks (ties count
+against the actor).
+
+| member alone, 68 development reports | top-1 | top-5 | MRR |
+|---|---|---|---|
+| Naive Bayes as shipped | 10 | 29 | 0.298 |
+| **Naive Bayes, case z-score, then each group's z-score on the design folds** | **23** | **34** | **0.415** |
+| Naive Bayes, multinomial likelihood with Dirichlet smoothing (mu 80) | 21 | 26 | 0.369 |
+| IDF cosine as shipped / with length norm 0.5 | 13 / 17 | 23 / 33 | 0.288 / 0.367 |
+| Jaccard as shipped | 16 | 27 | 0.316 |
+
+The chosen correction asks how unusual a group's score is for that group. It z-scores the scores
+across the groups of the case, so short and long inputs share one scale. It then z-scores each
+group against the mean and spread of its own case-level scores on the design folds, seeds 41 and
+53, which are ATT&CK-only cases. Against the shipped member it gains 14 reports and loses 1, top-1
++0.19 with a paired bootstrap 95% interval of +0.09 to +0.29. Kimsuky as wrong leader goes from 18
+to 0. With the other report sets as reference instead of the folds it reaches 21 to 22.
+The same per-group correction lowers IDF cosine (13 to 10) and Jaccard (16 to 11), whose bias runs
+the other way, so it applies to Naive Bayes only.
+
+Implementation, off by default (`NAIVE_BAYES_BACKGROUND_ENABLED=false`):
+
+- `apt_classifier/nb_background.py` wraps the Naive Bayes member under its own name, so fusion
+  weights, families and combiner columns treat it as that member. It lives outside
+  `classifiers/` so the combiner fingerprint is unchanged while it is off. On, the fingerprint
+  binds the module and the reference, so it needs its own combiner.
+- `scripts/fit_nb_background.py` writes the reference
+  (`data/models/nb_background/nb_background_design.json`: 360 design-fold cases, every group
+  with 358 to 360 reference cases, fingerprint 8023fdd904d99af5). It accepts only fold runs of
+  the design seeds, and its `--evaluate` reproduces the table above.
+- The reference pins the ATT&CK version, each group's technique list, the parent links and the
+  member's parameters. It also loads on a knowledge base with groups removed (the
+  removed-actor folds); any other change fails closed to the shipped member. The attribution
+  benchmark and the combiner fit refuse to run when the setting is on and the reference did not
+  load.
+
+Reading: a member-level result on development data. The product effect depends on the combiner,
+where the procedure-text members dominate. The gate is drafted in
+`docs/preregistration/attribution_nb_background_2026-11-04.json`, not yet registered:
+- a combiner fitted with the corrected member under its own file name;
+- the probability floor re-chosen on design seeds 41/53;
+- the bars on fresh fold seeds 149/151/157, CTI-HAL and Elastic.
+
+Fold seeds 131/137/139 are reserved for the knowledge-store test.
+
+The runners in `data/audits/nb_background/` refuse to start while the registration is a draft.
+`supervise.sh` starts only when no other process holds the GPU and nothing listens on port 8102,
+and it stops only the head service it started.
+
+Cost: CPU only, minutes; no credit.
+
 ## 22. Failure modes and troubleshooting
 
 ### 22.1 “ATT&CK knowledge base has not been ingested”

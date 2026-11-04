@@ -105,6 +105,7 @@ from apt_classifier.evidence.models import (  # noqa: E402
 )
 from apt_classifier.group_mlp import refit_without_groups  # noqa: E402
 from apt_classifier.llm import OpenRouterClient  # noqa: E402
+from apt_classifier.nb_background import nb_background_enabled  # noqa: E402
 from apt_classifier.overlap_cluster import SAME_ACTIVITY_LINKS, link_kind  # noqa: E402
 from apt_classifier.procedure_match import procedure_match_votes  # noqa: E402
 from apt_classifier.profile_forest import fit_profile_forest  # noqa: E402
@@ -1439,6 +1440,10 @@ def run_unknown(
             hide_group_entirely=True,
         )
         engine = AttributionEngine(settings, reduced, proxy, client)  # type: ignore[arg-type]
+        if nb_background_enabled(settings) and engine.nb_background is None:
+            # the reference accepts a knowledge base with groups removed; anything else would
+            # silently score this fold with the shipped member
+            raise RuntimeError(f"Naive Bayes background {engine.nb_background_status}")
         # the reduced knowledge base's index lacks the actor's own sentences; identical
         # sentences of other records are hidden too, as the dense store does
         hidden_lexical = hide_lexical(engine, fold.held_out_texts)
@@ -2132,6 +2137,13 @@ def main(argv: list[str] | None = None) -> int:
             file=sys.stderr,
         )
         return 3
+    if nb_background_enabled(settings) and engine.nb_background is None:
+        print(
+            f"refusing to run: NAIVE_BAYES_BACKGROUND_ENABLED but the reference is "
+            f"{engine.nb_background_status!r} (build it with scripts/fit_nb_background.py)",
+            file=sys.stderr,
+        )
+        return 3
     combiner_expected = bool(getattr(settings, "attribution_combiner_enabled", False))
     if (
         combiner_expected
@@ -2256,6 +2268,17 @@ def main(argv: list[str] | None = None) -> int:
                 }
             }
             if procedure_match_votes(settings)
+            else {}
+        ),
+        # only with the Naive Bayes correction on, so a default run keeps its fingerprint inputs
+        **(
+            {
+                "nb_background": {
+                    "status": engine.nb_background_status,
+                    "fingerprint": getattr(engine.nb_background, "fingerprint", None),
+                }
+            }
+            if nb_background_enabled(settings)
             else {}
         ),
         # only when the network votes, so a default run keeps its fingerprint inputs

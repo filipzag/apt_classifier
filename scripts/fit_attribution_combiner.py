@@ -51,6 +51,7 @@ from apt_classifier.combiner import (  # noqa: E402
 from apt_classifier.config import Settings  # noqa: E402
 from apt_classifier.embeddings import SentenceTransformerEmbedder  # noqa: E402
 from apt_classifier.group_mlp import precompute_draws, refit_without_groups  # noqa: E402
+from apt_classifier.nb_background import nb_background_enabled  # noqa: E402
 from apt_classifier.procedure_match import procedure_match_votes  # noqa: E402
 from apt_classifier.separation import discriminate, technique_document_counts  # noqa: E402
 from apt_classifier.session import AttributionEngine  # noqa: E402
@@ -425,6 +426,8 @@ def generate_unknown_lists(
             hide_group_entirely=True,
         )
         engine = AttributionEngine(settings, reduced, proxy, None)  # type: ignore[arg-type]
+        if nb_background_enabled(settings) and engine.nb_background is None:
+            raise RuntimeError(f"Naive Bayes background {engine.nb_background_status}")
         bench.hide_lexical(engine, fold.held_out_texts)
         if bench._forest_votes(engine):  # noqa: SLF001
             # the shipped forest knows the removed actor; the null option must be learned from
@@ -697,6 +700,10 @@ def generate_real_lists(
                     any_group_texts=fold.hidden_texts,
                 )
                 reduced_engine = AttributionEngine(settings, reduced, proxy, None)  # type: ignore[arg-type]
+                if nb_background_enabled(settings) and reduced_engine.nb_background is None:
+                    raise RuntimeError(
+                        f"Naive Bayes background {reduced_engine.nb_background_status}"
+                    )
                 bench.hide_lexical(reduced_engine, fold.hidden_texts)
                 if bench._forest_votes(reduced_engine):  # noqa: SLF001
                     reduced_engine.set_profile_forest(
@@ -1016,9 +1023,11 @@ def _cv_metrics(
 
 # fold seeds kept for evaluation and design (docs 21.3.13-21.3.15, the member gates of 21.3.19
 # and 21.3.20, the real-report combiner gate, the probability floor gate, the procedure-core
-# gate): never fitted on
+# gate, the knowledge-store test 131/137/139, the Naive Bayes background gate 149/151/157):
+# never fitted on
 EVALUATION_SEEDS = frozenset(
     {7, 41, 43, 47, 53, 59, 61, 67, 73, 79, 83, 89, 101, 103, 107, 109, 113, 127}
+    | {131, 137, 139, 149, 151, 157}
 )
 # report sets that are tests: never a source of training lists
 TEST_REPORT_SETS = ("cti_hal", "elastic")
@@ -1205,6 +1214,11 @@ def main(argv: list[str] | None = None) -> int:
         raise SystemExit(
             f"refusing to fit: PROCEDURE_MATCH_WEIGHT > 0 but the procedure member is "
             f"{engine.procedure_match_status!r} (it reads TEXT_GROUP_PATH)"
+        )
+    if nb_background_enabled(settings) and engine.nb_background is None:
+        raise SystemExit(
+            f"refusing to fit: NAIVE_BAYES_BACKGROUND_ENABLED but the reference is "
+            f"{engine.nb_background_status!r} (build it with scripts/fit_nb_background.py)"
         )
     stamp = args.lists_cache.with_name(args.lists_cache.name + ".pipeline")
     fold_args = {
