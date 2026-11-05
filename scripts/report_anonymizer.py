@@ -526,7 +526,9 @@ _OPERATION_RE = re.compile(
 class _BehaviorMask:
     """Names of malware and tools ATT&CK does not list, and operation names (``behavior``)."""
 
-    def __init__(self, kb: Any, directory: Path | None = None) -> None:
+    def __init__(
+        self, kb: Any, directory: Path | None = None, extra_names: Sequence[str] = ()
+    ) -> None:
         directory = directory or BEHAVIOR_DICTIONARY
         missing = [name for name in BEHAVIOR_FILES if not (directory / f"{name}.json").is_file()]
         if missing or not WORDS.is_file():
@@ -570,6 +572,18 @@ class _BehaviorMask:
                             single.add(label.casefold())
                     elif any(self.maskable(token) for token in tokens):
                         multi.add(label)
+        # names the knowledge store's posts introduce (the store arm's decisive test masks them in
+        # both arms, so no member can read a malware name this mask would otherwise miss)
+        for label in extra_names:
+            label = label.strip()
+            tokens = _TOKEN_RE.findall(label)
+            if not tokens or len(label) < 4:
+                continue
+            if len(tokens) == 1 and label == tokens[0]:
+                if self.maskable(label):
+                    single.add(label.casefold())
+            elif any(self.maskable(token) for token in tokens):
+                multi.add(label)
         self.single = single
         ordered = sorted(multi, key=lambda item: (-len(item), item.casefold()))
         self.multi_pattern = (
@@ -649,7 +663,8 @@ class ReportAnonymizer:
     is byte-identical; this class adds the guard for ordinary-word aliases and everything after.
     """
 
-    def __init__(self, kb: Any, level: str = "strict") -> None:
+    def __init__(self, kb: Any, level: str = "strict", extra_names: Sequence[str] = ()) -> None:
+        """``extra_names``: more malware names the behaviour level masks (the knowledge store's)."""
         if level not in LEVELS:
             raise ValueError(f"unknown anonymization level {level!r}")
         self.kb = kb
@@ -672,7 +687,7 @@ class ReportAnonymizer:
         for name in self.names:
             self._spellings.setdefault(name.casefold(), set()).add(name)
         self._guarded = {alias.casefold() for alias in GUARDED_ALIASES}
-        self._behavior = _BehaviorMask(kb) if level == "behavior" else None
+        self._behavior = _BehaviorMask(kb, extra_names=extra_names) if level == "behavior" else None
 
     # -- names, guarded ----------------------------------------------------------------
     def keeps_name_match(self, match: re.Match[str]) -> bool:

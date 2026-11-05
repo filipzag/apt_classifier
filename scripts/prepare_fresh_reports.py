@@ -40,28 +40,45 @@ so both systems read the same masked text; the benchmark's own anonymiser runs o
 
 Outputs under ``data/benchmarks/fresh/`` (gitignored; the text belongs to each vendor, CISA
 advisories are US government works; local evaluation only, do not redistribute).
+
+``--list --from-store <root>`` takes the candidates from the dated knowledge store instead
+(the decisive test of the store, prereg ``knowledge_store_decisive_2026-11-04.json``): its posts
+dated in the window, already listed and downloaded politely, with the store's dates, so a test
+report and the store view sliced at the report's date agree. The build then reads each page from
+the store's gzipped copy; labels, masking, caps and duplicates are unchanged.
 """
 
 from __future__ import annotations
 
 import argparse
-import email.utils
+import gzip
 import hashlib
 import json
 import re
+import sqlite3
 import sys
 import time
-from collections import Counter
+from collections import Counter, defaultdict
 from datetime import UTC, date, datetime
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlparse
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from apt_classifier.attack.kb import AttackKnowledgeBase  # noqa: E402
+from apt_classifier.knowledge_store import listing as _listing  # noqa: E402
+from apt_classifier.knowledge_store.listing import (  # noqa: E402
+    BATCH_PAGES,
+    LIVING_TITLE_RE,
+    batch_dates,
+    normalise_url,
+    page_date,
+    publication_date,
+    url_date,
+)
+from apt_classifier.knowledge_store.sources import SOURCES  # noqa: E402
 from scripts.prepare_vendor_reports import (  # noqa: E402
     USER_AGENT,
     _transient,
@@ -89,9 +106,6 @@ LEAD_STATEMENTS = 10
 OPEN_MAX_ATTACK_MENTIONS = 1
 GROUP_CAP = 8
 DUPLICATE_SHARE = 0.5
-BATCH_PAGES = 5
-# living documents ("Threat Brief: ... (Updated August 18)") carry content from before the window
-LIVING_TITLE_RE = re.compile(r"\(Updated\b|\bUpdated (?:on )?[A-Z][a-z]+ \d", re.IGNORECASE)
 MASK = "the adversary"
 WORDS = Path("/usr/share/dict/words")
 # vendor cluster codes (an actor ATT&CK does not document unless the code is an ATT&CK alias)
@@ -100,182 +114,10 @@ CLUSTER_CODE_RE = re.compile(
     r"|CL-(?:STA|CRI|UNK)-\d{4}|TGR-(?:STA|CRI|UNK)-\d{4}|Earth [A-Z][a-z]+|Water [A-Z][a-z]+"
     r"|Void [A-Z][a-z]+|SHADOW-[A-Z]+-\d+|REF\d{4}|STAC\d{3,5}|TAC\d{3,5})(?![\w-])"
 )
-_TREND_MONTH = {letter: index for index, letter in enumerate("abcdefghijkl", 1)}
-_MONTHS_SHORT = {
-    name: index
-    for index, name in enumerate(
-        ("jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"), 1
-    )
-}
 # MISP relations that tie an unmapped actor to an ATT&CK group's activity
 RELATION_TYPES = frozenset(
     {"similar", "overlaps", "linked-to", "part-of", "related-to", "associated-with"}
 )
-
-# Each source: how its posts are listed. ``sitemaps``: sitemap URLs (an index is followed into
-# children matching ``child``); ``feeds``: RSS/Atom URLs, ``{page}`` paged until older than
-# LIST_FROM; ``post``: a post URL pattern; ``dated``: how a URL encodes its date, if it does.
-SOURCES: dict[str, dict[str, Any]] = {
-    "unit42": {
-        "sitemaps": ["https://unit42.paloaltonetworks.com/sitemap_index.xml"],
-        "child": r"/post-sitemap\d*\.xml$",
-        "post": r"^https://unit42\.paloaltonetworks\.com/[a-z0-9-]+/$",
-    },
-    "microsoft": {
-        "feeds": ["https://www.microsoft.com/en-us/security/blog/feed/?paged={page}"],
-        "post": r"^https://www\.microsoft\.com/en-us/security/blog/\d{4}/\d{2}/\d{2}/[a-z0-9-]+/$",
-        "dated": "ymd",
-    },
-    "eset": {
-        "feeds": ["https://www.welivesecurity.com/en/rss/feed/"],
-        "post": r"^https://www\.welivesecurity\.com/en/[a-z0-9-]+/[a-z0-9-]+/$",
-    },
-    "securelist": {
-        "sitemaps": ["https://securelist.com/sitemap.xml"],
-        "child": r"/post-sitemap\d*\.xml$",
-        "post": r"^https://securelist\.com/[a-z0-9-]+/\d+/$",
-    },
-    "checkpoint": {
-        "sitemaps": ["https://research.checkpoint.com/sitemap_index.xml"],
-        "child": r"/post-sitemap\d*\.xml$",
-        "post": r"^https://research\.checkpoint\.com/20\d{2}/[a-z0-9-]+/$",
-    },
-    "sentinelone": {
-        "sitemaps": ["https://www.sentinelone.com/sitemap-labs.xml"],
-        "post": r"^https://www\.sentinelone\.com/labs/[a-z0-9-]+/$",
-    },
-    "talos": {
-        "sitemaps": ["https://blog.talosintelligence.com/sitemap-posts.xml"],
-        "post": r"^https://blog\.talosintelligence\.com/[a-z0-9-]+/$",
-    },
-    "zscaler": {
-        "sitemaps": ["https://www.zscaler.com/sitemap.xml"],
-        "post": r"^https://www\.zscaler\.com/blogs/security-research/[a-z0-9-]+$",
-    },
-    "proofpoint": {
-        "sitemaps": [f"https://www.proofpoint.com/us/sitemap.xml?page={n}" for n in range(1, 6)],
-        "post": r"^https://www\.proofpoint\.com/us/blog/threat-insight/[a-z0-9-]+$",
-    },
-    "google": {
-        "sitemaps": ["https://cloud.google.com/transform/sitemapsummary/cloudblog"],
-        "child": r"/cloudblog/en/2026-(?:0[2-9]|1[0-2])-",
-        "feeds": ["https://feeds.feedburner.com/threatintelligence/pvexyqv7v0v"],
-        "post": r"^https://cloud\.google\.com/blog/topics/threat-intelligence/[a-z0-9-]+/?$",
-    },
-    "trendmicro": {
-        "sitemaps": ["https://www.trendmicro.com/en_us/sitemap.xml"],
-        "post": r"^https://www\.trendmicro\.com/en_us/research/\d{2}/[a-l]/[a-z0-9-]+\.html$",
-        "dated": "trend",
-    },
-    "symantec": {
-        "sitemaps": ["https://www.security.com/sitemap.xml"],
-        "post": r"^https://www\.security\.com/threat-intelligence/[a-z0-9-]+$",
-    },
-    "recordedfuture": {
-        "sitemaps": ["https://www.recordedfuture.com/sitemap-main.xml"],
-        "feeds": ["https://www.recordedfuture.com/feed"],
-        "post": r"^https://www\.recordedfuture\.com/research/[a-z0-9-]+$",
-    },
-    "volexity": {
-        "sitemaps": ["https://www.volexity.com/sitemap_index.xml"],
-        "child": r"/post-sitemap\d*\.xml$",
-        "post": r"^https://www\.volexity\.com/blog/\d{4}/\d{2}/\d{2}/[a-z0-9-]+/$",
-        "dated": "ymd",
-    },
-    # added 2026-10-29 (amendment): the approved sources that can be listed with dates
-    "asec": {
-        "feeds": ["https://asec.ahnlab.com/en/feed/?paged={page}"],
-        "post": r"^https://asec\.ahnlab\.com/en/\d+/?$",
-    },
-    "seqrite": {
-        "feeds": ["https://www.seqrite.com/blog/feed/?paged={page}"],
-        "post": r"^https://www\.seqrite\.com/blog/[a-z0-9-]+/?$",
-    },
-    "bitdefender": {
-        "feeds": ["https://www.bitdefender.com/blog/api/rss/labs/"],
-        "post": r"^https://www\.bitdefender\.com/en-us/blog/labs/[a-z0-9-]+/?$",
-    },
-    "silentpush": {
-        "sitemaps": ["https://www.silentpush.com/sitemap_index.xml"],
-        "child": r"post|blog",
-        "post": r"^https://www\.silentpush\.com/blog/[a-z0-9-]+/?$",
-    },
-    "fortinet": {
-        "sitemaps": ["https://www.fortinet.com/sitemap-index.xml"],
-        "child": r"blog",
-        "post": r"^https://www\.fortinet\.com/blog/threat-research/[a-z0-9-]+$",
-    },
-    "arcticwolf": {
-        "sitemaps": ["https://arcticwolf.com/sitemap_index.xml"],
-        "child": r"post|blog|resource",
-        "post": r"^https://arcticwolf\.com/resources/blog/[a-z0-9-]+/$",
-    },
-    "rapid7": {
-        "sitemaps": ["https://www.rapid7.com/sitemap.xml"],
-        "child": r"blog",
-        "post": r"^https://www\.rapid7\.com/blog/post/[a-z0-9-]+/?$",
-    },
-    "hunt": {
-        "sitemaps": ["https://hunt.io/sitemap.xml"],
-        "post": r"^https://hunt\.io/blog/[a-z0-9-]+/?$",
-    },
-    "cisa": {
-        "sitemaps": ["https://www.cisa.gov/default/sitemap.xml"],
-        "post": r"^https://www\.cisa\.gov/news-events/cybersecurity-advisories/aa\d{2}-\d{3}[a-z]$",
-        "dated": "cisa",
-    },
-    # added 2026-11-02 for the second set (prereg llm_confidence_cutoff_2026-11-02): the
-    # approved sources whose posts can be listed with a plain request
-    "groupib": {
-        "sitemaps": ["https://www.group-ib.com/sitemap.xml"],
-        "child": r"blog|post",
-        # translated copies ("...-es/") are left out: the duplicate check compares statements
-        "post": r"^https://www\.group-ib\.com/blog/(?![a-z0-9-]+-(?:es|pt|br|fr|de|ar|tr|id)/$)"
-        r"[a-z0-9-]+/$",
-    },
-    "strikeready": {
-        "sitemaps": ["https://www.strikeready.com/sitemap.xml"],
-        "post": r"^https://www\.strikeready\.com/blog/[^/?#]+$",
-    },
-    "kaspersky_ics": {
-        "sitemaps": ["https://ics-cert.kaspersky.com/sitemap.xml"],
-        "child": r"publication",
-        "post": r"^https://ics-cert\.kaspersky\.com/publications/(?:reports|blog)/\d{4}/\d{2}/\d{2}/"
-        r"[a-z0-9-]+/$",
-        "dated": "ymd",
-    },
-    "jpcert": {
-        "sitemaps": ["https://blogs.jpcert.or.jp/sitemap.xml"],
-        "post": r"^https://blogs\.jpcert\.or\.jp/en/\d{4}/\d{2}/[A-Za-z0-9_.-]+\.html$",
-    },
-    "gendigital": {
-        "sitemaps": ["https://www.gendigital.com/blogentries/sitemap.xml"],
-        "post": r"^https://www\.gendigital\.com/blog/insights/research/[a-z0-9-]+$",
-    },
-    "resecurity": {
-        "sitemaps": ["https://www.resecurity.com/sitemap.xml"],
-        "post": r"^https://www\.resecurity\.com/blog/article/[a-z0-9-]+$",
-    },
-    "intrinsec": {
-        "sitemaps": ["https://www.intrinsec.com/sitemap_index.xml"],
-        "child": r"/post-sitemap\d*\.xml$",
-        "post": r"^https://www\.intrinsec\.com/[a-z0-9_-]+/$",
-    },
-    "infoblox": {
-        "sitemaps": ["https://www.infoblox.com/blog/sitemap_index.xml"],
-        "child": r"/post-sitemap\d*\.xml$",
-        "post": r"^https://www\.infoblox\.com/blog/threat-intelligence/(?:[a-z0-9-]+/)?[a-z0-9-]+/$",
-    },
-    "threatbook": {
-        "sitemaps": ["https://threatbook.io/sitemap.xml"],
-        "post": r"^https://threatbook\.io/blog/[a-z0-9-]+$",
-    },
-    "sekoia": {
-        # the feed reaches back to June 2026; the blog has no sitemap
-        "feeds": ["https://blog.sekoia.io/feed/?paged={page}"],
-        "post": r"^https://www\.sekoia\.com/blog/[a-z0-9-]+/?$",
-    },
-}
 
 
 # --------------------------------------------------------------------------- listing
@@ -293,111 +135,14 @@ def _get(url: str, *, timeout: float = 40.0) -> str | None:
     return response.text if response.status_code == 200 else None
 
 
-def normalise_url(url: str) -> str:
-    """Scheme-less, lower-case host, no query or fragment, no trailing slash (for matching)."""
-    parsed = urlparse(url.strip())
-    host = parsed.netloc.lower().removeprefix("www.")
-    return f"{host}{parsed.path}".rstrip("/").lower()
-
-
-def url_date(url: str, kind: str | None) -> date | None:
-    """The publication date a URL encodes (``ymd``: /YYYY/MM/DD/, ``trend``: /research/YY/m/,
-    first of the month, ``cisa``: aaYY-DDD day of the year)."""
-    try:
-        if kind == "ymd":
-            match = re.search(r"/(\d{4})/(\d{2})/(\d{2})/", url)
-            return date(int(match[1]), int(match[2]), int(match[3])) if match else None
-        if kind == "trend":
-            match = re.search(r"/research/(\d{2})/([a-l])/", url)
-            return date(2000 + int(match[1]), _TREND_MONTH[match[2]], 1) if match else None
-        if kind == "cisa":
-            match = re.search(r"/aa(\d{2})-(\d{3})[a-z]$", url)
-            if match:
-                return date.fromordinal(
-                    date(2000 + int(match[1]), 1, 1).toordinal() + int(match[2]) - 1
-                )
-    except ValueError:
-        return None
-    return None
-
-
-def _iso_date(text: str) -> date | None:
-    match = re.match(r"\s*(\d{4})-(\d{2})-(\d{2})", text or "")
-    if not match:
-        return None
-    try:
-        return date(int(match[1]), int(match[2]), int(match[3]))
-    except ValueError:
-        return None
-
-
 def sitemap_entries(url: str, child: str | None, *, seen: set[str] | None = None):
-    """(loc, lastmod) of every URL in a sitemap, following an index into matching children."""
-    seen = seen if seen is not None else set()
-    if url in seen:
-        return
-    seen.add(url)
-    text = _get(url, timeout=90.0)
-    if text is None:
-        print(f"  sitemap unavailable: {url}", flush=True)
-        return
-    blocks = re.findall(r"<(sitemap|url)>(.*?)</\1>", text, flags=re.S)
-    for kind, block in blocks:
-        loc = re.search(r"<loc>\s*(.*?)\s*</loc>", block, flags=re.S)
-        if not loc:
-            continue
-        lastmod = re.search(r"<lastmod>\s*(.*?)\s*</lastmod>", block, flags=re.S)
-        location = re.sub(r"^<!\[CDATA\[(.*)\]\]>$", r"\1", loc.group(1).strip())
-        location = location.replace("&amp;", "&")
-        if kind == "sitemap":
-            if child is None or re.search(child, location):
-                modified = _iso_date(lastmod.group(1)) if lastmod else None
-                if modified is None or modified >= LIST_FROM:
-                    yield from sitemap_entries(location, child, seen=seen)
-            continue
-        yield location, (_iso_date(lastmod.group(1)) if lastmod else None)
+    """(loc, lastmod) of every URL in a sitemap from LIST_FROM (``listing.sitemap_entries``)."""
+    yield from _listing.sitemap_entries(url, child, since=LIST_FROM, get=_get, seen=seen)
 
 
 def feed_entries(url: str):
-    """(link, published) of every item, paging ``{page}`` until older than LIST_FROM."""
-    pages = range(1, 40) if "{page}" in url else range(1, 2)
-    seen: set[str] = set()
-    for page in pages:
-        text = _get(url.format(page=page))
-        if text is None:
-            return
-        items = re.findall(r"<(item|entry)\b.*?</\1>", text, flags=re.S)
-        blocks = re.findall(r"<(?:item|entry)\b(.*?)</(?:item|entry)>", text, flags=re.S)
-        if not items:
-            return
-        oldest = None
-        fresh = 0
-        for block in blocks:
-            link = re.search(r"<link>\s*(.*?)\s*</link>", block, flags=re.S) or re.search(
-                r"<link[^>]*href=\"([^\"]+)\"", block
-            )
-            if not link:
-                continue
-            location = link.group(1).replace("&amp;", "&").strip()
-            published = None
-            stamp = re.search(r"<pubDate>(.*?)</pubDate>", block, flags=re.S)
-            if stamp:
-                try:
-                    published = email.utils.parsedate_to_datetime(stamp.group(1).strip()).date()
-                except (TypeError, ValueError):
-                    published = None
-            else:
-                stamp = re.search(r"<(?:published|updated)>(.*?)</", block, flags=re.S)
-                published = _iso_date(stamp.group(1)) if stamp else None
-            if location in seen:
-                continue
-            seen.add(location)
-            fresh += 1
-            if published is not None:
-                oldest = published if oldest is None else min(oldest, published)
-            yield location, published
-        if fresh == 0 or (oldest is not None and oldest < LIST_FROM):
-            return
+    """(link, published) of every item, paged until older than LIST_FROM."""
+    yield from _listing.feed_entries(url, since=LIST_FROM, get=_get)
 
 
 def list_candidates(
@@ -488,64 +233,91 @@ def excluded_url_set(
     return urls
 
 
+def store_candidates(
+    root: Path,
+    excluded_urls: set[str],
+    sources: list[str] | None = None,
+    window: tuple[date, date] = (WINDOW_START, WINDOW_END),
+    shown: set[str] | None = None,
+) -> dict[str, Any]:
+    """The knowledge store's posts published in the window, as candidates with the store's dates
+    and gzipped pages. Left out and counted: posts the store excludes (refusals, robots.txt),
+    copies of an earlier post, posts ATT&CK cites or another set holds (``excluded_urls``), posts
+    shown in a session before the test was registered (``shown``, store keys) and posts available
+    only after the window (updated more than 30 days after publication)."""
+    db = sqlite3.connect(f"file:{root / 'store.sqlite'}?mode=ro", uri=True)
+    db.row_factory = sqlite3.Row
+    start, end = (day.isoformat() for day in window)
+    per_source: dict[str, Counter[str]] = defaultdict(Counter)
+    rows: list[dict[str, Any]] = []
+    for row in db.execute(
+        "SELECT p.key, p.source, p.url, p.final_url, p.url_date, p.feed_date, p.lastmod, "
+        "p.excluded, p.raw_path, g.published, g.available_from, g.duplicate_of, g.attack_cited "
+        "FROM posts p JOIN pages g ON g.key = p.key "
+        "WHERE g.published >= ? AND g.published <= ? ORDER BY p.source, p.url",
+        (start, end),
+    ):
+        if sources and row["source"] not in sources:
+            continue
+        urls = {normalise_url(row["url"])} | (
+            {normalise_url(row["final_url"])} if row["final_url"] else set()
+        )
+        if row["excluded"]:
+            reason = "store_excluded"
+        elif row["duplicate_of"]:
+            reason = "copy_of_earlier_post"
+        elif row["attack_cited"] or urls & excluded_urls:
+            reason = "cited_or_in_another_set"
+        elif row["key"] in (shown or ()):
+            reason = "shown_before_registration"
+        elif row["available_from"] > end:
+            reason = "available_after_window"
+        else:
+            reason = "candidate"
+            rows.append(
+                {
+                    "source": row["source"],
+                    "url": row["url"],
+                    "listed": row["feed_date"] or row["lastmod"],
+                    "url_date": row["url_date"],
+                    "method": "feed" if row["feed_date"] else "sitemap",
+                    "store_key": row["key"],
+                    "raw": str(root / row["raw_path"]),
+                    "published": row["published"],
+                    "available_from": row["available_from"],
+                }
+            )
+        per_source[row["source"]][reason] += 1
+    # listed in the window by URL or listing date but never stored (refused, not yet fetched)
+    for row in db.execute(
+        "SELECT p.source, p.status FROM posts p LEFT JOIN pages g ON g.key = p.key "
+        "WHERE g.key IS NULL AND COALESCE(p.url_date, p.feed_date, p.lastmod) >= ? "
+        "AND COALESCE(p.url_date, p.feed_date, p.lastmod) <= ?",
+        (start, end),
+    ):
+        if not sources or row["source"] in sources:
+            per_source[row["source"]][f"not_stored_{row['status']}"] += 1
+    snapshot = {
+        key: db.execute("SELECT value FROM meta WHERE key = ?", (key,)).fetchone()
+        for key in ("finalised_at", "schema_version")
+    }
+    db.close()
+    for index, row in enumerate(rows):
+        row["id"] = f"{row['source']}-{hashlib.sha1(row['url'].encode()).hexdigest()[:12]}"
+        row["index"] = index
+    for source, counts in sorted(per_source.items()):
+        print(f"{source:15s} {dict(counts)}", flush=True)
+    return {
+        "listed_at": datetime.now(UTC).isoformat(),
+        "from_store": str(root),
+        "store": {key: value[0] if value else None for key, value in snapshot.items()},
+        "window": [start, end],
+        "per_source": {source: dict(counts) for source, counts in per_source.items()},
+        "candidates": rows,
+    }
+
+
 # --------------------------------------------------------------------------- page dates
-
-
-# meta names that state a publication date, most specific first (Recorded Future's
-# "published-date" is the research date; its JSON-LD datePublished is a re-dating stamp)
-_DATE_META = (
-    "published-date",
-    "article:published_time",
-    "og:published_time",
-    "publish-date",
-    "publication_date",
-    "pubdate",
-    "datePublished",
-    "date",
-    "dc.date",
-)
-_MONTH_RE = r"(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\.?"
-_VISIBLE_DATE_RE = re.compile(
-    rf"\b(\d{{1,2}})\s+({_MONTH_RE}),?\s+(20\d\d)\b|\b({_MONTH_RE})\s+(\d{{1,2}}),?\s+(20\d\d)\b"
-)
-# sources whose pages state the post date only as visible text, first on the page
-VISIBLE_DATE_SOURCES = frozenset({"symantec", "rapid7"})
-
-
-def _visible_date(html: str) -> date | None:
-    match = _VISIBLE_DATE_RE.search(html)
-    if not match:
-        return None
-    day, month, year = (
-        (match[1], match[2], match[3]) if match[1] else (match[5], match[4], match[6])
-    )
-    try:
-        return date(int(year), _MONTHS_SHORT[month[:3].lower()], int(day))
-    except (KeyError, ValueError):
-        return None
-
-
-def page_date(html: str, source: str | None = None) -> date | None:
-    """The publication date a page states: meta names in ``_DATE_META`` order, then JSON-LD
-    ``datePublished`` and ``<time>``; for ``VISIBLE_DATE_SOURCES`` the first date on the page."""
-    if source in VISIBLE_DATE_SOURCES:
-        return _visible_date(html)
-    for name in _DATE_META:
-        escaped = re.escape(name)
-        for pattern in (
-            rf"<meta[^>]+(?:property|name|itemprop)=\"{escaped}\"[^>]+content=\"([^\"]+)\"",
-            rf"<meta[^>]+content=\"([^\"]+)\"[^>]+(?:property|name|itemprop)=\"{escaped}\"",
-        ):
-            for match in re.finditer(pattern, html, flags=re.I):
-                found = _iso_date(match.group(1))
-                if found is not None:
-                    return found
-    for pattern in (r"\"datePublished\"\s*:\s*\"([^\"]+)\"", r"<time[^>]+datetime=\"([^\"]+)\""):
-        for match in re.finditer(pattern, html, flags=re.I):
-            found = _iso_date(match.group(1))
-            if found is not None:
-                return found
-    return None
 
 
 # --------------------------------------------------------------------------- actor names
@@ -883,34 +655,6 @@ def download(candidates: dict[str, Any], output: Path, *, delay: float = 1.0) ->
     return log
 
 
-def batch_dates(pages: dict[str, dict[str, Any]], sources: dict[str, str]) -> dict[str, set[date]]:
-    """Per source, the page dates shared by ``BATCH_PAGES`` or more pages: a site migration or
-    re-dating stamps one date on many old pages (Rapid7, Recorded Future), so such a date is no
-    publication date."""
-    counts: dict[str, Counter[date]] = {}
-    for page_id, page in pages.items():
-        if page.get("date") is not None:
-            counts.setdefault(sources[page_id], Counter())[page["date"]] += 1
-    return {
-        source: {day for day, count in counted.items() if count >= BATCH_PAGES}
-        for source, counted in counts.items()
-    }
-
-
-def publication_date(
-    candidate: dict[str, Any], stated: date | None, batches: dict[str, set[date]]
-) -> date | None:
-    """The page's stated date unless it is a batch date, else the URL's date, else a feed's
-    publication date; a sitemap's lastmod is a modification date and never counts."""
-    if stated is not None and stated not in batches.get(candidate["source"], set()):
-        return stated
-    if candidate.get("url_date"):
-        return date.fromisoformat(candidate["url_date"])
-    if candidate.get("method") == "feed" and candidate.get("listed"):
-        return date.fromisoformat(candidate["listed"])
-    return None
-
-
 def _overlap(a: set[str], b: set[str]) -> float:
     return len(a & b) / max(1, min(len(a), len(b)))
 
@@ -941,9 +685,14 @@ def build(
     software = dictionary["software_pattern"]
     pages: dict[str, dict[str, Any]] = {}
     for candidate in candidates["candidates"]:
-        path = _raw_path(output, candidate)
+        # a candidate from the knowledge store carries its gzipped page
+        path = Path(candidate["raw"]) if candidate.get("raw") else _raw_path(output, candidate)
         if path.is_file():
-            html = path.read_text(encoding="utf-8", errors="replace")
+            if path.suffix == ".gz":
+                with gzip.open(path, "rt", encoding="utf-8", errors="replace") as handle:
+                    html = handle.read()
+            else:
+                html = path.read_text(encoding="utf-8", errors="replace")
             parsed = parse_page(html)
             pages[candidate["id"]] = {
                 **parsed,
@@ -962,7 +711,11 @@ def build(
             excluded["not_downloaded"] += 1
             decisions[candidate["id"]] = {"label": "excluded", "reason": "not_downloaded"}
             continue
-        published = publication_date(candidate, page["date"], batches)
+        published = (
+            date.fromisoformat(candidate["published"])
+            if candidate.get("published")
+            else publication_date(candidate, page["date"], batches)
+        )
         if published is None or not window_start <= published <= window_end:
             reason = "no_date" if published is None else "outside_window"
             excluded[reason] += 1
@@ -1017,7 +770,7 @@ def build(
         unique.append(item)
     # a retelling of a report of another set (cross-posts, syndicated copies)
     others = [
-        {statement["text"] for statement in json.loads(line)["statements"]}
+        (path.parent.name, {statement["text"] for statement in json.loads(line)["statements"]})
         for path in twin_sets or ()
         for line in path.read_text(encoding="utf-8").splitlines()
         if line.strip()
@@ -1026,9 +779,13 @@ def build(
         fresh_items = []
         for item in unique:
             texts = {mask_text(s["text"], pattern, software) for s in item["statements"]}
-            if any(_overlap(texts, other) >= DUPLICATE_SHARE for other in others):
+            twin_set = next(
+                (name for name, other in others if _overlap(texts, other) >= DUPLICATE_SHARE),
+                None,
+            )
+            if twin_set is not None:
                 excluded["twin_of_other_set"] += 1
-                decisions[item["candidate"]["id"]]["twin_of_other_set"] = True
+                decisions[item["candidate"]["id"]]["twin_of_other_set"] = twin_set
                 continue
             fresh_items.append(item)
         unique = fresh_items
@@ -1063,6 +820,9 @@ def build(
             "published": item["published"].isoformat(),
             "statements": statements,
         }
+        if candidate.get("store_key"):  # the store view of this report is sliced at this date
+            row["available_from"] = candidate["available_from"]
+            row["store_key"] = candidate["store_key"]
         if decision["label"] == "known":
             known_rows.append(row)
         else:
@@ -1168,6 +928,19 @@ def main(argv: list[str] | None = None) -> int:
         default=[],
         help="report files of other sets: retellings of their reports are left out",
     )
+    parser.add_argument(
+        "--from-store",
+        type=Path,
+        default=None,
+        help="with --list: candidates from this knowledge store root instead of the listings",
+    )
+    parser.add_argument(
+        "--shown",
+        type=Path,
+        default=None,
+        help="with --from-store: JSON whose 'exposed' rows name store posts shown before "
+        "registration (left out)",
+    )
     args = parser.parse_args(argv)
     window = tuple(args.window)
     kb = AttackKnowledgeBase.load(args.kb)
@@ -1177,9 +950,16 @@ def main(argv: list[str] | None = None) -> int:
     candidates_path = output / "candidates.json"
     misp_path = output / "misp_threat_actor.json"
     if args.list:
-        listed = list_candidates(
-            excluded_url_set(bundle, args.other_sets, args.exclude_listed), args.sources, window
-        )
+        excluded = excluded_url_set(bundle, args.other_sets, args.exclude_listed)
+        if args.from_store:
+            shown = (
+                {row["key"] for row in json.loads(args.shown.read_text("utf-8"))["exposed"]}
+                if args.shown
+                else set()
+            )
+            listed = store_candidates(args.from_store, excluded, args.sources, window, shown)
+        else:
+            listed = list_candidates(excluded, args.sources, window)
         candidates_path.write_text(json.dumps(listed, indent=1), encoding="utf-8")
         print(f"{len(listed['candidates'])} candidates -> {candidates_path}")
         return 0

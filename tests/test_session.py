@@ -944,6 +944,120 @@ def test_old_ledgers_load_and_question_ids_do_not_change():
     assert roundtrip.question_answers[0] == software
 
 
+def test_store_members_at_weight_zero_leave_the_pipeline_unchanged(tmp_path):
+    """Off (the default) the knowledge store's members are not loaded and add no weight key, so
+    the fusion and the combiner fingerprint are unchanged; with a weight the store text votes in
+    learned_profile, binds the fingerprint and reads only the posts dated before the case."""
+    from apt_classifier.knowledge_store.members import (
+        STORE_SOFTWARE_NAME,
+        STORE_TEXT_NAME,
+        statement_keys,
+        write_artifact,
+    )
+
+    statements = [
+        "The adversary dumped LSASS memory with Mimikatz on the domain controller.",
+        "The adversary dumped LSASS memory again after moving over SMB shares.",
+        "Mimikatz output was staged in a temporary folder on the domain controller.",
+    ]
+    write_artifact(
+        tmp_path / "store_members.json.gz",
+        {
+            "metadata": {"attack_version": "test", "introduced_share": 0.25},
+            "posts": {"v/1": ["v", "2024-06-01", 0, sorted(statement_keys(statements))]},
+            "duplicates": {},
+            "text": [{"key": "v/1", "group": "G2", "text": t} for t in statements],
+            "links": [],
+            "names": [],
+            "software": {},
+            "masking_names": [],
+        },
+    )
+    kb = _kb()
+    store_dir = str(tmp_path)
+    off = AttributionEngine(_settings(knowledge_store_dir=store_dir), kb, FakeStore(), FakeLLM())
+    plain = AttributionEngine(_settings(), kb, FakeStore(), FakeLLM())
+    assert off.store_members is None and off.store_members_status == "disabled (weight 0)"
+    assert STORE_TEXT_NAME not in off.default_weights()
+    assert off.combiner_fingerprint == plain.combiner_fingerprint
+    assert all(c.name not in (STORE_TEXT_NAME, STORE_SOFTWARE_NAME) for c in off.classifiers)
+
+    on = AttributionEngine(
+        _settings(knowledge_store_dir=store_dir, store_text_weight=1.0),
+        kb,
+        FakeStore(),
+        FakeLLM(),
+    )
+    assert on.store_members_status == "active"
+    assert on.default_weights()[STORE_TEXT_NAME] == 1.0
+    assert STORE_SOFTWARE_NAME not in on.default_weights()
+    assert _CLASSIFIER_FAMILIES[STORE_TEXT_NAME] == "learned_profile"
+    assert on.combiner_fingerprint != plain.combiner_fingerprint
+
+    def store_text(state):
+        return next(r for r in state.classifier_results if r.classifier == STORE_TEXT_NAME)
+
+    ledger = _ledger("Mimikatz dumped LSASS memory on the domain controller")
+    assert store_text(on.analyze(ledger)).applicable
+    on.set_store_case(as_of="2024-06-01")  # the post is not available before the case
+    assert not store_text(on.analyze(ledger)).applicable
+    on.clear_store_case()
+    assert store_text(on.analyze(ledger)).applicable
+
+
+def test_the_weight_grid_refuses_a_case_as_the_engine_would(tmp_path):
+    """The store members' development grid fuses a case's classifier results again per weight
+    combination: weight 0 gives what an engine without the member gives, and the run's own
+    weights give the run's own ranking and decision."""
+    from apt_classifier.knowledge_store.members import (
+        STORE_TEXT_NAME,
+        statement_keys,
+        write_artifact,
+    )
+    from scripts.attribution_benchmark import grid_outcomes, parse_weight_grid
+
+    statements = [
+        "The adversary dumped LSASS memory with Mimikatz on the domain controller.",
+        "The adversary dumped LSASS memory again after moving over SMB shares.",
+        "Mimikatz output was staged in a temporary folder on the domain controller.",
+    ]
+    write_artifact(
+        tmp_path / "store_members.json.gz",
+        {
+            "metadata": {"attack_version": "test", "introduced_share": 0.25},
+            "posts": {"v/1": ["v", "2024-06-01", 0, sorted(statement_keys(statements))]},
+            "duplicates": {},
+            "text": [{"key": "v/1", "group": "G2", "text": t} for t in statements],
+            "links": [],
+            "names": [],
+            "software": {},
+            "masking_names": [],
+        },
+    )
+    kb = _kb()
+    ledger = _ledger("Mimikatz dumped LSASS memory on the domain controller", "PowerShell ran")
+    on = AttributionEngine(
+        _settings(knowledge_store_dir=str(tmp_path), store_text_weight=2.0),
+        kb,
+        FakeStore(),
+        FakeLLM(),
+    )
+    plain = AttributionEngine(_settings(), kb, FakeStore(), FakeLLM())
+    state = on.analyze(ledger)
+    base = plain.analyze(ledger)
+    grid = parse_weight_grid([f"{STORE_TEXT_NAME}=0,2"])
+    assert grid == [{STORE_TEXT_NAME: 0.0}, {STORE_TEXT_NAME: 2.0}]
+    cells = grid_outcomes(on, state, grid, {"G2"})
+    off, own = cells[f"{STORE_TEXT_NAME}=0"], cells[f"{STORE_TEXT_NAME}=2"]
+    assert off["top5"] == [e.group_id for e in base.fusion.entries][:5]
+    assert off["stage"] == base.attribution_decision.stage.value
+    assert off["leading"] == base.attribution_decision.leading_group_id
+    assert own["top5"] == [e.group_id for e in state.fusion.entries][:5]
+    assert own["stage"] == state.attribution_decision.stage.value
+    with pytest.raises(ValueError):
+        parse_weight_grid(["store_text"])
+
+
 def test_text_group_at_weight_zero_leaves_the_pipeline_unchanged(tmp_path):
     """Off (the default) the free-text model is not loaded and adds no weight key, so the fusion
     and the combiner fingerprint are unchanged; with a weight it votes in learned_profile."""

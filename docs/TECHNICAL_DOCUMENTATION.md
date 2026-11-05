@@ -2191,6 +2191,446 @@ The matching layer does not alter RRF, Bayes posterior, or classifier output. It
 
 Live feed data is not passed into the isolated AI reviewer by default. This prevents recency, source promotion, and unverified victim claims from becoming hidden review priors. The analyst can independently add corroborated evidence through the normal Intake workflow.
 
+### 12.6 Dated knowledge store, step 1: the collector (2026-11-03)
+
+Design: `docs/KNOWLEDGE_STORE_DESIGN.md` (21.3.29 found that the product loses on knowledge newer
+than ATT&CK; the open lists do not hold it). Step 1 reads the posts and stores them; it extracts no
+facts, and no ensemble member reads the store yet.
+
+- **Sources:** the 33 sources the product owner approved for the fresh sets
+  (`apt_classifier/knowledge_store/sources.py`, moved out of `scripts/prepare_fresh_reports.py`,
+  which now imports it). Listing, dating (`listing.py`) and page reading (`parse.py`) moved
+  unchanged out of the three report-set builders, which re-export the old names, so a test
+  report and a stored post are dated and read by one rule.
+- **Requests** (`fetch.py`): the store names itself (`VestigeKnowledgeStore/1.0`); robots.txt is
+  honoured, including crawl delays (missing allows and unreachable disallows, as in RFC 9309; a
+  refused robots.txt, 401/403, is read as "keep out", stricter than the RFC); one request per
+  second per site, sites in parallel; a 401/403/451 or 429 stops the
+  site for the run and it is left alone for 30 days (a rate limit for 1). Since 2026-11-04, five
+  bot-protection holding pages in a row ("202 Accepted", Check Point's answer) stop a site like a
+  refusal. Nothing is retried with
+  other headers. Refreshes are conditional (ETag, Last-Modified).
+- **Storage** (`store.py`): SQLite at `data/knowledge_store/store.sqlite` plus gzipped pages under
+  `raw/`; gitignored, local only (the text belongs to each publisher). The fresh-set downloads are
+  imported rather than requested again.
+- **Dates:** `published` is the fresh-set builder's rule. Every consumer reads through
+  `KnowledgeStore.view(as_of)`, which returns only posts with `available_from` before the date.
+  `available_from` is the publication date except:
+  - living documents count from the day they were fetched;
+  - posts a sitemap shows modified more than 30 days later count from that lastmod (a lastmod
+    shared by five or more posts of a source is a re-dating stamp);
+  - month-only URL dates count from the month's last day.
+- **Duplicates:** copies sharing at least half their statements point to the copy that was
+  available first. The ATT&CK-cited flag marks posts ATT&CK 20.0 cites; fold benchmarks will need
+  it to hide held-out sources.
+- **Commands:** `make store-backfill` (list from 2022-01-01, seed, fetch, parse, status; hours,
+  background), `make store-update` (daily), `make store-status`.
+- **Imported posts:** posts imported from the report sets (the older builders sent a browser
+  name and did not read robots.txt) are left out of every view when their site refuses the
+  reader or robots.txt does not allow them (`policy`, run after every fetch). Posts the store
+  fetched itself stay.
+- **First backfill (2026-11-03):** 12,776 posts listed, 11,103 stored, 10,725 dated and usable
+  (1,276 to 1,834 a year for 2022–2026). AhnLab ASEC, Silent Push and Fortinet are out (they
+  refuse the reader or forbid it in robots.txt). ESET is limited to its latest 100 posts.
+  Check Point, SentinelOne and Zscaler rate-limited the reader (1,669 posts waiting; the next
+  run reads them at 10 seconds between requests). The store takes 0.44 GB gzipped plus a 71 MB
+  database.
+
+### 12.7 Dated knowledge store, step 2: names and uses links (2026-11-03)
+
+`make store-extract` (`apt_classifier/knowledge_store/extract.py`, CPU, about 3 minutes with 6
+workers) reads every stored post that is not excluded or a duplicate. Rules only; no model and no
+OpenRouter credit.
+
+- **What a post is about:** the fresh-set builder's registered label rule (`label_report`) and its
+  actor dictionary (ATT&CK names and aliases, MISP synonyms, vendor cluster codes), injected so
+  the store and the test sets name actors alike.
+- **Software names:**
+  - ATT&CK names follow the app's matching rules, plus stricter ones:
+    - a malware name with inner capitals (PS1, OSInfo, MEDUSA) never matches all-lowercase text
+      (the 2026-10-02 rule);
+    - a name that is an ordinary word (Royal, Epic) matches only in its own spelling;
+    - a command word (route) matches only as `route.exe`;
+    - a short tool name (Reg, Arp, cmd) matches only as a command;
+    - a place (Cuba) or a group alias that is also a software alias (Sofacy, Snake) matches only
+      before a malware noun;
+    - nothing matches before a trademark sign.
+  - MISP's tool, RAT, backdoor, botnet, stealer and ransomware lists.
+  - Names a post introduces ("the HOOKEDGE backdoor", "a loader we named X"). Such a name counts,
+    as of a date, only when at least a quarter of the earlier posts that mention it introduce it
+    as malware. Technology words fall below that: MITRE was introduced as malware in 4 of the 397
+    posts that mention it, WhatsApp in 1 of 173, Golang in 22 of 104. Real names mostly score
+    between a third and all: FudModule 7 of 7, SparrowDoor 7 of 11.
+- **Uses links:**
+  - *Sentence rule:* one actor, a software and a use verb in one sentence.
+  - *Report rule:* in a single-actor post, software named at least twice, and at least one
+    sentence says it is used without another actor or a comparison. The link takes that sentence's
+    hedge.
+  - A sentence with a comparison ("similar to", "the same … as", "ties to"), a lure ("spoofing",
+    "masquerading as"), a leak or publication ("released by the Shadow Brokers") or several actors
+    gives *unclear* links. An unclear link counts only once the local model confirms it (below).
+  - Hedges are confirmed, stated, likely and possible; possible links never count towards naming.
+- **Claims:** "also known as", "part of" and "overlaps with" between two different actors are
+  stored as claims; nothing merges actors yet.
+- **Reading:** `KnowledgeStore.links_view(as_of)` aggregates links per actor and software from
+  posts available before the date. A link counts towards naming (`corroborated`) when two
+  publishers state it without a "possible" hedge (Securelist and Kaspersky ICS count as one).
+- **Result (extractor version 4, 10,934 posts):**
+  - 596 posts are single-actor about an ATT&CK group and 367 about another actor.
+  - There are 3,945 active links (2,921 from sentences, 1,024 from single-actor posts) and 2,379
+    unclear links.
+  - The active links form 1,688 actor-software pairs; 227 of them are confirmed by two
+    publishers, and 732 pairs exist only as unclear links.
+  - 2,027 malware names were introduced by posts; 1,638 pass the share rule.
+- **Quality check by hand:** two random samples of 200 active, non-"possible" links (100 per
+  rule), drawn only from posts outside the decisive-test window (2025-01-01 to 2026-02-28):
+  - First sample (version 2): 169 of 200 right (84.5%): sentence rule 87, report rule 82.
+  - The general error classes were then fixed: comparisons, lures, tactic ids read as Proofpoint
+    codes, short tool names, actor names before a malware noun, report links without a use
+    sentence.
+  - Second, fresh sample (version 3): 170 of 200 right (85%), 85 per rule. The remaining errors are
+    a long tail: leaks, partner groups, ransomware brands, wrong post labels, partial actor names
+    ("Mirage" in "Mirage Kitten").
+  - Links in pairs confirmed by two publishers, which are the ones that can name a group: 53 of 57
+    and 56 of 60, together 109 of 117 (93%), against the design's target of 90%.
+  - Version 4 only adds the leak and "plausible" rules. These can only move links to unclear; with
+    them the Shadow Brokers keeps no confirmed pair.
+- **Early stop (registered in `data/knowledge_store/early_stop_registered.json` before any result
+  was read):** the 8 malware links the model's reasons used on the 11 fresh reports it got and
+  the product missed (21.3.29).
+  - The store, as of each report's date, holds 4 of them: HEADLACE for APT28 (Recorded Future,
+    2024), which covers both HOOKEDGE reports; NotDoor and MiniDoor for APT28 (Zscaler,
+    StrikeReady); and Darkcomp for MuddyWater (Symantec, March 2026). Fewer than 3 meant stop, so
+    the result is **go**.
+  - One of the four is confirmed by two publishers (NotDoor). TomBerBil for ToddyCat (Kaspersky,
+    2024) is there but unclear.
+  - Missing:
+    - the Ptero tools for Gamaredon;
+    - TOSHIS and EntryShell for Tropic Trooper (first named in the report itself);
+    - COLDCOPY for Star Blizzard (Google mentioned it in October 2025 but never as malware, so the
+      share rule does not count it).
+  - Disclosure: the check reads the store up to dates after the decisive window, so its output
+    showed two posts inside that window (Zscaler and StrikeReady on NotDoor, February 2026;
+    Google on COLDCOPY, October 2025). No rule was changed after that.
+- **Local-model check (`make store-check`, `apt_classifier/knowledge_store/check.py`):**
+  - Each unclear link is one question to the local model (Qwen3.5 4B, Ollama 0.35 on port 11435).
+    The question gives the post title, the actor and the software as the text names them, the
+    sentences that decide the link and the claim that the actor itself used the software. A
+    sentence link shows its sentence and the one before. A report link shows up to six sentences
+    that name the software.
+  - The model writes a reason first, then supported, unsupported or uncertain. P(supported) comes
+    from the token probabilities, as in the technique verifier.
+  - A link counts once P(supported) reaches 0.98, the verifier's cut-off, fixed before the first
+    run. Verdicts are kept per model and prompt version (`link_checks`), so a new extraction keeps
+    them; `links_view(model=None)` leaves them out.
+  - **GPU only.** The model is loaded before the first question and must sit entirely in GPU
+    memory. Whenever it does not (a model that did not fit, or a server that lost the GPU after
+    a driver update), the check stops without using that answer.
+  - The model is reloaded every 50 answers, because the server's host memory grew to 9 GB after
+    about 330 answers and the laptop swapped.
+  - The run stops by itself after three answers in a row over 15 seconds. On 2026-11-03 the
+    laptop capped the GPU at 15 W of its 55 W and held it at 210 MHz, so an answer took 25 to 56
+    seconds instead of 1.5. The desktop is drawn on the same GPU and lagged.
+  - The model is unloaded when the run ends. The run is resumable.
+  - **Trial:** 30 random unclear links from posts outside the decisive window, before the run.
+    The model confirmed 10, and 9 of them were right; the tenth read Netcat, a feature of the
+    actor's backdoor, as a tool the actor used. Every rejection was right. Misses cost coverage,
+    not accuracy (MagicRAT for Lazarus, Carbon for Turla, ShadowPad for RedEcho).
+  - **Runs (2026-11-03):** all 2,379 unclear links are answered and 980 are confirmed (41%).
+    - The laptop answered 793 in two sittings. Each ended when the laptop throttled its GPU,
+      after 8 to 13 minutes of load, for about 2.5 hours.
+    - The other 1,586 ran on a rented GPU (Runpod Secure Cloud, RTX PRO 4500, image
+      `ollama/ollama:0.35.0`) at 0.9 seconds an answer. The pod ran 52 minutes and cost about
+      $0.62.
+    - It ran the exact local model file, uploaded and checked by its hash, because the Ollama
+      library's `qwen3.5:4b` has since been repackaged.
+    - Ollama listened only inside the pod and was reached through an SSH tunnel with a one-off
+      key. The pod and the key were deleted afterwards.
+    - The session script is kept with the store
+      (`data/knowledge_store/audit_scripts/pod_session.py`).
+  - **The two GPUs do not decide alike near the cut-off.**
+    - With the same model file, settings and questions, the laptop and the rented GPU decided
+      14 of 230 laptop-answered links differently (6%, 95% interval 4-10%). Six were confirmed
+      only on the laptop and eight only on the rented GPU.
+    - A repeat on the laptop itself differed on 1 of 30.
+    - The first 30-link comparison required 27 matches and got 26. The product owner chose to
+      continue and to measure the rate on 200 more.
+    - Rounding differences between the GPUs send the model's reasoning down another path.
+    - The store keeps each link's first answer, so which links count near the cut-off depends
+      on where they were answered.
+  - **Hand-check:** 100 model-confirmed links that count, from posts outside the decisive
+    window (seed 41019).
+    - 92 are right (95% interval 85-96%): 39 of 41 sentence links, 53 of 59 report links, and
+      all 42 links in two-publisher pairs. The rule links reached 85%, so the model's links are
+      as good or better.
+    - Two of the eight errors are the model's reading. It took Netcat, a feature of the actor's
+      backdoor, for a tool. It credited Tavdig to Storm-1837, although Secret Blizzard used
+      Storm-1837's backdoor to deploy it.
+    - The other six arise before the model. Four are name collisions: Karma for VOID MANTICORE,
+      Mirage Kitten for Ke3chang, the GOST cipher for the GOST tool, and a SPECTRE implant for
+      the Spectre ransomware.
+    - One post about RansomHub affiliates was taken to be about Scattered Spider. One suspected
+      attribution was stored as stated.
+  - **Swapped names (the design's memory test, on the same 100 links):**
+    - Replacing the actor's name with another well-known group in both the text and the claim
+      left the verdict "supported" on 93: 84 stayed above the cut-off and 9 fell just below it.
+      Two of the 7 reversals happened because the text still named the real actor. The answers
+      follow the text, not the model's memory.
+    - When only the claim names another group and the text is unchanged, the model still
+      confirmed 4 of 41 sentence links but 29 of 59 report links.
+    - The report-link question states that the report is about the actor (the report rule's
+      finding). The model trusts that statement instead of checking the name, so a report link
+      is only as right as the report rule's choice of subject.
+  - **Effect:**
+    - Active pairs rose from 1,688 to 1,900, and pairs named by two publishers from 227 to 280.
+    - The early stop was rerun on the registered links, reporting only whether each held. Five
+      of 8 held before each report's date (4 on rules alone), 3 of them by two publishers (1 on
+      rules alone).
+- **Not done yet:**
+  - Procedure text for the members (design step 5). The decisive test is registered and frozen
+    (12.8).
+  - Weak points to fix later: the name collisions above, and report-link questions that state
+    the subject instead of letting the model check it.
+
+### 12.8 Dated knowledge store, step 4: the decisive test, registered and frozen (2026-11-04)
+
+Registration: `docs/preregistration/knowledge_store_decisive_2026-11-04.json`. It was written
+before any system ran on a report of the set and before the store's members exist (design step
+5). The set is a test set: evaluation only, never tuned on, local only (the text belongs to each
+vendor).
+
+- **Question:** on vendor reports published from 2025-01-01 to 2026-02-28 that ATT&CK 20.0 does
+  not cite and no other set holds, does the product with the store's two members put the right
+  ATT&CK group first more often than without them, with no new wrong name? Each report reads only
+  posts available before its own date.
+- **Readings:**
+  - **Primary: behaviour** (the product owner's choice). Actor, malware, tool and operation names
+    are hidden, and for both arms every software name the store knows is masked too.
+  - Secondary: strict (actor names hidden, malware names kept). It informs but never decides.
+- **Adoption** (a default change still needs the product owner). Both must hold:
+  - at the behaviour reading the store arm puts the right group first more often, with the
+    bootstrap interval of the difference above 0 (10,000 report resamples, seed 7; an exact
+    McNemar test is reported too);
+  - no new wrong name on the set (known and open set, both readings), on the ATT&CK folds of
+    fresh seeds 131, 137 and 139, on CTI-HAL or on Elastic.
+- **Step 5's rule, fixed now** (the label reviewer also builds the members):
+  - Each member's weight is chosen from 0, 0.5, 1 and 2 on the development sets: both fresh sets
+    and the vendor, campaign and advisory sets, with the store sliced at each report's date.
+  - The pair that puts the right group first on the most known development reports at the
+    behaviour reading wins. Ties are broken by the strict reading, then by the smaller total
+    weight. A pair that adds a wrong name on a development set is not eligible.
+  - Then the combiner (the procedure-core recipe), the naming floor (design seeds 41/53) and the
+    confidence labels are refitted.
+  - If no pair puts more development reports first than weights 0, the decisive run is not made,
+    and that is the result.
+- **Names from before the window:** in the decisive run a store fact counts for an ATT&CK group
+  only through a name that pointed to that group before 2025:
+  - the group's ATT&CK 20.0 name;
+  - its names and aliases in ATT&CK 16.1 (2024-11-12, `data/raw/enterprise-attack-16.1.json`);
+  - a synonym in the MISP actor list at commit 3735fd37 (2024-12-24,
+    `data/raw/misp_galaxy_3735fd37/`; 793 actors against 1,113 in October 2026).
+
+  Software names are not pinned. Development reports from 2026-03-01 on use ATT&CK 18.1 and the
+  last MISP commit before that date.
+- **Building the set** (`data/benchmarks/decisive/build.sh`, local):
+  - `scripts/prepare_fresh_reports.py --list --from-store` (new, with a test) takes the
+    candidates and their saved pages from the store, with the store's dates. The fresh sets'
+    build then applies the same labels, masking, cap of 8 reports per actor and twin check.
+  - Left out: posts ATT&CK 20.0 cites, the URLs of the 12 other set files, copies of earlier
+    store posts, retellings of another set's reports, and posts available only after the window
+    (modified more than 30 days after publication).
+  - Left out as shown before registration: a scan of every session transcript and store result
+    file found 47 of the window's 2,010 stored posts, mostly from building the fresh sets and the
+    attribution research. Five more support links that the store's early-stop output showed by
+    publisher and date (among them the Zscaler and Google posts disclosed in 12.7). All 52 are
+    out.
+  - Not left out: URLs the fresh listings had only considered. Those listings took undated
+    sources whole and dated their posts without computing a label. Leaving them out would have
+    cost 563 of 1,977 posts (28%).
+- **Sources:**
+  - The 796 Zscaler posts that its rate limit had held back were fetched on 2026-11-04. Zscaler's
+    sitemap stamps 744 posts with an April 2025 date, but only 6 of the 796 were published in the
+    window (5 of them cited by ATT&CK), so none joined the set.
+  - SentinelOne rate-limited the reader again at its first request, and Check Point answered 218
+    of 231 requests with its bot-protection page. Both are left alone, never worked around.
+  - Their unfetched posts are not in the set: 88 of SentinelOne's and 103 of Check Point's that
+    their listings date to the window. Leaving out SentinelOne's was the product owner's choice;
+    Check Point's are treated the same way. The fetcher now stops a site after five
+    bot-protection pages in a row (12.6).
+- **Label review:** before any system ran, all 154 known and open-set reports were read against
+  the vendor's own attribution: the title, the label with its name counts, and the sentences that
+  name an actor. 34 were excluded, never relabelled (16 known, 18 open set;
+  `data/benchmarks/decisive/amendments.json`):
+  - roundups and posts about several actors;
+  - name collisions: "Poseidon" was the Poseidon Stealer, and "Alibaba" (a cloud registry) is a
+    MISP synonym of Cleaver;
+  - posts that tie the activity to a group only by an overlap, a resemblance or a low-confidence
+    suspicion, or that report an actor's claim without attributing it;
+  - open-set posts about a service, loader or framework that several actors use, or whose actor
+    the vendor ties to an ATT&CK group. For example, TA444 is BlueNoroff, which ATT&CK lists as an
+    alias of APT38; the label rule's name matching is case-sensitive and missed it.
+- **Frozen (2026-11-04):**
+  - 48 known reports on 25 groups and 69 open-set reports, published 2025-01-06 to 2026-02-26,
+    from 1,802 candidate posts. Most posts name no actor (1,154) or no leading one (316), and
+    181 are too short.
+  - Scattered Spider has 6 reports and Mustang Panda 4; no other group has more than 3.
+  - The rebuild after the last download added no report, so nothing was read again. One excluded
+    report left the candidates as a post behind an early-stop link.
+  - The registration's `frozen` entry holds the hashes of every set file and of the builder. The
+    code is the uncommitted worktree on top of commit 7c0f532.
+- **Fewer than 60 known reports:** under the design's rule (2026-11-03, before any count) every
+  reading of this set is descriptive only, and nothing is adopted on it.
+- **Not done yet:** step 5 (the two members, development runs, combiner, floor and labels; 12.9)
+  and step 6 (the decisive run and the gate).
+
+### 12.9 Dated knowledge store, step 5: the two members (2026-11-04)
+
+Code: `apt_classifier/knowledge_store/members.py` and `pins.py`. `scripts/knowledge_store.py
+members [--pin]` writes the artifacts. Both members are off by default (`STORE_TEXT_WEIGHT`,
+`STORE_SOFTWARE_WEIGHT` = 0): nothing loads and the combiner fingerprint is unchanged. Amendment 1
+of the decisive test's registration records every choice below, written before any development
+run.
+
+- **Store text:** one document per ATT&CK group, built from the statements of the posts the store
+  labels to that group (606 posts and 63,726 statements in the current store), with actor names
+  masked. It uses the free-text member's TF-IDF. Each case rebuilds the documents from the posts
+  available before its date, which equals a fresh fit on those statements. Like the other text
+  members it never counts as independent evidence.
+- **Store software:** the software member's rarity rule over the store's uses links that ATT&CK
+  lacks. Links that count: active rule links and unclear links the local model confirmed (4,956 in
+  the current store). A software's users are ATT&CK's groups plus every actor the store links to
+  it, so a malware many actors use weighs little. Software in a case: the ATT&CK software the
+  pipeline found, plus MISP and store names written in the text. It ranks on every link one
+  publisher states without "possible". For the naming gate it supports a group only through a
+  link two publishers state, and it shares the software family with the ATT&CK member.
+- **What a case never reads:** its own post, the post's copies, or any post sharing at least half
+  of its statements. Statements are compared without names, so a vendor's retelling of another
+  vendor's report is caught too.
+- **Names from before each report (the pins):** a dated report reads a copy of the store whose
+  actors were named with older lists:
+  - before 2026-03-01: ATT&CK 16.1 and MISP 3735fd37 (the decisive set and most development
+    reports);
+  - from 2026-03-01: ATT&CK 18.1 and MISP 03b461ff (2026-02-16; both fresh sets and three vendor
+    reports);
+  - undated cases and the app read the store with the current lists.
+
+  | Copy | Known posts | Counted links | Unclear links without a model answer |
+  |---|---:|---:|---:|
+  | current lists | 606 | 4,956 | 16 |
+  | before 2025 | 588 | 4,621 | 270 |
+  | before 2026-03 | 599 | 4,842 | 85 |
+
+  An unclear link without the model's answer never counts. The older lists name some actors
+  differently, so the model's earlier answer, which is stored per actor, does not apply to them.
+- **Which reports read what:**
+  - Fresh, vendor, decisive and Elastic reports read the store before their published date. The
+    store is not empty before 2022: the sources' sitemaps also list older posts, and it holds
+    3,741 pages dated before 2022, 123 of them labelled to a group (amendment 1 said otherwise;
+    amendment 2 corrects it).
+  - Campaigns and advisories have no date: they read nothing.
+  - ATT&CK fold cases read the whole store, without the posts ATT&CK cites for the held-out
+    sentences (and without the removed actor in the unknown arm).
+  - CTI-HAL reads the whole store without its own posts (`--store-undated whole`), for the safety
+    check only.
+- **Behaviour reading:** `--mask-store-names` also masks every malware name the store's posts
+  introduce, in both arms. ATT&CK's tools stay, as at the fresh sets' behaviour reading.
+- **Weight choice, as run:**
+  - One run per development set and reading, with both members loaded. `--weight-grid` fuses each
+    case again for all 16 weight pairs: the classifiers do not read the weights, so only fusion and
+    the gate run again. A test checks that this equals separate runs.
+  - The learned combiner is off for every pair, because the current one cannot load once a member
+    votes. Without the combiner, the naming floor does not act during the choice.
+  - `data/knowledge_store/step5/choose_weights.py` applies the registered rule. A pair is not
+    eligible if it gives a wrong name that weights 0 do not.
+- **After the choice:**
+  - The combiner is refitted on the procedure-core recipe, then the design seeds, the floor and
+    the labels are redone (`run_refit.sh`).
+  - A development check follows (`run_check.sh`): if the store arm gives a wrong name the baseline
+    does not, it is not frozen and the decisive run is not made.
+- **Engine and benchmarks:**
+  - `engine.set_store_case` tells the members which case they read (date, own posts, removed
+    actor).
+  - Combiner feature schema 4 adds the two members' columns; older artifacts load on their own
+    columns.
+  - The naming gate has a limited-support rule for store software (`attribution.LIMITED_SUPPORT`).
+- **Store refresh:** the store was read again on 2026-11-04 with the 814 pages fetched that day.
+  The copy from before is kept in `data/knowledge_store/step5/`.
+- **Tests:**
+  - `tests/test_knowledge_store_members.py`: date slices, hiding, rarity, the share rule for names,
+    pins and the gate limit;
+  - the builder end to end;
+  - session tests: weight 0 changes nothing, and the grid equals the engine.
+- **Caveat, ATT&CK folds:** the store's posts describe the same intrusions as ATT&CK's procedure
+  examples, and only the cited posts are hidden. On the folds the store text can therefore match a
+  held-out sentence through another vendor's write-up, and the combiner may learn to trust it more
+  than real reports support. The refit reports each member's top-1 alone on the folds and on the
+  vendor set.
+- **Result (2026-11-04, amendment 2): no decisive run.** The six grid runs took 1 h 50 min on
+  the laptop GPU. The development sets hold 90 known reports at each reading and 63 open-set
+  reports.
+
+  | Weights (store text, store software) | First at behaviour | First at strict | Eligible |
+  |---|---:|---:|---|
+  | 0, 0 | 22/90 | 41/90 | yes |
+  | 0.5, 0 | 20/90 | 41/90 | yes |
+  | 1 or 2, 0 | 19/90 | 39-41/90 | no: one open-set name |
+  | 0, 2 (best with store software) | 23/90 | 46/90 | no: two wrong names |
+
+  - Every store software weight above 0 adds a wrong name: Mustang Panda for a Tropic Trooper
+    report at the behaviour reading, and two more at the strict reading.
+  - So no eligible pair beats weights 0, and as registered the decisive run is not made. The
+    combiner refit, floor, labels and development check were not run. Both members stay off.
+- **Why (development numbers; nothing is chosen on them):**
+  - Alone, store text ranks the right group first more often than any other member on both fresh
+    sets: 20/44 and 7/12 at the behaviour reading, against 13/44 and 5/12 for the ATT&CK text
+    member and 8/44 and 4/12 for the whole product with the combiner off.
+  - Fused without the combiner, it changes no first choice on either fresh set at any weight.
+    Where it is right alone, the right group moves up only a few places (for example 59th to
+    47th).
+  - On the vendor set it is the weakest text member (7/34 against 22-26/34): these reports are the
+    sources of ATT&CK's procedure text. Both first choices it costs there are on reports from
+    before 2022, where the store holds only old sitemap posts. Had it not voted on them, store text
+    0.5 would have tied weights 0, and the tie goes to weights 0.
+- **Second attempt (amendment 3, product owner's request, registered before it ran):** store text
+  alone (weight 1, store software off), judged through its own refitted combiner
+  (`attribution_combiner_store_core.json`, the procedure-core recipe with every list generated
+  afresh). The go rule had two parts. First, summed over the three sets at the behaviour reading,
+  the store arm must put the right group first more often than the product's defaults. Second, it
+  must give no wrong name the defaults do not give.
+- **Result (2026-11-05, amendment 4): no decisive run.** The attempt took 8 hours on the laptop
+  GPU, with no API credit.
+  - Combiner: real weight 10, l2 10, cross-validated clean fold top-1 0.912. It gives store text
+    small weights (score −0.06, rank 0.21) next to the other text members (score 0.50-0.67). On the
+    ATT&CK folds, its main training data, store text alone is weak: 31/155 and 28/155 first on the
+    design seeds, against 86-102 for the ATT&CK text member.
+  - Design seeds 41/53: 140 and 138 of 155 first, with 35 and 36 names and none wrong. The floor
+    rule chose 0, since there was nothing to hold. The labels are strong-only (0.635).
+  - Development check (first / named / wrong; the vendor numbers are in-sample for both arms'
+    combiners):
+
+    | Set, reading | Store arm | Defaults |
+    |---|---|---|
+    | fresh, behaviour | 10/44, 0, 0 | 10/44, 0, 0 |
+    | fresh, strict | 18/44, 8, 2 | 19/44, 8, 1 |
+    | fresh2, behaviour | 5/12, 0, 0 | 4/12, 0, 0 |
+    | fresh2, strict | 5/12, 3, 0 | 5/12, 3, 0 |
+    | vendor, behaviour | 23/34, 2, 0 | 23/34, 2, 0 |
+    | vendor, strict | 29/34, 6, 0 | 30/34, 6, 0 |
+
+  - The first part holds (38 vs 37 at behaviour, one fresh2 report), but at strict the store arm
+    is behind (52 vs 54).
+  - The second part fails, on a Silent Push report labelled The Gentlemen. Both arms lead with
+    Storm-1811 (combiner p 0.85-0.92, through the Black Basta tooling). The defaults hold it at
+    separation 0.30, below the bar of 0.5. Store text changes the runner-up, the separation
+    rises to 0.58, and the gate names the wrong group.
+  - The store arm also drops one correct name and one open-set name at the strict reading.
+  - So the store arm is not frozen and the decisive run is not made. Both members stay off, and the
+    defaults are unchanged. The combiner and labels stay as trial artifacts.
+- **What this leaves:** store text is strong on new reports when it votes alone, but neither fusion
+  nor a combiner trained mostly on ATT&CK folds turns that into more first choices without a wrong
+  name. Real reports dated after the store's posts would be the training data such a combiner
+  needs, and the development sets are too small to provide them.
+
 ---
 
 ## 13. Analyst Canvas
@@ -7170,6 +7610,7 @@ The current ATT&CK self-consistency benchmarks are not sufficient for this purpo
 | `apt_classifier/fusion.py` | `reciprocal_rank_fusion`, effective family weights, Kendall tau |
 | `apt_classifier/origin.py` | `assess_origin_and_threat_type` |
 | `apt_classifier/threat_intel.py` | public feed client, parsers, matching, verification states |
+| `apt_classifier/knowledge_store/` | `KnowledgeStore`, `StoreView` (dated reads, `links_view`), `PoliteFetcher`, `list_posts`, `page_date`, `parse_page`; `extract.py` (labels, uses links, claims, 12.7); collector `scripts/knowledge_store.py` (12.6) |
 | `apt_classifier/elastic_mcp.py` | `ElasticMCPClient`, `StreamableHTTPMCPTransport`, ES|QL flow, search fallback, bounded query planning, staged evidence normalization |
 | `apt_classifier/canvas.py` | `build_analyst_canvas`, `build_candidate_dossier` |
 | `apt_classifier/questions.py` | information gain, chat answer parsing, stopping rule |

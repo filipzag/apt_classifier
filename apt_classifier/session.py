@@ -56,6 +56,17 @@ from apt_classifier.group_mlp import (
     group_mlp_votes,
     load_group_mlp_for,
 )
+from apt_classifier.knowledge_store.members import (
+    STORE_SOFTWARE_NAME,
+    STORE_TEXT_NAME,
+    StoreSoftwareClassifier,
+    StoreState,
+    StoreTextClassifier,
+    load_store_members_for,
+    store_bound_fingerprint,
+    store_software_votes,
+    store_text_votes,
+)
 from apt_classifier.llm import OpenRouterClient
 from apt_classifier.origin import OriginAndThreatAssessment, assess_origin_and_threat_type
 from apt_classifier.overlap_cluster import cluster_candidate
@@ -155,6 +166,10 @@ _CLASSIFIER_FAMILIES = {
     # accepted techniques' statements against the procedure sentences documented under each
     # technique, with the software links: re-reads counted evidence, so also no new family
     PROCEDURE_MATCH_NAME: "learned_profile",
+    # the knowledge store's members: its text documents are a learned profile like the text
+    # member's; its uses links share the software family with ATT&CK's (knowledge_store/members.py)
+    STORE_TEXT_NAME: "learned_profile",
+    STORE_SOFTWARE_NAME: "software",
 }
 
 
@@ -349,6 +364,24 @@ class AttributionEngine:
                 *self.classifiers,
                 ProcedureMatchClassifier(self.procedure_match),
             )
+        # the knowledge store's members read one shared case state (set_store_case)
+        self.store_members, self.store_members_status = load_store_members_for(
+            self.settings, knowledge_base
+        )
+        self.store_state = StoreState(self.store_members)
+        if self.store_members is not None:
+            if store_text_votes(self.settings):
+                self.classifiers = (*self.classifiers, StoreTextClassifier(self.store_state))
+            if store_software_votes(self.settings):
+                self.classifiers = (
+                    *self.classifiers,
+                    StoreSoftwareClassifier(
+                        self.store_state,
+                        tool_weight_cap=float(
+                            getattr(self.settings, "software_tool_weight_cap", 1.5)
+                        ),
+                    ),
+                )
         self.telemetry_profile: Any = None
         # the store's Chroma client serves a Chroma exemplar backend (never a client of its own)
         self.exemplar_index, self.exemplar_status = load_exemplar_index(
@@ -388,6 +421,10 @@ class AttributionEngine:
         if self.procedure_match is not None:
             self.combiner_fingerprint = procedure_match_bound_fingerprint(
                 self.combiner_fingerprint, self.procedure_match
+            )
+        if self.store_members is not None:
+            self.combiner_fingerprint = store_bound_fingerprint(
+                self.combiner_fingerprint, self.store_members, self._store_weights()
             )
         self.combiner, self.combiner_status = load_attribution_combiner(
             self.settings, knowledge_base, fingerprint=self.combiner_fingerprint
@@ -1415,6 +1452,31 @@ class AttributionEngine:
             if getattr(classifier, "name", None) == PROCEDURE_MATCH_NAME:
                 classifier.model = model
 
+    def set_store_case(self, **case: Any) -> Any:
+        """The case the knowledge store's members read (``StoreState.set_case``: its date, its own
+        post keys and statements, removed actors, extra hidden posts); the benchmarks set it per
+        report and per fold. ``clear_store_case`` returns to the whole store."""
+        return self.store_state.set_case(
+            pinned=bool(getattr(self.settings, "knowledge_store_pinned", False)), **case
+        )
+
+    def clear_store_case(self) -> None:
+        self.store_state.clear()
+
+    def _store_weights(self) -> dict[str, float]:
+        return {
+            **(
+                {STORE_TEXT_NAME: float(self.settings.store_text_weight)}
+                if store_text_votes(self.settings)
+                else {}
+            ),
+            **(
+                {STORE_SOFTWARE_NAME: float(self.settings.store_software_weight)}
+                if store_software_votes(self.settings)
+                else {}
+            ),
+        }
+
     def set_text_group(self, model: Any, status: str | None = None) -> None:
         """Swap the free-text model; the benchmarks refit it without a fold's held-out
         behaviour or a removed actor (and restore the loaded one with its status)."""
@@ -1476,6 +1538,8 @@ class AttributionEngine:
                 if procedure_match_votes(self.settings)
                 else {}
             ),
+            # only when the members loaded and vote (weight 0 adds no key)
+            **(self._store_weights() if self.store_members is not None else {}),
         }
 
     def _score(

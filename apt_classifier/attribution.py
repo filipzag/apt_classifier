@@ -174,7 +174,13 @@ SUPPORT_RANK_LIMIT = 10
 # Members that re-read evidence other families already score: they rank, but never count as an
 # independent evidence family for the naming gate. The free-text model (text_group.py) scores
 # the same case narrative the technique, software and behaviour classifiers read.
-NOT_INDEPENDENT_EVIDENCE = frozenset({"text_group", "behavior_text", "procedure_match"})
+NOT_INDEPENDENT_EVIDENCE = frozenset(
+    {"text_group", "behavior_text", "procedure_match", "store_text"}
+)
+# Members that support the naming gate only for some groups: the knowledge store's software
+# member ranks on every link one publisher states, but supports a name only through a link two
+# publishers state (``knowledge_store.members``; the context's ``store_naming_groups``).
+LIMITED_SUPPORT = frozenset({"store_software"})
 
 # Families whose members read nothing but the accepted technique list (the learned profiles and the
 # country model also read the analyst's stated context, which strategic_context and
@@ -185,19 +191,32 @@ TECHNIQUE_LIST_FAMILIES = frozenset({"technique_overlap", "campaign", "learned_p
 TECHNIQUE_LIST = "technique_list"
 
 
+def naming_limits(context: Any) -> dict[str, frozenset[str]]:
+    """The groups each ``LIMITED_SUPPORT`` member may support for the gate in this case."""
+    groups = getattr(context, "store_naming_groups", None)
+    return {"store_software": frozenset(groups)} if groups is not None else {}
+
+
 def supporting_families(
     classifier_ranks: Mapping[str, Any],
     classifier_families: Mapping[str, str] | None = None,
     *,
     technique_list_one_family: bool = False,
     support_rank_limit: int = SUPPORT_RANK_LIMIT,
+    group_id: str | None = None,
+    limits: Mapping[str, frozenset[str]] | None = None,
 ) -> set[str]:
-    """The evidence families whose classifiers rank a group within ``support_rank_limit``."""
+    """The evidence families whose classifiers rank a group within ``support_rank_limit``. A
+    ``LIMITED_SUPPORT`` member counts only for a ``group_id`` its ``limits`` hold."""
     families: set[str] = set()
     for classifier_name, rank in classifier_ranks.items():
         if rank is None or int(rank) > support_rank_limit:
             continue
         if classifier_name in NOT_INDEPENDENT_EVIDENCE:
+            continue
+        if classifier_name in LIMITED_SUPPORT and group_id not in (limits or {}).get(
+            classifier_name, frozenset()
+        ):
             continue
         family = (classifier_families or {}).get(classifier_name, classifier_name)
         if technique_list_one_family and family in TECHNIQUE_LIST_FAMILIES:
@@ -212,6 +231,7 @@ def _evidence_family_count(
     *,
     support_rank_limit: int = SUPPORT_RANK_LIMIT,
     technique_list_one_family: bool = False,
+    limits: Mapping[str, frozenset[str]] | None = None,
 ) -> int:
     """Count distinct evidence families that *support* the top entry.
 
@@ -227,6 +247,8 @@ def _evidence_family_count(
             classifier_families,
             technique_list_one_family=technique_list_one_family,
             support_rank_limit=support_rank_limit,
+            group_id=fusion.entries[0].group_id,
+            limits=limits,
         )
     )
 
@@ -266,6 +288,7 @@ def _compute_maturity(
         fusion,
         classifier_families,
         technique_list_one_family=thresholds.technique_list_one_family,
+        limits=naming_limits(context),
     )
     families = min(1.0, family_count / max(thresholds.min_independent_evidence_families, 1))
     factors["independent_families"] = round(families, 3)
@@ -420,6 +443,7 @@ def assess_attribution(
         fusion,
         classifier_families,
         technique_list_one_family=thresholds.technique_list_one_family,
+        limits=naming_limits(context),
     )
     # Stage decision
     if (

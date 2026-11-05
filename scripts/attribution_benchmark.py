@@ -59,12 +59,13 @@ from __future__ import annotations
 import argparse
 import copy
 import hashlib
+import itertools
 import json
 import random
 import sys
 import time
 from collections import Counter
-from collections.abc import Iterator
+from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
@@ -104,6 +105,13 @@ from apt_classifier.evidence.models import (  # noqa: E402
     Provenance,
 )
 from apt_classifier.group_mlp import refit_without_groups  # noqa: E402
+from apt_classifier.knowledge_store.listing import normalise_url  # noqa: E402
+from apt_classifier.knowledge_store.members import (  # noqa: E402
+    StoreMembers,
+    citation_keys,
+    members_path,
+    store_members_votes,
+)
 from apt_classifier.llm import OpenRouterClient  # noqa: E402
 from apt_classifier.overlap_cluster import SAME_ACTIVITY_LINKS, link_kind  # noqa: E402
 from apt_classifier.procedure_match import procedure_match_votes  # noqa: E402
@@ -190,6 +198,12 @@ class Fold:
     hidden_campaign: str = ""
     hidden_texts: frozenset[str] = frozenset()
     hidden_raw: tuple[str, ...] = ()
+    # the knowledge store's members (knowledge_store/members.py): a dated report reads only posts
+    # available before ``as_of`` (its available_from, else its publication date), never its own
+    # post (``store_keys``) or a copy of it (``store_statements``, the copy rule)
+    as_of: str = ""
+    store_keys: tuple[str, ...] = ()
+    store_statements: tuple[str, ...] = ()
 
 
 class FoldStore:
@@ -466,6 +480,7 @@ def load_report_folds(
                 )
             )
             hidden = frozenset(form for raw in hidden_raw for form in hide_forms(raw))
+        own = row.get("store_key") or (normalise_url(str(row["url"])) if row.get("url") else "")
         folds.append(
             Fold(
                 group_id=str(group_id) if group_id is not None else None,
@@ -479,6 +494,11 @@ def load_report_folds(
                 hidden_campaign=str(row.get("campaign_id") or ""),
                 hidden_texts=hidden,
                 hidden_raw=hidden_raw,
+                as_of=str(row.get("available_from") or row.get("published") or "")[:10],
+                store_keys=(str(own),) if own else (),
+                store_statements=tuple(
+                    str(item.get("text", "")) for item in row.get("statements", [])
+                ),
             )
         )
     return folds
@@ -512,7 +532,11 @@ def hidden_campaign(kb: Any, campaign_id: str) -> Iterator[bool]:
 
 
 def anonymize_report_folds(
-    folds: list[Fold], kb: AttackKnowledgeBase, *, level: str = "names"
+    folds: list[Fold],
+    kb: AttackKnowledgeBase,
+    *,
+    level: str = "names",
+    extra_names: tuple[str, ...] = (),
 ) -> tuple[list[Fold], list[dict[str, Any]], dict[str, Any]]:
     """Replace every ATT&CK group name and alias in the report statements with "the adversary".
 
@@ -533,7 +557,7 @@ def anonymize_report_folds(
         raise ValueError(f"unknown anonymization level {level!r}")
     names = actor_names(kb)
     pattern = _evidence_name_pattern(names)
-    anonymizer = ReportAnonymizer(kb, level) if level != "names" else None
+    anonymizer = ReportAnonymizer(kb, level, extra_names=extra_names) if level != "names" else None
     owners: dict[str, set[str]] = {}
     for group in kb.groups.values():
         for name in (group.name, *group.aliases):
@@ -1170,6 +1194,124 @@ def summarize_software_interview(
     }
 
 
+# an undated report reads no store post at all (its date cannot hide what came after it)
+NO_STORE = "0001-01-01"
+
+
+def store_case(
+    engine: Any,
+    fold: Fold,
+    *,
+    hide_evidence: bool = True,
+    citations: dict[tuple[str, str], frozenset[str]] | None = None,
+    remove_actor: bool = False,
+    undated: str = "none",
+) -> Any:
+    """Set the case the knowledge store's members read for ``fold`` (a no-op without them).
+
+    A dated report reads the store before its date (``as_of``) without its own post and its
+    copies. An undated report reads nothing (``undated="none"``, the development and training
+    sets) or the whole store without its own post and copies (``"whole"``, CTI-HAL's rule). An
+    ATT&CK fold case has no date and reads the whole store without the posts ATT&CK cites for its
+    held-out sentences. ``remove_actor`` (the unknown-actor arms) also drops the actor's own
+    documents and links."""
+    if getattr(engine, "store_members", None) is None:
+        return None
+    removed = {fold.group_id} if remove_actor and fold.group_id else set()
+    if fold.report_id:
+        as_of = fold.as_of or (None if undated == "whole" else NO_STORE)
+        return engine.set_store_case(
+            as_of=as_of,
+            keys=fold.store_keys,
+            statements=fold.store_statements,
+            removed_actors=removed,
+        )
+    hidden: set[str] = set()
+    if hide_evidence and fold.group_id is not None:
+        for technique_id in fold.held_out_techniques:
+            hidden |= (citations or {}).get((fold.group_id, technique_id), frozenset())
+    return engine.set_store_case(hidden=hidden, removed_actors=removed)
+
+
+def parse_weight_grid(items: list[str] | None) -> list[dict[str, float]]:
+    """``NAME=v1,v2,...`` items -> every combination of those classifiers' weights (the store
+    members' development grid, prereg ``knowledge_store_decisive_2026-11-04``)."""
+    axes: list[list[tuple[str, float]]] = []
+    for item in items or ():
+        name, sep, values = item.partition("=")
+        if not sep or not name or not values:
+            raise ValueError(f"--weight-grid wants NAME=v1,v2,...: {item!r}")
+        axes.append([(name, float(value)) for value in values.split(",")])
+    return [dict(combination) for combination in itertools.product(*axes)] if axes else []
+
+
+def grid_key(weights: Mapping[str, float]) -> str:
+    return ",".join(f"{name}={value:g}" for name, value in sorted(weights.items()))
+
+
+def grid_outcomes(
+    engine: Any, state: Any, grid: list[dict[str, float]], truth: set[str]
+) -> dict[str, dict[str, Any]]:
+    """Per weight combination of ``grid``: the leader, the truth's best rank and the naming
+    decision from this case's classifier results fused with those weights. The classifiers do not
+    read the weights, so only fusion and the gate run again; a member at weight 0 is left out of
+    fusion exactly as if it were not loaded (``fusion.filter_eligible_results``)."""
+    context = state.context
+    eligible = set(context.eligible_group_ids or ())
+    saved = {name: getattr(context, name, None) for name in ("discrimination", "combiner")}
+    outcomes: dict[str, dict[str, Any]] = {}
+    try:
+        for overrides in grid:
+            weights = {**state.weights, **overrides}
+            fusion = engine._fuse(state.classifier_results, weights, eligible, context)
+            trial = copy.copy(state)
+            trial.fusion = trial.deterministic_fusion = fusion
+            trial.weights = weights
+            decision = engine._assess_stage(trial)
+            ranked = [entry.group_id for entry in fusion.entries]
+            ranks = [ranked.index(group_id) + 1 for group_id in truth if group_id in ranked]
+            named = _named_members(decision)
+            outcomes[grid_key(overrides)] = {
+                "leading": decision.leading_group_id,
+                "rank": min(ranks) if ranks else None,
+                "top5": ranked[:5],
+                "stage": decision.stage.value,
+                "named": named,
+                "named_right": bool(named and truth & set(named)),
+            }
+    finally:
+        for name, value in saved.items():
+            setattr(context, name, value)
+    return outcomes
+
+
+def summarize_grid(
+    grid: list[dict[str, float]], known: list[dict[str, Any]], open_set: list[dict[str, Any]]
+) -> dict[str, dict[str, Any]]:
+    """Per weight combination: known reports with the right group first (the leader, or an
+    accepted group) and in the top five, names right and wrong, and names on the open set."""
+    out: dict[str, dict[str, Any]] = {}
+    for weights in grid:
+        key = grid_key(weights)
+        cells = [row["grid"][key] for row in known if "grid" in row]
+        opened = [row["grid"][key] for row in open_set if "grid" in row]
+        truths = [{row.get("group_id"), *(row.get("accept") or ())} - {None} for row in known]
+        out[key] = {
+            "weights": dict(weights),
+            "known": len(cells),
+            "first": sum(
+                cell["leading"] in truth for cell, truth in zip(cells, truths, strict=True)
+            ),
+            "top5": sum(cell["rank"] is not None and cell["rank"] <= 5 for cell in cells),
+            "named": sum(bool(cell["named"]) for cell in cells),
+            "named_right": sum(cell["named_right"] for cell in cells),
+            "named_wrong": sum(bool(cell["named"]) and not cell["named_right"] for cell in cells),
+            "open_set": len(opened),
+            "open_set_named": sum(bool(cell["named"]) for cell in opened),
+        }
+    return out
+
+
 def run_known(
     engine: AttributionEngine,
     folds: list[Fold],
@@ -1177,6 +1319,9 @@ def run_known(
     hide_evidence: bool = True,
     client: OpenRouterClient | None = None,
     software_interview: bool = False,
+    citations: dict[tuple[str, str], frozenset[str]] | None = None,
+    store_undated: str = "none",
+    weight_grid: list[dict[str, float]] | None = None,
 ) -> tuple[list[dict[str, Any]], dict]:
     rows: list[dict[str, Any]] = []
     base_store = engine.store
@@ -1250,6 +1395,13 @@ def run_known(
                 any_group_texts=fold.hidden_texts,
             )
             engine.store = proxy
+            store_slice = store_case(
+                engine,
+                fold,
+                hide_evidence=hide_evidence,
+                citations=citations,
+                undated=store_undated,
+            )
             cost_before = client.total_usage.cost_usd if client is not None else 0.0
             with hidden_campaign(engine.kb, fold.hidden_campaign):
                 state = engine.analyze(_ledger(fold))
@@ -1298,6 +1450,11 @@ def run_known(
                 {
                     "group_id": fold.group_id,
                     "report_id": fold.report_id,
+                    **(
+                        {"store": _store_case_fields(engine, store_slice)}
+                        if store_slice is not None
+                        else {}
+                    ),
                     "observations": len(fold.observations),
                     "held_out_techniques": sorted(fold.held_out_techniques),
                     "accepted_techniques": sorted(observed),
@@ -1373,6 +1530,8 @@ def run_known(
                 rows[-1]["software_interview"] = enumerate_software_interview(
                     engine, state, set(getattr(group, "software_ids", ()) or ())
                 )
+            if weight_grid:
+                rows[-1]["grid"] = grid_outcomes(engine, state, weight_grid, truth)
             for key, value in proxy.dropped.items():
                 dropped_total[key] += value
             rows[-1]["lexical_hidden"] = hidden_lexical or 0
@@ -1386,7 +1545,19 @@ def run_known(
         if base_procedure is not None:
             engine.set_procedure_match(base_procedure, base_procedure_status)
         engine.lexical_index = base_lexical
+        if getattr(engine, "store_members", None) is not None:
+            engine.clear_store_case()
     return rows, dropped_total
+
+
+def _store_case_fields(engine: Any, case: Any) -> dict[str, Any]:
+    """What a row's store members read: the date, the artifact (a pin) and the hidden posts."""
+    return {
+        "as_of": case.as_of,
+        "pin": engine.store_state.pin,
+        "hidden_posts": len(case.hidden),
+        "removed_actors": sorted(case.removed_actors),
+    }
 
 
 def _forest_votes(engine: Any) -> bool:
@@ -1419,6 +1590,7 @@ def run_unknown(
     *,
     client: OpenRouterClient | None = None,
     software_interview: bool = False,
+    citations: dict[tuple[str, str], frozenset[str]] | None = None,
 ) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
     for fold in folds:
@@ -1475,6 +1647,8 @@ def run_unknown(
                 )
             )
             procedure_match = "refit without the actor"
+        # the store members read the whole store without the actor and the cited posts
+        store_slice = store_case(engine, fold, citations=citations, remove_actor=True)
         cost_before = client.total_usage.cost_usd if client is not None else 0.0
         state = engine.analyze(_ledger(fold))
         fusion = state.fusion
@@ -1482,6 +1656,11 @@ def run_unknown(
         rows.append(
             {
                 "group_id": fold.group_id,
+                **(
+                    {"store": _store_case_fields(engine, store_slice)}
+                    if store_slice is not None
+                    else {}
+                ),
                 "observations": len(fold.observations),
                 "profile_forest": forest,
                 "group_mlp": group_mlp,
@@ -1853,6 +2032,7 @@ HEADLINE_LEVEL = {
     "advisories": "strict",
     "campaigns": "names",
     "cti_hal": "names",
+    "decisive": "behavior",
     "elastic": "strict",
     "fresh": "strict",
     "vendor": "strict",
@@ -1995,6 +2175,27 @@ def main(argv: list[str] | None = None) -> int:
         "the first ones (the volume diagnostic)",
     )
     parser.add_argument(
+        "--store-undated",
+        choices=("none", "whole"),
+        default="none",
+        help="what an undated report's store members read: nothing (default; the development "
+        "sets) or the whole store without the report's own post and its copies (CTI-HAL)",
+    )
+    parser.add_argument(
+        "--mask-store-names",
+        action="store_true",
+        help="with --anonymize behavior: also mask every malware name the knowledge store's posts "
+        "introduce (its members artifact), in every arm (prereg knowledge_store_decisive)",
+    )
+    parser.add_argument(
+        "--weight-grid",
+        nargs="+",
+        metavar="NAME=V1,V2",
+        help="also fuse every case again for each combination of these classifiers' weights "
+        "(rows gain 'grid', metrics 'grid'); each named classifier must be loaded, i.e. voting "
+        "in the run's settings (the store members' development rule)",
+    )
+    parser.add_argument(
         "--allow-inactive-combiner",
         action="store_true",
         help="write the artifact even when the learned combiner is enabled but did not load "
@@ -2055,6 +2256,7 @@ def main(argv: list[str] | None = None) -> int:
     embedder = SentenceTransformerEmbedder.from_settings(settings)
     store = ChromaVectorStore(settings, embedder)
     real_reports = args.cti_hal is not None
+    extra_names: tuple[str, ...] = ()
     actor_records: list[dict[str, Any]] = []
     actor_totals: dict[str, Any] | None = None
     open_folds: list[Fold] = []
@@ -2088,11 +2290,21 @@ def main(argv: list[str] | None = None) -> int:
             folds = sample_folds(folds, args.sample, args.seed)
         elif args.limit is not None:
             folds = folds[: args.limit]
+        if args.mask_store_names:
+            if level != "behavior":
+                parser.error("--mask-store-names needs --anonymize behavior")
+            path = members_path(settings)
+            masking = StoreMembers.load(path, kb)
+            if masking is None:
+                parser.error(f"--mask-store-names: no members artifact at {path}")
+            extra_names = masking.masking_names
         if level is not None:
-            folds, actor_records, actor_totals = anonymize_report_folds(folds, kb, level=level)
+            folds, actor_records, actor_totals = anonymize_report_folds(
+                folds, kb, level=level, extra_names=extra_names
+            )
             if open_folds:
                 open_folds, open_records, open_totals = anonymize_report_folds(
-                    open_folds, kb, level=level
+                    open_folds, kb, level=level, extra_names=extra_names
                 )
     else:
         folds = build_folds(
@@ -2132,6 +2344,29 @@ def main(argv: list[str] | None = None) -> int:
             file=sys.stderr,
         )
         return 3
+    if store_members_votes(settings) and engine.store_members is None:
+        print(
+            f"refusing to run: a store member's weight is > 0 but its artifact is "
+            f"{engine.store_members_status!r} (scripts/knowledge_store.py members)",
+            file=sys.stderr,
+        )
+        return 3
+    grid = parse_weight_grid(args.weight_grid)
+    loaded = {getattr(classifier, "name", None) for classifier in engine.classifiers}
+    missing = sorted({name for weights in grid for name in weights} - loaded)
+    if missing:
+        print(
+            f"refusing to run: --weight-grid names classifiers not loaded: {missing}",
+            file=sys.stderr,
+        )
+        return 3
+    # an ATT&CK fold hides from the store members the posts ATT&CK cites for its held-out
+    # sentences (real reports hide their own post and its copies instead)
+    citations = (
+        citation_keys(settings.attack_bundle_path)
+        if engine.store_members is not None and not real_reports
+        else None
+    )
     combiner_expected = bool(getattr(settings, "attribution_combiner_enabled", False))
     if (
         combiner_expected
@@ -2153,6 +2388,9 @@ def main(argv: list[str] | None = None) -> int:
             hide_evidence=not real_reports,
             client=client,
             software_interview=simulate,
+            citations=citations,
+            store_undated=args.store_undated,
+            weight_grid=grid,
         )
     except LLMUnavailableError as error:
         print(f"aborted: {error}", file=sys.stderr)
@@ -2168,7 +2406,12 @@ def main(argv: list[str] | None = None) -> int:
         started = time.time()
         try:
             open_rows, open_dropped = run_known(
-                engine, open_folds, hide_evidence=False, client=client
+                engine,
+                open_folds,
+                hide_evidence=False,
+                client=client,
+                store_undated=args.store_undated,
+                weight_grid=grid,
             )
         except LLMUnavailableError:
             # credit ran out after the labelled reports: keep them, record the open set as cut
@@ -2187,7 +2430,15 @@ def main(argv: list[str] | None = None) -> int:
     )
     started = time.time()
     unknown_rows = (
-        run_unknown(settings, kb, store, unknown_folds, client=client, software_interview=simulate)
+        run_unknown(
+            settings,
+            kb,
+            store,
+            unknown_folds,
+            client=client,
+            software_interview=simulate,
+            citations=citations,
+        )
         if unknown_folds
         else []
     )
@@ -2195,6 +2446,8 @@ def main(argv: list[str] | None = None) -> int:
         client.close()
     unknown_seconds = time.time() - started
     metrics = summarize(known_rows, unknown_rows)
+    if grid:
+        metrics["grid"] = summarize_grid(grid, known_rows, open_rows)
     if open_folds:
         metrics["open_set"] = open_set_metrics(open_rows, known_rows)
         if any("llm" in row for row in open_rows):
@@ -2258,6 +2511,26 @@ def main(argv: list[str] | None = None) -> int:
             if procedure_match_votes(settings)
             else {}
         ),
+        # only when a store member votes, so a default run keeps its fingerprint inputs
+        **(
+            {
+                "store_members": {
+                    "status": engine.store_members_status,
+                    "pinned": bool(getattr(settings, "knowledge_store_pinned", False)),
+                    "artifacts": {
+                        str(pin): members.fingerprint
+                        for pin, members in (engine.store_members or {}).items()
+                    },
+                    "weights": engine._store_weights(),
+                }
+            }
+            if store_members_votes(settings)
+            else {}
+        ),
+        **(
+            {"mask_store_names": len(extra_names)} if real_reports and args.mask_store_names else {}
+        ),
+        **({"weight_grid": [grid_key(weights) for weights in grid]} if grid else {}),
         # only when the network votes, so a default run keeps its fingerprint inputs
         **(
             {
@@ -2422,6 +2695,12 @@ def main(argv: list[str] | None = None) -> int:
             print(
                 "  open set:",
                 {k: v for k, v in metrics["open_set"].items() if k != "leader_counts"},
+            )
+        for key, cell in (metrics.get("grid") or {}).items():
+            print(
+                f"  grid {key}: first {cell['first']}/{cell['known']}, top5 {cell['top5']}, "
+                f"names {cell['named']} ({cell['named_wrong']} wrong), open-set names "
+                f"{cell['open_set_named']}/{cell['open_set']}"
             )
         if actor_totals is not None and "strict" in actor_totals:
             print("  strict masking:", actor_totals["strict"])

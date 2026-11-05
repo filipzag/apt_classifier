@@ -309,3 +309,91 @@ def test_second_set_leaves_out_every_url_the_first_listing_considered(tmp_path):
     bundle = {"objects": [{"external_references": [{"url": "https://example.com/d"}]}]}
     urls = fresh.excluded_url_set(bundle, [other], [listed])
     assert urls == {"example.com/a/b", "example.com/c", "example.com/d"}
+
+
+def test_decisive_set_from_the_store_keeps_its_dates_and_leaves_out_what_leaks(
+    tmp_path, monkeypatch
+):
+    from apt_classifier.knowledge_store.fetch import FetchResult
+    from apt_classifier.knowledge_store.store import KnowledgeStore
+
+    def html(title, published, sentences):
+        body = "".join(f"<p>{sentence}</p>" for sentence in sentences)
+        return (
+            f'<html><head><title>{title}</title><meta property="article:published_time" '
+            f'content="{published}T10:00:00+00:00"></head><body><article>{body}</article>'
+            "</body></html>"
+        )
+
+    report = [
+        "APT28 deployed a new backdoor against foreign ministries.",
+        *(f"APT28 used implant number {n} to collect documents." for n in range(3)),
+        *(f"The operators staged archive number {n} on a remote server." for n in range(3, 18)),
+    ]
+    filler = [f"The intruders renamed tool number {n} before running it." for n in range(8)]
+    posts = {
+        "v.test/report": ("APT28 targets ministries", "2025-03-10", report, None),
+        "v.test/early": ("Early", "2024-12-01", filler, None),
+        "v.test/copy": ("Copy", "2025-02-01", [*filler, "One more line is here."], None),
+        "v.test/shown": ("Shown", "2025-04-01", report[1:], None),
+        "v.test/edited": ("Edited", "2025-05-01", report[2:], "2026-06-01"),
+        "v.test/cited": ("Cited", "2025-06-01", report[3:], None),
+        "v.test/late": ("Late", "2026-04-01", report[4:], None),
+    }
+    store = KnowledgeStore(tmp_path / "store")
+    store.add_posts(
+        {"key": key, "source": "v", "url": f"https://{key}", "lastmod": lastmod}
+        for key, (_title, _day, _lines, lastmod) in posts.items()
+    )
+    for key, (title, day, lines, _lastmod) in posts.items():
+        page = html(title, day, lines).encode()
+        store.record_fetch(
+            key,
+            "v",
+            FetchResult("fetched", http_status=200, final_url=f"https://{key}", content=page),
+            at="2026-11-03T10:00:00+00:00",
+        )
+    store.parse()
+    store.finalise(attack_urls=["https://v.test/cited"])
+    store.close()
+
+    window = (date(2025, 1, 1), date(2026, 2, 28))
+    listed = fresh.store_candidates(
+        tmp_path / "store", set(), window=window, shown={"v.test/shown"}
+    )
+    assert listed["per_source"]["v"] == {
+        "candidate": 1,
+        "copy_of_earlier_post": 1,
+        "shown_before_registration": 1,
+        "available_after_window": 1,
+        "cited_or_in_another_set": 1,
+    }
+    (candidate,) = listed["candidates"]
+    assert candidate["store_key"] == "v.test/report" and candidate["raw"].endswith(".html.gz")
+    assert (candidate["published"], candidate["available_from"]) == ("2025-03-10", "2025-03-10")
+
+    class _Anonymizer:  # the strict anonymiser reads a real knowledge base
+        def __init__(self, kb, level):
+            pass
+
+        def heading_is_attribution(self, heading):
+            return False
+
+    words = tmp_path / "words"
+    words.write_text("comment\n", encoding="utf-8")
+    monkeypatch.setattr(fresh, "WORDS", words)
+    monkeypatch.setattr(fresh, "ReportAnonymizer", _Anonymizer)
+    output = tmp_path / "decisive"
+    kb = _kb()
+    kb.version = "test"
+    manifest = fresh.build(listed, output, kb=kb, misp=_misp(), window=window)
+    assert (manifest["known_reports"], manifest["open_set_reports"]) == (1, 0)
+    row = json.loads((output / "reports.jsonl").read_text(encoding="utf-8"))
+    assert (row["group_id"], row["published"], row["available_from"]) == (
+        "G0007",
+        "2025-03-10",
+        "2025-03-10",
+    )
+    assert row["store_key"] == "v.test/report"
+    assert row["title"] == "the adversary targets ministries"
+    assert not any("APT28" in statement["text"] for statement in row["statements"])

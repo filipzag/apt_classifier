@@ -29,3 +29,5 @@ web/node_modules/
 # user store: personal data (email, name, picture); apt_classifier/users.py creates it on first use
 data/users.db*
 data/text_group_study/
+# knowledge store: publishers' post text, local only (docs/KNOWLEDGE_STORE_DESIGN.md)
+data/knowledge_store/

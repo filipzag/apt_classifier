@@ -1,0 +1,1048 @@
+{
+  "schema": "attribution_prereg/1",
+  "id": "knowledge_store_decisive_2026-11-04",
+  "title": "Dated knowledge store, decisive test: with the store, does the product put the right ATT&CK group first more often on reports from January 2025 to February 2026, with no new wrong name?",
+  "registered": "2026-11-04",
+  "request": "the product owner approved the store's design (docs/KNOWLEDGE_STORE_DESIGN.md, 2026-11-03) and asked to start its step 4, registering the decisive test before anything is built on it (2026-11-04). The product owner chose the behaviour reading as the primary reading (2026-11-04).",
+  "question": "On vendor research reports published 2025-01-01 to 2026-02-28 that ATT&CK 20.0 does not cite and that no other set holds, does the product with the store's two members, each report reading only posts available before its own date, put the right ATT&CK group first more often than the product without them at the behaviour reading, without any new wrong name there or on the safety sets?",
+  "role": "test set: evaluation only, never tuned on, never a training or calibration set; local only (the text belongs to each vendor; CISA advisories are US government works); not redistributed",
+  "background": "docs 12.6-12.7 (the store: 10.9k dated posts from 2022, rule and model links), 21.3.28-21.3.31 (on fresh reports the product's misses rest on knowledge newer than ATT&CK), and the store's early stop of 2026-11-03 (5 of the 8 malware links the frontier model used were in the store before each report's date)",
+  "made_before": "any system (the product or a model) ran on any report of the set, and before the store's members exist. The store's own rules and local model read every stored post as data, the window's posts included (their facts are hidden from their own reports by date); nobody inspected a post of the window apart from the posts left out as shown below",
+  "set": {
+    "builder": "scripts/prepare_fresh_reports.py, the fresh sets' builder, with --list --from-store: the candidates and their pages come from the knowledge store, with the store's dates, instead of a new listing and download (sha256 of the builder at the freeze)",
+    "store": "data/knowledge_store/ (local): the 33 approved sources of apt_classifier/knowledge_store/sources.py, listed from 2022-01-01 and downloaded politely (robots.txt honoured, the store's own name, one request per second per site, ten seconds for a site that rate-limited; a refusal is never worked around). Out: AhnLab ASEC (robots.txt refused), Silent Push (sitemaps refused), Fortinet (robots.txt forbids its blog). ESET's feed holds only its latest 100 posts (from 2026-01-30) and Bitdefender's 15. On 2026-11-04 the reader fetched the 796 Zscaler posts that a rate limit had held back on 2026-11-03: Zscaler's sitemap stamps 744 posts with an April 2025 date, and only 6 of the 796 were published in the window (5 of them cited by ATT&CK; none became a labelled report). SentinelOne rate-limited it again at its first request, and Check Point answered 218 of 231 requests with its bot-protection page ('202 Accepted'), so the reader left both alone (never worked around; such pages now stop a site, apt_classifier/knowledge_store/fetch.py). Their unfetched posts are not in the set: 88 of SentinelOne's and 103 of Check Point's that their listing dates to the window (a listing date can be a re-dating stamp, as Zscaler's was). The product owner chose to freeze without SentinelOne's (2026-11-04), and Check Point's, found the same day, are treated the same way",
+    "window": "published 2025-01-01 to 2026-02-28 by the store's date (the date the page states, else the URL's or the listing's; a month-only URL date stands for the month's end), and available by 2026-02-28: a post modified more than 30 days after publication counts from the modification and is left out when that falls after the window; living documents count from the fetch date and are left out",
+    "exclusions": "posts ATT&CK 20.0 cites anywhere; the URLs of the other report sets (vendor, advisories, campaigns, Elastic, CTI-HAL, CTI-TAA, AthenaBench, both fresh sets); a copy of an earlier store post (at least half of the statements shared, the store's rule); a retelling of a report of another set (at least half of the masked statements shared, --twin-sets with every set above); posts shown before this registration (next item). A URL the fresh listings merely considered is not left out as such: they reached back to 2026-02-20 and took undated sources whole, but their builds only dated those posts and set aside the ones outside their own window, with no label computed or read; leaving them out would have cost 563 of the window's 1,977 stored posts (28%), 36 of them from 2026-02-20 to 2026-02-28 (counted before the freeze, from the listings only)",
+    "shown_before_registration": "every session transcript of this project and every result file of the store were scanned for the URLs and store keys of the window's posts, truncated ones included (data/benchmarks/decisive/shown.json and the scan script beside it). On the final store 47 of the window's 2,010 stored posts had been shown, mostly while the fresh sets were built and during the attribution research. The store's early-stop output of 2026-11-03 named the posts behind each link by publisher and date, not by URL, so every window post that supports one of its 13 actor-software pairs also counts as shown (shown_early_stop.py): 5 more, among them the Zscaler and Google posts disclosed in docs 12.7 (the StrikeReady one is among the 47). All 52 are left out; the scan was rerun on the final store before the freeze",
+    "labels_and_masking": "unchanged from the fresh sets: label_report on the post as reported (known: the leading ATT&CK group has at least 3 mentions, twice the next group's, more than any other actor, and is named in the title or the first 10 statements; open set: an actor ATT&CK does not document leads the same way and no ATT&CK group is named more than once; at least 15 statements; everything else is left out); actor names from ATT&CK 20.0 and the MISP galaxy at commit 24877de2 of 2026-10-29 (data/raw/misp_galaxy_24877de2/threat-actor.json, sha256 092e2eb8fcd63cd6b6d7bf8add2af025cc5cfd94a8dce1bdf57c197ee9751838, the store's own list, a superset of the fresh sets'); every actor name and vendor cluster code becomes 'the adversary'; at most 8 reports per actor, newest first; one copy of a cross-posted report",
+    "label_review": "before any system runs on the set, every known and every open-set report is read against the vendor's own attribution: the title, the label with its name counts, and the sentences that name an actor. A report whose label disagrees with the vendor's stated attribution, that attributes to several actors or to none, or that is a roundup is excluded (never relabelled) in data/benchmarks/decisive/amendments.json, frozen with the set. This review is the only reading of the window's posts; the reviewer records label decisions only",
+    "size": "the known and open-set counts after review are recorded at the freeze. With fewer than 60 known reports every reading is descriptive only (the design's rule)"
+  },
+  "store_arm": {
+    "members": "two ensemble members built in step 5, off by default (at weight 0 they are not loaded and the current combiner stays valid): store software applies the software member's rarity rule to the store's uses links that ATT&CK lacks and matches new code names; only links stated by two publishers count towards naming, and the naming gate counts it in one family with the ATT&CK software member. Store text is the free-text member's TF-IDF over per-actor documents of the store's anonymised procedure text; like the other text members it never counts as independent evidence",
+    "dating": "each report reads only posts available strictly before its own available_from date (KnowledgeStore.view(as_of)); its own post and its copies are hidden by key and by the store's duplicate rule",
+    "names_before_the_window": "in the decisive run a store fact counts for an ATT&CK group only through a name that pointed to that group before the window: the group's own ATT&CK 20.0 name, its name and aliases in ATT&CK 16.1 (2024-11-12, the last release before the window; data/raw/enterprise-attack-16.1.json, sha256 8423d8dac3fc2feb825bb07d26e5f5d905e08a88f6fe4652cc20834cbe982813), or a synonym in the MISP galaxy at commit 3735fd37 (2024-12-24, the last change of its actor list before the window; data/raw/misp_galaxy_3735fd37/threat-actor.json, sha256 533cc8ac1286efd2dae3e1e0884b3d167ea0491030969aa413e791d0f036f44e; 793 actors against 1,113 in October 2026). The store's facts are read again with these lists for the decisive run. Software names are not pinned (a post that names a malware states it itself); MISP's malware lists give names only, never their actor links",
+    "settings": "the members' weights, their combiner, the naming floor and the confidence labels are chosen in step 5 by the development rule below and recorded, with the artifacts' hashes and the store's extraction and model-check versions, in an amendment before the decisive run"
+  },
+  "development": {
+    "sets": "the first fresh set (44 known, 54 open set), the second fresh set (12 known, 9 open set), and the vendor, campaign and advisory report sets, with the store sliced at each report's date (a report without a date is left out of the store arm's development runs). Name lists: the decisive run's (ATT&CK 16.1, MISP 3735fd37) for reports published before 2026-03-01, and for later reports (the two fresh sets and three vendor reports) the last ATT&CK release and MISP commit before 2026-03-01 (ATT&CK 18.1 of 2025-11-13; the commit is recorded in step 5). CTI-HAL and Elastic serve only the safety check, never a choice",
+    "rule": "each member's weight from 0, 0.5, 1 and 2: the pair that puts the right group first on the most known development reports at the behaviour reading, ties broken by the strict reading and then by the smaller total weight; a pair that adds a wrong name on the development sets (known or open set, either reading) is not eligible. Then the combiner is refitted with the members' columns (the procedure-core recipe: fold and real-report lists), the naming floor is chosen again on the design seeds 41/53 by its rule (scripts/probability_floor_replay.py --choose) and the confidence labels are refitted. If no pair puts more development reports first than weights 0, the decisive run is not made and that is the result",
+    "changes": "any change to the members' design or to this rule is logged as an amendment with its reason before the decisive run; nothing runs on the decisive set before the store arm is frozen"
+  },
+  "arms": {
+    "baseline": "the product's defaults at the commit that freezes the store arm, local pipeline (no API key, local LLM off, technique head service on): scripts/attribution_benchmark.py on data/benchmarks/decisive/reports.jsonl and open_set.jsonl, --report-observations 0, at --anonymize behavior (primary) and --anonymize strict (secondary), as for the fresh sets",
+    "store": "the same with the store members at the chosen weights and their combiner, floor and labels; both arms read the same statements",
+    "behaviour_masking": "at the behaviour reading the statements are also masked with every software name the store knows (ATT&CK, the MISP malware and tool lists and the names posts introduce, all dates), for both arms, so neither can match a malware name the masker missed"
+  },
+  "hypotheses": {
+    "primary": "behaviour reading, known reports: right group first, store arm against baseline, paired: bootstrap 95% interval of the difference (10,000 report resamples, seed 7) and exact McNemar",
+    "secondary": "the same at the strict reading; right group in the top five; per-group macro first choice; names given, right and wrong, on known and open-set reports; and per report the right group's facts ATT&CK added after the report's date (how much ATT&CK 20.0 already knows from later reporting, which helps both arms)"
+  },
+  "adoption": {
+    "rule": "the store members are recommended for adoption (a default change needs the product owner) only if both hold: (1) at the behaviour reading the store arm puts the right group first more often, with the bootstrap interval of the difference above 0; (2) no new wrong name, meaning no wrong name the store arm gives that the baseline does not give: on the decisive set (known and open set, both readings), on the ATT&CK folds of fresh seeds 131, 137 and 139 (removed actors included; fold cases have no date, so they read the whole store without the removed actor and without the posts ATT&CK cites for a held-out sentence), on CTI-HAL (the anonymised headline; its reports carry no date, so they read the whole store without each report's own post and its copies, found by statement overlap) and on Elastic (open set included; the store sliced at each post's date)",
+    "small_set": "with fewer than 60 known reports after review the readings are descriptive only and nothing is adopted on them",
+    "strict_reading": "the strict reading informs but does not decide: a gain at strict alone is reported, not adopted"
+  },
+  "caveats": "labels are the vendors' attribution under the name-count rule, and vendors can be wrong or disagree; the label reviewer also builds the members, which is why the development rule is fixed here; 92 of 100 model-confirmed store links were right by hand, and the same model decides about 6% of borderline links differently on another GPU (each link keeps its first answer); ATT&CK 20.0 already holds facts published after many test reports, which helps both arms and understates the store's gain; source coverage changes across the window (ESET only from 2026-01-30; part of Check Point is behind bot protection)",
+  "cost": "no OpenRouter credit (local pipeline). The store's model check of newly downloaded posts runs on the laptop GPU or, after the product owner approves the price, on a rented GPU (about $0.60 on 2026-11-03). Product runs take the usual hours per arm and reading",
+  "confirmation_set": "posts published from 2026-11-03 on (after the second fresh listing of 2026-11-02), collected by the daily refresh and built the same way (--from-store with its own window, every URL an earlier listing or set considered left out), with its own label review before any run; scored on its own once it holds 30 known reports after review, never pooled with this set",
+  "frozen": {
+    "frozen_at": "2026-11-04T12:11:30+00:00",
+    "known_reports": 48,
+    "known_groups": 25,
+    "open_set_reports": 69,
+    "per_group": {
+      "G1015": 6,
+      "G0129": 4,
+      "G1033": 3,
+      "G0030": 3,
+      "G1052": 3,
+      "G0134": 3,
+      "G0096": 3,
+      "G0032": 2,
+      "G0094": 2,
+      "G0069": 2,
+      "G0067": 2,
+      "G0007": 2,
+      "G1022": 1,
+      "G1008": 1,
+      "G1041": 1,
+      "G1002": 1,
+      "G0040": 1,
+      "G1048": 1,
+      "G0010": 1,
+      "G0099": 1,
+      "G1057": 1,
+      "G0082": 1,
+      "G1045": 1,
+      "G0011": 1,
+      "G1034": 1
+    },
+    "per_source": {
+      "unit42": 15,
+      "securelist": 12,
+      "trendmicro": 10,
+      "google": 10,
+      "microsoft": 9,
+      "seqrite": 8,
+      "talos": 7,
+      "resecurity": 6,
+      "groupib": 6,
+      "recordedfuture": 5,
+      "proofpoint": 5,
+      "rapid7": 5,
+      "zscaler": 4,
+      "sekoia": 4,
+      "symantec": 2,
+      "arcticwolf": 2,
+      "hunt": 2,
+      "jpcert": 1,
+      "strikeready": 1,
+      "checkpoint": 1,
+      "gendigital": 1,
+      "volexity": 1
+    },
+    "published": [
+      "2025-01-06",
+      "2026-02-26"
+    ],
+    "label_review": {
+      "reviewed_reports": 154,
+      "excluded": 34,
+      "excluded_in_build": 33,
+      "unreviewed_in_set": 0
+    },
+    "size_rule": "48 known reports: fewer than 60, so every reading of this set is descriptive only and nothing is adopted on it (adoption.small_set)",
+    "candidates": 1802,
+    "candidate_reasons": {
+      "candidate": 1802,
+      "not_stored_site_stopped": 189,
+      "available_after_window": 85,
+      "cited_or_in_another_set": 56,
+      "shown_before_registration": 40,
+      "store_excluded": 20,
+      "copy_of_earlier_post": 7,
+      "not_stored_error": 1,
+      "not_stored_rate_limited": 1,
+      "not_stored_gone": 1
+    },
+    "label_reasons": {
+      "no_actor": 1154,
+      "no_dominant_actor": 316,
+      "too_short": 181,
+      "label_review": 33,
+      "leader_related_to_attack_group": 1
+    },
+    "shown_before_registration": 52,
+    "files_sha256": {
+      "candidates.json": "6600c13639e9e9be4de7636e43cec4e1af9e5780b3fac930f39dbaafbb7108b4",
+      "reports.jsonl": "ec47fc70685a52452068ead888aa91552bfd5059f6e502a5498b169b5bc6ba2a",
+      "open_set.jsonl": "be1c000cb4813b057452fc0a218b1bf0cc7d038a36fac7a31316cd1e85091c55",
+      "labels.json": "4264a5fc4fdff3178055ae4a5587c676f523746af30baf945876cdc9d02f6e60",
+      "amendments.json": "498ab521a8f51f7e09ee939ebfa20b4dd72ec7ece6a0d574c4b5228f4583a733",
+      "MANIFEST.json": "aa7c96010dc9fa4e9f9bc1a54ff22b877ab10bc0d500d4e7fce918010c8e8058",
+      "shown.json": "9b218f2b3593073d97e32cfb97e12935758240a565252863f91fc2b50d6475c9",
+      "misp_threat_actor.json": "092e2eb8fcd63cd6b6d7bf8add2af025cc5cfd94a8dce1bdf57c197ee9751838",
+      "build.sh": "6c0944abf34eb14783dbc63b65bc075c7f02cb13582d8d547caab29c44ce30c1",
+      "shown_scan.py": "0d32c0a2e6d291d128aaf5e5531c0ee5d504d4c9e7516d2e56b94bc74c89c9a5",
+      "shown_early_stop.py": "c479d9afd567cc811b4c4b2d113179d9ad88c6b64a194853fc761292a0f17ac1"
+    },
+    "builder_sha256": "79ad81449207357f3d292ce388f27c1fed20463517fa09ef44303794b7fa4af1",
+    "code": {
+      "commit": "7c0f532201cdca86b806712c56ad245e5559e313",
+      "uncommitted_changes": true
+    },
+    "store": {
+      "finalised_at": "2026-11-04T12:01:57+00:00",
+      "posts_with_pages": 11917,
+      "link_checks": {
+        "qwen3.5:4b-text v1": 2379
+      }
+    }
+  },
+  "amendments": [
+    {
+      "number": 1,
+      "date": "2026-11-04",
+      "made_before": "any development run of the store arm: no store member has scored any report, fold or development case yet; written right after the members' code, tests and store build",
+      "reason": "step 5 built the two members; this records exactly how they read the store, which store copy each case reads, the masking, and how the registered development rule is run (operational choices the registration left open), before any result",
+      "members_as_built": {
+        "code": "apt_classifier/knowledge_store/members.py and pins.py; the artifacts are written by scripts/knowledge_store.py members [--pin]; engine wiring in session.py (off at weight 0: not loaded, the combiner fingerprint unchanged)",
+        "store_text": "one document per ATT&CK group from the statements of every readable post the extractor labels known to that group (the fresh sets' label rule, run with the copy's actor lists); actor names masked with the current lists (ATT&CK 20.0, MISP 24877de2). Scored with the free-text member's TF-IDF settings (text_group.DEFAULT_PARAMS); per case the documents are rebuilt from the posts available strictly before the case's date (equal to a fresh fit on those statements). Family learned_profile; never independent evidence for the naming gate (attribution.NOT_INDEPENDENT_EVIDENCE); it cannot make a group eligible",
+        "store_software": "counted links: active rule links and unclear links the local model confirmed (P(supported) >= 0.98, qwen3.5:4b-text, prompt v1); an unclear link without a verdict never counts. A case's software: the ATT&CK software the pipeline found and the MISP malware/tool names and the names posts introduce (the share rule at the case's date) written in the case text in their own spelling. A software's users: ATT&CK's groups plus every store actor (ATT&CK group or not) with a link stated without 'possible' before the case's date; weight log((N+1)/(users+1)) + 1, ATT&CK tools capped at 1.5 (the software member's rule). A group scores the weight share of the case's software the store links it to, stated without 'possible', where ATT&CK does not. Family software (it shares the family's budget with the ATT&CK software member); for the naming gate it supports a group only through a link two publishers state without 'possible' (attribution.LIMITED_SUPPORT; securelist and kaspersky_ics are one publisher); it cannot make a group eligible",
+        "hiding": "a case never reads its own post (URL key), the post's duplicate group, or a post sharing at least half of the shorter side's statement keys (name-insensitive keys: lower-case words without capitalised tokens; both sides at least 3 statements)"
+      },
+      "what_each_case_reads": {
+        "dated_reports": "fresh, fresh2, vendor, decisive and Elastic reports read the posts available strictly before their published date. Reports published before 2026-03-01 read the before_2025 copy (actor names: ATT&CK 16.1 and MISP 3735fd37), later ones the before_2026_03 copy (ATT&CK 18.1, data/raw/enterprise-attack-18.1.json sha256 f857d8f78f2f0c0b7db321a711a39fba98546c1e3076a657684850c83d0962fb, and MISP commit 03b461ff of 2026-02-16, the last change of the actor list before 2026-03-01, data/raw/misp_galaxy_03b461ff/threat-actor.json sha256 e1ed20f295c0a59e61a3b09521af65f88a1974f2852dbbed914d1a0863765e70, 941 actors). The store starts 2022-01-01, so the 16 vendor reports published before 2022 read an empty store",
+        "undated_reports": "campaigns and advisories read nothing: they stay out of the weight choice (registered) and enter the combiner's real-report lists with empty store columns (a whole-store reading would show them later reporting)",
+        "attack_folds": "fold cases (the combiner's lists, the design seeds, the safety folds) have no date: the whole store with the current names, without the posts ATT&CK cites for the held-out (group, technique) pairs, and in the unknown arm without the removed actor's documents and links (as registered for the safety check)",
+        "cti_hal": "the safety check only: the whole store with the current names without each report's own post and copies (--store-undated whole)",
+        "app": "the application reads the whole store with the current names"
+      },
+      "behaviour_masking": "at the behaviour reading (--anonymize behavior --mask-store-names) the statements lose, as at the fresh sets' behaviour reading, the ATT&CK malware names and the MISP malware and tool names ATT&CK does not list, and now also every name posts introduce that counts as software at the latest date (the current store's members artifact), in both arms. Clarification of the registered text ('every software name the store knows (ATT&CK, ...)'): ATT&CK's tools (Mimikatz, PsExec, ...) stay, as they do at the fresh sets' behaviour level, where commodity tools count as tradecraft",
+      "weight_choice": {
+        "grid": "store_text and store_software each in 0, 0.5, 1, 2 (16 pairs)",
+        "runs": "fresh (reports + open set), fresh2 (reports + open set) and vendor, each at the behaviour reading (with --mask-store-names) and the strict reading, local pipeline as the arms (no API key, local LLM off, technique head service on), --report-observations 0, --set knowledge_store_pinned=true, both members loaded (weights 1) and --weight-grid store_text=0,0.5,1,2 store_software=0,0.5,1,2: each case's classifier results are fused again per pair (attribution_benchmark.grid_outcomes; a member at weight 0 is left out of fusion as if not loaded, tested)",
+        "combiner_off": "the learned combiner is off for every pair (the procedure-core combiner cannot load once a member votes, and a combiner per pair is not affordable), so the naming floor and the above-null rule do not act in the choice; the rest of the naming gate does",
+        "rule_as_run": "data/knowledge_store/step5/choose_weights.py (its sha256 below): first = the leader is the labelled group or an accepted one, summed over the three sets' known reports; a pair is not eligible when on some report and reading it gives a wrong name (a named known report without the label, or any named open-set report) that weights 0 do not give; best eligible pair by firsts at the behaviour reading, then at the strict reading, then the smaller total weight, then the smaller store software weight; when the best pair puts no more known reports first at the behaviour reading than weights 0, the decisive run is not made"
+      },
+      "after_the_choice": "the combiner is refitted with the members at the chosen weights on the procedure-core recipe, every list generated afresh (scripts/fit_attribution_combiner.py --seeds 11 23 37 --variants 5 --unknown-all --real-reports vendor campaigns advisories --real-unknown --real-weights 0,3,10,30 --l2-grid 1,3,10, a new file name); the design seeds 41/53 run with it and no floor, the floor comes from scripts/probability_floor_replay.py --choose, and the confidence labels are refitted (strong-only when no set threshold meets its bound, as for the procedure core). The artifacts and their hashes go into amendment 2, which freezes the store arm",
+      "development_check": "added here, before any result: with its refitted combiner, floor and labels the store arm and the baseline product run once on the three development sets at both readings; if the store arm gives a wrong name the baseline does not give, the store arm is not frozen and the decisive run is not made. The numbers are reported as development numbers; nothing is tuned on them",
+      "caveat_folds": "the store's vendor posts describe the same intrusions as ATT&CK's procedure examples, and only the posts ATT&CK cites for a held-out pair are hidden, so on the ATT&CK folds the store text can match a held-out sentence through another vendor's write-up; the combiner may learn more trust in it than real reports support. Reported with the refit: each member's top-1 alone on the folds and on the vendor set",
+      "store_build": {
+        "script": "data/knowledge_store/step5/build.sh (the store backed up to step5/store_before_step5.sqlite, then read again with the current lists and with each copy's lists, then the members' artifacts)",
+        "current": {
+          "meta": {
+            "extracted_at": "2026-11-04T12:47:52+00:00",
+            "extractor_version": "4",
+            "finalised_at": "2026-11-04T12:01:57+00:00"
+          },
+          "labels": {
+            "excluded": 10772,
+            "known": 606,
+            "open": 367
+          },
+          "links": {
+            "report:active": 1033,
+            "report:unclear": 1130,
+            "sentence:active": 2943,
+            "sentence:unclear": 1265
+          },
+          "unclear_links_without_a_verdict": 16,
+          "members_artifact": {
+            "path": "data/knowledge_store/store_members.json.gz",
+            "sha256": "dce66e4dc79f1ee85a3457b71ff406553e8c10d88202242932f935da995b915f",
+            "fingerprint": "da1da80adca9c75b1331c947",
+            "counts": {
+              "labelled_posts": 606,
+              "statements": 63726,
+              "links": 4956,
+              "link_posts": 1180,
+              "name_posts": 11616,
+              "masking_names": 1685
+            }
+          }
+        },
+        "before_2025": {
+          "meta": {
+            "extracted_at": "2026-11-04T12:51:09+00:00",
+            "extractor_version": "4",
+            "finalised_at": "2026-11-04T12:01:57+00:00",
+            "pin": "before_2025",
+            "pin_attack_release": "16.1",
+            "pin_misp_commit": "3735fd37d5ccc51e0f1430e97b7701755da20ec1",
+            "copied_at": "2026-11-04T12:47:53+00:00"
+          },
+          "labels": {
+            "excluded": 10826,
+            "known": 588,
+            "open": 331
+          },
+          "links": {
+            "report:active": 997,
+            "report:unclear": 1059,
+            "sentence:active": 2819,
+            "sentence:unclear": 1195
+          },
+          "unclear_links_without_a_verdict": 270,
+          "members_artifact": {
+            "path": "data/knowledge_store/pins/before_2025/store_members.json.gz",
+            "sha256": "ca8b67850a241e2db837cc89576cb49ee734764748f5f7d29225eb3fd2fe0c08",
+            "fingerprint": "26f77c2002c00de385d34dd1",
+            "counts": {
+              "labelled_posts": 588,
+              "statements": 61595,
+              "links": 4621,
+              "link_posts": 1123,
+              "name_posts": 11612,
+              "masking_names": 1684
+            }
+          }
+        },
+        "before_2026_03": {
+          "meta": {
+            "extracted_at": "2026-11-04T12:54:30+00:00",
+            "extractor_version": "4",
+            "finalised_at": "2026-11-04T12:01:57+00:00",
+            "pin": "before_2026_03",
+            "pin_attack_release": "18.1",
+            "pin_misp_commit": "03b461ff837848a475ad26de68c6a4ccf27f3067",
+            "copied_at": "2026-11-04T12:51:10+00:00"
+          },
+          "labels": {
+            "excluded": 10791,
+            "known": 599,
+            "open": 355
+          },
+          "links": {
+            "report:active": 1009,
+            "report:unclear": 1106,
+            "sentence:active": 2903,
+            "sentence:unclear": 1249
+          },
+          "unclear_links_without_a_verdict": 85,
+          "members_artifact": {
+            "path": "data/knowledge_store/pins/before_2026_03/store_members.json.gz",
+            "sha256": "85950e3436eae1768af8580d4537fc82006a8563fe3eb442893669e0db214d9d",
+            "fingerprint": "e71cacfadf733da7d10f5219",
+            "counts": {
+              "labelled_posts": 599,
+              "statements": 62712,
+              "links": 4842,
+              "link_posts": 1157,
+              "name_posts": 11617,
+              "masking_names": 1685
+            }
+          }
+        }
+      },
+      "files_sha256": {
+        "build.sh": "3f69f4bc99efc65b94aaa689d1c88d118d742b5a8deab8c8802fd70b872635b9",
+        "choose_weights.py": "2c03bb093cdf4426be94e7d70d63eff3d0a3a0f338e306964a42d57d2cb3ee54",
+        "supervise_dev.sh": "b9f49c396e139b2c594532d4ea283931872522fbda954b5d4e85b8c540aae68d",
+        "run_dev.sh": "882bdbac4c21dcfea0ca29e66a326f99e4931a774b4f9ea64e41625bdadb460c",
+        "run_refit.sh": "f61808ae2527e8e7198671d069277f4b0300ee7d906ad88bd15b9b4ea8541b87",
+        "run_check.sh": "08ea3206050bc6d405cc414087b14aca83bf02ba4f964cbc2b6ef5ea860352c4",
+        "check_dev.py": "f98d0b0e583bf85f9dfb20efdd112bf50cf06f1793a75b59a124fe08aa2b172a"
+      },
+      "code": "uncommitted worktree on 7c0f532 (apt-attribution-methods-0b93ee)",
+      "scripts": "data/knowledge_store/step5/ (local): build.sh (store build), supervise_dev.sh + run_dev.sh (the grid, started once 8 GB of memory is free), choose_weights.py (the rule as run), run_refit.sh (combiner, design seeds, floor, labels), run_check.sh + check_dev.py (the development check)"
+    },
+    {
+      "number": 2,
+      "date": "2026-11-04",
+      "made_before": "any run on the decisive set (none has been made); written after the registered development rule ran on the six development runs",
+      "reason": "records the registered development rule's result, and corrects one statement of amendment 1 (the store before 2022)",
+      "development_result": {
+        "runs": {
+          "fresh_behavior": {
+            "file": "data/knowledge_store/step5/dev/fresh_behavior.json",
+            "sha256": "1a59ef9cd05f6d33757283d6f7c1c1dd4df2ac42e56dea39e9fed081094d0e1e",
+            "known": 44,
+            "open_set": 54
+          },
+          "fresh_strict": {
+            "file": "data/knowledge_store/step5/dev/fresh_strict.json",
+            "sha256": "83cd8868ddaf1b35a2462c33082924b9323a5f3ae7aba0b0a9e81de690b64f9e",
+            "known": 44,
+            "open_set": 54
+          },
+          "fresh2_behavior": {
+            "file": "data/knowledge_store/step5/dev/fresh2_behavior.json",
+            "sha256": "319a42a210b1fd641a6f04ce1c960e32a168c3aed4bb4ebfb7a6ffe37ca53f17",
+            "known": 12,
+            "open_set": 9
+          },
+          "fresh2_strict": {
+            "file": "data/knowledge_store/step5/dev/fresh2_strict.json",
+            "sha256": "8e13334c9e0f57cdf3b4c0571b1b03585851bfb66c384c03d6725cf433850a2b",
+            "known": 12,
+            "open_set": 9
+          },
+          "vendor_behavior": {
+            "file": "data/knowledge_store/step5/dev/vendor_behavior.json",
+            "sha256": "7fd75eeb10cd1e32d8b59a0cd674bee6fe682d702b8fb198a056fa901e7285ae",
+            "known": 34,
+            "open_set": 0
+          },
+          "vendor_strict": {
+            "file": "data/knowledge_store/step5/dev/vendor_strict.json",
+            "sha256": "816b31f71e6d2a1a83f007d6d4a01170fa589c5f302458fe9d63a03a986637f3",
+            "known": 34,
+            "open_set": 0
+          }
+        },
+        "choice": {
+          "file": "data/knowledge_store/step5/dev/choice.json",
+          "sha256": "5e273ad6833fc1332ee0bc6e14556a1bd30c5850068b7b0d5f102e6956d9eba8",
+          "eligible": [
+            "store_software=0,store_text=0",
+            "store_software=0,store_text=0.5"
+          ],
+          "best_eligible": "store_software=0,store_text=0",
+          "beats_weights_0": false,
+          "verdict": "no pair puts more known reports first than weights 0 at the behaviour reading (best eligible store_software=0,store_text=0): the decisive run is not made"
+        },
+        "table": {
+          "store_software=0,store_text=0": {
+            "behaviour_first": 22,
+            "strict_first": 41,
+            "known_per_reading": 90,
+            "added_wrong_names": []
+          },
+          "store_software=0,store_text=0.5": {
+            "behaviour_first": 20,
+            "strict_first": 41,
+            "known_per_reading": 90,
+            "added_wrong_names": []
+          },
+          "store_software=0,store_text=1": {
+            "behaviour_first": 19,
+            "strict_first": 41,
+            "known_per_reading": 90,
+            "added_wrong_names": [
+              {
+                "set": "fresh2",
+                "reading": "strict",
+                "report": "fresh-groupib-4e967dbc1817",
+                "named": [
+                  "G0094"
+                ],
+                "truth": []
+              }
+            ]
+          },
+          "store_software=0,store_text=2": {
+            "behaviour_first": 19,
+            "strict_first": 39,
+            "known_per_reading": 90,
+            "added_wrong_names": [
+              {
+                "set": "fresh2",
+                "reading": "strict",
+                "report": "fresh-groupib-4e967dbc1817",
+                "named": [
+                  "G0094"
+                ],
+                "truth": []
+              }
+            ]
+          },
+          "store_software=0.5,store_text=0": {
+            "behaviour_first": 21,
+            "strict_first": 43,
+            "known_per_reading": 90,
+            "added_wrong_names": [
+              {
+                "set": "fresh",
+                "reading": "behavior",
+                "report": "fresh-zscaler-31eeae945d40",
+                "named": [
+                  "G0129"
+                ],
+                "truth": [
+                  "G0081"
+                ]
+              }
+            ]
+          },
+          "store_software=0.5,store_text=0.5": {
+            "behaviour_first": 19,
+            "strict_first": 43,
+            "known_per_reading": 90,
+            "added_wrong_names": [
+              {
+                "set": "fresh",
+                "reading": "behavior",
+                "report": "fresh-zscaler-31eeae945d40",
+                "named": [
+                  "G0129"
+                ],
+                "truth": [
+                  "G0081"
+                ]
+              }
+            ]
+          },
+          "store_software=0.5,store_text=1": {
+            "behaviour_first": 19,
+            "strict_first": 43,
+            "known_per_reading": 90,
+            "added_wrong_names": [
+              {
+                "set": "fresh",
+                "reading": "behavior",
+                "report": "fresh-zscaler-31eeae945d40",
+                "named": [
+                  "G0129"
+                ],
+                "truth": [
+                  "G0081"
+                ]
+              },
+              {
+                "set": "fresh2",
+                "reading": "strict",
+                "report": "fresh-groupib-4e967dbc1817",
+                "named": [
+                  "G0094"
+                ],
+                "truth": []
+              }
+            ]
+          },
+          "store_software=0.5,store_text=2": {
+            "behaviour_first": 19,
+            "strict_first": 42,
+            "known_per_reading": 90,
+            "added_wrong_names": [
+              {
+                "set": "fresh",
+                "reading": "behavior",
+                "report": "fresh-zscaler-31eeae945d40",
+                "named": [
+                  "G0129"
+                ],
+                "truth": [
+                  "G0081"
+                ]
+              },
+              {
+                "set": "fresh2",
+                "reading": "strict",
+                "report": "fresh-groupib-4e967dbc1817",
+                "named": [
+                  "G0094"
+                ],
+                "truth": []
+              }
+            ]
+          },
+          "store_software=1,store_text=0": {
+            "behaviour_first": 22,
+            "strict_first": 44,
+            "known_per_reading": 90,
+            "added_wrong_names": [
+              {
+                "set": "fresh",
+                "reading": "behavior",
+                "report": "fresh-zscaler-31eeae945d40",
+                "named": [
+                  "G0129"
+                ],
+                "truth": [
+                  "G0081"
+                ]
+              },
+              {
+                "set": "fresh",
+                "reading": "strict",
+                "report": "fresh-unit42-5654a7dfe665",
+                "named": [
+                  "G0094"
+                ],
+                "truth": []
+              }
+            ]
+          },
+          "store_software=1,store_text=0.5": {
+            "behaviour_first": 20,
+            "strict_first": 44,
+            "known_per_reading": 90,
+            "added_wrong_names": [
+              {
+                "set": "fresh",
+                "reading": "behavior",
+                "report": "fresh-zscaler-31eeae945d40",
+                "named": [
+                  "G0129"
+                ],
+                "truth": [
+                  "G0081"
+                ]
+              },
+              {
+                "set": "fresh",
+                "reading": "strict",
+                "report": "fresh-silentpush-92ef58955864",
+                "named": [
+                  "G1046"
+                ],
+                "truth": [
+                  "G1058"
+                ]
+              }
+            ]
+          },
+          "store_software=1,store_text=1": {
+            "behaviour_first": 20,
+            "strict_first": 44,
+            "known_per_reading": 90,
+            "added_wrong_names": [
+              {
+                "set": "fresh",
+                "reading": "behavior",
+                "report": "fresh-zscaler-31eeae945d40",
+                "named": [
+                  "G0129"
+                ],
+                "truth": [
+                  "G0081"
+                ]
+              },
+              {
+                "set": "fresh",
+                "reading": "strict",
+                "report": "fresh-silentpush-92ef58955864",
+                "named": [
+                  "G1046"
+                ],
+                "truth": [
+                  "G1058"
+                ]
+              },
+              {
+                "set": "fresh2",
+                "reading": "strict",
+                "report": "fresh-groupib-4e967dbc1817",
+                "named": [
+                  "G0094"
+                ],
+                "truth": []
+              }
+            ]
+          },
+          "store_software=1,store_text=2": {
+            "behaviour_first": 20,
+            "strict_first": 42,
+            "known_per_reading": 90,
+            "added_wrong_names": [
+              {
+                "set": "fresh",
+                "reading": "behavior",
+                "report": "fresh-zscaler-31eeae945d40",
+                "named": [
+                  "G0129"
+                ],
+                "truth": [
+                  "G0081"
+                ]
+              },
+              {
+                "set": "fresh",
+                "reading": "strict",
+                "report": "fresh-silentpush-92ef58955864",
+                "named": [
+                  "G1046"
+                ],
+                "truth": [
+                  "G1058"
+                ]
+              },
+              {
+                "set": "fresh2",
+                "reading": "strict",
+                "report": "fresh-groupib-4e967dbc1817",
+                "named": [
+                  "G0094"
+                ],
+                "truth": []
+              }
+            ]
+          },
+          "store_software=2,store_text=0": {
+            "behaviour_first": 23,
+            "strict_first": 46,
+            "known_per_reading": 90,
+            "added_wrong_names": [
+              {
+                "set": "fresh",
+                "reading": "behavior",
+                "report": "fresh-zscaler-31eeae945d40",
+                "named": [
+                  "G0129"
+                ],
+                "truth": [
+                  "G0081"
+                ]
+              },
+              {
+                "set": "fresh",
+                "reading": "strict",
+                "report": "fresh-silentpush-92ef58955864",
+                "named": [
+                  "G1046"
+                ],
+                "truth": [
+                  "G1058"
+                ]
+              }
+            ]
+          },
+          "store_software=2,store_text=0.5": {
+            "behaviour_first": 21,
+            "strict_first": 46,
+            "known_per_reading": 90,
+            "added_wrong_names": [
+              {
+                "set": "fresh",
+                "reading": "behavior",
+                "report": "fresh-zscaler-31eeae945d40",
+                "named": [
+                  "G0129"
+                ],
+                "truth": [
+                  "G0081"
+                ]
+              },
+              {
+                "set": "fresh",
+                "reading": "strict",
+                "report": "fresh-silentpush-92ef58955864",
+                "named": [
+                  "G1046"
+                ],
+                "truth": [
+                  "G1058"
+                ]
+              }
+            ]
+          },
+          "store_software=2,store_text=1": {
+            "behaviour_first": 21,
+            "strict_first": 46,
+            "known_per_reading": 90,
+            "added_wrong_names": [
+              {
+                "set": "fresh",
+                "reading": "behavior",
+                "report": "fresh-zscaler-31eeae945d40",
+                "named": [
+                  "G0129"
+                ],
+                "truth": [
+                  "G0081"
+                ]
+              },
+              {
+                "set": "fresh",
+                "reading": "strict",
+                "report": "fresh-silentpush-92ef58955864",
+                "named": [
+                  "G1046"
+                ],
+                "truth": [
+                  "G1058"
+                ]
+              },
+              {
+                "set": "fresh2",
+                "reading": "strict",
+                "report": "fresh-groupib-4e967dbc1817",
+                "named": [
+                  "G0094"
+                ],
+                "truth": []
+              }
+            ]
+          },
+          "store_software=2,store_text=2": {
+            "behaviour_first": 21,
+            "strict_first": 44,
+            "known_per_reading": 90,
+            "added_wrong_names": [
+              {
+                "set": "fresh",
+                "reading": "behavior",
+                "report": "fresh-zscaler-31eeae945d40",
+                "named": [
+                  "G0129"
+                ],
+                "truth": [
+                  "G0081"
+                ]
+              },
+              {
+                "set": "fresh",
+                "reading": "strict",
+                "report": "fresh-silentpush-92ef58955864",
+                "named": [
+                  "G1046"
+                ],
+                "truth": [
+                  "G1058"
+                ]
+              },
+              {
+                "set": "fresh2",
+                "reading": "strict",
+                "report": "fresh-groupib-4e967dbc1817",
+                "named": [
+                  "G0094"
+                ],
+                "truth": []
+              }
+            ]
+          }
+        },
+        "outcome": "as registered (development.rule): no eligible pair puts more development reports first than weights 0 at the behaviour reading (weights 0: 22 of 90 known reports; store text 0.5, the only other eligible pair: 20), so the decisive run is not made and that is the result. The combiner refit, the floor, the labels and the development check were not run (supervise_rest.sh stopped before run_refit.sh); both members stay off (weight 0); nothing ran on the decisive set"
+      },
+      "observations": {
+        "note": "development numbers, reported for the record; nothing is chosen on them",
+        "member_alone_top1": {
+          "fresh_behavior": {
+            "store_text": "20/44",
+            "store_software": "5/44",
+            "text_group": "13/44",
+            "behavior_text": "5/44",
+            "procedure_match": "3/44"
+          },
+          "fresh_strict": {
+            "store_text": "22/44",
+            "store_software": "16/44",
+            "text_group": "18/44",
+            "behavior_text": "6/44",
+            "procedure_match": "15/44"
+          },
+          "fresh2_behavior": {
+            "store_text": "7/12",
+            "store_software": "1/12",
+            "text_group": "5/12",
+            "behavior_text": "2/12",
+            "procedure_match": "0/12"
+          },
+          "fresh2_strict": {
+            "store_text": "8/12",
+            "store_software": "5/12",
+            "text_group": "6/12",
+            "behavior_text": "1/12",
+            "procedure_match": "4/12"
+          },
+          "vendor_behavior": {
+            "store_text": "7/34",
+            "store_software": "0/34",
+            "text_group": "22/34",
+            "behavior_text": "26/34",
+            "procedure_match": "18/34"
+          },
+          "vendor_strict": {
+            "store_text": "6/34",
+            "store_software": "1/34",
+            "text_group": "25/34",
+            "behavior_text": "26/34",
+            "procedure_match": "27/34"
+          }
+        },
+        "member_alone_reading": "alone, store text ranks the right group first more often than any other member on both fresh sets (behaviour 20/44 and 7/12; ATT&CK text 13/44 and 5/12; the fused product with the combiner off 8/44 and 4/12), yet fused without the combiner it changes no first choice on either fresh set at any weight; on the vendor set, whose reports ATT&CK's procedure text derives from, it is the weakest text member (7/34 against 22-26/34)",
+        "vendor_by_date": {
+          "vendor_behavior:before_2022": {
+            "reports": 16,
+            "first": {
+              "store_software=0,store_text=0": 4,
+              "store_software=0,store_text=0.5": 2
+            }
+          },
+          "vendor_behavior:from_2022": {
+            "reports": 18,
+            "first": {
+              "store_software=0,store_text=0": 6,
+              "store_software=0,store_text=0.5": 6
+            }
+          },
+          "vendor_strict:before_2022": {
+            "reports": 16,
+            "first": {
+              "store_software=0,store_text=0": 8,
+              "store_software=0,store_text=0.5": 8
+            }
+          },
+          "vendor_strict:from_2022": {
+            "reports": 18,
+            "first": {
+              "store_software=0,store_text=0": 11,
+              "store_software=0,store_text=0.5": 11
+            }
+          }
+        },
+        "store_software": "every weight above 0 adds a wrong name (behaviour: G0129 for a G0081 report of the first fresh set; strict: two more), so no pair with it is eligible; at the strict reading weight 2 puts 46 of 90 first against 41"
+      },
+      "correction_of_amendment_1": "what_each_case_reads.dated_reports says the store starts 2022-01-01, so the 16 vendor reports published before 2022 read an empty store. That is wrong: the sources' sitemaps also list older posts, and the store holds 3,741 pages dated before 2022 (123 labelled to an ATT&CK group, earliest 2004). The members read them as for any date. The two right first choices store text 0.5 costs on the vendor set at the behaviour reading are both on those 16 reports (4 -> 2; reports from 2022 on 6 -> 6). Had store text not voted on them, that pair would have tied weights 0 (22 each), and the tie goes to weights 0 (the smaller total weight): the outcome does not rest on this",
+      "window_posts": "as registered (made_before), the members read every stored post as data: the slices of the vendor reports published in 2025 included posts of the decisive window published before each of them (the decisive reports are store posts). Nobody inspected them; only the counts above were read",
+      "files_sha256": {
+        "supervise_rest.sh": "aa6ab44a48951c1fc042e1bef87447a706790abec091fa89c3ddfc889a54e00c",
+        "members_alone.py": "df487d1637bdc5063287d0385ea325313e1809c4db4810836110779aac591ef7",
+        "dev/members_alone.txt": "6690c62b6b895086f2a21a26f35e16b5fc22c84bf3070114ceb92f2c78fe52d9"
+      },
+      "code": "uncommitted worktree on 7c0f532 (apt-attribution-methods-0b93ee)"
+    },
+    {
+      "number": 3,
+      "date": "2026-11-04",
+      "request": "the product owner asked for this second attempt after amendment 2's result ('Yes, try it', 2026-11-04)",
+      "made_before": "any run of this attempt and any run on the decisive set",
+      "reason": "the registered weight choice ran with the learned combiner off, and fusion without the combiner barely uses a text member: on both fresh sets store text alone ranks the right group first more often than any other member (20/44 and 7/12 at the behaviour reading) yet changes no fused first choice at any weight (amendment 2). The combiner gives each member its own columns (feature schema 4); it is how the procedure-core text members became useful (docs 21.3.25). This attempt judges store text through its own refitted combiner. It is chosen after seeing amendment 2's development numbers, so it is a second try; the decisive set stays untouched, so its run would remain a clean test (descriptive only, 48 known reports)",
+      "store_arm": {
+        "STORE_TEXT_WEIGHT": 1.0,
+        "STORE_SOFTWARE_WEIGHT": 0.0,
+        "KNOWLEDGE_STORE_PINNED": true,
+        "why": "store text at the other text members' weight (1.0, not tuned); store software off, since it adds a wrong name at every weight (amendment 2). The members' code, artifacts and store copies are those of amendment 1"
+      },
+      "refit": "run_refit.sh 1.0 0 (unchanged since amendment 1, sha256 there): the combiner on the procedure-core recipe with every list generated afresh (data/models/combiner/attribution_combiner_store_core.json), design seeds 41/53 with no floor, the floor by its design rule (probability_floor_replay.py --choose), the confidence labels (strong-only when no set threshold meets its bound). If the design rule chooses no floor, the attempt stops and the decisive run is not made",
+      "development_check": "run_check.sh 1.0 0 <floor> (unchanged): the store arm and the baseline (the product's defaults) on fresh, fresh2 and vendor at the behaviour reading (--mask-store-names, both arms) and the strict reading; check_dev.py lists every wrong name the store arm gives that the baseline does not",
+      "go_rule": "the store arm is frozen (amendment 4: the artifacts and their hashes) and the decisive run can be made, on the product owner's go, only if both hold: (1) summed over the three sets' known reports at the behaviour reading, the store arm puts the right group (or an accepted one) first on more reports than the baseline; (2) check_dev.py finds no wrong name the store arm gives that the baseline does not (known or open set, either reading). Otherwise the decisive run is not made and that is the result",
+      "in_sample_note": "both arms' combiners are fitted with the vendor set's real-report lists (names:30 and strict:all), so the vendor numbers are in-sample for both arms; the fresh sets are no combiner's training data",
+      "reported_with_it": "the combiner's cross-validation; each member's top-1 alone on the design seeds' folds and on the development sets (amendment 1's fold caveat)",
+      "device": "every run uses the laptop GPU; supervise_combiner.sh stops the running step when nvidia-smi fails (the nightly driver update leaves new processes without CUDA), so no CPU run enters the comparison; the steps resume from their finished outputs",
+      "files_sha256": {
+        "supervise_combiner.sh": "55467c7aeeef3c3a46c226fbfb05ce7738f13e45ed9598dd224424834133424b"
+      },
+      "cost": "no OpenRouter credit; about 7-9 hours of the laptop GPU",
+      "code": "uncommitted worktree on 7c0f532 (apt-attribution-methods-0b93ee)"
+    },
+    {
+      "number": 4,
+      "date": "2026-11-05",
+      "kind": "result of amendment 3 (nothing frozen: the go rule failed)",
+      "refit": {
+        "combiner": "data/models/combiner/attribution_combiner_store_core.json: real weight 10, l2 10 by the registered selection; cross-validated clean fold top-1 0.912, real-report top-1 0.857 (MRR 0.902)",
+        "store_text_weights": {
+          "store_text_present": 0.1203,
+          "store_text_inv_rank": 0.2062,
+          "store_text_score_rel": -0.063,
+          "store_text_inv_rank_x_distinctive_share": 0.0226,
+          "store_text_inv_rank_x_software_rarity_max": -0.1409,
+          "store_text_inv_rank_x_log_accepted": 0.0544
+        },
+        "store_text_weights_note": "small next to the other text members' (text_group score 0.67, behavior_text score 0.50): the combiner learns little trust in store text",
+        "design_seeds": "seed 41: 140/155 first, 35 names, 0 wrong; seed 53: 138/155 first, 36 names, 0 wrong (no floor)",
+        "floor": "the design rule chose 0.0: no wrong name on either design seed to hold, lowest correct-name probability 0.625 (amendment 3 stops only when the rule chooses none)",
+        "labels": "no set threshold met its bound; strong-only, strong 0.635 (data/models/calibration/confidence_labels_store_core.json)",
+        "member_alone_on_design_folds": "store_text 31/155 and 28/155, text_group 102 and 86, behavior_text 57 and 61, procedure_match 28 and 28 (seeds 41, 53): on ATT&CK's own groups store text is weak, which is the combiner's main training data"
+      },
+      "development_check": {
+        "table": {
+          "fresh_behavior": {
+            "store": {
+              "known": 44,
+              "first": 10,
+              "named": 0,
+              "named_wrong": 0,
+              "open_set_named": 1
+            },
+            "baseline": {
+              "known": 44,
+              "first": 10,
+              "named": 0,
+              "named_wrong": 0,
+              "open_set_named": 1
+            }
+          },
+          "fresh_strict": {
+            "store": {
+              "known": 44,
+              "first": 18,
+              "named": 8,
+              "named_wrong": 2,
+              "open_set_named": 1
+            },
+            "baseline": {
+              "known": 44,
+              "first": 19,
+              "named": 8,
+              "named_wrong": 1,
+              "open_set_named": 2
+            }
+          },
+          "fresh2_behavior": {
+            "store": {
+              "known": 12,
+              "first": 5,
+              "named": 0,
+              "named_wrong": 0,
+              "open_set_named": 0
+            },
+            "baseline": {
+              "known": 12,
+              "first": 4,
+              "named": 0,
+              "named_wrong": 0,
+              "open_set_named": 0
+            }
+          },
+          "fresh2_strict": {
+            "store": {
+              "known": 12,
+              "first": 5,
+              "named": 3,
+              "named_wrong": 0,
+              "open_set_named": 0
+            },
+            "baseline": {
+              "known": 12,
+              "first": 5,
+              "named": 3,
+              "named_wrong": 0,
+              "open_set_named": 0
+            }
+          },
+          "vendor_behavior": {
+            "store": {
+              "known": 34,
+              "first": 23,
+              "named": 2,
+              "named_wrong": 0,
+              "open_set_named": 0
+            },
+            "baseline": {
+              "known": 34,
+              "first": 23,
+              "named": 2,
+              "named_wrong": 0,
+              "open_set_named": 0
+            }
+          },
+          "vendor_strict": {
+            "store": {
+              "known": 34,
+              "first": 29,
+              "named": 6,
+              "named_wrong": 0,
+              "open_set_named": 0
+            },
+            "baseline": {
+              "known": 34,
+              "first": 30,
+              "named": 6,
+              "named_wrong": 0,
+              "open_set_named": 0
+            }
+          }
+        },
+        "member_alone_store_arm": "store_text first alone: fresh 20/44 (behaviour) 22/44 (strict), fresh2 7/12 and 8/12, vendor 7/34 and 6/34 (as in amendment 2)"
+      },
+      "go_rule": {
+        "condition_1": "behaviour firsts summed over the three sets: store arm 38 vs baseline 37: holds (fresh2 5 vs 4; fresh and vendor equal)",
+        "condition_1_strict_for_reference": "strict firsts: store arm 52 vs baseline 54",
+        "condition_2": "fails: one wrong name the baseline does not give",
+        "new_wrong_names": [
+          {
+            "set": "fresh",
+            "reading": "strict",
+            "report": "fresh-silentpush-4dd416e2e8a9",
+            "named": [
+              "G1046"
+            ]
+          }
+        ],
+        "how_it_arose": "fresh-silentpush-4dd416e2e8a9 (label G1058 The Gentlemen, rank 34-35 in both arms): both arms lead with G1046 Storm-1811 (decisive software S1070 and S1242; combiner p 0.92 store arm, 0.85 baseline). In the baseline the runner-up is G1050 and the leader's separation 0.302 holds the name; store text reorders the window (runner-up G0034) and the separation rises to 0.581, so the gate names it. Not the floor: both probabilities are far above 0.20",
+        "other_changes": "fresh strict: the store arm drops one correct name (fresh-proofpoint-941af5a9a075, G0129) and one open-set name (fresh-cisa-d9cea57d40b0, a G0094 cluster in the baseline)"
+      },
+      "outcome": "the store arm is not frozen and the decisive run is not made (amendment 3's go rule). Both store members stay off (weights 0); the default combiner, floor and labels are unchanged. The new combiner and labels stay as trial artifacts under their new names",
+      "window_posts": "no decisive-window post was sampled or inspected; nothing ran on the decisive set",
+      "files_sha256": {
+        "data/models/combiner/attribution_combiner_store_core.json": "a71bf24981d6d39d55039dc06707aaccc96fe48b0df445817a93838d1c43f4dc",
+        "data/models/calibration/confidence_labels_store_core.json": "ec45eb279841ab7f71cc03bc9b27d9a01969bf6ca7a12d3ac59238c1190bebe4",
+        "data/knowledge_store/step5/refit/attribution_combiner_store_core_cv.json": "b076f7fd71ec5016cbc6c70fa3bc2e63da793be7ee5187cff97e6e1c6421b766",
+        "data/knowledge_store/step5/refit/design41_store.json": "5b46f18fbcd207c9c3de8ad22658d77a1fa3aa8267da29c2a5d0ca4c43a6625a",
+        "data/knowledge_store/step5/refit/design53_store.json": "00e2c79c0584acb51edc6fd468206a0263924794220987c06ac75e3ae7a6179f",
+        "data/knowledge_store/step5/refit/floor_choice.txt": "f8cdd5e23f3583486ff4b6e3672c769e8deba0dbd373081c56d12ff97925a6ad",
+        "data/knowledge_store/step5/refit/confidence_labels_store_core_eval.json": "c687939707ce2042b5d15756552c85e7c407e165e5589be662d4a68a675136d4",
+        "data/knowledge_store/step5/check/check.json": "3e60a1710a1cb718472389ce0b337fa982cbf83309342db6791eea26773307b6",
+        "data/knowledge_store/step5/check/fresh2_behavior_baseline.json": "e5f384fda9ee9d809ed752ef2339795cb6ee2c1f58ac9830ad2b618595524718",
+        "data/knowledge_store/step5/check/fresh2_behavior_store.json": "f5c092dd0ed47e85378f7316eca856efd45705d100bbc7c39347086a53c52d30",
+        "data/knowledge_store/step5/check/fresh2_strict_baseline.json": "f3f1ee3272a12d7572b736b1c14290451a93ba47025852ac64102303638c52a6",
+        "data/knowledge_store/step5/check/fresh2_strict_store.json": "edbe942e8faf0c384264bd087dfe550ec6130c4cfba52be47a93be97e3802268",
+        "data/knowledge_store/step5/check/fresh_behavior_baseline.json": "71bee920c7ae4d8a15cff1e782a27134a85faf8e6aa45d55e3ea9f4aafd4f39a",
+        "data/knowledge_store/step5/check/fresh_behavior_store.json": "5d2b5d24c14b20a4d20d346e0c74ccd1ba92345e2e9163af99b02b52bdb2ea21",
+        "data/knowledge_store/step5/check/fresh_strict_baseline.json": "0b3ae46dcf814b6b27c049fe6979885c549eabe89add7015c647e601f7235a93",
+        "data/knowledge_store/step5/check/fresh_strict_store.json": "defaabeebe5d0173f1c2f3b7606f12444920e62a8d94205c07b431628958447c",
+        "data/knowledge_store/step5/check/vendor_behavior_baseline.json": "cc20307f40e85dbf586f57d28a273aa505550afe9666a94e4cf759763b0bf3e9",
+        "data/knowledge_store/step5/check/vendor_behavior_store.json": "6c2fd6788e473a1b47d9c2d4ad496edee3fb4fbc879d57acd802c49ea42dc28b",
+        "data/knowledge_store/step5/check/vendor_strict_baseline.json": "9fe679260ac711b0624dae048ac01d50df2dac4e183be50c57751c8d7f1c9635",
+        "data/knowledge_store/step5/check/vendor_strict_store.json": "a47c6fe9a1b9a49c8dc76ef6159a9c7d7ed017ede0fc88c37c887d0896dcf127"
+      },
+      "cost": "no OpenRouter credit; 8 hours of the laptop GPU (17:47-01:48), every run on the GPU",
+      "code": "uncommitted worktree on 7c0f532 (apt-attribution-methods-0b93ee)"
+    }
+  ]
+}

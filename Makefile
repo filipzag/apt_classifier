@@ -7,7 +7,7 @@ EVIDENCEFORGE_CLINIC_DIR ?= ../evidenceforge_clinic
 PUBLIC_BASELINE ?= data/audits/public_heldout_baseline.json
 PUBLIC_CURRENT ?= data/audits/public_heldout_current.json
 
-.PHONY: llm-pull llm-check cribl-venv cribl-export cribl-probe cribl-train cribl-eval technique-head-serve exemplars exemplars-chroma exemplars-chroma-verify exemplar-equivalence fit-forest fit-mlp fit-text-group fit-behavior-text fit-combiner fit-confidence-labels api api-dev api-local api-auth-demo web-install web-dev web-build web-check run-next setup up down ingest run run-local test lint evidenceforge-eval evidenceforge-eval-all benchmark-public benchmark-curated verify-results check-regression fit-acceptance benchmark-attribution train-reranker generate-synthetic benchmark-cti-hal benchmark-cti-hal-production benchmark-attribution-production prepare-elastic benchmark-elastic benchmark-elastic-production
+.PHONY: llm-pull llm-check cribl-venv cribl-export cribl-probe cribl-train cribl-eval technique-head-serve exemplars exemplars-chroma exemplars-chroma-verify exemplar-equivalence fit-forest fit-mlp fit-text-group fit-behavior-text fit-combiner fit-confidence-labels api api-dev api-local api-auth-demo web-install web-dev web-build web-check run-next setup up down ingest run run-local test lint evidenceforge-eval evidenceforge-eval-all benchmark-public benchmark-curated verify-results check-regression fit-acceptance benchmark-attribution train-reranker generate-synthetic benchmark-cti-hal benchmark-cti-hal-production benchmark-attribution-production prepare-elastic benchmark-elastic benchmark-elastic-production store-backfill store-update store-status store-extract store-check
 
 setup:
 	python3 -m venv --system-site-packages .venv
@@ -274,3 +274,23 @@ web-check:
 	cd web && npx tsc -b && npm run lint
 
 run-next: web-build api
+
+# Dated knowledge store (docs/KNOWLEDGE_STORE_DESIGN.md): approved research posts from 2022 on,
+# downloaded politely (robots.txt, one request per second per site) into the gitignored store.
+STORE_ROOT ?= data/knowledge_store
+
+store-backfill:
+	PYTHONPATH=. $(PYTHON) scripts/knowledge_store.py --root $(STORE_ROOT) backfill --since 2022-01-01
+
+store-update:
+	PYTHONPATH=. $(PYTHON) scripts/knowledge_store.py --root $(STORE_ROOT) update
+
+store-status:
+	PYTHONPATH=. $(PYTHON) scripts/knowledge_store.py --root $(STORE_ROOT) status
+
+store-extract:
+	PYTHONPATH=. $(PYTHON) scripts/knowledge_store.py --root $(STORE_ROOT) --workers 6 extract
+
+# unclear links to the local model (Ollama 0.35+ on port 11435, every layer on the GPU; resumable)
+store-check:
+	PYTHONPATH=. $(PYTHON) scripts/knowledge_store.py --root $(STORE_ROOT) --workers 6 check

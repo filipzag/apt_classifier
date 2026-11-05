@@ -304,6 +304,18 @@ class Settings(BaseSettings):
     procedure_match_link_weight: float = 1.0
     procedure_match_aggregate: str = "mean"
     procedure_match_prior: float = 0.0
+    # The dated knowledge store's two members (apt_classifier/knowledge_store/members.py, prereg
+    # knowledge_store_decisive_2026-11-04, docs 12.9): store text (the free-text member's TF-IDF
+    # over the store's posts per group; never an independent family) and store software (the
+    # software member's rarity rule over the store's uses links ATT&CK lacks; names a group only
+    # through links two publishers state). Off at 0: nothing is loaded and the combiner
+    # fingerprint is unchanged. They read <knowledge_store_dir>/store_members.json.gz (built by
+    # scripts/knowledge_store.py members); with knowledge_store_pinned a dated case reads the pin
+    # of its date instead (pins.py: actor names from before its window; the benchmarks only).
+    store_text_weight: float = 0.0
+    store_software_weight: float = 0.0
+    knowledge_store_dir: str = "data/knowledge_store"
+    knowledge_store_pinned: bool = False
     cyberre_model: str = "openai/gpt-5.6-sol"
     cyberre_effort: str = "low"
     cyberre_weight: float = 0.35

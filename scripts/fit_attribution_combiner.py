@@ -51,6 +51,10 @@ from apt_classifier.combiner import (  # noqa: E402
 from apt_classifier.config import Settings  # noqa: E402
 from apt_classifier.embeddings import SentenceTransformerEmbedder  # noqa: E402
 from apt_classifier.group_mlp import precompute_draws, refit_without_groups  # noqa: E402
+from apt_classifier.knowledge_store.members import (  # noqa: E402
+    citation_keys,
+    store_members_votes,
+)
 from apt_classifier.procedure_match import procedure_match_votes  # noqa: E402
 from apt_classifier.separation import discriminate, technique_document_counts  # noqa: E402
 from apt_classifier.session import AttributionEngine  # noqa: E402
@@ -251,8 +255,15 @@ def generate_lists(
     base_behavior_status = getattr(engine, "behavior_text_status", None)
     base_procedure = getattr(engine, "procedure_match", None)
     base_procedure_status = getattr(engine, "procedure_match_status", None)
+    citations = (
+        citation_keys(engine.settings.attack_bundle_path)
+        if getattr(engine, "store_members", None) is not None
+        else None
+    )
 
     def hide_text(fold: Any) -> None:
+        # the store members read the whole store without the posts ATT&CK cites for the fold
+        bench.store_case(engine, fold, citations=citations)
         # the text model's group documents hide the fold like the store does (cheap refit)
         if base_text is not None:
             engine.set_text_group(
@@ -379,6 +390,8 @@ def generate_lists(
         if base_procedure is not None:
             engine.set_procedure_match(base_procedure, base_procedure_status)
         engine.lexical_index = base_lexical
+        if getattr(engine, "store_members", None) is not None:
+            engine.clear_store_case()
     return records, stats
 
 
@@ -405,6 +418,7 @@ def generate_unknown_lists(
         log(f"  unknown: resumed after {processed}/{len(folds)} folds")
     started = time.time()
     draws = None
+    citations = None
     for index, fold in enumerate(folds, 1):
         if index <= processed:
             continue
@@ -454,6 +468,11 @@ def generate_unknown_lists(
                     reduced, group_id=fold.group_id, texts=fold.held_out_texts, remove_group=True
                 )
             )
+        if getattr(engine, "store_members", None) is not None:
+            if citations is None:
+                citations = citation_keys(settings.attack_bundle_path)
+            # the whole store without the actor and the posts ATT&CK cites for the fold
+            bench.store_case(engine, fold, citations=citations, remove_actor=True)
         state = engine.analyze(bench._ledger(fold))  # noqa: SLF001
         fusion = state.deterministic_fusion or state.fusion
         if fusion.entries:
@@ -582,6 +601,9 @@ def _known_real_lists(
                         any_group_texts=fold.hidden_texts,
                     )
                     engine.store = proxy
+                    # a dated report's store members read the store before its date; an
+                    # undated one (campaigns, advisories) reads none of it
+                    bench.store_case(engine, fold)
                     with bench.hidden_campaign(engine.kb, fold.hidden_campaign):
                         state = engine.analyze(bench._ledger(fold))  # noqa: SLF001
                         lst = list_from_state(
@@ -625,6 +647,8 @@ def _known_real_lists(
         for name, (member, status) in saved.items():
             if member is not None:
                 setters[name](member, status)
+        if getattr(engine, "store_members", None) is not None:
+            engine.clear_store_case()
 
 
 def generate_real_lists(
@@ -707,6 +731,7 @@ def generate_real_lists(
                         refit_without_groups(reduced_engine.group_mlp, reduced)
                     )
                 _hide_members(reduced_engine, reduced, fold, remove_group=True)
+                bench.store_case(reduced_engine, fold, remove_actor=True)
                 with bench.hidden_campaign(reduced, fold.hidden_campaign):
                     state = reduced_engine.analyze(bench._ledger(fold))  # noqa: SLF001
                     fusion = state.deterministic_fusion or state.fusion
@@ -1200,6 +1225,11 @@ def main(argv: list[str] | None = None) -> int:
         raise SystemExit(
             f"refusing to fit: BEHAVIOR_TEXT_WEIGHT > 0 but the behaviour-text member is "
             f"{engine.behavior_text_status!r} (it reads TEXT_GROUP_PATH)"
+        )
+    if store_members_votes(settings) and engine.store_members is None:
+        raise SystemExit(
+            f"refusing to fit: a store member's weight is > 0 but its artifact is "
+            f"{engine.store_members_status!r} (scripts/knowledge_store.py members)"
         )
     if procedure_match_votes(settings) and engine.procedure_match is None:
         raise SystemExit(

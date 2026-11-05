@@ -43,6 +43,9 @@ if str(REPO_ROOT) not in sys.path:
 from apt_classifier.attack.kb import AttackKnowledgeBase  # noqa: E402
 from apt_classifier.evidence.iocs import match_software_aliases  # noqa: E402
 from apt_classifier.evidence.local_extract import local_observations  # noqa: E402
+
+# whole headings (normalized, lower case) of non-narrative sections, dropped for every post
+from apt_classifier.knowledge_store.parse import _DROP_HEADING_RE  # noqa: E402
 from apt_classifier.vectorstore import (  # noqa: E402
     normalize_procedure_text,
     procedure_sentence_texts,
@@ -75,20 +78,6 @@ _BLOCK_TAGS = frozenset(
     ]
 )
 _HEADING_TAGS = {f"h{level}": level for level in range(1, 7)}
-# whole headings (normalized, lower case) of non-narrative sections, dropped for every post
-_DROP_HEADING_RE = re.compile(
-    r"^(?:.*mitre att&ck.*"
-    r"|tactics|techniques(?: ?(?:/|\() ?sub[- ]?techniques\)?)?"
-    r"|observed (?:adversary )?tactics and techniques"
-    r"|detections?(?: logic| rules?(?: for .*)?| opportunities| capabilities)?"
-    r"|existing detection rules|detecting and preventing .*"
-    r"|(?:malware )?(?:prevention|detection) capabilities|preventions?(?: rules?(?: for .*)?)?"
-    r"|hunting quer(?:y|ies).*|eql quer(?:y|ies)|es\|?ql quer(?:y|ies)"
-    r"|yara(?: rules?(?: for .*)?| signatures?)?"
-    r"|how to detect and prevent.*|observations|observables.*|indicators(?: of compromise.*)?|iocs?"
-    r"|artifacts|references|appendix.*|(?:the )?diamond model|about elastic security labs"
-    r"|defensive recommendations|recommendations)$"
-)
 _TECHNIQUE_HREF_RE = re.compile(r"attack\.mitre\.org/techniques/(T\d{4})(?:/(\d{3}))?", re.I)
 _IMAGE_RE = re.compile(r"!\[[^\]]*]\([^)]*\)")
 _FIGURE_LINE_RE = re.compile(r"^Figure \d+\b")

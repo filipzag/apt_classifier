@@ -37,8 +37,8 @@ from apt_classifier.separation import DiscriminationResult, technique_document_c
 
 # 2: the random-forest source-country vote joins the features; 3: per-member features for the
 # optional members (OPTIONAL_CLASSIFIERS; zero whenever one does not vote, so an artifact fitted
-# without them keeps its own columns)
-FEATURE_SCHEMA_VERSION = 3
+# without them keeps its own columns); 4: the knowledge store's two members join them
+FEATURE_SCHEMA_VERSION = 4
 KIND = "attribution_combiner_conditional_logit"
 DISTINCTIVE_MAX_GROUPS = 10
 EXCLUSIVE_SOFTWARE_MAX_GROUPS = 4
@@ -63,6 +63,9 @@ OPTIONAL_CLASSIFIERS: tuple[str, ...] = (
     "text_group",
     "behavior_text",
     "procedure_match",
+    # schema 4 (2026-11-04): the knowledge store's members (knowledge_store/members.py)
+    "store_text",
+    "store_software",
 )
 RRF_FEATURES = ("rrf_rel", "rrf_inv_rank", "rrf_support", "rrf_rank_std", "rrf_contested")
 DISC_FEATURES = (
