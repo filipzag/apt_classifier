@@ -287,6 +287,65 @@ Everything below runs locally and spends no OpenRouter credit.
 
   With fewer than 60 known reports, every reading is descriptive only.
 
+## Step 5b (registered 2026-11-09): the combiner learns from dated store posts
+
+Registration: `docs/preregistration/store_training_lists_2026-11-09.json` (registered
+2026-11-09). Nothing here is built or run yet.
+
+**Why.** Store text alone is the strongest member on the fresh reports at the behaviour reading
+(20/44 and 7/12). The combiner still barely uses it, because it learns mostly from ATT&CK folds,
+where store text is weak (28–31 of 155 first). Real reports read the way the product reads them
+should teach it how far to trust store text.
+
+**Training posts.**
+- Store posts published before 2025. Nothing from the decisive window (2025-01 to 2026-02) is read,
+  either as a case or as store content.
+- Built with the fresh-set builder from the store: same label rule, masking, and cap of 8 posts per
+  group. The decisive set's label review runs before any system reads them.
+- Posts ATT&CK cites are left out, and so are the URLs and retellings of every other set (CTI-HAL
+  and Elastic included).
+- Open-set posts become real "none of these" lists for the combiner's null option.
+- Pool before the cap, exclusions and review: 294 known posts on 79 groups (before 2022: 83; 2022:
+  74; 2023: 61; 2024: 76) and 167 open-set posts. Expected: about 180–230 known.
+
+**How each post is read.**
+- The store: the pre-2025 pinned copy, only posts from before the post's own date, without the post
+  and its copies.
+- ATT&CK members: ATT&CK 20.0, with the procedure examples that copy the post hidden. Older ATT&CK
+  releases would mean rebuilding every index and model per release.
+- Two readings: strict and behaviour.
+
+**Choosing the weight.**
+- Store lists get their own weight (0, 3, 10, 30). The existing real-report lists keep 10.
+- A time split decides: train on posts before 2024, score on the 2024 posts. Most behaviour-reading
+  first places wins.
+- A guard stops any choice that drops ATT&CK fold top-1 by more than 0.02.
+- If weight 0 wins, the step stops.
+
+**Naming safety.**
+- Floor and labels are re-chosen on the design seeds.
+- The go rule: more development reports first at the behaviour reading (fresh, fresh2, vendor) and
+  no wrong name the current product does not give. This covers those sets at both readings and the
+  design seeds.
+- The last wrong name came at combiner probability 0.92, so only that check, not a floor, guards
+  against it.
+
+**Deciding test.** The registered confirmation set (posts from 2026-11-03, scored at 30 known,
+descriptive) needs the refresh. It did not run from 2026-11-04 to 2026-11-09; the run on 2026-11-09
+added 27 posts and lost nothing. It is run by hand (`make store-update`), not scheduled; a run at
+least every 60 days loses nothing. Sites that refuse or rate-limit are left alone (2026-11-09: Check
+Point, SentinelOne, Zscaler, Silent Push, AhnLab ASEC); Trend Micro listed nothing after 2026-09-25.
+At about 4–7 usable known posts a month:
+- 30 by about March–June 2027;
+- 60, the adoption minimum, by about mid-2027 to early 2028;
+- 100 by about 2028.
+
+**Cost.**
+- No OpenRouter credit.
+- About 10–11 hours of laptop GPU: lists about 7–8 h, design seeds about 50 min, development check
+  about 1.6 h. A rented GPU would cost roughly $4–8.
+- About 300–350 label reviews.
+
 ## Build order
 
 | Step | What | Compute | Result |
@@ -296,6 +355,7 @@ Everything below runs locally and spends no OpenRouter credit.
 | 3 | Early stop check on the 11 misses | seconds | go or stop. **Go (2026-11-03):** 4 of the 8 links held before each report's date; 5 of 8 with the model's links |
 | 4 | Register the decisive test; build and freeze the 2025 set | listing minutes, download 1–2 hours | pre-registration file and a frozen set. **Done 2026-11-04:** registered with behaviour primary; frozen at 48 known and 69 open-set reports, below 60, so descriptive only |
 | 5 | Both members, benchmarks sliced by date, tuning on the development sets, own combiner, floor and labels | combiner about 1 hour; benchmarks the usual hours | weights and model files. **Done (2026-11-04), no decisive run:** members, pins and artifacts built and tested, amendment 1 recorded before any run; no eligible weight pair beat weights 0 at the behaviour reading (22/90), so, as registered, step 6 is not run (amendment 2). A second attempt, store text through its own refitted combiner (amendment 3), put 38 vs 37 reports first at the behaviour reading but added one wrong name, so step 6 is again not run (amendment 4, 2026-11-05; technical documentation 12.9) |
+| 5b | Dated store posts as combiner training lists (registered 2026-11-09, section above) | about 10–11 GPU hours | a combiner and a go or stop for step 6 |
 | 6 | Decisive run, then the full gate (folds, CTI-HAL, Elastic) | hours | adopt or not |
 | 7 | Later: artefacts and indicators; actors outside ATT&CK; dossier for the LLM | — | each with its own test |
 
