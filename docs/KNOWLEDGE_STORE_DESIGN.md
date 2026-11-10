@@ -290,7 +290,8 @@ Everything below runs locally and spends no OpenRouter credit.
 ## Step 5b (registered 2026-11-09): the combiner learns from dated store posts
 
 Registration: `docs/preregistration/store_training_lists_2026-11-09.json` (registered
-2026-11-09). Nothing here is built or run yet.
+2026-11-09). Built and run 2026-11-09 to 2026-11-10; the result and its review are at the end of
+this section.
 
 **Why.** Store text alone is the strongest member on the fresh reports at the behaviour reading
 (20/44 and 7/12). The combiner still barely uses it, because it learns mostly from ATT&CK folds,
@@ -307,6 +308,10 @@ should teach it how far to trust store text.
 - Open-set posts become real "none of these" lists for the combiner's null option.
 - Pool before the cap, exclusions and review: 294 known posts on 79 groups (before 2022: 83; 2022:
   74; 2023: 61; 2024: 76) and 167 open-set posts. Expected: about 180–230 known.
+- Built and reviewed 2026-11-09 (`data/benchmarks/store_train/`, hashes in the registration's
+  build record): 95 posts excluded by the label review, never relabelled; 194 known posts on 72
+  groups and 132 open-set posts on 97 actors. The 2024 choice slice holds 61 known and 47 open-set
+  posts.
 
 **How each post is read.**
 - The store: the pre-2025 pinned copy, only posts from before the post's own date, without the post
@@ -346,6 +351,40 @@ At about 4–7 usable known posts a month:
   about 1.6 h. A rented GPU would cost roughly $4–8.
 - About 300–350 label reviews.
 
+**Result (2026-11-10): store weight 0, so no combiner and no decisive run.**
+- Lists: 1,025 from the store posts (191 known and 131 open-set posts at both readings, 381
+  removed-actor lists). Run on the laptop GPU from 00:40 to 06:25, no credit.
+- Time split: the 60 known posts of 2024, scored by a combiner fitted without them.
+  - Every weight put 14–15 of the 60 first at the behaviour reading (weight 0: 15) and 28–30 at
+    strict.
+  - Weights 10 and 30 moved the right group up a little (mean reciprocal rank 0.34 → 0.35–0.37)
+    but cost ATT&CK fold top-1 0.90 → 0.85–0.87, outside the guard.
+  - Weight 3 passed the guard and put no more reports first.
+- The rule picked weight 0, so no combiner was written. The design seeds, floor, labels and
+  development check were not run. Defaults are unchanged.
+- For scale: the right group was in the shortlist for 37 of the 60 posts at the behaviour reading
+  (45 at strict).
+- Report: `data/knowledge_store/step5b/attribution_combiner_store_lists_cv.json`.
+
+**Review (2026-11-10, development data, made after the result).**
+- The stop is the rule applied correctly. But 60 posts can only show a jump of about 8 first
+  places, so the test had little power.
+- Old posts are not like new ones. A post from 2019 meets a thin store, while ATT&CK 20.0 already
+  documents its activity. The right group had no store text at all for 20 of the 34 posts up to
+  2019, against 5 of the 60 posts of 2024. So the lists teach the combiner to trust the ATT&CK
+  members.
+- 643 of the 916 usable lists say "none of these". They teach caution only, and a higher naming
+  floor on today's combiner does that better. At the same 2,151 right names on held-out fold cases
+  it gives 196 wrong names (floor 0.44), against 293 with the store lists.
+- The combiner cannot reach what store text knows:
+  - it only reorders the fused top 20, and in 4 of store text's 10 own wins the right group was
+    outside it;
+  - a good store-text answer shows in its lead over its own second choice, and the combiner has no
+    such feature.
+- Three routes through the fusion or a combiner have now failed for the same reasons, so no fourth
+  is proposed. What did pay on development data is a ranking rule outside the combiner (next
+  section).
+
 ## Build order
 
 | Step | What | Compute | Result |
@@ -355,7 +394,7 @@ At about 4–7 usable known posts a month:
 | 3 | Early stop check on the 11 misses | seconds | go or stop. **Go (2026-11-03):** 4 of the 8 links held before each report's date; 5 of 8 with the model's links |
 | 4 | Register the decisive test; build and freeze the 2025 set | listing minutes, download 1–2 hours | pre-registration file and a frozen set. **Done 2026-11-04:** registered with behaviour primary; frozen at 48 known and 69 open-set reports, below 60, so descriptive only |
 | 5 | Both members, benchmarks sliced by date, tuning on the development sets, own combiner, floor and labels | combiner about 1 hour; benchmarks the usual hours | weights and model files. **Done (2026-11-04), no decisive run:** members, pins and artifacts built and tested, amendment 1 recorded before any run; no eligible weight pair beat weights 0 at the behaviour reading (22/90), so, as registered, step 6 is not run (amendment 2). A second attempt, store text through its own refitted combiner (amendment 3), put 38 vs 37 reports first at the behaviour reading but added one wrong name, so step 6 is again not run (amendment 4, 2026-11-05; technical documentation 12.9) |
-| 5b | Dated store posts as combiner training lists (registered 2026-11-09, section above) | about 10–11 GPU hours | a combiner and a go or stop for step 6 |
+| 5b | Dated store posts as combiner training lists (registered 2026-11-09, section above) | about 10–11 GPU hours planned, about 6 used | a combiner and a go or stop for step 6. **Done (2026-11-10), no decisive run:** the registered choice picked store weight 0, so no combiner was written |
 | 6 | Decisive run, then the full gate (folds, CTI-HAL, Elastic) | hours | adopt or not |
 | 7 | Later: artefacts and indicators; actors outside ATT&CK; dossier for the LLM | — | each with its own test |
 

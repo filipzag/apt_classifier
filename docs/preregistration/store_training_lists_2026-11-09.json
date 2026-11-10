@@ -1,7 +1,7 @@
 {
   "schema": "attribution_prereg/1",
   "id": "store_training_lists_2026-11-09",
-  "status": "registered on the product owner's go (2026-11-09); nothing built or run under it yet",
+  "status": "registered on the product owner's go (2026-11-09); built and reviewed 2026-11-09; step 5 run 2026-11-10: the registered choice picked store weight 0, so no combiner was written and the step stopped (no go, no decisive run)",
   "title": "Dated store posts as combiner training lists: does a combiner that also learns from store posts read before their own date let store text through on the development reports, with no new wrong name?",
   "registered": "2026-11-09",
   "request": "the product owner approved handing this step from the size-correction session to the knowledge-store session (2026-11-09): design dated real-report training lists so the attribution combiner can learn how far to trust store text; design and draft registration first, nothing built or run before approval, one step at a time, costs up front",
@@ -72,12 +72,31 @@
     "development_check": "about 1.6 hours of GPU (store arm only, baseline reused)",
     "total": "about 10-11 hours of laptop GPU, or roughly $4-8 on a rented GPU"
   },
+  "build_record": {
+    "built": "2026-11-09, after registration; no system ran on any post of the set",
+    "script": "data/benchmarks/store_train/build.sh (store posts published 1990-01-01..2024-12-31; ATT&CK 20.0 and MISP 24877de2 names, as the decisive set; other sets and their retellings left out, the decisive set included)",
+    "listing": "7,533 candidate posts; left out before labelling: copies, posts ATT&CK cites or another set holds, posts available only after 2024 (updated more than 30 days later or living documents) and pages refused by their site",
+    "label_rule": "4,199 name no actor, 2,059 too short, 813 no dominant actor, 2 leader related to an ATT&CK group, 12 retellings of another set's report",
+    "label_review": "every labelled post read before use (data/benchmarks/store_train/amendments.json, review aids review_view.py and review_detail.py): 95 excluded, never relabelled (61 known, 34 open set): roundups, news, tutorials and emulation exercises; names that are a malware, product or technique rather than the actor; several actors; the vendor not attributing to the labelled group or only suspecting a link; open-set actors that are an ATT&CK group under another name or overlap one. Exclusions under the cap let older posts in; they were reviewed in two more rounds until no new post entered",
+    "result": "194 known posts on 72 groups (before 2022: 52; 2022: 45; 2023: 36; 2024: 61; 5 groups at the cap of 8, 30 with one post) and 132 open-set posts on 97 actors (before 2022: 22; 2022: 26; 2023: 37; 2024: 47). Choice slice (2024): 61 known and 47 open-set posts",
+    "sha256": {
+      "reports.jsonl": "a5f4291143223aa8f9a885c908484efec8d91b594e9b1ebb0253822fe9571bfe",
+      "open_set.jsonl": "0f7957184de5ddd4f1695757c1fc22633be3713a914c46c8011a78e0a4c99180",
+      "amendments.json": "327ae3b202cca038e5b3e0ebb0e2facb6e29b255339c16942347ac0fc5055f4e",
+      "candidates.json": "006ecc6200cfd5aa9bc13bca21159df91a3d4a60d60c27c3e3317e2ecb93809e",
+      "labels.json": "6f370cac25933913168659b79bb730a477e848a4275148cccd2b21f26385abab",
+      "misp_threat_actor.json": "092e2eb8fcd63cd6b6d7bf8add2af025cc5cfd94a8dce1bdf57c197ee9751838"
+    },
+    "hidden_texts": "scripts/refresh_hidden_texts.py on both files (reports_attack20.0.jsonl, open_set_attack20.0.jsonl, ATT&CK 20.0): 16 procedure examples copy 12 known posts and 1 copies an open-set post (10-token runs; the posts ATT&CK cites were already left out)",
+    "readable": "at the strict and behaviour readings the benchmark's attribution-statement rule drops every statement of 3 known posts and 1 open-set post, so 191 known posts on 72 groups and 131 open-set posts give lists (the same rule the fresh and decisive sets are read with)",
+    "notes": "the case text is the store's own parse, which drops the pages' related-post teasers and later update banners (checked: no 2025-2026 date in any kept post's text); one kept known post (WINELOADER, published 2024-02-27) names its group only in an update of 2024-11-07, so its case reads the store before February 2024 while its text holds the later attribution (masked)"
+  },
   "steps_each_needs_a_go": [
     "start the daily store refresh (and, if approved, schedule it): ran 2026-11-09, not scheduled",
     "register this file after edits: registered 2026-11-09",
-    "build the training posts and review their labels",
-    "code and tests",
-    "lists, choice, fit, design seeds, floor and labels, development check",
+    "build the training posts and review their labels: done 2026-11-09 (build_record)",
+    "code and tests: done 2026-11-09 (scripts/fit_attribution_combiner.py: --store-reports, --store-conditions, --store-unknown, --store-cache, --store-weights, --choice-from, --store-guard-margin; tests/test_store_training_lists.py; no apt_classifier/ code changed, so the second attempt's list caches stay valid if the pipeline fingerprint matches)",
+    "lists, choice, fit, design seeds, floor and labels, development check: run 2026-11-10 on the laptop GPU (00:40-06:25, no credit; data/knowledge_store/step5b/). 1,025 store lists (191 known and 131 open-set posts at both readings, 381 removed-actor lists; one strict removed-actor reading fused no candidate), the second attempt's 2,860 fold and 204 real-report lists reused (pipeline unchanged). Time split: 620 store lists before 2024 in training, 60 known posts from 2024 scored. Every grid point put 14-15 of the 60 first at the behaviour reading (store weight 0: 15 at every l2; strict 29-30); weights 10 and 30 raised behaviour MRR (0.34 to 0.35-0.37) but cost fold clean top-1 0.90 to 0.85-0.87, outside the 0.02 guard; weight 3 was eligible but put no more first (14-15 behaviour, 28 strict). Chosen: store weight 0, l2 3 (tie on behaviour first places, won on strict first places), so by the registered rule no combiner was written and the design seeds, floor, labels and development check were not run. For scale: the true group was in the shortlist for 37 of the 60 posts at the behaviour reading (45 at strict). Report: data/knowledge_store/step5b/attribution_combiner_store_lists_cv.json",
     "report; the decisive run only on a go and the product owner's approval"
   ]
 }
