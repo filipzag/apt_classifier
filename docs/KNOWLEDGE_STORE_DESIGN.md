@@ -269,7 +269,9 @@ Everything below runs locally and spends no OpenRouter credit.
   - Posts from November 2026 onwards are collected as a confirmation set. The "LLM proposes" test
     can share them.
 - **The two systems compared.** The default product, and the product with the store (registered
-  weights, combiner and floor). Both read the same statements.
+  weights, combiner and floor). Both read the same statements. *Since 2026-11-10 (amendment 5):*
+  no store arm was ever frozen, so the set's one use goes to the lead rule (section "The lead
+  rule"): the default product against the same run with the rule applied.
 - **Readings.**
   - **Primary: behaviour** (the product owner's choice, 2026-11-04), with malware, tool and
     operation names hidden too. Only the store's procedure text can help there.
@@ -385,6 +387,81 @@ At about 4–7 usable known posts a month:
   is proposed. What did pay on development data is a ranking rule outside the combiner (next
   section).
 
+## The lead rule (registered 2026-11-10): store text leads where the product gives no name
+
+Registration: `docs/preregistration/store_text_lead_rule_2026-11-10.json`, with amendment 5 of the
+decisive registration. Nothing has run on the decisive set. The run needs its own go.
+
+**The rule.**
+- It applies only to reports the product does not name.
+- Store text's first choice becomes the leader when it is clearly ahead: its first score minus its
+  second is at least 0.0131.
+- Otherwise the product's leader stays.
+- No name changes and the rule never names, so it cannot add a wrong name.
+
+**Where 0.0131 comes from.** It is the top half of store text's leads on the 214 store training
+posts from before 2024 (behaviour reading, whole store). The share was picked in the review, after
+looking at the 2024 posts and both fresh sets, so those sets are in-sample. The decisive set played
+no part.
+
+**How it is scored.** No engine change is needed.
+- One product run with the store off, on the GPU. This is the registered baseline.
+- Store text alone for the same reports (`scripts/store_text_lead.py store-text`, CPU).
+- `score --frozen` and `verdict` put the two together. They refuse files that do not belong
+  together.
+- Store text is read twice: with the whole store, and with every post of the report's own
+  publisher hidden. The second shows how much of a lead is the publisher's writing rather than the
+  actor.
+- The registered run refuses anything the registration does not name: other report files, another
+  version of the script, other store files, a product run without the technique head, and
+  masking that differs between the two runs.
+- Before any decisive file is read, the run script (`data/knowledge_store/lead_rule/run_decisive.sh
+  --go`, local) repeats the fresh2 check and stops unless it gives the registered numbers.
+- Five independent reviewers read the script before its hash was registered. They found no error
+  in the rule or the statistics. The gaps they confirmed were closed: missing refusals, one edge
+  case (a report the product gives no leader for) and thin tests.
+
+**Development numbers (in-sample).** Right group first, product → product with the rule:
+
+| Set | Reading | Whole store | Own publisher hidden |
+|---|---|---|---|
+| fresh (44 known) | behaviour | 10 → 18 (+9 −1) | 10 → 16 (+7 −1) |
+| fresh (44 known) | strict | 19 → 28 (+9 −0) | 19 → 24 (+6 −1) |
+| fresh2 (12 known) | behaviour | 4 → 7 (+3 −0) | 4 → 5 (+1 −0) |
+| fresh2 (12 known) | strict | 5 → 8 (+3 −0) | 5 → 6 (+1 −0) |
+
+- On fresh at the behaviour reading the rule led on 17 of the 44 known reports, 14 of them right.
+  It also led on 10 of the 54 open-set reports, where no group is right.
+- The gains sit on a few heavily reported groups (APT28 three, Mustang Panda two, TeamPCP two).
+  The per-group average rises less: 0.17 → 0.24.
+- fresh2 ran through the script end to end. For fresh, the store-text scores are the review's,
+  from the same member code. On fresh2 they equal the script's own on every row.
+- The script's own store-text run on fresh and on the store training posts was stopped for lack of
+  laptop memory and not repeated. It checks the script, not the rule.
+
+**What decides.** Primary: behaviour reading, whole store, known reports, right group first,
+compared report by report (bootstrap interval, exact McNemar). The rule counts as supported when
+both hold:
+- the gains outnumber the losses beyond chance there (one-sided sign test, p ≤ 0.05; for example
+  +5 −0 or +7 −1);
+- no other reading or store loses more reports than it gains.
+
+Then:
+- Supported: wire the rule into the engine behind a setting, default off. A default change waits
+  for the confirmation set or your decision.
+- Not supported: store text is closed for this store until the confirmation set exists.
+
+The decisive set is used once for this. With 48 known reports the result is descriptive, and only
+a large effect can show. An effect half the size seen on fresh would most likely come out as not
+supported.
+
+**Expect less than on fresh.** Every decisive report reads the older name lists (ATT&CK 16.1), and
+part of the gain on fresh comes from the report's own publisher.
+
+**Cost.** No credit.
+- Product run: about 1.4 hours of laptop GPU. It needs about 8 GB of free memory.
+- Store text: about 20 minutes of one CPU core and 1.1 GB of memory. This step has no GPU path.
+
 ## Build order
 
 | Step | What | Compute | Result |
@@ -395,7 +472,8 @@ At about 4–7 usable known posts a month:
 | 4 | Register the decisive test; build and freeze the 2025 set | listing minutes, download 1–2 hours | pre-registration file and a frozen set. **Done 2026-11-04:** registered with behaviour primary; frozen at 48 known and 69 open-set reports, below 60, so descriptive only |
 | 5 | Both members, benchmarks sliced by date, tuning on the development sets, own combiner, floor and labels | combiner about 1 hour; benchmarks the usual hours | weights and model files. **Done (2026-11-04), no decisive run:** members, pins and artifacts built and tested, amendment 1 recorded before any run; no eligible weight pair beat weights 0 at the behaviour reading (22/90), so, as registered, step 6 is not run (amendment 2). A second attempt, store text through its own refitted combiner (amendment 3), put 38 vs 37 reports first at the behaviour reading but added one wrong name, so step 6 is again not run (amendment 4, 2026-11-05; technical documentation 12.9) |
 | 5b | Dated store posts as combiner training lists (registered 2026-11-09, section above) | about 10–11 GPU hours planned, about 6 used | a combiner and a go or stop for step 6. **Done (2026-11-10), no decisive run:** the registered choice picked store weight 0, so no combiner was written |
-| 6 | Decisive run, then the full gate (folds, CTI-HAL, Elastic) | hours | adopt or not |
+| 5c | The lead rule: store text leads where the product gives no name (registered 2026-11-10, section above) | scoring script and tests; development check from saved runs | a registered rule, threshold and scoring script. **Registered 2026-11-10;** the decisive run waits for a go |
+| 6 | Decisive run, now of the lead rule: one product run with the store off, then store text alone and the script's scoring. The full gate (folds, CTI-HAL, Elastic) comes before any default change | about 1.4 GPU hours and 20 CPU minutes | supported or not |
 | 7 | Later: artefacts and indicators; actors outside ATT&CK; dossier for the LLM | — | each with its own test |
 
 ## Costs

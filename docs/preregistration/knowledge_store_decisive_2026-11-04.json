@@ -1043,6 +1043,26 @@
       },
       "cost": "no OpenRouter credit; 8 hours of the laptop GPU (17:47-01:48), every run on the GPU",
       "code": "uncommitted worktree on 7c0f532 (apt-attribution-methods-0b93ee)"
+    },
+    {
+      "number": 5,
+      "date": "2026-11-10",
+      "kind": "the store arm is replaced before any run: the lead rule (registration store_text_lead_rule_2026-11-10)",
+      "request": "the product owner, 2026-11-10: \"Write up + register\" after the review of step 5b (store_training_lists_2026-11-09)",
+      "made_before": "anything ran on the decisive set; the set is as frozen on 2026-11-04 (same file hashes)",
+      "reason": "no store arm was ever frozen: the weight choice (amendment 2), store text through its own combiner (amendment 4) and the combiner trained on dated store posts (store_training_lists_2026-11-09, result 2026-11-10) each failed their go rule, so nothing has run on the set. The review of 2026-11-10 found that a combiner cannot use what store text knows and that a rule outside the fusion pays on the development sets",
+      "store_arm": "the product's defaults with the lead rule applied to their output: on a report the product does not name, store text's first choice leads when its first score minus its second is at least 0.0131; names are never changed. Both store members stay off (weights 0), so the product run is the baseline arm itself and the store arm is computed from it offline by scripts/store_text_lead.py",
+      "baseline": "unchanged (arms.baseline): the product's defaults at the commit that registers the lead rule, local pipeline, both readings, --report-observations 0",
+      "hypotheses": "the primary keeps its form: behaviour reading, known reports, right group first, paired bootstrap 95% interval (10,000 report resamples, seed 7) and exact McNemar; the store arm is now the product with the rule, read with the whole store. Secondary readings and the decision guide are in the new registration",
+      "adoption": "unchanged where it applies: with 48 known reports every reading is descriptive only. The rule changes no name, so the no-new-wrong-name condition holds by construction and the safety-set runs of the adoption rule (ATT&CK folds 131, 137 and 139, CTI-HAL, Elastic) are not part of this test; they apply to a wired rule before any default change",
+      "single_use": "this is the decisive set's one use for store text. After the run the set is spent for store-text questions; a later idea waits for the confirmation set (posts from 2026-11-03, scored at 30 known reports)",
+      "window_posts": "no decisive-window post was sampled or inspected; nothing ran on the decisive set",
+      "files_sha256": {
+        "scripts/store_text_lead.py": "1d44da2dfc13195b24e0cdc55e3dd0b1dcf01b8863d88724cf2ea6693302c248",
+        "docs/preregistration/store_text_lead_rule_2026-11-10.json": "b01a304f72650b9af5f66e79f1cf85f01a901c284c8c97b7929430c19dfbcbfe"
+      },
+      "cost": "no OpenRouter credit. Registration: no GPU; the development check reused saved runs. The decisive run would take about 1.4 hours of laptop GPU and about 20 minutes of CPU",
+      "code": "worktree on a18222d (apt-attribution-methods-0b93ee); step 5b committed as 6bc1227, the lead rule committed with this amendment"
     }
   ]
 }
