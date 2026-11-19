@@ -11,6 +11,11 @@ evidence. Shared tools, incomplete reporting and false flags can make the answer
 The [technical documentation](docs/TECHNICAL_DOCUMENTATION.md) covers the architecture, algorithms,
 operations, security boundaries and every measurement in detail.
 
+![Assessment page: no group clears the naming bar, so the leader is shown as the closest documented group](docs/images/assessment.png)
+
+<sub>An illustrative case (a made-up phishing intrusion, local mode with no LLM): two groups fit, the evidence
+pulls both ways, and Vestige declines to name either.</sub>
+
 ## Strengths and limits
 
 - **Technique mapping on real report text** is its strongest part: accepted-set F1 0.50 on 968 human-annotated
@@ -68,6 +73,10 @@ is no authentication, so configure it or put the app behind an SSO proxy before 
    independent AI review, and exports (Markdown, JSON audit, Navigator layers, Attack Flow). With
    `MODEL_OPINION_ENABLED=true` a button asks GPT-5.6 Sol for its own answer (one paid request, about $0.05)
    and shows it beside Vestige's; it never changes the ranking, the name, the case file or an export.
+
+| Technique review | Distinguish | Analyst canvas |
+|---|---|---|
+| ![Technique review: each observation's candidate techniques with status, evidence and decision](docs/images/techniques.png) | ![Distinguish: the top three candidates side by side with their exclusive evidence](docs/images/distinguish.png) | ![Analyst canvas: evidence linked to techniques, candidate groups and documented origin](docs/images/canvas.png) |
 
 The Canvas, Diamond Model, live-intelligence and CyberRE views sit beside these steps. Every page shows the
 case status and a **Next** hint; OpenRouter or ChromaDB errors are reported in plain language and never lose
