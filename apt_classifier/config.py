@@ -344,6 +344,16 @@ class Settings(BaseSettings):
     # Group-size normalisation exponent of the IDF cosine classifier (1.0 = full cosine, 0.5 =
     # square-root damping, 0 = ignore group size). See classifiers/idf_overlap.py.
     idf_overlap_length_norm: float = 1.0
+    # Group-background correction of the Naive Bayes member (apt_classifier/nb_background.py,
+    # development 2026-11-04): each group's score is z-scored within the case and then against
+    # the group's own scores on the design folds, so a long ATT&CK technique list stops winning
+    # long reports by default (member alone on the 68 development reports: top-1 10 -> 23).
+    # Off until a gate passes; on, it binds the combiner fingerprint and needs its own combiner.
+    # Build the reference with scripts/fit_nb_background.py.
+    naive_bayes_background_enabled: bool = False
+    naive_bayes_background_path: Path = (
+        PROJECT_ROOT / "data" / "models" / "nb_background" / "nb_background_design.json"
+    )
     campaign_weight: float = 0.00
     group_description_weight: float = 0.40
     semantic_centroid_weight: float = 0.70

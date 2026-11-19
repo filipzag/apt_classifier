@@ -7479,6 +7479,152 @@ opt-in, display-only second opinion (16.6) and to test it on the confirmation se
 (`model_second_opinion_2026-11-11.json`). The ranking, the naming gate and every default stay as
 they are.
 
+#### 21.3.32 Exact procedure artefacts (2026-11-03, development only)
+
+Question: the literature's strongest attribution signal after malware family is the exact
+artefact an operator leaves behind: a registry key, a file path or name, a named pipe, a mutex, a
+service or task name, a PDB path, a user agent, a DLL export name. Do these put the right group
+first where the text members miss, and is the knowledge to weigh them there? Development data only
+(the 68 vendor, campaign and advisory reports of 21.3.24); CTI-HAL, Elastic and the fresh sets
+are not read.
+
+Method: `apt_classifier/evidence/artefacts.py` extracts and normalises the artefacts (hive
+spellings unified, user and environment folders folded into `%appdata%`-style variables, GUIDs,
+SIDs, long hex and digit runs replaced by placeholders, case folded; system binaries, LOLBins,
+generic folders and prose words dropped). Nothing in the pipeline imports it. The same extractor
+runs over the text member's ATT&CK corpus with each report's cited and copied texts and its own
+statements hidden (`TextGroupModel.without`). Each artefact is credited to the groups of the
+records that carry it and weighted by rarity, log(178 / groups). An artefact credited to more than
+8 groups never scores. Groups are ranked by the summed weight of what they share with the report,
+with ties counted against the actor (`scripts/separation_study/artefacts.py`, CPU, minutes).
+
+ATT&CK holds few exact artefacts: 435 file names, 176 paths, 114 registry keys, 26 task names,
+25 service names, 4 mutexes, 5 user agents, 2 PDB paths, 1 export name and no pipes (at most 8
+groups each).
+
+| 68 development reports (names / strict / tradecraft alike) | result |
+|---|---|
+| reports with any artefact | 43 / 42 / 42 |
+| reports sharing an artefact with ATT&CK (at most 8 groups) | 24 |
+| actor first / top-5 / MRR | 14 / 17 / 0.225 |
+| of the 14 firsts, a text member also first | **14 (0 new)** |
+| artefacts lead with another group | **10** |
+| text members (any) put the actor first, for comparison | 52 |
+
+Per matched artefact, the actor's share against a random other group: file names 51 matches,
+68.6% against 0%; paths 18, 88.9% against 5.6%; registry keys 8, 100%; service names 2, 100%.
+Dropping file names that are ATT&CK software names changes nothing (one match).
+
+- Every first place the artefacts give, a text member already gives: the text members read the
+  same tokens in the same sentences.
+- The 10 wrong leads are commodity tools and system files that ATT&CK happens to record for only
+  one or two groups: `wsmprovhost.exe`, `vlc.exe` (a side-loading host), `taskmgr.exe`,
+  `wmiprvse.exe`, `wmiexec.py`, `secretsdump.py`, `netscan.exe`, `/etc/passwd`, `info.txt`, and
+  one tie. ATT&CK's sparse coverage makes them look rare. Rarity needs many reports per artefact,
+  and ATT&CK has one or two.
+- An earlier extractor version gave 13 wrong leads; three came from extractor noise (prose such
+  as "in.zip", "and.log", an unquoted "exports the requests ...", `/dev/null`, `c:\temp`) and were
+  fixed as general hygiene. The same version backtracked exponentially on lines full of slashes
+  (the PDB pattern); it is now linear and tested.
+
+Where the knowledge could come from: the dated knowledge store outside its decisive window
+(2025-01-01 to 2026-02-28, never inspected; counts only, no text read). Of 757 posts with an
+actor reading (497 known, 260 open set), 521 carry an artefact (median 3 per post). Of 4,371
+distinct artefacts, 261 appear at two or more sources, and only 45 of those belong to one actor
+(35 file names, 7 paths, 1 registry key, 1 export, 1 user agent), spread over 232 actors. The
+store does see commodity tools as shared (`rar.exe` 8 actors, `secretsdump.py` 3, `/etc/passwd`
+3), which ATT&CK cannot.
+
+Reading: no artefact member over ATT&CK. It adds no first place and leads wrongly on 10 of 68
+reports. The store weighs artefacts better than ATT&CK does, but 45 single-actor artefacts that
+recur across sources are too few to build a member on. The extractor is kept so the store can
+record each post's artefacts as it grows. The question returns only in the store's own time-split
+test, when far more reports per actor exist. Nothing changes in the product.
+
+Cost: CPU only, about 10 minutes in total; no credit.
+
+#### 21.3.33 Profile-size bias of the technique-list members (2026-11-04, development only)
+
+Question: when the product ranks a similar group above the true one, what makes it pick that
+group, and can it be corrected?
+
+Diagnosis, from the recorded runs of the current defaults: 652 known-actor cases (fold seeds
+109/113/127, CTI-HAL, Elastic, the vendor, campaign and advisory sets, both fresh sets), 120 not
+ranked first. The evaluation sets were read as totals only: who led and how long each group's
+ATT&CK technique list is. Documented siblings explain little. The leader is a same-activity pair
+of the reviewed table in 7 misses, linked only by rarely used shared software in 5, a reviewed
+distinct pair in 2, and from the same country without a link in 18. The length of the leader's
+technique list explains more, in opposite directions:
+
+- Short inputs (at most 10 accepted techniques) are led by short lists. On the folds the wrong
+  leaders have a median of 7 documented techniques against 9 for the truth. APT30, documented
+  with only spearphishing attachment and user execution, led 12 fold misses and is never a fold
+  truth.
+- Long real reports (more than 10 accepted) are led by long lists: median 67 against 48 for the
+  truth. Kimsuky (130 techniques) led 10 real-report misses and was the truth in 2. Naive Bayes
+  ranked it first in 9 of the 10.
+
+Cause: Naive Bayes (`classifiers/naive_bayes.py`) scores the observed techniques only. A
+documented one adds log(alpha), an undocumented one log(beta), and a documented technique the
+report lacks costs nothing, so a long list covers most of a long report. IDF cosine and Jaccard
+divide by the whole list, so a two-technique list matches two observed techniques perfectly.
+
+The ATT&CK folds cannot judge this. A known fold keeps the true group's technique list, so every
+observed technique is in it, and any scorer that rewards "all observed techniques documented"
+wins (the "self-consistency over the technique table" of 10.3). The members were therefore
+replayed on the 68 development reports (vendor, campaigns, advisories): each report's accepted
+techniques from its recorded run, every group rescored on the CPU, strict ranks (ties count
+against the actor).
+
+| member alone, 68 development reports | top-1 | top-5 | MRR |
+|---|---|---|---|
+| Naive Bayes as shipped | 10 | 29 | 0.298 |
+| **Naive Bayes, case z-score, then each group's z-score on the design folds** | **23** | **34** | **0.415** |
+| Naive Bayes, multinomial likelihood with Dirichlet smoothing (mu 80) | 21 | 26 | 0.369 |
+| IDF cosine as shipped / with length norm 0.5 | 13 / 17 | 23 / 33 | 0.288 / 0.367 |
+| Jaccard as shipped | 16 | 27 | 0.316 |
+
+The chosen correction asks how unusual a group's score is for that group. It z-scores the scores
+across the groups of the case, so short and long inputs share one scale. It then z-scores each
+group against the mean and spread of its own case-level scores on the design folds, seeds 41 and
+53, which are ATT&CK-only cases. Against the shipped member it gains 14 reports and loses 1, top-1
++0.19 with a paired bootstrap 95% interval of +0.09 to +0.29. Kimsuky as wrong leader goes from 18
+to 0. With the other report sets as reference instead of the folds it reaches 21 to 22.
+The same per-group correction lowers IDF cosine (13 to 10) and Jaccard (16 to 11), whose bias runs
+the other way, so it applies to Naive Bayes only.
+
+Implementation, off by default (`NAIVE_BAYES_BACKGROUND_ENABLED=false`):
+
+- `apt_classifier/nb_background.py` wraps the Naive Bayes member under its own name, so fusion
+  weights, families and combiner columns treat it as that member. It lives outside
+  `classifiers/` so the combiner fingerprint is unchanged while it is off. On, the fingerprint
+  binds the module and the reference, so it needs its own combiner.
+- `scripts/fit_nb_background.py` writes the reference
+  (`data/models/nb_background/nb_background_design.json`: 360 design-fold cases, every group
+  with 358 to 360 reference cases, fingerprint 8023fdd904d99af5). It accepts only fold runs of
+  the design seeds, and its `--evaluate` reproduces the table above.
+- The reference pins the ATT&CK version, each group's technique list, the parent links and the
+  member's parameters. It also loads on a knowledge base with groups removed (the
+  removed-actor folds); any other change fails closed to the shipped member. The attribution
+  benchmark and the combiner fit refuse to run when the setting is on and the reference did not
+  load.
+
+Reading: a member-level result on development data. The product effect depends on the combiner,
+where the procedure-text members dominate. The gate is registered in
+`docs/preregistration/attribution_nb_background_2026-11-04.json` (2026-11-04, code commit
+eab270e, before any run):
+- a combiner fitted with the corrected member under its own file name;
+- the probability floor re-chosen on design seeds 41/53;
+- the bars on fresh fold seeds 149/151/157, CTI-HAL and Elastic.
+
+Fold seeds 131/137/139 are reserved for the knowledge-store test.
+
+The runners are in `data/audits/nb_background/`.
+`supervise.sh` starts only when no other process holds the GPU and nothing listens on port 8102,
+and it stops only the head service it started.
+
+Cost: the study CPU only, minutes; the gate about 8 to 9 hours of laptop GPU; no credit.
+
 #### 21.3.34 Google's decision model, Gemini Decision 1, on Jev's questions and on whole reports (2026-11-13, descriptive)
 
 Google released `google/gemini-decision-1` on 2026-11-11 (OpenRouter decisions endpoint, served
