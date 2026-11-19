@@ -7474,6 +7474,81 @@ reports, for example posts collected from November on under the same rules.
 Cost: OpenRouter $1.11 (the head-to-head total is now $13.77); product 9 minutes; downloads 600
 pages (146 MB, local only).
 
+Follow-up (2026-11-11): the product owner chose to show the model's answer in the product as an
+opt-in, display-only second opinion (16.6) and to test it on the confirmation set
+(`model_second_opinion_2026-11-11.json`). The ranking, the naming gate and every default stay as
+they are.
+
+#### 21.3.34 Google's decision model, Gemini Decision 1, on Jev's questions and on whole reports (2026-11-13, descriptive)
+
+Google released `google/gemini-decision-1` on 2026-11-11 (OpenRouter decisions endpoint, served
+`google/gemini-decision-1-20261111`, $0.10 per 1M input tokens, output free). Like TypeSafe Jev it
+answers typed questions with probabilities and writes no text. Registration
+`gemini_decision_2026-11-12.json`, written before any answer was seen; descriptive only, nothing in
+the product changes. Tests A-C ask the questions Jev answered (docs 16.4b on the Jev branches),
+rebuilt from the stored artifacts on ATT&CK 19.2 and proven byte-identical by replaying every one
+from Jev's cache with 0 misses. Test D is a new question. The scripts, logs and results are local
+(`data/audits/gemini_decision/`, `code/` holds the scripts; they run against the Jev harness
+worktree). Every answer was valid (0 errors, 0 invalid); billing came to about 0.6-0.7 of the
+chars/3 estimate. Total spend $1.22.
+
+Gemini sorts a choice question's options by the bytes of their ids before reading them, so it never
+sees the pipeline's order and Jev's three option orders become one question. The pilot (30 dev
+sentences, 3 orders) confirmed it: 27 answers bit-identical, 3 differing by at most 2e-8 (float
+noise; the registered rule asked for exactly 0, read here as held), so the full runs asked each
+question once. The verifier's 1,559 retest questions came back identical: Gemini is deterministic
+(Jev's retest noise p95 0.02).
+
+A. Technique pick (C1: the pipeline's top 10 + none_of_these; C1r adds the whole anonymized report).
+
+| Set | Gemini exact | Jev exact | Gemini - Jev | Union F1 Gemini / Jev / pipeline | ECE Gemini / Jev | No pick Gemini / Jev |
+|---|---|---|---|---|---|---|
+| Public dev 659, C1 | 0.492 | 0.514 | -0.023 [-0.046, +0.002] | 0.538 / 0.540 / 0.549 | 0.19 / 0.23 | 69 / 35 |
+| CTI-HAL 968, C1 | 0.436 | 0.460 | -0.024 [-0.043, -0.004] | 0.448 / 0.451 / 0.378 | 0.18 / 0.24 | 163 / 108 |
+| CTI-HAL 968, C1r | 0.486 | 0.482 | +0.003 [-0.014, +0.023] | 0.467 / 0.465 / 0.378 | 0.15 / 0.23 | 132 / 95 |
+
+Jev's level, better calibrated, and it says "none of these" more often; with C1r it beats the
+pipeline's first choice on CTI-HAL by +0.102 [+0.074, +0.133] exact, as Jev did.
+
+B. Verifier (yes/no per candidate, public dev, 9,546 questions, 202 right): AUC 0.808 vs Jev 0.818
+(-0.010 [-0.028, +0.007]), ECE 0.067 vs 0.085, Brier 0.042 vs 0.049 (-0.007 [-0.009, -0.006]). Its
+high answers are more often right (P >= 0.90: 17/46 = 0.37 vs 9/46; >= 0.93: 9/15 vs 3/15) but
+still far below the precision of the accepted sets (0.59), so the registered rule again finds no
+accept bar. Because its answers do not vary, the reject bar 0.01 now survives the noise check
+(drops 598 candidates, 3 of them right); exploratory, nothing written.
+
+C. Group pick among the product's top 5 (G3, ATT&CK names only, CTI-HAL 55 + Elastic 8): 27/63 first
+vs Jev 28/63 and the product's own order 29/63 (Gemini - product -0.032 [-0.127, +0.048]). The
+per-group score framing G0 stays poor (9/63; Jev 13/63) and named 1 group, right (Jev 4, 2 wrong).
+
+D. Whole report, one choice over all 178 ATT&CK 20.0 groups + none_of_these (option = name and id,
+criterion = the ATT&CK description cut at 400 characters), reading the statements the product reads:
+
+| Set | Gemini first | Product first | GPT-5.6 Sol first (id-first / name-first) | Gemini names at P >= 0.9 (wrong) | Open set named at P >= 0.9 |
+|---|---|---|---|---|---|
+| CTI-HAL 55, anonymized headline | 13 | 27 (sign p 0.004) | - | 5 (0) | - |
+| Elastic 8 + 22 open set, strict | 2 | 4 | - | 1 (0) | 0 of 22 |
+| Fresh 44 + 54 open set, strict | 22 | 19 (p 0.63) | 24 / 24 | 11 (0) | 1 of 54 |
+| Fresh, behaviour reading | 21 | 10 (p 0.007) | 18 / 23 | 9 (0) | 1 of 54 |
+
+At P >= 0.9 it gave 26 names on known reports (18 distinct reports; the two fresh readings share
+their reports) and none was wrong; the two open-set names were Storm-1175
+as Medusa Group (Microsoft's name for an actor that deploys Medusa ransomware) and Storm-2570 as
+Storm-0501. At P >= 0.5 it is much less safe (CTI-HAL 16 names, 8 wrong; fresh 23, 5 wrong). On
+the fresh set GPT-5.6 Sol gave 32-34 names with 8-16 wrong and 13-19 open-set names; the product
+gave 8 (1 wrong) and 2. A whole-report call costs about $0.0016 (GPT-5.6 Sol about $0.05-0.06).
+
+Reading: on Jev's questions Gemini Decision is Jev's equal with better calibration and no answer
+noise, not an improvement in accuracy. On whole reports it is far behind the product on CTI-HAL
+(old reports that ATT&CK's procedure examples were written from) and level with or ahead of it on
+the fresh 2025-26 reports, about where GPT-5.6 Sol is, at about a thirtieth of the cost and with
+fewer wrong confident names. Limits: the fresh set is development data, the P >= 0.9 cut-off and every
+count here are in-sample, the confident names cluster in a few recent groups (TeamPCP 5, Mustard
+Tempest 2, Contagious Interview 3), and Gemini read ATT&CK 20.0's descriptions of those groups,
+which may draw on the same months' reports (the product reads them too; GPT-5.6 Sol did not).
+Any product use needs its own registration and a test on reports it has not seen, such as the
+confirmation set.
+
 ## 22. Failure modes and troubleshooting
 
 ### 22.1 “ATT&CK knowledge base has not been ingested”

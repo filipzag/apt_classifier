@@ -1,0 +1,64 @@
+{
+  "id": "lev3b_2026-11-13",
+  "status": "registered 2026-11-13 before any Lev-3B answer to a test question was seen (the only Lev answers so far are a GPU smoke test on a hand-written toy request that belongs to no set)",
+  "question": "How does Cisco's open decision model Lev-3B, run locally on this laptop's GPU, perform on the technique questions TypeSafe Jev and Gemini Decision 1 answered in this project, compared with Jev, Gemini and the pipeline?",
+  "requested_by": "product owner, 2026-11-13 ('only ciscos model' after the survey of security-tuned decision models; 'Yes, run it' to executing the pinned Kev runtime on the GPU)",
+  "nature": "Descriptive. Nothing here changes a default, a gate, a combiner or a label; any product use of the model needs its own registration and the usual gates.",
+  "model": {
+    "id": "cisco-ai/lev-3b, Hugging Face revision 556e65bd9d7a5f637f856336675e4f94bbb8f40c (Apache-2.0)",
+    "base": "ibm-granite/granite-4.1-3b-base, revision dacb9cb9157bec98e99b09f285c92a4d58405c96",
+    "architecture": "Granite-4.1-3B backbone + LoRA r16 (alpha 32, fp32) + trained structural-token rows + a pointer head that scores the offered alternatives; no text is generated",
+    "training_claims": "Model card: decision adaptation on Kev's Decision-v7, then log adaptation (BGL/Spirit/Thunderbird anomalies, general-log questions, ATT&CK parent-technique classification from Splunk attack_data logs plus GPT-5.5-generated examples). Reported ATT&CK parent-technique accuracy from logs with 130 alternatives: 35.1% (represented sourcetypes) and 42.1% (withheld), against Jev 0-shot 24.6/32.6 and GPT-5.6 Sol 0-shot 42.5/51.7. It was not trained on report prose or on sub-techniques.",
+    "runtime": "Kev (github.com/jaredpalmer/kev) at e943f21e with Splunk's patch from github.com/splunk/lev at dc80fb53, the versions the model card pins; loaded with kev.evaluate.load in .venv-cribl (transformers 5, peft 0.21)"
+  },
+  "execution": {
+    "where": "this laptop, NVIDIA RTX 4060 Laptop GPU (8 GB), whole model on the GPU, offline (HF_HUB_OFFLINE=1); nothing leaves the machine and nothing is paid",
+    "precision": "bf16 backbone with fp32 adapter, token rows and head: the model card's inference precision. Kev's fp32 'exact evaluation' does not fit in 8 GB.",
+    "rows": "Kev's 'rows' execution mode (each question is one causal row of state + its branch). Every question is sent as its own record and run alone (batch of 1, no padding), so an answer never depends on which other questions were asked with it. The smoke test showed that batching rows moves P by about 1e-4.",
+    "low_memory_patch": "Kev's structural-token setup takes a 980 MB fp32 copy of the embedding table to fill the two new rows (100352/100353) with the table mean; it ran out of memory. The worker computes the same mean in chunks. Both rows are overwritten by the adapter's trained rows when PEFT loads, so the value never reaches an answer.",
+    "probabilities": "Primary reading: raw probabilities (T = 1, the model card's default). Second reading: the card's fitted T = 1.8234449771164334 applied offline as softmax(log p / T) (equal to softmax(z / T)); positive T never changes a pick.",
+    "answer_shapes": "noul: P(yes) = p[1] of Kev's [no, yes] options; choice: probabilities by option in the criteria order the harness sends, pick = the most probable option; the answers are shaped like TypeSafe's so the Jev harness reads them unchanged",
+    "guards": "host memory guard 900 MB (the run stops, no answer is invented); a row that runs out of GPU memory is recorded as a missing answer; the enforced GPU power limit is checked before each full run"
+  },
+  "reference_arms": {
+    "jev": "TypeSafe Jev typesafe/jev-1.13-20260917, the stored answers of 2026-10-09..13 (docs 16.4b), on byte-identical questions rebuilt with ATT&CK 19.2. Identity proven before any Lev answer by free cache replay with 0 misses and identical stored results: dev C1 659/659, CTI-HAL C1 968/968, CTI-HAL C1r 968/968, verifier 9,546 and 1,559 questions.",
+    "gemini": "Gemini Decision 1's answers of 2026-11-13 (docs 21.3.34, prereg gemini_decision_2026-11-12) on the same questions",
+    "product": "the recorded pipeline runs on the same cases (rank-1 and accepted sets)"
+  },
+  "tests": {
+    "A_technique_pick": {
+      "framing": "Jev framing C1 (flat choice over the pipeline's top 10 candidates + none_of_these, question version jq1-6b22d339 at 3 orders) and C1r (C1 + the anonymized report window, jq1-24f61664), unchanged.",
+      "sets": "public dev 659 sentences (C1); CTI-HAL 968 statements (C1 and C1r).",
+      "rotation_rule": "Lev reads the options in the order sent, so a pilot on the first 30 dev sentences asks all 3 orders. If the three answers agree on all 30 for every option (largest |dP| <= 1e-6), each further question is asked once and stands for all three orders as registered for Gemini. Otherwise all 3 orders are asked as registered for Jev (combine_rotations), and Lev's first order alone is reported beside it.",
+      "reference": "Jev C1/C1r as registered (3 orders), Jev's first order alone, Gemini's one-order answers.",
+      "metrics": "exact (pick in the labels), parent-aware (judge_hits), family, no-pick rate, errors, ECE and AUC of the pick's probability, union micro P/R/F1 (pipeline accepted + pick), pick-alone F1; paired case bootstrap (1000, seed 7) for Lev - Jev, Lev - Gemini and Lev - pipeline rank-1. A missing answer counts as a miss. Both temperature readings are reported; the raw one is primary."
+    },
+    "B_verifier": {
+      "framing": "Jev verifier yes/no question per candidate (vq1-4193207f), unchanged.",
+      "sets": "public dev 659 cases / 9,546 questions; the 100-case retest (1,559 questions) is answered again by a new worker with its own cache as a repeatability check (a deterministic local model should give the same P; Jev's and Gemini's retest noise are quoted beside it).",
+      "metrics": "AUC, ECE (10 bins), Brier, precision and count at accept bars 0.70-0.97, gold lost at reject bars 0.01-0.10, the largest |dP| between the shadow and retest answers to the same questions, paired case bootstrap of AUC(Lev) - AUC(Jev) and AUC(Lev) - AUC(Gemini); the registered bars rule of jev_2026-10-09 applied as an exploratory reading (no artifact written). Missing answers are reported and a run with them is not scored as complete."
+    }
+  },
+  "reading": "A difference is better or worse only when its 95% interval excludes no difference; otherwise comparable. Every number is quoted with its set.",
+  "sets_and_reuse": "Public dev is design data; CTI-HAL (local only, reused many times) is reused descriptively. Nothing is fitted or tuned on any result here. The decisive set, the second fresh set and the confirmation set are not used.",
+  "not_run": "Tests C (group pick) and D (whole-report attribution) of the Gemini test: attribution is outside what Lev was trained for, and D's rows (every ATT&CK group with its description) would not fit beside the model in 8 GB. Cribl Decision 2 is not downloaded (product owner).",
+  "data_leaving_the_machine": "None. The weights and runtime code were downloaded once from Hugging Face and GitHub at the pinned revisions (product owner's OK of 2026-11-13).",
+  "limits": [
+    "Lev was trained on logs and parent techniques; these questions are report prose with sub-techniques among the options, so a low score says little about its log use.",
+    "The framings were chosen on dev for Jev.",
+    "bf16 instead of Kev's fp32 evaluation numbers.",
+    "Lev's training data (Splunk attack_data, generated examples) may share wording with ATT&CK descriptions; the public dev and CTI-HAL texts are not known to be in it."
+  ],
+  "order": "GPU smoke test on a toy request (done), this registration, a pilot on 30 dev sentences at 3 orders (checks the answer format and the rotation rule), the full A runs (dev C1, CTI-HAL C1, CTI-HAL C1r), a 5-case verifier pilot, the full B runs, then scoring.",
+  "cost": "0 USD. GPU time estimate about 1.5-3 hours in all at the 55 W laptop limit.",
+  "result": {
+    "run": "2026-11-13 16:58 to 2026-11-14 19:33 on the laptop GPU (firmware clamp at 15 W the whole time, about 26.5 h), 0 errors, 0 missing answers, nothing sent, 0 USD. Scores: data/audits/lev3b/A_judge/score_lev_judge.{json,md}, data/audits/lev3b/verifier/score/.",
+    "rotation_rule": "the pilot answers moved with option order (largest |dP| 0.55), so every question was asked in 3 orders; the top choice changed with order on 15-19% of questions",
+    "A_technique_pick_raw": "Lev declines most questions (none_of_these first on 70% dev, 75% CTI-HAL). Exact pick: dev C1 0.185 vs Jev 0.514, Gemini 0.492, pipeline rank-1 0.589; CTI-HAL C1 0.164 vs 0.460, 0.436, 0.383; CTI-HAL C1r 0.152 vs 0.482, 0.486. Worse than every reference on every set (intervals exclude 0). Union F1 (pipeline accepted + pick): dev 0.548 vs Jev 0.540 (comparable); CTI-HAL C1 0.409 vs Jev 0.451 (worse) and vs the accepted set alone 0.378 (better, +0.031 [+0.019, +0.044], Jev adds more).",
+    "A_fitted_temperature": "same picks; ECE of the pick improves (dev 0.221 -> 0.121, CTI-HAL C1 0.142 -> 0.066)",
+    "A_first_order_alone": "dev 0.206, CTI-HAL C1 0.174, C1r 0.182: worse than Jev's first order alone",
+    "A_post_hoc_none_left_out": "not registered: Lev's top technique with none_of_these ignored is comparable to Jev on dev (one order 0.508 vs 0.514) but worse on CTI-HAL (C1 0.369-0.406 vs 0.460)",
+    "B_verifier": "AUC 0.708 vs Jev 0.818 (-0.110 [-0.144, -0.080]) and Gemini 0.808 (-0.100 [-0.135, -0.067]); ECE 0.241 (0.307 at the fitted T) vs Jev 0.085; mean P(yes) on wrong candidates 0.258 vs Jev 0.099; precision at accept 0.85: 27/305 = 0.089 vs Jev 28/115 = 0.243; no accept bar meets the registered rule. The retest gives the same P on all 1,559 questions (max |dP| 0).",
+    "reading": "Lev-3B is worse than Jev, Gemini and the pipeline on these report-prose technique questions; it is deterministic for a fixed option order. Nothing in the product uses it; no further run is proposed."
+  }
+}

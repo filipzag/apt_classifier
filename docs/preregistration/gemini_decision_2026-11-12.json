@@ -1,0 +1,55 @@
+{
+  "id": "gemini_decision_2026-11-12",
+  "status": "registered 2026-11-12 before any Gemini Decision answer was seen",
+  "question": "How does Google's decision model Gemini Decision 1 perform on the questions TypeSafe Jev answered in this project, and on whole-report attribution, compared with Jev and with the product?",
+  "requested_by": "product owner, 2026-11-12 ('test how new google decision model performs')",
+  "nature": "Descriptive. Nothing here changes a default, a gate, a combiner or a label; any product use of the model needs its own registration and the usual gates.",
+  "model": {
+    "id": "google/gemini-decision-1",
+    "route": "OpenRouter decisions endpoint (https://openrouter.ai/api/alpha/decisions), provider Google AI Studio, listed snapshot google/gemini-decision-1-20261111",
+    "price": "0.10 USD per 1M input tokens, output free",
+    "known_behaviour": "Google's documentation says a choice question's options are sorted by the UTF-8 byte order of their ids before the model reads them, so the option order the harness sends (and the pipeline's rank order) is not seen and rotated orders are the same question."
+  },
+  "reference_arms": {
+    "jev": "TypeSafe Jev typesafe/jev-1.13-20260917, the stored answers of 2026-10-09..13 (docs 16.4b), on byte-identical questions rebuilt from the stored artifacts with ATT&CK 19.2; identity is proven before any paid call by replaying every question from Jev's cache with 0 misses and identical stored results.",
+    "product": "the recorded product runs on the same cases (pipeline rank-1 and accepted sets for techniques; the default attribution runs for reports)",
+    "gpt": "GPT-5.6 Sol's stored fresh head-to-head answers (docs 21.3.28-21.3.30), for test D on the fresh set only"
+  },
+  "tests": {
+    "A_technique_pick": {
+      "framing": "Jev framing C1 (flat choice over the pipeline's top 10 candidates + none_of_these, question version jq1-6b22d339) and C1r (C1 + the whole anonymized report, jq1-24f61664), unchanged.",
+      "sets": "public dev 659 sentences (C1); CTI-HAL 968 statements (C1 and C1r).",
+      "rotation_rule": "A paid pilot on the first 30 dev sentences asks all 3 option orders. If the three answers are identical on all 30 for every option (largest |dP| = 0), every further judge question is asked once and that answer stands for all three orders: it is combined as three identical copies (combine_rotations, the registered reading; the 0.005 floor moves P by up to 0.05 and changes no pick), and the plain one-order reading is reported beside it. Otherwise all 3 orders are asked as registered for Jev.",
+      "reference": "Jev C1/C1r as registered (3 orders); Jev's first order alone is reported beside it.",
+      "metrics": "exact (pick in the labels), parent-aware (judge_hits, the family number), no-pick rate, errors, ECE and AUC of the pick's probability, union micro P/R/F1 (pipeline accepted + pick); paired case bootstrap (1000, seed 7) for Gemini - Jev and Gemini - pipeline rank-1. A missing or invalid answer counts as a miss."
+    },
+    "B_verifier": {
+      "framing": "Jev verifier yes/no question per candidate (vq1-4193207f), unchanged.",
+      "sets": "public dev 659 cases / 9,546 questions, plus the 100-case retest (1,559 questions) asked a second time for answer noise.",
+      "metrics": "AUC, ECE (10 bins), Brier, precision and count at accept bars 0.70-0.97, gold lost at reject bars 0.01-0.10, retest noise p95 |dP|, paired case bootstrap of AUC(Gemini) - AUC(Jev); the registered bars rule of jev_2026-10-09 applied to Gemini's answers as an exploratory reading (no artifact written). Gemini clamps yes/no answers to 0.01-0.99, so the lowest reject bar collects every floor answer; missing answers are reported and the run is not scored as complete."
+    },
+    "C_group_pick": {
+      "framing": "Jev ranking framings G3 (one choice over the product's top 5 groups + none_of_these, rq1-ae8435ab) and G0 (score per top-10 group, rq1-7daec5fa), unchanged; the states carry ATT&CK technique, software and group names only.",
+      "sets": "CTI-HAL 55 + Elastic 8 attributed reports (the stored S2 rows).",
+      "metrics": "top-1/3/5, MRR, size rho, largest profile first; paired case bootstrap of Gemini G3 - Jev G3 and Gemini G3 - the product's default order."
+    },
+    "D_whole_report": {
+      "framing": "New. One choice question per report over every ATT&CK 20.0 group (option id 'Name (Gxxxx)', criterion = the group's ATT&CK description cut at a sentence end within 400 characters) + none_of_these; state = the numbered statements the product reads for that report; instructions fixed in the runner gem_report_attr.py (wording recorded in the result files).",
+      "sets": "CTI-HAL 55 at the anonymized headline reading; Elastic 8 attributed + 22 open-set posts at the strict headline level; the first fresh set (44 known + 54 open set) at the strict and the behaviour readings.",
+      "metrics": "top-1/3/5 and MRR over groups (none_of_these left out of the ranking; a truth with probability 0 is a miss); P(none); 'would name' counts at P(first group) >= 0.5, 0.9 and 0.99 (right / wrong on known reports, any name on an open-set report is wrong); ECE of P(first group); paired per-report top-1 against the product (and GPT-5.6 Sol on the fresh set, registered id-first matching, name-first beside it), exact two-sided sign test on the discordant reports. An unanswered report counts as a miss that never names. Jev's own whole-report run (s8, every ATT&CK 19.2 group on a score rubric: CTI-HAL 3/55, Elastic 0/8) is quoted beside it as a different question.",
+      "comparison_files": "product and GPT-5.6 Sol artifacts of 2026-10-27..29 (ATT&CK 20.0, procedure-core defaults) in the worktree finetune-cribl-mitre-attack-8aa2d5 data/audits; they reproduce CTI-HAL 27/55, Elastic 4/8, fresh strict 19 vs 24 and behaviour 10 vs 18 (23 name-first)."
+    }
+  },
+  "reading": "A difference is reported as better or worse only when its 95% interval (or sign test p <= 0.05) excludes no difference; otherwise comparable. Every number is quoted with its set.",
+  "sets_and_reuse": "Public dev is design data. CTI-HAL (local only, reused many times), Elastic (never tuned on) and the first fresh set (development data since 2026-11-02) are reused descriptively; nothing is fitted or tuned on any result here. The decisive set, the second fresh set and the confirmation set are not used.",
+  "not_run": "The interview lead choice (needs attribution fold runs on the old ATT&CK 19.2 index) and Jev-alone end to end (needs the raw fold sentences).",
+  "data_leaving_the_machine": "Public dev sentences; CTI-HAL statements and report windows; Elastic posts; fresh-set vendor posts (all masked as the product reads them) go to Google through OpenRouter. The product owner chose 'run all four' on 2026-11-13, accepting this.",
+  "limits": [
+    "The framings were chosen on dev for Jev; Gemini may do better with framings of its own (not tried here).",
+    "Gemini may have read the CTI-HAL, Elastic and fresh reports in training; the fresh set is the least exposed.",
+    "Option sorting hides the pipeline's rank order from Gemini, which Jev saw."
+  ],
+  "result": "Run 2026-11-13, $1.22 in all, every answer valid; docs 21.3.34. Deviation: the rotation pilot gave 27 of 30 answers bit-identical and 3 differing by at most 2e-8 (float noise), read as the rule holding, so A was run at one order. A: Jev's level (CTI-HAL C1 -0.024 [-0.043, -0.004], C1r +0.003, dev -0.023 n.s.; union F1 equal), better calibrated. B: AUC 0.808 vs 0.818 (n.s.), ECE 0.067 vs 0.085, no retest noise; still no accept bar. C: G3 27/63 vs Jev 28 and the product's order 29. D: CTI-HAL 13 vs product 27 of 55; Elastic 2 vs 4 of 8, 0 of 22 open set named; fresh strict 22 vs product 19 vs GPT 24; behaviour 21 vs 10 vs 18 (23 name-first); at P >= 0.9 26 names on known reports, 0 wrong, 2 open-set names.",
+  "order": "Each test starts with a small paid pilot that checks the answer format and the billing (A: 30 dev sentences at 3 orders; B: 5 dev cases; C: 2 CTI-HAL reports; D: 10 Elastic posts) before its full run; a test whose answers the harness cannot read stops there.",
+  "cost": "Estimates before any call (chars/3 tokens at 0.10 USD/M; real billing likely lower): A about 0.47 at one order (1.19 at three), B about 0.80, C about 0.06, D about 0.64, pilots about 0.05; about 2.0 in all. Hard cap 3.00 USD for everything here, a per-run budget on every call, and no stage starts when the OpenRouter balance is below 1.00 USD (4.19 USD on 2026-11-12)."
+}
