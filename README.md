@@ -14,9 +14,14 @@ See [`docs/TECHNICAL_DOCUMENTATION.md`](docs/TECHNICAL_DOCUMENTATION.md) for the
 
 1. Normalize prose and alerts into atomic attack-action sentences with `openai/gpt-5.6-sol` through OpenRouter.
 2. Parse supported Windows/Sysmon events deterministically without sending bulk logs to an LLM.
-3. Embed observations with `basel/ATTACK-BERT` and retrieve sentence-level ATT&CK techniques plus actor-specific behavior sentences from local ChromaDB. With a Target OS set for the case (Windows, Linux, macOS, ESXi), techniques documented only for other operating systems are not mapped (docs 5.7).
+3. Embed observations with `basel/ATTACK-BERT` and retrieve sentence-level ATT&CK techniques plus actor-specific behavior sentences from local ChromaDB (ATT&CK Enterprise 20.0). When the local technique head service runs, a fine-tuned 4B model scores every candidate and may propose techniques retrieval missed (on by default since 2026-10-20, see [Optional technique head service](#optional-technique-head-service)). With a Target OS set for the case (Windows, Linux, macOS, ESXi), techniques documented only for other operating systems are not mapped (docs 5.7).
 4. Capture optional strategic context: target geography, industry, motivation, intended objective, and independently supported sponsor/origin.
-5. Rank groups with deterministic classifiers plus the analyst-requested CyberRE-LLM vote (the LLM zero-shot vote was removed; the LLM extraction, technique verifier and independent review in steps 1 and 7 remain):
+5. Rank groups with deterministic classifiers plus the analyst-requested CyberRE-LLM vote (the LLM zero-shot vote was removed; the LLM extraction, technique verifier and independent review in steps 1 and 7 remain). Since 2026-10-27 procedure text is the core of attribution (docs 21.3.24–21.3.25): what the report says the attacker did separates groups far better than its list of technique ids, and keeps doing so when malware names are removed. Three members read that text:
+   - free-text group model: a TF-IDF word document per group (ATT&CK procedure examples and descriptions, actor names removed) scored against the case text
+   - behaviour-text member: each observation votes for the groups of its nearest ATT&CK procedure sentences
+   - technique-conditioned procedure member: each accepted technique's statements against the procedure sentences ATT&CK documents for that exact technique, plus the software the report names for it
+
+   The other members read the accepted technique list, named software and context:
    - Bernoulli Naive Bayes
    - TF-IDF cosine
    - weighted Jaccard
@@ -35,7 +40,10 @@ See [`docs/TECHNICAL_DOCUMENTATION.md`](docs/TECHNICAL_DOCUMENTATION.md) for the
    - PyTorch group network over the accepted techniques and named software (`GROUP_MLP_WEIGHT=0`, not loaded:
      at weight 1.0 it named one wrong group on the ATT&CK folds on 2026-10-01)
    - opt-in CyberRE-LLM technique filtering and ranking
-6. Fuse applicable classifiers with family-aware Reciprocal Rank Fusion. Naive Bayes, TF-IDF, Jaccard, and the technique centroid share one technique-overlap budget instead of casting four full correlated votes. Actor-specific behavior, software, and campaign classifiers have their own family budgets. Context, motivation, and description signals may rerank only candidates with documented technical support; the analyst-requested CyberRE vote has its own low family budget and cannot introduce a candidate. Abstaining classifiers cast no vote. Groups with zero technical overlap are excluded from authoritative RRF.
+
+   Off by default after failing their gates: the two dated knowledge-store members (docs 12.9) and the Naive Bayes
+   size correction (docs 21.3.33).
+6. Fuse applicable classifiers with family-aware Reciprocal Rank Fusion. Naive Bayes, TF-IDF, Jaccard, and the technique centroid share one technique-overlap budget instead of casting four full correlated votes. Actor-specific behavior, software, and campaign classifiers have their own family budgets. Context, motivation, and description signals may rerank only candidates with documented technical support; the analyst-requested CyberRE vote has its own low family budget and cannot introduce a candidate. Abstaining classifiers cast no vote. Groups with zero technical overlap are excluded from authoritative RRF. A learned combiner then orders the shortlist (see [Learned attribution combiner](#learned-attribution-combiner)). A single group is named only when it is clearly separated from the alternatives, its combiner probability is at least 0.20 and above the probability of "none of these", and the members that all read the technique list count as one source of evidence rather than four (docs 10.6, 21.3.22, 21.3.27); otherwise the result is a documented same-activity cluster or no name.
 7. Aggregate documented sponsor/origin evidence across the ranked candidates and classify the profile as APT-like state/espionage activity, financially motivated criminal intrusion, mixed, or indeterminate.
 8. Fetch a cached, non-voting live-intelligence layer from CISA KEV, CISA Alerts & Advisories, and explicitly labeled ransomware.live extortion claims; match only explicit case overlaps and add them to the Canvas.
 9. Run a hypothesis-driven chat interview that predicts unobserved behaviors from the current ensemble candidates, recommends ATT&CK-informed telemetry, Windows channels and Event IDs to inspect, and automatically asks the next prioritized question after each analyst response.
@@ -71,10 +79,11 @@ After analysis, the application opens an analyst Canvas linking normalized evide
 CISA KEV and CISA Alerts & Advisories are labeled authoritative for what CISA reports. ransomware.live records are public extortion-site claims, not confirmed breaches; they require independent victim, regulator, law-enforcement, or press corroboration. Live intelligence is excluded from RRF and the isolated reviewer by default to prevent recency and reporting bias.
 
 When no named group meets the evidence bar (stages below *known group hypothesis*), the Assessment
-view says so explicitly and labels the leader as the closest documented group, not an attribution;
-on the attribution benchmarks every named known group was correct (32 of 32 on the ATT&CK folds; 10 of 10
-on the CTI-HAL real reports with the group names removed from the text, 15 of 15 with them left in) and
-all 25 actors removed from ATT&CK were correctly left unnamed. When ATT&CK documents the leader and another
+view says so explicitly and labels the leader as the closest documented group, not an attribution.
+At the gate of the current defaults (2026-10-27, three fresh fold seeds) every named known group was
+correct (115 names, 0 wrong); 12 of the 55 CTI-HAL real reports were named, all correct, and none of the 22
+Elastic open-set posts. Actors removed from ATT&CK are occasionally still named after a group that shares
+their malware (2 across the three seeds), so a name is strong evidence, not proof. When ATT&CK documents the leader and another
 group as the same or overlapping activity (a reviewed table of its own description text, for example
 Carbanak and FIN7, or nesting profiles), the view says so, because the evidence usually cannot separate them.
 Groups ATT&CK only links through rarely shared malware, or names in order to call them distinct, are shown as
@@ -125,10 +134,32 @@ typed by hand.
   attribution prose, group and cluster names, places and sponsors removed; `scripts/report_anonymizer.py`), with
   names, tradecraft (ATT&CK malware masked too) and as-reported runs beside it (docs 21.3.4c). Post text is (c)
   Elastic, local evaluation only.
+- `attribution_benchmark.py --report-set vendor|campaigns|advisories` — the 68 development real reports the
+  combiner is fitted on (diagnosis only, docs 10.9).
+- `scripts/prepare_fresh_reports.py` + `scripts/fresh_llm_attribution.py` — vendor reports published after the
+  frontier models' training cut-off, product against GPT-5.6 Sol, pre-registered (docs 21.3.28–21.3.31; local only).
+- `scripts/cribl_finetune/external_product_taa.py` — the full pipeline on the CTI-TAA and AthenaBench attribution
+  tasks (evaluation only, non-commercial licences, docs 21.3.26).
 
-#### Current results (artifacts as of 2026-10-01, local pipeline, no LLM verifier)
+#### Current results (defaults of 2026-10-27, ATT&CK 20.0, local pipeline with the technique head, no LLM verifier)
 
-**Public held-out (hybrid):**
+| Measure | Result | Docs |
+|---|---|---|
+| Technique mapping, public held-out test splits, accepted-set micro F1 | 0.463 (0.417 without the technique head) | 21.3.18 |
+| Technique mapping, CTI-HAL statements, accepted-set F1 / precision | 0.504 / 0.553 (0.378 / 0.425 without the head) | 21.3.18 |
+| Attribution, ATT&CK folds (seeds 109/113/127, 465 held-out groups): top-1 | 421/465 (0.905); 115 names, 0 wrong; 2 removed actors named | 21.3.25 |
+| Attribution, CTI-HAL (55 real reports, group names removed): top-1 / names | 27/55 (0.49) / 12 named, 0 wrong; 11 named after the naming rules of 2026-10-27 | 21.3.25, 21.3.27 |
+| Same, malware names removed too | 20/55 (11 before procedure text was the core) | 21.3.25 |
+| Attribution, Elastic Security Labs (8 reports, strict) / open set (22 posts) | 4/8, 1 named, correct / 0 named | 21.3.25 |
+| CTI-TAA / AthenaBench attribution (public benchmarks, top-ranked correct) | 0.54 (ChatGPT-4 0.52) / 0.23 (GPT-5 0.39) | 21.3.26 |
+| 44 vendor reports published after the model's cut-off: right group first, strict / behaviour only | product 19 / 10; GPT-5.6 Sol 24 / 18 | 21.3.28, 21.3.30 |
+
+On reports newer than its knowledge the frontier model ranks better, mostly from knowledge of actors outside ATT&CK,
+but names many more groups wrongly (8 of 32 known-report names at strict, 19 open-set names; the product: 1 of 8 and 2).
+The product names little and is right when it names. The tables below record earlier stages of the
+work (2026-10-01 and before) and are kept for the before/after comparisons in the docs.
+
+**Public held-out (hybrid, 2026-10-01):**
 
 | Split | n | Micro F1 [95% CI] | P | R | hit@1 | hit@3 | hit@10 |
 |---|---|---|---|---|---|---|---|
@@ -170,7 +201,7 @@ development bundles narrated telemetry loses some ranking, so structured-telemet
 `TECHNIQUE_EXEMPLARS_ENABLED=false` (docs 21.3.10). With the OpenRouter verifier enabled (production pipeline,
 measured before the exemplars) narrative micro-F1 was 0.53, recall 0.56.
 
-**Attribution (text in, group out; 153 held-out groups):** on the leak-free fold benchmark (seed 7; since
+**Attribution (text in, group out; 153 held-out groups; 2026-10-03, before the procedure-text core):** on the leak-free fold benchmark (seed 7; since
 2026-10-03 the BM25 index is rebuilt per fold without the held-out sentences, docs 21.3.5) top-1 0.82, top-3 0.90,
 top-5 0.94, MRR 0.87; with the separation gate 26 known groups are named, all correct, plus one documented same-activity
 cluster (docs 10.11), and 0/25 removed actors are named: named risk 0.00. Before the BM25 fold hiding the same
@@ -179,7 +210,7 @@ source-country vote, which costs one fold here and gains on real reports), top-3
 across the seven fold seeds used on 2026-10-02 (also before the hiding) the gate named 4 of 175 removed actors (about
 2%), each just above the separation bar (docs 21.3.15).
 
-**CTI-HAL real reports (55 reports, 6 groups; local evaluation only):** statement mapping F1 0.38 (was 0.32 before the
+**CTI-HAL real reports (55 reports, 6 groups; local evaluation only; 2026-10-01):** statement mapping F1 0.38 (was 0.32 before the
 exemplars), recall 0.34 (was 0.25), hit@1 0.38 (was 0.33); median accepted-technique recall per report 0.42 (was 0.31).
 Attribution, with every ATT&CK group name and alias in the statements replaced by "the adversary" as in the ATT&CK
 folds: **top-1 0.46** (0.44 before the source-country vote), cluster-aware top-1 0.56, top-3 0.53
@@ -200,7 +231,7 @@ same. Refitting the
 acceptance model with the CTI-HAL statements did not help (public F1 0.320 -> 0.313) and was not adopted.
 
 **Elastic Security Labs real reports (8 reports, 6 groups, whole posts read as the no-LLM mode reads them; local
-evaluation only):** strict anonymization **top-1 4/8 = 0.50** [Wilson 0.22, 0.78], top-5 0.63, MRR 0.54; one group named,
+evaluation only; 2026-10-01):** strict anonymization **top-1 4/8 = 0.50** [Wilson 0.22, 0.78], top-5 0.63, MRR 0.54; one group named,
 correct, and none of the 22 open-set posts (actors outside ATT&CK) named. Three of the four hits rest on malware only
 the truth group uses in ATT&CK: with ATT&CK malware names masked top-1 is 1/8 (Gamaredon, from behaviour). Group names
 left in give 5/8; the extra hit (LOBSHOT) comes from software mentioned only in Elastic's attribution paragraph. Reading
@@ -216,9 +247,11 @@ These are engineering diagnostics, not production accuracy claims. See
 
 - Python 3.11–3.13
 - Docker with permission to access the Docker daemon
-- NVIDIA GPU optional; CPU works but ingestion is slower
+- NVIDIA GPU optional; CPU works but ingestion is slower. The technique head service (about 3.5 GB) and the
+  local LLM (about 4 GB) run on the GPU only
 - Node.js 22 with npm for the web front end outside Docker (`make web-install`)
-- OpenRouter API key with access to the configured extraction and review models
+- Optional: an OpenRouter API key for the extraction, verifier, review and model second-opinion models (without it
+  the app uses the local LLM or runs in local mode)
 
 ## Setup
 
@@ -271,7 +304,10 @@ reverse proxy with SSO, before exposing it.
    Distinguish leads).
 5. **Assessment**: the stage decision with its bars and glossary, the ranking chart, a dossier
    per candidate, the optional independent AI review, and exports (Markdown, JSON audit,
-   Navigator layers, Attack Flow) that are always available.
+   Navigator layers, Attack Flow) that are always available. With `MODEL_OPINION_ENABLED=true`
+   a button asks GPT-5.6 Sol for its own answer (one paid OpenRouter request per click, about
+   $0.05) and shows it next to the product's; it is display only and never changes the ranking,
+   the name, the case file or an export (docs 16.6).
 
 Every page shows the case status strip and a **Next** hint. Errors from OpenRouter (credit, key,
 rate limit) or Chroma are reported in plain language and never lose the case state.
@@ -282,14 +318,16 @@ rate limit) or Chroma are reported in plain language and never lose the case sta
 
 The shortlist is ordered by a learned combiner (`apt_classifier/combiner.py`): a conditional-logit
 model over per-classifier ranks, the discrimination channels and the case's evidence regime,
-blended half-and-half with reciprocal-rank fusion. It is fitted only on ATT&CK-derived folds
-(`make fit-combiner`, no credit, about an hour) and loads fail-closed on an ATT&CK-version or
-pipeline mismatch. On the held-out ATT&CK folds it lifted top-1 from 0.60 to 0.83 (fold benchmark before
-the 2026-10-03 BM25 hiding) and on the 55 CTI-HAL real reports (statements as reported) from 0.51 to 0.53 with
-every named group still correct; the naming gate scores
-the leader against the union of both shortlists so a re-ordering cannot hide a competitor. The
-assessment page shows its calibrated leader probability. Disable with
-`ATTRIBUTION_COMBINER_ENABLED=false`.
+blended half-and-half with reciprocal-rank fusion. The default
+(`data/models/combiner/attribution_combiner_procedure_core.json`, since 2026-10-27) is fitted on ATT&CK-derived
+folds plus 68 development real reports (vendor posts, ATT&CK campaigns and FBI/CISA advisories, each with the
+ATT&CK text that cites it hidden; docs 10.9, 21.3.25); CTI-HAL and Elastic are never used to fit it
+(`make fit-combiner` for the fold-only recipe, no credit, about an hour). It loads fail-closed on an
+ATT&CK-version or pipeline mismatch, and each combiner has its own naming floor and confidence labels. The naming
+gate scores the leader against the union of both shortlists so a re-ordering cannot hide a competitor. The
+assessment page shows its calibrated leader probability and, when it is high enough, the "strong single answer"
+label. Disable with `ATTRIBUTION_COMBINER_ENABLED=false`; the previous defaults are kept for rollback (tag
+`rollback/pre-procedure-core-2026-10-26`).
 
 ### Web front end (FastAPI + React)
 
@@ -467,6 +505,21 @@ All settings are environment variables documented in `.env.example`. Important v
   trains both on the GPU when available, `PROFILE_FOREST_DEVICE=cpu` otherwise). To turn the country vote off set
   `SOURCE_COUNTRY_WEIGHT=0.0` and `ATTRIBUTION_COMBINER_PATH=data/models/combiner/attribution_combiner_no_country_fsum.json`
   (docs 9.13 and 21.3.11)
+- `TEXT_GROUP_WEIGHT=1.0`, `BEHAVIOR_TEXT_WEIGHT=1.0`, `PROCEDURE_MATCH_WEIGHT=1.0` (the procedure-text members,
+  the core since 2026-10-27; `make fit-text-group` builds the model the three read). They bind the combiner, so
+  turning one off needs the matching combiner (docs 21.3.20, 21.3.25)
+- `ATTRIBUTION_COMBINER_PATH=data/models/combiner/attribution_combiner_procedure_core.json`,
+  `CONFIDENCE_LABELS_PATH=data/models/calibration/confidence_labels_procedure_core.json`,
+  `CONFIDENCE_LABELS_ENABLED=true` (display-only "strong single answer" label)
+- `ATTRIBUTION_HYPOTHESIS_MIN_PROBABILITY=0.20` (a single name needs at least this combiner probability; the floor
+  belongs to its combiner), `ATTRIBUTION_HYPOTHESIS_ABOVE_NULL=true` (and more than "none of these"),
+  `ATTRIBUTION_TECHNIQUE_LIST_ONE_FAMILY=true` (members that all read the technique list count once at the naming
+  gate); docs 10.6, 21.3.22, 21.3.27
+- `ATTRIBUTION_CLUSTER_NAMING=true`, `ATTRIBUTION_CLUSTER_SCOPE=documented` (name a pair only when ATT&CK documents
+  it as the same activity; docs 10.11)
+- `STORE_TEXT_WEIGHT=0`, `STORE_SOFTWARE_WEIGHT=0` (dated knowledge-store members, off: no weight beat 0;
+  docs 12.9), `NAIVE_BAYES_BACKGROUND_ENABLED=false` (size correction, failed its gate; docs 21.3.33)
+- `MODEL_OPINION_ENABLED=false` (the Assessment page's paid GPT-5.6 Sol second opinion, display only; docs 16.6)
 - `GROUP_MLP_WEIGHT=0.0` (PyTorch group network, `make fit-mlp`; not loaded at 0. At 1.0 it needs
   `ATTRIBUTION_COMBINER_PATH=data/models/combiner/attribution_combiner_group_mlp_fsum.json` and named one wrong group
   on the ATT&CK folds on 2026-10-01)
@@ -507,4 +560,6 @@ The LLM boundary is mocked in tests, so tests run without network access or API 
 - Elastic MCP searches and result normalization run locally between this application and Kibana; the Elastic API key is never sent to OpenRouter.
 - Elastic MCP results remain staged and non-voting until an analyst selects them for import. Imported event text may later enter an OpenRouter review payload if the analyst explicitly runs AI review.
 - Free-text observations, alert text, adaptive-question context, and review payloads are sent to OpenRouter when those features are used.
+- The model second opinion (off by default) sends the case's observations, with ATT&CK group names and ids removed, to OpenRouter only when the analyst clicks its button; vendor and most malware names stay in the text.
+- Without an OpenRouter key (local LLM and technique head service on your GPU), no case data leaves the computer; only the live-intelligence feeds are fetched.
 - Do not submit evidence to OpenRouter if organizational policy prohibits third-party processing.
