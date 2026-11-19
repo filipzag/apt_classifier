@@ -1,3 +1,5 @@
+from math import fsum
+
 from apt_classifier.classifiers.base import (
     ClassifierContext,
     ClassifierResult,
@@ -30,16 +32,19 @@ class WeightedJaccardClassifier:
             known = group_techniques(context, group_id)
             group = {tid: idf_for(context, tid) for tid in known}
             matches = hierarchy_matches(context, group_id)
-            intersection = sum(
+            # fsum throughout: exactly rounded, so no score depends on set or dict iteration order
+            intersection = fsum(
                 min(observed[tid], group.get(match.group_technique_id, 0.0)) * match.factor
                 for tid, match in matches.items()
             )
             union = set(observed) | known
             if self.metric == "dice":
-                denominator = sum(observed.values()) + sum(group.values())
+                denominator = fsum([*observed.values(), *group.values()])
                 score = 2.0 * intersection / denominator if denominator else 0.0
             else:
-                denominator = sum(max(observed.get(tid, 0.0), group.get(tid, 0.0)) for tid in union)
+                denominator = fsum(
+                    max(observed.get(tid, 0.0), group.get(tid, 0.0)) for tid in union
+                )
                 score = intersection / denominator if denominator else 0.0
             if score > 0:
                 scores[group_id] = score

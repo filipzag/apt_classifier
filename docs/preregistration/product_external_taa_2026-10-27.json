@@ -1,0 +1,25 @@
+{
+  "schema": "cribl_finetune_prereg/1",
+  "id": "product_external_taa_2026-10-27",
+  "title": "The full attribution pipeline on the threat-actor-attribution tasks of CTIBench and AthenaBench (evaluation only)",
+  "registered": "2026-10-27",
+  "parent": "cribl_external_bench_2026-10-19 (the same texts, scored then with single models only: the actor head and the TF-IDF text-group model); attribution_procedure_core_2026-10-26 (the default since 2026-10-27, docs 21.3.25)",
+  "question": "Where does the whole product (technique mapping, every ensemble member, the learned combiner, the naming gate) land on CTIBench's CTI-TAA and AthenaBench's TAA under those benchmarks' own scoring, against the published model scores, with the procedure-text core and with the previous default?",
+  "licences": "CTIBench CC BY-NC-SA 4.0; AthenaBench Academic Research License (non-commercial). Local evaluation only: nothing trained, tuned or redistributed; the converted reports stay under data/benchmarks/ (gitignored).",
+  "inputs": "the texts already prepared by external_bench.py prepare (data/audits/cribl_ft/cases_ext_ctibench_taa.jsonl, cases_ext_athena_taa.jsonl): CTIBench's [PLACEHOLDER] and every ATT&CK group name and alias replaced with 'the adversary', split with the product's no-LLM splitter; AthenaBench's bullets. One report per text, every statement read (no cap), the attribution benchmark's real-report mode at the names level (--anonymize-actors), local pipeline, no API key, local LLM off (the gate's protocol)",
+  "gold": "each answer mapped to the ATT&CK groups alias-connected to it (AthenaBench's alias list plus ATT&CK's names and aliases): the exact name match first as group_id, the others as accept; an answer connected to no ATT&CK group is an open-set report (group_id null)",
+  "arms": {
+    "core": "the defaults since 2026-10-27 (procedure-text core)",
+    "previous": "the rollback settings: TEXT_GROUP_WEIGHT=0, BEHAVIOR_TEXT_WEIGHT=0, attribution_combiner_real_reports.json, confidence_labels_real_reports.json, floor 0.50"
+  },
+  "scoring": {
+    "primary": "the product's top-ranked group per report, always given (the published models always answer): AthenaBench's rule, correct when alias-connected to the answer, plausible when connected through their related-group list, combined 1 / 0.5 / 0, over every report",
+    "named": "the product's own answer: a single name (known_group_hypothesis) or a documented cluster (correct when the answer connects to a member); a held report gives no answer and scores 0; reported as names given, names correct and the share of all reports",
+    "strict": "the top-ranked group is the answer's own ATT&CK group (its name or an alias equals the answer): the benchmarks' alias walk links some distinct groups (APT28 with APT29, APT41 with Winnti Group), which the published numbers also benefit from",
+    "also": "top-3 / top-5 by AthenaBench's correct rule; the same numbers on the reports whose answer maps to an ATT&CK group",
+    "published": "CTI-TAA correct / plausible: ChatGPT-4 52 / 86, Llama3-70B 52 / 80, ChatGPT-3.5 44 / 62, Gemini-1.5 38 / 74, Llama3-8B 28 / 36 (CTIBench paper); AthenaBench TAA accuracy: GPT-5 39, GPT-4o 35, GPT-4 31, Gemini-2.5-Pro 31, Llama 3.1-8B 24, Qwen3-14B 17, Qwen3-4B 15 (AthenaBench paper); compare the correct column (docs 21.3.18)"
+  },
+  "caveats": "a quarter of AthenaBench's answers (and two CTIBench answers) are actors ATT&CK does not list, which the product can never get right; ATT&CK procedure examples may cite the CTI-TAA reports (as for CTI-HAL, 21.3.16) and AthenaBench's profiles may be written from public group descriptions, and nothing here hides those texts; the plausible column follows the authors' transitive related-group walk",
+  "success": "none registered: report-only, each arm run once, no selection, no refit, nothing adopted",
+  "cost": "laptop only, no API credit, about 15 minutes per arm"
+}

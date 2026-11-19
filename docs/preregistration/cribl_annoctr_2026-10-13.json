@@ -1,0 +1,88 @@
+{
+  "schema": "cribl_finetune_prereg/1",
+  "id": "cribl_annoctr_2026-10-13",
+  "title": "B3: cribl-decision B1 trained further on real-report sentences (AnnoCTR)",
+  "registered": "2026-10-13",
+  "parent": "docs/preregistration/cribl_finetune_2026-10-11.json (amendments 1-5; docs 21.3.18)",
+  "question": "Does training on sentences from real vendor reports close the gap seen on CTI-HAL? Under the never-abstain rule B1 beat pipeline rank-1 by +0.10 on dev, +0.06 on public test and only +0.05 on CTI-HAL, and stayed below Jev C1 there.",
+  "harness": "scripts/cribl_finetune/ (prepare_annoctr.py, export_cases.py --splits annoctr_*, train.py continued-arm options, evaluate.py, rescore.py); pod script scripts/cribl_finetune/runpod/remote_b3.sh",
+  "data": {
+    "source": "AnnoCTR (Lange et al., LREC-COLING 2024), github.com/boschresearch/anno-ctr-lrec-coling-2024 at d510b6949e1938d47c93a43eedd562dc538439dc, CC-BY-SA 4.0: 400 vendor reports (Intel471, Lab52, S2 Grupo, Proofpoint, QuoIntelligence, Zscaler); the 112 with ATT&CK technique links are used",
+    "cases": "one case per sentence with at least one technique link (linking_mitre_only), gold = its linked techniques remapped to ATT&CK 19.2; AnnoCTR's own document split: train 1,884, dev 443, test 959 scorable sentences",
+    "labels": "parent level: 0.5% of train sentences carry a sub-technique, against 45% of CTI-HAL statements; two thirds of the links are implicit mentions",
+    "candidates": "the pipeline's top-10 (benchmark_mapping.py hybrid, exemplar index on: it holds only public train sentences), as for dev, test and CTI-HAL",
+    "overlap": "no CTI-HAL statement of 8+ tokens occurs verbatim in any AnnoCTR report; AnnoCTR train drops exact and near (token Jaccard >= 0.9) duplicates of public dev/test, CTI-HAL and AnnoCTR dev/test texts",
+    "replay": "1,772 AnnoCTR train rows remain after the overlap filter (42 held-out duplicates, 70 repeats); an equal number of public train rows (cases_train.jsonl), a seeded sample, with the original exact targets, against forgetting"
+  },
+  "fixed": {
+    "init": "B1 step_9462 (data/models/cribl_ft/B1/step_9462)",
+    "targets": "AnnoCTR rows: common.family_target_distribution (uniform over offered options in a gold parent's family, or a gold sub-technique; none_of_these when none is offered); replay rows: common.target_distribution",
+    "training": "QLoRA as B1/B2 (4-bit NF4, same LoRA modules, chat format, fp32 readout), lr 5e-5 (continued training; not tuned), cosine with 3% warmup, effective batch 16, 2 epochs, checkpoints every half epoch, seed 7",
+    "decision_rule": "never_abstain (amendment 4 of the parent): the most probable of the ten techniques; P(none_of_these) is a flag",
+    "compute": "RunPod secure RTX 4090; CTI-HAL uploaded for the scoring run with the owner's permission (2026-10-13) and deleted with the pod"
+  },
+  "selection": {
+    "checkpoint": "the B3 checkpoint with the highest AnnoCTR dev parent-aware score under never_abstain (AnnoCTR labels are parent level); ties the earlier",
+    "dev_only": true,
+    "reported_not_used": "B1 and pipeline rank-1 on AnnoCTR dev"
+  },
+  "confirmation": {
+    "runs": "the selected B3 once on CTI-HAL (968), AnnoCTR test (959) and public test (1,391); B1 once on AnnoCTR test; everything rescored with rescore.py under never_abstain",
+    "no_retuning": "nothing is chosen, refit or rerun because of a confirmation result"
+  },
+  "success": {
+    "headline": "CTI-HAL exact under never_abstain: B3 minus B1 (same rows, B1 from docs 21.3.18) with a paired 95% CI lower bound above 0",
+    "secondary": [
+      "AnnoCTR test parent-aware under never_abstain: B3 minus B1, paired 95% CI lower bound above 0",
+      "CTI-HAL exact at least Jev C1 as reported (0.460)",
+      "public test exact: B3 minus B1 not below -0.02 (point estimate; forgetting check)"
+    ]
+  },
+  "stop_rules": [
+    "the adapter check fails",
+    "AnnoCTR train gold-family-in-candidates above 0.95 (a leak into the candidates): stop and inspect",
+    "more than 1% of a split's cases end in error"
+  ],
+  "adoption": "none: an experiment, no product wiring",
+  "reporting": "every checkpoint's AnnoCTR dev curve (both rules), exact and parent-aware on every set, B1 vs B3 vs pipeline rank-1 vs Jev C1 (CTI-HAL), the none_of_these flag AUROC, explicit vs implicit AnnoCTR mentions, training time and cost",
+  "informed_by": "the parent study's dev, public test and CTI-HAL results (docs 21.3.18) and AnnoCTR's statistics and dev candidate lists (gold family in the top 10 for 0.722 of dev sentences, exact id 0.436); no model has been scored on AnnoCTR",
+  "amendments": [
+    {
+      "id": 1,
+      "date": "2026-10-13",
+      "before": "any B3 training or AnnoCTR scoring",
+      "change": "compute is a RunPod secure A40 (48 GB, Ampere, EU-SE-1, $0.59/h) instead of an RTX 4090",
+      "reason": "no secure RTX 4090 or L40 was available",
+      "deviation": "a different GPU gives floating-point differences against B1's CTI-HAL and public test rows (scored on RTX 4090 pods); same code, seeds and data order",
+      "informed_by": "nothing from B3 or AnnoCTR model scores (none exist)"
+    },
+    {
+      "id": 2,
+      "date": "2026-10-13",
+      "before": "any B3 checkpoint or AnnoCTR scoring: the first 2-epoch start was stopped about a minute into training, before its first logged step",
+      "change": "4 epochs instead of 2 (8 checkpoints, every half epoch, still selected on AnnoCTR dev); compute is a RunPod community-cloud H100 NVL ($2.59/h) instead of the secure A40 of amendment 1",
+      "reason": "the owner judged 2 epochs too few (7,088 examples, against 12,616 for B1) and asked for a faster GPU; no secure RTX 4090, L40, 5090 or cheap community GPU was free",
+      "data": "the owner allowed the CTI-HAL statements to be uploaded to the community host for the scoring run; the upload is deleted and the pod terminated after the download",
+      "deviation": "the cosine schedule now spans 4 epochs; GPU floating-point differences against B1's RTX 4090 rows as in amendment 1",
+      "informed_by": "nothing from B3 or AnnoCTR model scores (none exist)"
+    },
+    {
+      "id": 3,
+      "date": "2026-10-13",
+      "before": "any B3 checkpoint or AnnoCTR scoring: the first H100 start failed at its first backward pass",
+      "change": "on Hopper GPUs remote_b3.sh installs triton 3.7.1 over the 3.6.0 that torch 2.11 pins",
+      "reason": "flash-linear-attention refuses Triton 3.4-3.7.0 on Hopper (incorrect gated chunk backward, fla issue #640)",
+      "deviation": "Triton kernels of a different version than the RTX 4090 runs (3.6.0); torch itself uses Triton only for torch.compile, which the experiment does not use",
+      "informed_by": "nothing from B3 or AnnoCTR model scores (none exist)"
+    },
+    {
+      "id": 4,
+      "date": "2026-10-13",
+      "before": "any B3 checkpoint or AnnoCTR scoring: the H100 run was stopped at optimizer step 50 of 886, before its first checkpoint",
+      "change": "compute is a RunPod community-cloud A100 SXM 80GB ($1.39/h); training restarts from scratch with the same seed",
+      "reason": "on the H100 NVL host training was CPU-bound (GPU 54-57% busy, one core at 100%): 0.58 s/example at step 50 against 0.37 on the RTX 4090; the owner asked to switch if it did not speed up",
+      "deviation": "amendment 3's Triton 3.7.1 applies only on Hopper, so the A100 runs the pinned Triton 3.6.0 like the RTX 4090 runs; GPU floating-point differences as in amendment 1",
+      "informed_by": "only the H100 training speed and loss of the first 50 steps; nothing from B3 or AnnoCTR model scores"
+    }
+  ]
+}

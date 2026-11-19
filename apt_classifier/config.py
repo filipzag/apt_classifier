@@ -1,5 +1,6 @@
 from functools import lru_cache
 from pathlib import Path
+from typing import Literal
 
 from pydantic import SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -15,6 +16,32 @@ class Settings(BaseSettings):
     )
 
     openrouter_api_key: SecretStr | None = None
+    # Local LLM (Ollama, docs 16.4a). Model ids prefixed ``local/`` in the per-task settings
+    # below run on it; without an OpenRouter key every other model id falls back to
+    # local_llm_fallback_model. On by default (product owner, 2026-10-02): it is used only
+    # when the server answers with the fallback model pulled; with an OpenRouter key nothing
+    # changes unless a model id starts with ``local/``.
+    local_llm_enabled: bool = True
+    local_llm_url: str = "http://localhost:11434"
+    # The 4B fits the 8 GB laptop GPU next to the app and a benchmark; ``-text`` is the same
+    # model without its vision tower (``make llm-pull`` builds it; 740 MiB less GPU memory).
+    local_llm_fallback_model: str = "local/qwen3.5:4b-text"
+    local_llm_num_ctx: int = 32768
+    # GPU only: every layer must sit on the GPU, or the model refuses to load (num_gpu=999)
+    # instead of spilling layers onto the CPU, which slows the whole machine down.
+    local_llm_gpu_only: bool = True
+    # CPU threads the local model may use; with every layer on the GPU they only sample and
+    # wait, and a power-capped laptop GPU otherwise leaves them spinning on several cores.
+    local_llm_num_thread: int = 2
+    # A local verifier's 'supported' with P(supported) below this becomes 'uncertain' (left for
+    # the analyst); 0 keeps every verdict. OpenRouter verdicts carry no probability (docs 16.4a).
+    local_llm_verifier_min_confidence: float = 0.98
+    # Idle time before Ollama frees the GPU memory again (the app's own GPU models need it).
+    local_llm_keep_alive: str = "5m"
+    local_llm_timeout: float = 300.0
+    # Efforts that switch Qwen's thinking on, and the extra token budget it gets for it.
+    local_llm_think_efforts: str = "high,xhigh,max"
+    local_llm_think_tokens: int = 8192
     chroma_host: str = "localhost"
     chroma_port: int = 8000
     chroma_ssl: bool = False
@@ -25,6 +52,17 @@ class Settings(BaseSettings):
     extract_effort: str = "low"
     question_effort: str = "medium"
     review_effort: str = "max"
+    # A cloud model's answer as a second opinion beside the product's own
+    # (apt_classifier/model_opinion.py, prereg model_second_opinion_2026-11-11): display only,
+    # never part of the ranking, the combiner, the naming gate, a confidence label or an export.
+    # Off by default. When on, the analyst asks with a button and every click is one paid
+    # OpenRouter request (about $0.05-0.06 measured; sent and paid once more when the answer cannot
+    # be read); nothing is asked during an analysis. It needs
+    # an OpenRouter key and a local/ model id is refused. The "confident name" mark (a stated
+    # probability of at least 0.99) was measured for this model at this effort only.
+    model_opinion_enabled: bool = False
+    model_opinion_model: str = "openai/gpt-5.6-sol"
+    model_opinion_effort: str = "medium"
     attack_version: str = "latest"
     similarity_threshold: float = 0.45
     retrieval_top_k: int = 30
@@ -86,6 +124,25 @@ class Settings(BaseSettings):
     # Default since 2026-10-01: neutral on every benchmark (public held-out F1 0.416 -> 0.417,
     # attribution unchanged, docs 21.3.12), which rarely describe non-Windows hosts.
     technique_platform_from_text: bool = True
+    # Single-answer cap (2026-10-19, prereg cribl_single_answer_cap_2026-10-19): "model" follows
+    # the acceptance artifact's own gate record (at most one probability-only acceptance per
+    # observation, a second one above the artifact's bar; artifacts without a record run
+    # uncapped), "off" ignores it, a number in (0, 1] forces that bar for an ablation (1.0:
+    # strictly one acceptance on probability per observation).
+    technique_single_answer_cap: str = "model"
+    # Agreement filter (2026-10-19, prereg cribl_head_agreement): "technique" / "family" /
+    # "top3" keep an accepted technique only when the technique head picks it too (its top
+    # technique, its top family, one of its top-3 families); "off" (default) no filter.
+    technique_head_agreement: str = "off"
+    # Head-first acceptance (2026-10-20, prereg cribl_head_first): "model" follows the acceptance
+    # artifact's gate record (a candidate the head gives at least that joint probability is
+    # accepted outright; artifacts without the record change nothing), "off" ignores it, a
+    # number forces a bar for an ablation.
+    technique_head_first: str = "model"
+    # Sibling replacement (2026-10-20, prereg cribl_sibling_replacement): "model" follows the
+    # artifact's gate record (the head's preferred member of a family replaces an accepted
+    # sibling when it prefers it by the recorded ratio), "off" ignores it, a number forces it.
+    technique_head_sibling: str = "model"
     acceptance_model_path: Path = (
         PROJECT_ROOT / "data" / "models" / "acceptance" / "acceptance_model.json"
     )
@@ -94,7 +151,52 @@ class Settings(BaseSettings):
     acceptance_model_fallback_path: Path | None = (
         PROJECT_ROOT / "data" / "models" / "acceptance" / "acceptance_model_no_exemplars.json"
     )
+    # ----- the fine-tuned technique head (apt_classifier/technique_head.py, docs 21.3.18) -----
+    # A local service (`make technique-head-serve`, scripts/cribl_finetune/serve.py, its own
+    # .venv-cribl and about 3.5 GB of GPU memory) scoring every observation with the 4B technique
+    # model: evidence on every candidate (acceptance feature schema 4) and up to
+    # TECHNIQUE_HEAD_NEW_CANDIDATES proposals retrieval missed. On by default since 2026-10-20
+    # (product owner; the mapping gate of cribl_product_integration_2026-10-19 passed and the
+    # cluster volume guard settled the open-set naming): it is used only while the service
+    # answers with the pinned checkpoint, otherwise the pipeline runs exactly as without it.
+    # Prose only, for now: log-derived observations (the telemetry sources of cyberre.
+    # is_telemetry_source) are not scored. Fail closed: unavailable, wrong ATT&CK version or a
+    # fingerprint other than the pinned one leaves the pipeline exactly as without it; an
+    # acceptance model fitted with the head runs only on that head.
+    technique_head_enabled: bool = True
+    technique_head_url: str = "http://localhost:8102"
+    technique_head_timeout: float = 120.0
+    # SHA-256 of the served checkpoint (its /health "fingerprint"); pinned to E2 step_52706
+    # (the registered head); empty accepts any checkpoint
+    technique_head_expected_fingerprint: str = (
+        "5b5d015d8766dd27cdeceaf0ea1aaa0ea7c613f397d2bf0fecb07eea41fcea01"
+    )
+    technique_head_top_families: int = 3
+    technique_head_new_candidates: int = 3
+    technique_head_batch: int = 16
+    technique_head_cache_size: int = 2048
+    # The acceptance model fitted with the head's features (schema 4; `fit_acceptance_model.py
+    # --require-technique-head`). Read only while the head is active: it then judges the
+    # observations the head scored and ACCEPTANCE_MODEL_PATH the rest (acceptance.
+    # HeadAwareAcceptance); with the service stopped the shipped gate runs unchanged.
+    acceptance_model_head_path: Path | None = (
+        PROJECT_ROOT / "data" / "models" / "acceptance" / "acceptance_model_technique_head.json"
+    )
     max_questions: int = 10
+    # Interview questions about malware only one top-three group uses (software_questions.py,
+    # docs 21.3.15 C): asked first while the case is not named, with fixed wording and the answers
+    # found / not found / not checked. A "found" counts like the software named in the text; a
+    # "not found" can only lower the leader's (or a named cluster's) separation, by this weight
+    # times the malware's rarity and exclusivity. Off until the pre-registered simulation passes.
+    interview_software_questions: bool = False
+    interview_software_per_group: int = 1
+    interview_software_max_questions: int = 3
+    interview_software_max_users: int = 1
+    interview_software_when_named: bool = False
+    interview_software_negative_weight: float = 0.3
+    # a name must not rest on a "found" alone: without the interview software the leader's (or
+    # the cluster's) separation in the gate window must be >= 0
+    interview_software_found_requires_lead: bool = True
     threat_intel_days: int = 30
     threat_intel_timeout: float = 20.0
     threat_intel_max_items_per_source: int = 100
@@ -111,6 +213,12 @@ class Settings(BaseSettings):
     # Technique-level dense/lexical RRF constant; kept separate because the acceptance
     # model's features are fitted against it.
     technique_rrf_k: int = 60
+    # Dense technique hits within this similarity of an observation's best hit become candidates
+    # (_best_technique_hits), and the number of sentence hits fetched per query (0 keeps
+    # max(3 x retrieval_top_k, 4 x technique_candidate_pool), 90 at the defaults). Both feed the
+    # acceptance features; its retrieval contract refuses values the model was not fitted with.
+    technique_dense_relative_margin: float = 0.12
+    technique_dense_overfetch: int = 0
     software_idf_enabled: bool = True
     # Cap on the rarity weight of ATT&CK *tool* entries (legitimate utilities); malware keeps
     # its full rarity weight. See classifiers/software.py.
@@ -135,8 +243,9 @@ class Settings(BaseSettings):
     profile_forest_family_weight: float = 1.0
     # Default since 2026-10-01 by the product owner's decision (docs 21.3.11): real reports improve
     # (anonymized top-1 0.436 -> 0.455, 8 -> 10 names) at the cost of one ATT&CK fold (0.837 -> 0.830).
-    # It needs the combiner fitted with it (data/models/combiner/attribution_combiner.json); to turn it
-    # off use 0.0 with attribution_combiner_no_country.json. The group forest stays at 0: it hurts
+    # It needs the combiner fitted with it (data/models/combiner/attribution_combiner_0930_fsum.json);
+    # to turn it off use 0.0 with attribution_combiner_no_country_fsum.json. The group forest
+    # stays at 0: it hurts
     # real reports at every weight tried.
     source_country_weight: float = 1.0
     source_country_family_weight: float = 1.0
@@ -144,13 +253,80 @@ class Settings(BaseSettings):
     # named software -> group. It joins the ensemble, in the learned_profile family, only with a
     # positive weight; at 0 it is not loaded and the fusion and combiner fingerprint are unchanged.
     # Measured 2026-10-01 at 1.0 with its own combiner (data/models/combiner/
-    # attribution_combiner_group_mlp.json): CTI-HAL anonymized top-1 0.455 -> 0.473, as reported
+    # attribution_combiner_group_mlp.json, on earlier classifier code; refit 2026-10-03 as
+    # attribution_combiner_group_mlp_fsum.json, docs 21.3.9): CTI-HAL anonymized top-1 0.455 -> 0.473, as reported
     # 0.564 -> 0.564, no wrong names; but on the ATT&CK folds top-1 0.830 -> 0.817 and one wrong
     # name (Silence named as Kimsuky), so it fails the naming gate and stays at 0.
     group_mlp_enabled: bool = True
     group_mlp_path: Path = PROJECT_ROOT / "data" / "models" / "mlp" / "group_mlp.npz"
     group_mlp_device: str = "auto"
     group_mlp_weight: float = 0.0
+    # Free-text group model (apt_classifier/text_group.py, make fit-text-group): a TF-IDF word
+    # document per ATT&CK group scored against the case text. Like the group network it votes, in
+    # the learned_profile family, only with a positive weight; at 0 it is not loaded and the fusion
+    # and combiner fingerprint are unchanged. It never counts as an independent evidence family.
+    # Gate trial 2026-10-03 at 1.0 with its own combiner (data/models/combiner/
+    # attribution_combiner_text_group.json, docs 21.3.16): CTI-HAL anonymized top-1 0.455 -> 0.491,
+    # MRR 0.512 -> 0.572, as reported MRR 0.636 -> 0.666, Elastic strict 4 better / 0 worse, no
+    # wrong names anywhere; but ATT&CK folds top-1 0.830 -> 0.824 (5 gained / 6 lost), so the
+    # pre-registered no-regression rule fails by one case and it stays at 0 (the product owner decides).
+    # Since 2026-10-27 1.0 with the behaviour-text member: procedure text as the core of
+    # attribution (prereg attribution_procedure_core_2026-10-26, docs 21.3.25; rollback = both
+    # weights 0 with the real-report combiner, its labels and the floor 0.5, tag
+    # rollback/pre-procedure-core-2026-10-26).
+    text_group_enabled: bool = True
+    text_group_path: Path = PROJECT_ROOT / "data" / "models" / "text_group" / "text_group.json.gz"
+    text_group_weight: float = 1.0
+    # Behaviour-text member (apt_classifier/behavior_text.py, prereg
+    # attribution_behavior_text_2026-10-20): the text member's corpus indexed sentence by
+    # sentence, every case statement voting for the groups of its nearest procedure sentences.
+    # Reads TEXT_GROUP_PATH; joins the ensemble only with a positive weight (0 until the gate
+    # passes); a learned profile that never counts as an independent evidence family. The
+    # parameters are the dev choice of scripts/fit_behavior_text.py (vendor set). 1.0 since
+    # 2026-10-27 with the free-text member and the procedure-core combiner (docs 21.3.25).
+    behavior_text_enabled: bool = True
+    behavior_text_weight: float = 1.0
+    # dev choice 2026-10-21 (vendor set, member alone): top_k 10, the five best statements, no
+    # prior: MRR 0.809, top-1 0.676, top-3 0.912 (mean over all statements: top-1 0.706, MRR 0.784)
+    behavior_text_top_k: int = 10
+    behavior_text_min_similarity: float = 0.0
+    behavior_text_aggregate: str = "top5"
+    behavior_text_prior: float = 0.0
+    # Technique-conditioned procedure member (apt_classifier/procedure_match.py, prereg
+    # attribution_procedure_match_2026-10-21): each accepted technique's statements against the
+    # procedure sentences documented under that technique (the group's own, its software's, its
+    # campaigns'), with ATT&CK's software-to-group links and a bonus for software the report
+    # names. Reads TEXT_GROUP_PATH; joins the ensemble only with a positive weight (0 until the
+    # gate passes); never an independent evidence family. The parameters are the dev choice of
+    # scripts/fit_procedure_match.py (vendor set + ATT&CK campaigns).
+    procedure_match_enabled: bool = True
+    # on by default since 2026-10-21 (gate trial, docs 21.3.20): the combiner below is fitted with
+    # it voting; 0 switches it off, which then needs a combiner fitted without it
+    procedure_match_weight: float = 1.0
+    # dev choice 2026-10-21 (vendor set + campaigns, member alone, each report's own statements
+    # hidden from the corpus, 64 variants): floor 0.30, exact technique, no software-sentence
+    # route, the named-software link on, mean over the accepted techniques: MRR 0.820, top-1 0.782
+    # (vendor 0.794 / 0.845, campaigns 0.762 / 0.779); the text routes alone reach MRR 0.64, the
+    # software sentences add nothing on top of the link
+    procedure_match_min_similarity: float = 0.30
+    procedure_match_family: str = "exact"
+    procedure_match_software_route: bool = False
+    procedure_match_seen_bonus: float = 0.0
+    procedure_match_link_weight: float = 1.0
+    procedure_match_aggregate: str = "mean"
+    procedure_match_prior: float = 0.0
+    # The dated knowledge store's two members (apt_classifier/knowledge_store/members.py, prereg
+    # knowledge_store_decisive_2026-11-04, docs 12.9): store text (the free-text member's TF-IDF
+    # over the store's posts per group; never an independent family) and store software (the
+    # software member's rarity rule over the store's uses links ATT&CK lacks; names a group only
+    # through links two publishers state). Off at 0: nothing is loaded and the combiner
+    # fingerprint is unchanged. They read <knowledge_store_dir>/store_members.json.gz (built by
+    # scripts/knowledge_store.py members); with knowledge_store_pinned a dated case reads the pin
+    # of its date instead (pins.py: actor names from before its window; the benchmarks only).
+    store_text_weight: float = 0.0
+    store_software_weight: float = 0.0
+    knowledge_store_dir: str = "data/knowledge_store"
+    knowledge_store_pinned: bool = False
     cyberre_model: str = "openai/gpt-5.6-sol"
     cyberre_effort: str = "low"
     cyberre_weight: float = 0.35
@@ -168,6 +344,16 @@ class Settings(BaseSettings):
     # Group-size normalisation exponent of the IDF cosine classifier (1.0 = full cosine, 0.5 =
     # square-root damping, 0 = ignore group size). See classifiers/idf_overlap.py.
     idf_overlap_length_norm: float = 1.0
+    # Group-background correction of the Naive Bayes member (apt_classifier/nb_background.py,
+    # development 2026-11-04): each group's score is z-scored within the case and then against
+    # the group's own scores on the design folds, so a long ATT&CK technique list stops winning
+    # long reports by default (member alone on the 68 development reports: top-1 10 -> 23).
+    # Off until a gate passes; on, it binds the combiner fingerprint and needs its own combiner.
+    # Build the reference with scripts/fit_nb_background.py.
+    naive_bayes_background_enabled: bool = False
+    naive_bayes_background_path: Path = (
+        PROJECT_ROOT / "data" / "models" / "nb_background" / "nb_background_design.json"
+    )
     campaign_weight: float = 0.00
     group_description_weight: float = 0.40
     semantic_centroid_weight: float = 0.70
@@ -212,6 +398,22 @@ class Settings(BaseSettings):
     attribution_hypothesis_separation: float = 0.5
     attribution_hypothesis_min_discriminative: float = 3.0
     attribution_hypothesis_specificity: float = 0.0
+    # Naming probability floor: a single name also needs the learned combiner's leader
+    # probability at or above this (0 = off; a held leader can still be named through its
+    # documented cluster). Pre-registered 2026-10-25 (attribution_probability_floor), docs 10.6;
+    # 0.50 (chosen on the design seeds for the real-report combiner) since 2026-10-26: fresh seeds
+    # 101/103/107 and CTI-HAL/Elastic with 0 wrong names, 110 of 112 correct fold names kept
+    # (docs 21.3.22). The floor belongs to that combiner; with another combiner set it anew.
+    # 0.20 since 2026-10-27, chosen by the same rule on the design seeds for the procedure-core
+    # combiner (docs 21.3.25); 0.5 belongs to attribution_combiner_real_reports.json.
+    attribution_hypothesis_min_probability: float = 0.2
+    # Independent inputs (prereg attribution_independent_inputs_2026-10-27, docs 10.6/21.3.27):
+    # the technique-overlap, campaign, learned-profile and country members all read the accepted
+    # technique list, so the gate counts them as one family; and a single name needs the
+    # combiner's leader probability above its "none of these" probability. Both on since
+    # 2026-10-27 (they held the two wrong names of the external benchmarks, 21.3.26).
+    attribution_technique_list_one_family: bool = True
+    attribution_hypothesis_above_null: bool = True
     # Blend the discriminative mass into the RRF score of the top-K (0 = pure RRF order).
     attribution_rerank_blend: float = 0.5
     # Shortlist size for the discriminative re-ranking; 0 = the gate's shortlist
@@ -228,13 +430,61 @@ class Settings(BaseSettings):
     # model over per-classifier ranks, discrimination channels and evidence-regime features,
     # blended half-and-half with the RRF order; the naming gate then scores the leader against
     # the union of both shortlists. Adopted 2026-09-30 (docs 21.3.9): folds top-1 0.601 -> 0.830,
-    # CTI-HAL 0.509 -> 0.527, every named group correct on both sets. Loads fail-closed.
+    # CTI-HAL 0.509 -> 0.527, every named group correct on both sets. Since 2026-10-04 the same
+    # weights, stamped for the hardened classifiers (identical rankings); the 2026-10-03 refit
+    # (attribution_combiner_fsum.json) lost 5 of 153 leak-free folds and is not used. Fail-closed.
     attribution_combiner_enabled: bool = True
+    # the 2026-09-30 weights stamped for the exactly rounded classifier sums (docs 21.3.9); the
+    # earlier artifacts stay next to it for checkouts with the previous classifier code
+    # fitted on ATT&CK 20.0 with the procedure member voting (2026-10-21, feature schema 3, docs
+    # 21.3.20); attribution_combiner_1021_fsum.json is the same refit without the member (for
+    # PROCEDURE_MATCH_WEIGHT=0), the 2026-09-30 artifact is pinned to 19.2 and fails closed.
+    # Since 2026-10-26 the default is the same pipeline refitted with real-report lists (docs
+    # 21.3.21), adopted together with the naming probability floor of 0.50 below (prereg
+    # attribution_probability_floor_2026-10-25, docs 21.3.22); without the floor it named a wrong
+    # group on a design seed. attribution_combiner_procedure_match.json is the fold-only refit.
+    # Since 2026-10-27 the same recipe refitted with the free-text and behaviour-text members
+    # voting (procedure text as the core, docs 21.3.25), with the floor 0.20 above.
     attribution_combiner_path: Path = (
-        PROJECT_ROOT / "data" / "models" / "combiner" / "attribution_combiner.json"
+        PROJECT_ROOT / "data" / "models" / "combiner" / "attribution_combiner_procedure_core.json"
     )
     attribution_combiner_top_n: int = 20
     attribution_combiner_blend: float = 0.5
+    # Documented-overlap clusters (overlap_cluster.py, docs 10.11 / 21.3.15): name the gate
+    # leader together with its ATT&CK-documented twin when the merged pair clears the separation
+    # bar, this mass (3.0 for a nesting pair) and a combined combiner probability. The full-scope
+    # rule passed on fresh seeds 43/47; the product owner narrowed it to the "documented" scope
+    # below, which passed its own pre-registered confirmation on the unused seeds 59/61 on
+    # 2026-10-02 (docs 21.3.15 A′: no wrong cluster, single names unchanged, replay exact).
+    attribution_cluster_naming: bool = True
+    attribution_cluster_min_probability: float = 0.8
+    attribution_cluster_min_discriminative: float = 3.5
+    # Which ATT&CK links make a twin: "documented" (ATT&CK documents the pair as the same activity,
+    # reviewed in attack/same_activity.py, or the profiles nest; product-owner decision 2026-10-02:
+    # groups that only share rare malware or that ATT&CK calls distinct are different actors),
+    # "full" (the pre-registered rule: any relation, shared rare malware too), "nested".
+    attribution_cluster_scope: Literal["documented", "full", "nested"] = "documented"
+    # Evidence-volume guard for the cluster step (2026-10-19, prereg cribl_cluster_volume_guard,
+    # docs 10.11 / 21.3.18): a cluster is held at shortlist on more accepted techniques than this
+    # unless decisive software supports the leader. On by default since the registered checks
+    # passed (inert on the folds, CTI-HAL and the vendor set; removes the two wrongly named
+    # commodity posts of the Elastic open set); 0 switches it off.
+    attribution_cluster_max_techniques: int = 30
+    # Calibrated confidence labels on the Top-three view (apt_classifier/confidence_labels.py,
+    # scripts/fit_confidence_labels.py): display only, never a gate, pinned to the combiner
+    # artifact above. Adopted 2026-10-02 after the pre-registered check on fresh seeds 43/47
+    # (docs 21.3.15: "strong" wrong 4.2% pooled, calibration error 0.041). Fails closed (no
+    # labels) when the artifact is missing or was fitted against a different combiner.
+    confidence_labels_enabled: bool = True
+    # the 2026-10-02 labels re-pinned to attribution_combiner_0930_fsum.json (same weights, same
+    # rankings); confidence_labels.json stays for checkouts with the earlier combiner;
+    # confidence_labels_fsum.json holds the labels of attribution_combiner_procedure_match.json.
+    # Since 2026-10-26 the labels fitted for the real-report combiner (docs 21.3.21/21.3.22)
+    # (confidence_labels_real_reports.json); since 2026-10-27 the procedure-core combiner's, strong
+    # label only: no "one of these" threshold met its bound (docs 21.3.25).
+    confidence_labels_path: Path = (
+        PROJECT_ROOT / "data" / "models" / "calibration" / "confidence_labels_procedure_core.json"
+    )
     # Activity clustering (opt-in)
     activity_clusters_enabled: bool = False
     activity_clusters_db_path: Path = PROJECT_ROOT / "data" / "activity_clusters.db"
@@ -254,6 +504,46 @@ class Settings(BaseSettings):
     # an exemplar at or above this cosine to the query is treated as a copy and never votes
     technique_exemplar_duplicate_similarity: float = 0.95
     technique_exemplar_new_candidates: int = 3
+    # How a neighbour's weight is shared among its labels: "none" (each label gets the full
+    # weight, the shipped behaviour) or "label_split" (divided by the neighbour's label count).
+    technique_exemplar_vote_norm: str = "none"
+    # "off" queries the exemplars once per observation (the shipped behaviour). "max" / "mean"
+    # also query each sentence of a long (segmented) observation and pool the votes per
+    # technique over the whole text and its sentences. Tuning knobs (docs 21.3.15): the
+    # acceptance model refuses to run on values it was not fitted with.
+    technique_exemplar_segment_votes: str = "off"
+    # Where the library is read from: "npz" (the artifact above), "chroma" (the collection
+    # below, written once by scripts/sync_exemplars_to_chroma.py; unusable -> no exemplars) or
+    # "auto" (the collection, else the npz with a visible reason). Chroma re-normalises vectors
+    # on insert, so the Chroma library is its own library with its own fingerprint (recomputed
+    # from the vectors it returns): an acceptance model fitted on the npz does not run on it
+    # (apt_classifier/exemplar_store.py).
+    technique_exemplar_backend: str = "npz"
+    # The Chroma library is accepted only when every vector norm is within this of 1 and, when
+    # the npz it was copied from is present, every component within this of the npz's.
+    technique_exemplar_tolerance: float = 1e-6
+    # The fingerprint the served library must have (empty: not pinned). For a Chroma library it
+    # is the one recomputed from the vectors Chroma returns (the sync report's
+    # library_fingerprint; T1.env pins it): any changed vector is refused, with or without the
+    # npz. Without the npz and without a pin the Chroma library is only norm-checked and its
+    # status reads "active (unverified: ...)". Checked on both backends.
+    technique_exemplar_library_fingerprint: str = ""
+    # empty: technique_exemplars-<npz fingerprint>-s1-m<M>-efc<ef_construction>
+    technique_exemplar_collection: str = ""
+    # "exact" searches the verified local copy; "hnsw" also asks Chroma for the candidates and
+    # counts a recall miss whenever they lack part of the exact window (the votes stay exact)
+    technique_exemplar_search: str = "exact"
+    technique_exemplar_hnsw_m: int = 32
+    technique_exemplar_hnsw_ef_construction: int = 400
+    # the collection must be searched with at least this ef (checked at load)
+    technique_exemplar_hnsw_ef_search: int = 8192
+    # Chroma results per query as a multiple of the exact window (2k+16)
+    technique_exemplar_overfetch: float = 2.0
+    # ATT&CK collections. A name other than the default is a read-only copy made by
+    # scripts/sync_attack_collection_copy.py; it is opened with get_collection and refused unless
+    # its recorded source (metadata, id and count) still matches the default collection.
+    technique_collection_name: str = "attack_techniques"
+    group_collection_name: str = "attack_groups"
 
     # ----- users and sign-in (web app) -----
     # "auto" = Google sign-in when GOOGLE_CLIENT_ID is set, otherwise a single local analyst.

@@ -26,7 +26,7 @@ import {
 import { useState } from 'react'
 import { Link, NavLink, Outlet, useMatch, useNavigate } from 'react-router-dom'
 
-import { api } from '../../api/client'
+import { api, type ExportKind } from '../../api/client'
 import { useCase, useDeleteCase, useLogout, useRename, useSystem } from '../../api/hooks'
 import { useMe } from '../AuthGate'
 import { Avatar } from '../../pages/Users'
@@ -248,6 +248,18 @@ function AdminNav() {
   )
 }
 
+const PROSE_LABEL: Record<string, string> = {
+  extract: 'extracted by the OpenRouter model',
+  sentences: 'split, then rewritten sentence by sentence by the local model',
+  split: 'split into sentences',
+}
+
+const PROVIDER_LABEL: Record<string, string> = {
+  openrouter: 'Production',
+  local: 'Production · local LLM',
+  hybrid: 'Production · hybrid LLM',
+}
+
 function SystemFooter({ system }: { system?: SystemInfo }) {
   if (!system) return <div className="border-t border-border px-4 py-3 text-[11px] text-faint">Connecting…</div>
   const local = system.mode === 'local'
@@ -255,7 +267,7 @@ function SystemFooter({ system }: { system?: SystemInfo }) {
     <div className="border-t border-border px-4 py-3">
       <div className="flex items-center justify-between">
         <Badge tone={local ? 'amber' : 'emerald'} dot>
-          {local ? 'Local mode' : 'Production'}
+          {local ? 'Local mode' : PROVIDER_LABEL[system.llm_provider ?? 'openrouter'] ?? 'Production'}
         </Badge>
         <Tip
           content={
@@ -265,7 +277,14 @@ function SystemFooter({ system }: { system?: SystemInfo }) {
                 Index: {system.index.ok ? `${system.index.technique_sentences} sentences, ${system.index.group_documents} group docs` : `unavailable (${system.index.error})`}
               </div>
               <div>Embedder {system.embedding_model}</div>
-              {!local ? <div>Extraction {system.extract_model} · review {system.review_model}</div> : null}
+              {!local && system.llm_models ? (
+                <div>
+                  Prose {PROSE_LABEL[system.prose_normalisation ?? 'extract']} · verifier {system.llm_models.verifier ?? 'off'} · CyberRE{' '}
+                  {system.llm_models.cyberre ?? 'off'} · review {system.llm_models.review ?? 'off'}
+                </div>
+              ) : !local ? (
+                <div>Extraction {system.extract_model} · review {system.review_model}</div>
+              ) : null}
               <div>Preset {system.preset} · gate {system.gate_mode}</div>
               <div>Learned combiner: {system.combiner}</div>
               {system.exemplars ? <div>Exemplar index: {system.exemplars}</div> : null}
@@ -281,8 +300,10 @@ function SystemFooter({ system }: { system?: SystemInfo }) {
       </div>
       <div className="mt-1.5 text-[11px] text-faint">
         {local
-          ? 'No OpenRouter key: sentence split, no verifier, no AI review.'
-          : `LLM spend this session $${fmt(system.llm_spend_usd, 2)}`}
+          ? 'No LLM (no OpenRouter key, no local model): sentence split, no verifier, no AI review.'
+          : system.llm_provider === 'local'
+            ? 'All LLM steps run on the local model (no credit spent).'
+            : `LLM spend this session $${fmt(system.llm_spend_usd, 2)}`}
       </div>
     </div>
   )
@@ -415,11 +436,12 @@ function TopBar({
 }
 
 function ExportMenu({ caseId }: { caseId: string }) {
-  const items: { kind: 'markdown' | 'json' | 'navigator' | 'attack-flow'; label: string; hint: string }[] = [
+  const items: { kind: ExportKind; label: string; hint: string }[] = [
     { kind: 'markdown', label: 'Markdown report', hint: 'Analyst assessment' },
     { kind: 'json', label: 'JSON audit', hint: 'Ledger, ranking, decision, graphs' },
     { kind: 'navigator', label: 'ATT&CK Navigator layers', hint: 'Observed and candidate techniques' },
     { kind: 'attack-flow', label: 'Attack Flow (STIX 2.1)', hint: 'Sequenced technique bundle' },
+    { kind: 'pilot-log', label: 'Software-question pilot log', hint: 'JSON lines, one per software answer' },
   ]
   return (
     <DropdownMenu.Root>

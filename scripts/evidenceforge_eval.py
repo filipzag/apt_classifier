@@ -44,6 +44,17 @@ from apt_classifier.platforms import normalize_platforms, set_ledger_platforms  
 from apt_classifier.presets import PRESETS  # noqa: E402
 from apt_classifier.session import AttributionEngine  # noqa: E402
 from apt_classifier.vectorstore import ChromaVectorStore  # noqa: E402
+from scripts.run_tooling import (  # noqa: E402
+    acceptance_fingerprint_inputs,
+    acceptance_identity,
+    add_exemplar_backend_arguments,
+    exemplar_backend_problem,
+    exemplar_identity,
+    exemplar_query_totals,
+    exemplar_setting_overrides,
+    exemplar_signature,
+    git_state,
+)
 
 _LABEL_KEYS = frozenset(
     {
@@ -744,7 +755,11 @@ def collect_run_metadata(
     kb: AttackKnowledgeBase,
     preset: str,
     pipeline: str,
+    engine: Any = None,
 ) -> dict[str, Any]:
+    """Provenance of one run. With ``engine``, the acceptance model and exemplar index it loaded
+    are recorded and their identity (path, threshold, file hash, fingerprint) joins the pipeline
+    fingerprint, so runs with different mapping artifacts never share a fingerprint."""
     generation_path = bundle_dir / "GENERATION_MANIFEST.json"
     generation = _read_json(generation_path)
     manifest_names = (
@@ -777,7 +792,35 @@ def collect_run_metadata(
         "relative_margin": settings.technique_relative_margin,
         "platform_from_text": bool(getattr(settings, "technique_platform_from_text", False)),
     }
+    acceptance = (
+        acceptance_identity(settings, engine.acceptance_model, engine.acceptance_model_status)
+        if engine is not None
+        else None
+    )
+    exemplars = (
+        exemplar_identity(settings, engine.exemplar_index, engine.exemplar_status)
+        if engine is not None
+        else None
+    )
+    fingerprint_payload: dict[str, Any] = {
+        "attack_version": getattr(kb, "version", settings.attack_version),
+        "models": model_metadata,
+        "pipeline": pipeline_metadata,
+    }
+    if engine is not None:
+        fingerprint_payload["mapping_artifacts"] = {
+            "acceptance_model": acceptance_fingerprint_inputs(acceptance or {}),
+            "exemplar_fingerprint": (exemplars or {}).get("fingerprint"),
+            # backend, search and collection (a Chroma copy is a different input)
+            "exemplar_store": exemplar_signature(getattr(engine, "exemplar_index", None)),
+        }
+    git = git_state(PROJECT_ROOT)
     return {
+        "generated_at": datetime.now(UTC).isoformat(),
+        "git_commit": git["commit"],
+        "git_dirty": git["dirty"],
+        "acceptance_model": acceptance,
+        "exemplars": exemplars,
         "scenario_path": str(scenario_path),
         "scenario_hash": _sha256(scenario_path),
         "ground_truth_hash": _sha256(bundle_dir / "GROUND_TRUTH.json"),
@@ -791,13 +834,7 @@ def collect_run_metadata(
         "attack_version": getattr(kb, "version", settings.attack_version),
         "models": model_metadata,
         "pipeline": pipeline_metadata,
-        "pipeline_fingerprint": pipeline_fingerprint(
-            {
-                "attack_version": getattr(kb, "version", settings.attack_version),
-                "models": model_metadata,
-                "pipeline": pipeline_metadata,
-            }
-        ),
+        "pipeline_fingerprint": pipeline_fingerprint(fingerprint_payload),
         "label_semantics": "EvidenceForge technique annotations are non-exhaustive intent labels",
     }
 
@@ -895,6 +932,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         type=Path,
         default=PROJECT_ROOT / "data" / "audits" / "evidenceforge_production.json",
     )
+    add_exemplar_backend_arguments(parser)
     args = parser.parse_args(argv)
     if args.output_local.resolve() == args.output_production.resolve():
         parser.error("local and production output paths must be distinct")
@@ -931,6 +969,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     }
     selected_modes = tuple(case_sets) if args.mode == "all" else (args.mode,)
     settings = _settings_for_preset(get_settings(), args.preset)
+    if exemplar_setting_overrides(args):
+        settings = settings.model_copy(update=exemplar_setting_overrides(args))
     kb = AttackKnowledgeBase.load(str(args.kb_path))
     embedder = SentenceTransformerEmbedder(
         model_name=settings.embedding_model,
@@ -941,6 +981,12 @@ def main(argv: Sequence[str] | None = None) -> int:
     pipelines = ("local", "production") if args.pipeline == "both" else (args.pipeline,)
     for pipeline in pipelines:
         engine, client = _build_engine(settings, kb, store, production=pipeline == "production")
+        problem = exemplar_backend_problem(engine.exemplar_index, args.require_exemplar_backend)
+        if problem:
+            if client is not None:
+                client.close()
+            print(f"refusing to run: {problem} ({engine.exemplar_status})", file=sys.stderr)
+            return 2
         try:
             report = {
                 "metadata": collect_run_metadata(
@@ -950,6 +996,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                     kb=kb,
                     preset=args.preset,
                     pipeline=pipeline,
+                    engine=engine,
                 ),
                 "mode": args.mode,
                 "target_platforms": target_platforms,
@@ -966,11 +1013,17 @@ def main(argv: Sequence[str] | None = None) -> int:
                     for mode in selected_modes
                 },
             }
+            if getattr(engine.exemplar_index, "backend", None) == "chroma":
+                report["metadata"]["exemplar_query_totals"] = exemplar_query_totals()
             destination = write_artifact(_output_path(args, pipeline), report)
             print(f"{pipeline}: wrote {destination}")
         finally:
             if client is not None:
                 client.close()
+        problem = exemplar_backend_problem(engine.exemplar_index, args.require_exemplar_backend)
+        if problem:
+            print(problem, file=sys.stderr)
+            return 2
     return 0
 
 

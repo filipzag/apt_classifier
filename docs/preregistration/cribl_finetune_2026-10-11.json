@@ -1,0 +1,167 @@
+{
+  "schema": "cribl_finetune_prereg/1",
+  "id": "cribl_finetune_2026-10-11",
+  "title": "Fine-tuning cribl-decision (Qwen3.5-4B-Base + LoRA) on the Jev C1 technique question",
+  "registered": "2026-10-11",
+  "documentation": "scripts/cribl_finetune/README.md; results in docs/TECHNICAL_DOCUMENTATION.md section 21.3.18",
+  "harness": {
+    "scripts": [
+      "scripts/cribl_finetune/export_cases.py",
+      "scripts/cribl_finetune/probe.py",
+      "scripts/cribl_finetune/train.py",
+      "scripts/cribl_finetune/evaluate.py",
+      "scripts/cribl_finetune/common.py",
+      "scripts/cribl_finetune/decision_model.py"
+    ],
+    "git_rule": "this file is committed before the format probe and before any training; a later change is recorded in amendments with its reason and commit"
+  },
+  "model": {
+    "base": "Qwen/Qwen3.5-4B-Base@1001bb4d826a52d1f399e183466143f4da7b741b",
+    "adapter": "cribl-ai/cribl-decision-1.0@75cb0dd9d551e774664c01ba8f7b25c0087b4abf",
+    "quantization": "4-bit NF4, double quantization, bf16 compute; lm_head, vision tower and MTP head not quantized",
+    "adapter_check": "every tensor of adapter_model.safetensors is in the loaded model bit for bit, else stop"
+  },
+  "question": {
+    "framing": "Jev C1 (jev_judge.py @ f9b452c): state {sentence, source}, flat choice over the case's first 10 catalogue candidates in rank order, labels 'Name (Txxxx)', what = description cut at 400 characters, none_of_these last",
+    "rotations": "3 option orders (rotation r moves the first r candidates to the end, none stays last), per-option P floored at 0.005, geometric mean, renormalised; pick = argmax (ties in canonical order); none_of_these = no pick",
+    "readout": "options lettered A..; the prompt ends with 'Answer:'; the final hidden state at the last position times the native lm_head rows of the tokens ' A' ' B' .., in float32, softmax over the offered options",
+    "formats": [
+      "plain",
+      "chat",
+      "json"
+    ]
+  },
+  "data": {
+    "train": "public tram/expert/derived_procedures train splits (CC-BY-4.0); candidates from scripts/benchmark_mapping.py --split train --modes hybrid with TECHNIQUE_EXEMPLARS_ENABLED=false; exact and near (token Jaccard >= 0.9) duplicates of any dev, test or CTI-HAL text dropped; target = the gold options offered (uniform), else none_of_these",
+    "dev": "public tram+expert dev, 659 cases, the candidate lists of data/audits/jev/framing/s1_dev_c1.json (case_set_hash 86910fc4...)",
+    "confirmation": [
+      "CTI-HAL statements, 968 cases, the candidate lists of s3_cti_hal_statements.json (case_set_hash 1a031870...); local evaluation only",
+      "public test tram/expert/derived_procedures, 1391 cases, pipeline top-10 from data/audits/refresh_2026-10-07/public_heldout_current.json"
+    ],
+    "refused_for_training_or_selection": [
+      "any test split",
+      "cti_hal",
+      "procedures (leaky)",
+      "elastic",
+      "evidenceforge (every bundle)",
+      "ATT&CK procedure sentences and software 'uses' text (indexed or leaky)"
+    ]
+  },
+  "fixed": {
+    "lora_shape": {
+      "r": 16,
+      "lora_alpha": 32,
+      "lora_dropout": 0.05,
+      "target_modules": "language-model linear_attn in_proj_qkv/in_proj_z/in_proj_a/in_proj_b/out_proj and self_attn q/k/v/o_proj (Cribl's shape)"
+    },
+    "optimizer": "AdamW, lr 1e-4, weight decay 0, cosine schedule with 3% linear warmup, gradient clip 1.0",
+    "batch": "1 example per forward, 16 per optimizer step",
+    "epochs": 2,
+    "checkpoints": "every half epoch, each scored on the full dev split (3 orders)",
+    "example_order": "candidates shuffled per example (none_of_these last); epochs reshuffled; seed 7",
+    "max_tokens": 2048,
+    "loss": "cross-entropy of the letter softmax against the target distribution"
+  },
+  "arms": [
+    {
+      "id": "B0",
+      "description": "Cribl's adapter zero-shot in the chosen format"
+    },
+    {
+      "id": "B1",
+      "description": "Cribl's adapter, trained further (init=cribl)"
+    },
+    {
+      "id": "B2",
+      "description": "control: a fresh LoRA of the same shape on the plain base (init=fresh), same data and schedule"
+    }
+  ],
+  "references": [
+    "pipeline rank-1 (the first candidate) on the same cases",
+    "Jev C1 stored picks (dev exact 0.514, CTI-HAL exact 0.460, ECE 0.229 / 0.238)"
+  ],
+  "selection": {
+    "format": "highest exact on the first 200 dev cases with Cribl's adapter (probe.py); ties in the order plain, chat, json",
+    "checkpoint": "per arm, the highest full-dev exact; ties the earlier checkpoint",
+    "finalist": "the higher full-dev exact of B1 and B2 (ties B1)",
+    "dev_only": true
+  },
+  "confirmation": {
+    "runs": "B0 and the selected checkpoints of B1 and B2, each once on cti_hal and once on test",
+    "no_retuning": "nothing is chosen, refit or rerun because of a confirmation result"
+  },
+  "success": {
+    "headline": "the finalist on CTI-HAL: exact minus pipeline rank-1 with a paired 95% CI lower bound above 0, and exact >= Jev C1 (0.460)",
+    "secondary": [
+      "public test: exact minus pipeline rank-1 with a paired 95% CI lower bound above 0",
+      "CTI-HAL ECE of P(pick) at most Jev C1's (0.238)",
+      "B1 above B2 on dev and CTI-HAL (Cribl's adapter helps)"
+    ]
+  },
+  "stop_rules": [
+    "the adapter check fails",
+    "train gold-in-candidates above 0.95 (the exemplar leak is not closed): stop and inspect",
+    "more than 1% of a split's cases end in error"
+  ],
+  "adoption": "none: an experiment. Any product use (a local judge in place of Jev, the judge_union arm) is a separate decision with the public held-out gate and the attribution naming gate",
+  "reporting": "every arm and checkpoint (dev curve), single-order and 3-order numbers, per dataset, no-pick counts, calibration, training time and peak GPU memory; reversals reported as measured",
+  "amendments": [
+    {
+      "id": 1,
+      "date": "2026-10-11",
+      "before": "the full-dev B0 run and any training",
+      "change": "letter logits computed in float32 from the final hidden state and the lm_head rows instead of read from the model's bf16 logits",
+      "reason": "bf16 logits are rounded to 1/8 at typical magnitudes, which quantises the probabilities; on 20 dev cases the argmax was identical (20/20) and probabilities moved by at most 0.018",
+      "informed_by": "the format probe (first 200 dev cases) ran with bf16 logits; its format choice (chat) is kept"
+    },
+    {
+      "id": 2,
+      "date": "2026-10-12",
+      "before": "B2's second epoch and any confirmation run",
+      "change": "B2 resumes from its 1-epoch checkpoint (step_6308, examples 6309-12616) instead of continuing in one process",
+      "reason": "a 4-second system suspend at 09:58 left the B2 process crawling (stuck at optimizer step 520/789 for 2 h, GPU idle, while a fresh process ran at full speed); the owner chose to resume from the last checkpoint",
+      "deviation": "the same seed and data/option order are replayed; AdamW moments and dropout draws restart; the 4 examples of the partial accumulation window at the checkpoint are lost. B2's 0.5- and 1-epoch dev scores come from the original process",
+      "informed_by": "B1's full dev curve and B2's 0.5/1-epoch dev scores were known; no selection rule changed"
+    },
+    {
+      "id": 3,
+      "date": "2026-10-12",
+      "before": "B2's second epoch and any confirmation run",
+      "change": "B2's second epoch (resumed from step_6308 as in amendment 2) and the public-test confirmations of B0, B1 and B2 run on a rented RunPod GPU (scripts/cribl_finetune/runpod/); CTI-HAL confirmations stay on the laptop",
+      "reason": "the laptop capped its GPU at 15 W (P8, 210 MHz) from about 15:30, which slowed training about 25-fold; the owner chose RunPod",
+      "deviation": "same code, 4-bit NF4 base, seeds and data order; a different GPU model gives floating-point differences; B0 and B1 test scores also come from the pod, their dev and CTI-HAL scores from the laptop",
+      "data": "the upload holds only public CC-BY-4.0 case files (train, dev, test), logs and adapters; CTI-HAL (no licence) is not uploaded",
+      "informed_by": "nothing new beyond amendment 2: no confirmation result exists yet"
+    },
+    {
+      "id": 4,
+      "date": "2026-10-13",
+      "before": "any CTI-HAL confirmation result: B0's CTI-HAL run had started, no CTI-HAL prediction or metric of any arm had been read",
+      "change": "a second decision rule, never_abstain: the pick is the most probable of the ten techniques in the stored three-order distribution, never none_of_these, with P(pick) renormalised over the techniques (common.forced_pick); P(none_of_these) is kept as a separate flag. The question, the models and the stored predictions are unchanged; scripts/cribl_finetune/rescore.py applies the rule offline",
+      "reason": "under the registered metric a no-pick is always a miss and a pick can only gain, so abstaining can never raise exact or parent-aware; the trained arms said none_of_these on 22-23% of dev cases (training targets were none_of_these for 27.6% of examples, dev's gold-absent share is 16.2%) and on 33% of test",
+      "selection": "dev only, the registered rules under the new decision rule: B1 step_9462 (exact 0.687405, tied with step_12616, the earlier wins), B2 step_12616 (0.679818), finalist B1; B0 0.485584; Jev C1 under the same rule 0.520486",
+      "confirmation": "CTI-HAL (968 statements, laptop, local only): B0, B1 step_9462 and B2 step_12616 (a new CTI-HAL run; B2 step_6308 is still scored for the registered rule), rescored once with rescore.py",
+      "success": {
+        "headline": "the finalist on CTI-HAL under never_abstain: exact minus pipeline rank-1 with a paired 95% CI lower bound above 0, and exact at least Jev C1 as reported (0.460) and Jev C1 under the same rule (from its stored distributions)",
+        "secondary": [
+          "CTI-HAL ECE of the renormalised P(pick) at most Jev C1's under the same rule",
+          "B1 above B2 on dev and CTI-HAL under the same rule",
+          "diagnostic: AUROC of P(none_of_these) for the cases whose gold is not among the candidates"
+        ]
+      },
+      "test": "the public test split was scored with the registered rule before this amendment and that result is part of what motivated it, so test numbers under never_abstain are reported but are not confirmatory; B2 step_12616 is scored on test on the laptop for completeness",
+      "registered_outcome_stands": "the registered rule's results stay the registered outcome (test: B1 exact 0.465852 vs pipeline rank-1 0.501078, paired CI [-0.060388, -0.009346], the secondary test criterion failed); never_abstain is reported beside them, never in their place",
+      "informed_by": "dev (all checkpoints, offline replay) and the public test result of the registered rule; nothing from CTI-HAL"
+    },
+    {
+      "id": 5,
+      "date": "2026-10-13",
+      "before": "any CTI-HAL confirmation result",
+      "change": "the CTI-HAL confirmations (B1 step_9462, B2 step_12616, B0, B2 step_6308) and B2 step_12616 on test run on a rented RunPod RTX 4090 (scripts/cribl_finetune/runpod/remote_confirm.sh) instead of the laptop, reversing amendment 3's 'CTI-HAL stays local'",
+      "reason": "the laptop capped its GPU again (battery not charging on a weak USB-C supply, 6-8 W, 210 MHz)",
+      "data": "the owner decided on 2026-10-13 to upload the CTI-HAL statement file (no published licence) to a secure-cloud pod for this run only; the upload is deleted and the pod terminated once the results are downloaded",
+      "deviation": "17 B0 and 210 B1 CTI-HAL rows scored on the laptop before the switch are set aside unread (data/audits/cribl_ft/laptop_partial/) and not used; every CTI-HAL row comes from the pod",
+      "informed_by": "nothing from CTI-HAL: no CTI-HAL metric of any arm had been computed or read"
+    }
+  ]
+}

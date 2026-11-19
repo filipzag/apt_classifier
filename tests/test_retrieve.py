@@ -15,6 +15,7 @@ from apt_classifier.evidence.models import (
 )
 from apt_classifier.platforms import set_ledger_platforms
 from apt_classifier.retrieve import (
+    LexicalTechniqueIndex,
     _specific_behavior_results,
     apply_candidate_decisions,
     build_classifier_context,
@@ -1897,3 +1898,391 @@ def test_classifier_context_carries_behaviour_matches():
     context = build_classifier_context(kb, ledger, result)
     assert context.specific_behavior_matches == tuple(result.specific_behavior_matches or ())
     assert context.discrimination is None
+
+
+# ----- shared retrieval arguments, runtime guards and the retrieval contract -----
+
+
+def test_cue_tables_are_pinned():
+    """The regex cue tables are fixed while retrieval is tuned (docs 21.3.15): a cue added to
+    fix a benchmark case would leak into every reported number. Change this pin only with a
+    deliberate, separately measured cue change."""
+    import hashlib
+    import json
+
+    from apt_classifier import retrieve, technique_signals
+
+    def pattern(value):
+        return None if value is None else [value.pattern, int(value.flags)]
+
+    payload = {
+        "explicit": [
+            [technique_id, pattern(regex)]
+            for technique_id, regex in retrieve._EXPLICIT_TECHNIQUE_CUES.items()
+        ],
+        "benign": pattern(retrieve._BENIGN_INDICATORS),
+        "signals": [
+            [
+                signal.technique_id,
+                pattern(signal.pattern),
+                signal.rationale,
+                pattern(signal.benign_guard),
+                bool(signal.requires_context),
+            ]
+            for signal in technique_signals.SIGNALS
+        ],
+        "adversarial_context": pattern(technique_signals._ADVERSARIAL_CONTEXT),
+    }
+    digest = hashlib.sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest()
+    assert digest == "cfff3df110338f1378f0b6f1e14bbe2f4cd3b639d39effee53065324589e04ed"
+
+
+def old_serving_kwargs(settings, exemplar_index, lexical_index):
+    """Frozen copy of the arguments ``AttributionEngine.map_techniques`` passed to
+    ``retrieve_techniques`` before ``retrieval_kwargs`` existed (2026-10-02, minus the call-site
+    reranker, finalize and acceptance model)."""
+    return {
+        "threshold": settings.similarity_threshold,
+        "top_k": settings.retrieval_top_k,
+        "behavior_threshold": settings.behavior_similarity_threshold,
+        "behavior_top_k": settings.behavior_retrieval_top_k,
+        "retrieval_mode": getattr(settings, "technique_retrieval_mode", "hybrid"),
+        "candidate_pool": getattr(settings, "technique_candidate_pool", 12),
+        "include_detection": getattr(settings, "technique_include_detection", False),
+        "parent_policy": getattr(settings, "technique_parent_policy", "ancestor_compatible"),
+        "lexical_index": lexical_index,
+        "acceptance_threshold": getattr(settings, "technique_acceptance_threshold", 0.75),
+        "relative_margin": getattr(settings, "technique_relative_margin", 0.08),
+        "rank_by_acceptance": bool(getattr(settings, "technique_rank_by_acceptance", False)),
+        "corroboration_accept_observations": int(
+            getattr(settings, "technique_corroboration_accept_observations", 0)
+        ),
+        "corroboration_accept_min_probability": float(
+            getattr(settings, "technique_corroboration_accept_min_probability", 0.2)
+        ),
+        "rrf_k": int(getattr(settings, "technique_rrf_k", 60)),
+        "corroboration_bonus": float(getattr(settings, "technique_corroboration_bonus", 0.0)),
+        "segment_acceptance": bool(getattr(settings, "technique_segment_acceptance", False)),
+        "hierarchy_parent_mode": str(getattr(settings, "technique_hierarchy_parent_mode", "off")),
+        "include_synthetic": bool(getattr(settings, "technique_include_synthetic", False)),
+        "platform_from_text": bool(getattr(settings, "technique_platform_from_text", False)),
+        "exemplar_index": exemplar_index,
+        "exemplar_k": int(getattr(settings, "technique_exemplar_k", 64)),
+        "exemplar_tau": float(getattr(settings, "technique_exemplar_tau", 0.05)),
+        "exemplar_duplicate_similarity": float(
+            getattr(settings, "technique_exemplar_duplicate_similarity", 0.95)
+        ),
+        "exemplar_new_candidates": int(getattr(settings, "technique_exemplar_new_candidates", 0)),
+    }
+
+
+NEW_RETRIEVAL_KNOBS = {
+    "dense_relative_margin",
+    "dense_overfetch",
+    "exemplar_vote_norm",
+    "exemplar_segment_votes",
+    # the technique head (2026-10-19): off (None) unless a client is passed
+    "technique_head",
+    "technique_head_new_candidates",
+    "technique_head_top_families",
+    # the single-answer cap (2026-10-19): "model" follows the artifact's gate record
+    "single_answer_cap",
+    # the technique head agreement filter (2026-10-19): off unless asked
+    "technique_head_agreement",
+    # head-first acceptance (2026-10-20): "model" follows the artifact's gate record
+    "technique_head_first",
+    # sibling replacement (2026-10-20): "model" follows the artifact's gate record
+    "technique_head_sibling",
+}
+
+
+def _serving_settings(**changes):
+    from apt_classifier.config import Settings
+    from apt_classifier.presets import apply_preset
+
+    return apply_preset(Settings(_env_file=None)).model_copy(update=changes)
+
+
+def test_retrieval_kwargs_at_the_defaults_equal_the_old_serving_arguments():
+    import inspect
+
+    from apt_classifier.retrieve import retrieval_kwargs
+
+    index, lexical = object(), object()
+    for settings in (
+        _serving_settings(),
+        _serving_settings(technique_mapping_preset="conservative", similarity_threshold=0.55),
+    ):
+        new = retrieval_kwargs(settings, exemplar_index=index, lexical_index=lexical)
+        old = old_serving_kwargs(settings, index, lexical)
+        assert set(new) - set(old) == NEW_RETRIEVAL_KNOBS
+        for key, value in old.items():
+            assert new[key] == value and type(new[key]) is type(value), key
+    # the new knobs default to retrieve_techniques' own defaults, so passing them changes nothing
+    defaults = inspect.signature(retrieve_techniques).parameters
+    new = retrieval_kwargs(_serving_settings(), exemplar_index=index, lexical_index=lexical)
+    assert {key: new[key] for key in NEW_RETRIEVAL_KNOBS} == {
+        key: defaults[key].default for key in NEW_RETRIEVAL_KNOBS
+    }
+    # a settings object without the fields gets the serving call's old fallbacks
+    bare = SimpleNamespace(
+        similarity_threshold=0.45,
+        retrieval_top_k=30,
+        behavior_similarity_threshold=0.55,
+        behavior_retrieval_top_k=20,
+    )
+    new = retrieval_kwargs(bare, exemplar_index=None, lexical_index=None)
+    assert {key: new[key] for key in old_serving_kwargs(bare, None, None)} == old_serving_kwargs(
+        bare, None, None
+    )
+    assert {key: new[key] for key in NEW_RETRIEVAL_KNOBS} == {
+        key: defaults[key].default for key in NEW_RETRIEVAL_KNOBS
+    }
+
+
+def test_lexical_fields_follow_the_serving_index():
+    from apt_classifier.retrieve import default_lexical_fields, lexical_fields
+
+    assert lexical_fields(_serving_settings()) == ("name", "description", "procedure")
+    assert lexical_fields(_serving_settings(technique_include_synthetic=True))[-1] == "synthetic"
+    # detection text is never indexed lexically by the engine (only retrieve's own default)
+    assert "detection" not in lexical_fields(_serving_settings(technique_include_detection=True))
+    assert default_lexical_fields(include_synthetic=False, include_detection=True)[-1] == (
+        "detection"
+    )
+    kb = AttackKnowledgeBase(techniques={"T1": Technique(id="T1", name="One")}, groups={})
+    index = LexicalTechniqueIndex.from_kb(kb, fields=lexical_fields(_serving_settings()))
+    assert index.fields == ("name", "description", "procedure")
+
+
+def _hybrid_setup():
+    from apt_classifier.retrieve import lexical_fields
+
+    kb, store, ledger = _two_hit_setup()
+    lexical = LexicalTechniqueIndex.from_kb(kb, fields=lexical_fields(_serving_settings()))
+    return kb, store, ledger, lexical
+
+
+def test_new_retrieval_knobs_at_their_defaults_change_nothing():
+    from apt_classifier.retrieve import retrieval_kwargs
+
+    kb, store, ledger, lexical = _hybrid_setup()
+    settings = _serving_settings()
+    old = retrieve_techniques(
+        ledger, store, kb, **old_serving_kwargs(settings, None, lexical), finalize=True
+    )
+    new = retrieve_techniques(
+        ledger,
+        store,
+        kb,
+        **retrieval_kwargs(settings, exemplar_index=None, lexical_index=lexical),
+        finalize=True,
+    )
+    assert new.to_dict() == old.to_dict()
+
+    class Recording(type(store)):
+        depths: list[int] = []
+
+        def query_techniques(self, texts, *, n_results, **kwargs):
+            self.depths.append(n_results)
+            return super().query_techniques(texts, n_results=n_results, **kwargs)
+
+    recording = Recording()
+    retrieve_techniques(ledger, recording, kb, retrieval_mode="dense", top_k=30)
+    deep = retrieve_techniques(
+        ledger, recording, kb, retrieval_mode="dense", top_k=30, dense_overfetch=150
+    )
+    assert recording.depths == [90, 150]
+    assert deep.diagnostics["dense_overfetch"] == 150
+    # a tighter margin drops the second technique (0.82 is 0.08 below the best 0.90)
+    tight = retrieve_techniques(
+        ledger, store, kb, retrieval_mode="dense", dense_relative_margin=0.05
+    )
+    assert [c.technique_id for c in tight.candidates if c.evidence_for("dense")] == ["T1059.001"]
+    assert tight.diagnostics["dense_relative_margin"] == 0.05
+    assert "dense_relative_margin" not in new.diagnostics
+    with pytest.raises(ValueError, match="segment votes"):
+        retrieve_techniques(ledger, store, kb, exemplar_segment_votes="sum")
+
+
+def _candidate(observation_id, technique_id, *, parent=None, p=None, **evidence):
+    items = []
+    for source, (score, rank) in evidence.items():
+        items.append(
+            TechniqueRetrievalEvidence(source=source, field="description", score=score, rank=rank)
+        )
+    if p is not None:
+        items.append(TechniqueRetrievalEvidence(source="acceptance_model", score=p))
+    return TechniqueCandidate(
+        observation_id=observation_id,
+        technique_id=technique_id,
+        technique_name=technique_id,
+        parent_technique_id=parent,
+        is_subtechnique=parent is not None,
+        fused_score=0.1,
+        fused_rank=len(items),
+        evidence=items,
+    )
+
+
+def test_candidate_gate_flags_match_the_gate():
+    from apt_classifier.retrieve import candidate_gate_flags, context_gate_flags
+
+    text = "The actor ran an encoded PowerShell command on the host"
+    cue = _candidate("o", "T1", dense=(0.5, 1), explicit_cue=(0.85, 1))
+    weak_cue = _candidate("o", "T2", dense=(0.3, 1), explicit_cue=(0.85, 1))
+    lexical_cue = _candidate("o", "T3", lexical=(2.0, 3), structured_signal=(0.9, 1))
+    parent = _candidate("o", "T4", hierarchy_parent=(0.5, 1))
+    flags = candidate_gate_flags(cue, text, threshold=0.45)
+    assert flags == {
+        "benign": False,
+        "sparse": False,
+        "hierarchy_parent": False,
+        "cue_supported": True,
+    }
+    assert candidate_gate_flags(weak_cue, text, threshold=0.45)["cue_supported"] is False
+    assert candidate_gate_flags(lexical_cue, text, threshold=0.45)["cue_supported"] is True
+    assert candidate_gate_flags(parent, text, threshold=0.45)["hierarchy_parent"] is True
+    assert context_gate_flags("routine maintenance of the host") == {
+        "benign": True,
+        "sparse": False,
+    }
+    assert context_gate_flags("powershell")["sparse"] is True
+    # a precomputed context is used as given
+    assert candidate_gate_flags(cue, "", threshold=0.45, context={"benign": True, "sparse": True})[
+        "benign"
+    ]
+
+
+def test_runtime_emulation_reproduces_the_accepted_set():
+    """What the fit and the harness score (p, candidate_gate_flags, suppressed parents) gives
+    exactly the accepted techniques of finalize_retrieval_candidates (plan check P3)."""
+    from apt_classifier.retrieve import (
+        RetrievalResult,
+        candidate_gate_flags,
+        finalize_retrieval_candidates,
+        runtime_gate_masks,
+        suppressed_parent_flags,
+    )
+
+    observations = [
+        Observation(observation_id="o1", text="The actor executed payloads and moved laterally"),
+        Observation(
+            observation_id="o2", text="Routine maintenance ran the script on several servers"
+        ),
+        Observation(observation_id="o3", text="powershell download"),
+    ]
+    candidates = [
+        _candidate("o1", "T1059.001", parent="T1059", p=0.70, dense=(0.80, 1)),
+        _candidate("o1", "T1059", p=0.90, hierarchy_parent=(0.5, 1)),
+        # exemplar-only parent of a visible child: accepted by p, never materialized
+        _candidate("o1", "T1003", p=0.95, exemplar=(0.4, 1)),
+        _candidate("o1", "T1003.001", parent="T1003", p=0.30, dense=(0.60, 2)),
+        _candidate("o1", "T1105", p=0.10, lexical=(3.0, 2), explicit_cue=(0.85, 1)),
+        _candidate("o1", "T1021", p=0.55, dense=(0.50, 3)),
+        _candidate("o2", "T1047", p=0.90, dense=(0.70, 1)),
+        _candidate("o2", "T1053", p=0.05, dense=(0.60, 2), structured_signal=(0.9, 1)),
+        _candidate("o3", "T1086", p=0.90, dense=(0.70, 1)),
+    ]
+    ledger = EvidenceLedger(observations=observations)
+    kb = AttackKnowledgeBase(techniques={}, groups={})
+    texts = {item.observation_id: item.text for item in observations}
+    flags = [
+        candidate_gate_flags(candidate, texts[candidate.observation_id], threshold=0.45)
+        for candidate in candidates
+    ]
+    for row, suppressed in zip(flags, suppressed_parent_flags(candidates), strict=True):
+        row["parent_suppressed"] = suppressed
+    blocked, forced = runtime_gate_masks(flags)
+    probabilities = [float(c.evidence_for("acceptance_model").score) for c in candidates]
+    for threshold in (0.05, 0.2, 0.5, 0.6, 0.75, 0.92, 0.99):
+        model = SimpleNamespace(threshold=threshold, probability=lambda features: 0.0)
+        retrieval = RetrievalResult(
+            matches=(),
+            observed_techniques={},
+            technique_observations={},
+            semantic_profile_scores={},
+            group_text_scores={},
+            specific_behavior_scores={},
+            specific_behavior_signals={},
+            specific_behavior_matches=(),
+            candidates=tuple(candidates),
+            parent_policy="ancestor_compatible",
+        )
+        final = finalize_retrieval_candidates(
+            retrieval,
+            ledger,
+            kb,
+            retrieval_mode="hybrid",
+            threshold=0.45,
+            acceptance_threshold=0.75,
+            relative_margin=0.08,
+            acceptance_model=model,
+        )
+        emulated = {
+            candidate.technique_id
+            for candidate, p, never, always in zip(
+                candidates, probabilities, blocked, forced, strict=True
+            )
+            if always or (not never and p >= threshold)
+        }
+        assert emulated == set(final.observed_techniques), threshold
+    assert flags[2]["parent_suppressed"] and not flags[0]["parent_suppressed"]
+
+
+def test_retrieval_refuses_a_model_whose_contract_it_does_not_meet():
+    from apt_classifier.acceptance import AcceptanceModel, retrieval_contract
+    from apt_classifier.retrieve import retrieval_kwargs
+
+    kb, store, ledger, lexical = _hybrid_setup()
+    rows = [dict.fromkeys(["dense_score"], 0.9), dict.fromkeys(["dense_score"], 0.2)]
+    fitted = AcceptanceModel.fit(rows * 5, [1, 0] * 5, attack_version="t")
+    legacy = AcceptanceModel.from_dict(fitted.to_dict())  # an artifact without a contract
+    assert legacy.contract_origin == "legacy" and not legacy.requires_exemplars
+    kwargs = retrieval_kwargs(_serving_settings(), exemplar_index=None, lexical_index=lexical)
+    meets = retrieve_techniques(ledger, store, kb, **kwargs, acceptance_model=legacy)
+    assert meets.diagnostics["acceptance_model"] is True
+    assert "acceptance_model_disabled" not in meets.diagnostics
+    # the in-memory model has no contract and runs anywhere (as before contracts)
+    free = retrieve_techniques(
+        ledger, store, kb, **{**kwargs, "candidate_pool": 16}, acceptance_model=fitted
+    )
+    assert free.diagnostics["acceptance_model"] is True
+    # a model with a stored contract is held to every key of it
+    contract = retrieval_contract(kwargs, None)
+    stored = AcceptanceModel.fit(rows * 5, [1, 0] * 5, attack_version="t", contract=contract)
+    stored = AcceptanceModel.from_dict(stored.to_dict())
+    assert stored.contract_origin == "artifact"
+    # the legacy artifact only to the knobs new with contracts; the older ones (pool, mode,
+    # synthetic sentences) ran it before contracts and still do, exactly as unconstrained
+    for change, key, legacy_refused in (
+        ({"candidate_pool": 16}, "candidate_pool 16 (fitted with 12)", False),
+        ({"retrieval_mode": "dense"}, "retrieval_mode", False),
+        ({"include_synthetic": True}, "include_synthetic", False),
+        ({"dense_relative_margin": 0.2}, "dense_relative_margin", True),
+        ({"dense_overfetch": 120}, "dense_overfetch 120 (fitted with 0)", True),
+    ):
+        plain = retrieve_techniques(ledger, store, kb, **{**kwargs, **change})
+        unconstrained = retrieve_techniques(
+            ledger, store, kb, **{**kwargs, **change}, acceptance_model=fitted
+        )
+        for model, refused_expected in ((stored, True), (legacy, legacy_refused)):
+            result = retrieve_techniques(
+                ledger, store, kb, **{**kwargs, **change}, acceptance_model=model
+            )
+            if refused_expected:
+                assert result.diagnostics["acceptance_model"] is False
+                assert key in result.diagnostics["acceptance_model_disabled"]
+                assert [c.model_dump() for c in result.candidates] == [
+                    c.model_dump() for c in plain.candidates
+                ]
+            else:
+                assert "acceptance_model_disabled" not in result.diagnostics, change
+                assert [c.model_dump() for c in result.candidates] == [
+                    c.model_dump() for c in unconstrained.candidates
+                ]
+    # exemplar knobs never refuse a model fitted without exemplars
+    exemplar_change = retrieve_techniques(
+        ledger, store, kb, **{**kwargs, "exemplar_k": 128}, acceptance_model=legacy
+    )
+    assert exemplar_change.diagnostics["acceptance_model"] is True

@@ -35,7 +35,10 @@ from apt_classifier.classifiers.software import COMMODITY_TOOL_WEIGHT_CAP, softw
 from apt_classifier.fusion import FusionEntry, FusionResult, filter_eligible_results
 from apt_classifier.separation import DiscriminationResult, technique_document_counts
 
-FEATURE_SCHEMA_VERSION = 2  # 2: the random-forest source-country vote joins the features
+# 2: the random-forest source-country vote joins the features; 3: per-member features for the
+# optional members (OPTIONAL_CLASSIFIERS; zero whenever one does not vote, so an artifact fitted
+# without them keeps its own columns); 4: the knowledge store's two members join them
+FEATURE_SCHEMA_VERSION = 4
 KIND = "attribution_combiner_conditional_logit"
 DISTINCTIVE_MAX_GROUPS = 10
 EXCLUSIVE_SOFTWARE_MAX_GROUPS = 4
@@ -53,6 +56,16 @@ CLASSIFIERS: tuple[str, ...] = (
     "strategic_context",
     "motivation_alignment",
     "source_country",
+)
+# members that vote only behind a weight (default 0): their columns are zero when they are off
+OPTIONAL_CLASSIFIERS: tuple[str, ...] = (
+    "group_mlp",
+    "text_group",
+    "behavior_text",
+    "procedure_match",
+    # schema 4 (2026-11-04): the knowledge store's members (knowledge_store/members.py)
+    "store_text",
+    "store_software",
 )
 RRF_FEATURES = ("rrf_rel", "rrf_inv_rank", "rrf_support", "rrf_rank_std", "rrf_contested")
 DISC_FEATURES = (
@@ -101,6 +114,14 @@ def _feature_names() -> tuple[str, ...]:
     names += [
         f"{base}_inv_rank_x_{regime}"
         for base in INTERACTION_BASES
+        for regime in INTERACTION_REGIMES
+    ]
+    # schema 3: the optional members, after every schema-2 column so older artifacts keep theirs
+    for name in OPTIONAL_CLASSIFIERS:
+        names += [f"{name}_present", f"{name}_inv_rank", f"{name}_score_rel"]
+    names += [
+        f"{name}_inv_rank_x_{regime}"
+        for name in OPTIONAL_CLASSIFIERS
         for regime in INTERACTION_REGIMES
     ]
     return tuple(names)
@@ -226,7 +247,7 @@ def combiner_inputs(
     for entry in candidates:
         gid = entry.group_id
         values: dict[str, float] = {}
-        for name in CLASSIFIERS:
+        for name in (*CLASSIFIERS, *OPTIONAL_CLASSIFIERS):
             hit = maps.get(name, {}).get(gid)
             values[f"{name}_present"] = 1.0 if hit else 0.0
             values[f"{name}_inv_rank"] = (1.0 / hit[0]) if hit else 0.0
@@ -266,10 +287,10 @@ def combiner_inputs(
         values["exclusive_software"] = (len(exclusive) / len(software_ids)) if software_ids else 0.0
         values["log_group_techniques"] = math.log1p(len(group_techniques.get(gid, ()) or ()))
         values["log_prominence"] = math.log1p(max(0.0, float(prominence.get(gid, 0) or 0)))
-        bases = {name: values[f"{name}_inv_rank"] for name in CLASSIFIERS}
+        bases = {name: values[f"{name}_inv_rank"] for name in (*CLASSIFIERS, *OPTIONAL_CLASSIFIERS)}
         bases["rrf"] = values["rrf_inv_rank"]
         bases["disc_total"] = values["disc_total_rel"]
-        for base in INTERACTION_BASES:
+        for base in (*INTERACTION_BASES, *OPTIONAL_CLASSIFIERS):
             for regime_name in INTERACTION_REGIMES:
                 values[f"{base}_inv_rank_x_{regime_name}"] = bases[base] * regime[regime_name]
         rows.append([float(values[name]) for name in FEATURE_NAMES])
@@ -644,4 +665,11 @@ def load_attribution_combiner(
     ok, reason = model.compatible_with(str(getattr(kb, "version", "") or ""), fingerprint)
     if not ok:
         return None, f"incompatible artifact: {reason}"
+    configured = int(getattr(settings, "attribution_combiner_top_n", model.top_n) or model.top_n)
+    if configured != int(model.top_n):
+        # a model fitted on top-N lists scores only that window; another N silently changes
+        # which candidates it can reorder
+        return None, (
+            f"incompatible artifact: top_n (fitted on {model.top_n}, configured {configured})"
+        )
     return model, "active"

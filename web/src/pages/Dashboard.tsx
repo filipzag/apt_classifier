@@ -55,7 +55,7 @@ export function DashboardPage() {
 
       {s?.mode === 'local' ? (
         <Callout tone="warning" title="Local mode">
-          No OpenRouter key is configured. Prose is split into sentences instead of LLM-normalised,
+          No LLM is configured (no OpenRouter key and no local Ollama model). Prose is split into sentences instead of LLM-normalised,
           the technique verifier is skipped and the AI review and CyberRE-LLM are
           unavailable. Retrieval, acceptance, ranking, the interview and every export still work.
         </Callout>
@@ -125,7 +125,12 @@ export function DashboardPage() {
                       <Crosshair className="size-3.5 text-faint" />
                       {item.summary.leading_group_name ? (
                         <span className="truncate">
-                          {stage === 'known_group_hypothesis' ? 'Named' : 'Closest'}:{' '}
+                          {stage === 'known_group_hypothesis'
+                            ? 'Named'
+                            : stage === 'known_cluster_hypothesis'
+                              ? 'Named cluster'
+                              : 'Closest'}
+                          :{' '}
                           <span className="text-text">{item.summary.leading_group_name}</span>
                         </span>
                       ) : (

@@ -11,9 +11,14 @@ originating group is recovered by the fused ranking (``rank``: what the analyst 
 ``deterministic_rank``: what the stage decision reads; equal since the vote was removed, both
 kept so older artifacts compare) and which attribution stage is reached.
 
-Leak control per fold (``FoldStore``):
-- technique-index hits whose text equals a held-out sentence are dropped (the dense index
-  embeds the same anonymized sentences);
+Leak control per fold (``FoldStore`` and ``fold_lexical_index``):
+- technique-index hits whose text equals a held-out sentence are dropped, from the dense index
+  (it embeds the same anonymized sentences), and the BM25 lexical index is rebuilt per fold
+  without them (it holds them as ``procedure`` documents; before 2026-10-03 only the dense index
+  was filtered, so a held-out sentence was the top BM25 hit for about 99.7% of fold
+  observations). Not hidden: the fold group's one-word variants of a held sentence filed under
+  other techniques (about 1.4% of queries have one in the BM25 top 3), and, when
+  ``TECHNIQUE_INCLUDE_SYNTHETIC`` is on, synthetic paraphrases generated from procedure examples;
 - the held-out group's actor-behaviour documents for the held-out techniques are dropped;
 - in the *unknown-actor* arm the group is removed from the knowledge base and every one of
   its documents is hidden, so the correct answer is "no named group".
@@ -30,32 +35,60 @@ CTI-HAL reports name their own group in them, which name-sensitive signals (grou
 similarity, actor-behaviour retrieval) can match without reading any tradecraft;
 ``--anonymize-actors`` applies the folds' replacement to the statements first and records what it
 removed, including the software matches lost where a group alias is also a software name
-(Carbanak is both G0008 and S0030).
+(Carbanak is both G0008 and S0030). ``--anonymize strict|tradecraft`` goes further
+(``scripts/report_anonymizer.py``): the report's own attribution prose, vendor cluster names,
+country / nationality / sponsor words and, for tradecraft, ATT&CK malware names.
+
+``--report-set elastic`` reads the Elastic Security Labs posts prepared by
+``scripts/prepare_elastic_reports.py`` (every prose sentence, as the product's no-LLM mode reads a
+pasted report; strict is its headline level). ``--open-set`` adds reports whose actor is in no
+ATT&CK group: they are analysed like the labelled ones and reported apart, since any name given
+there is unsupported (not proven wrong).
+
+The development report sets (``--report-set vendor|campaigns|advisories``; the combiner's
+real-report training lists, never a gate) carry ``hidden_texts``: the ATT&CK procedure examples
+that cite the report (vendor, advisories) or are near-copies of its statements (campaigns). Those
+and the report's own statements are hidden, under whichever group documents them, from the dense
+and lexical indexes and from the text-based members' corpora, and a campaign report hides its
+``campaign_id`` from the knowledge base while it runs (``hidden_campaign``). CTI-HAL and Elastic
+rows carry no ``hidden_texts`` and run unchanged.
 """
 
 from __future__ import annotations
 
 import argparse
 import copy
+import hashlib
+import itertools
 import json
 import random
-import re
 import sys
 import time
 from collections import Counter
+from collections.abc import Iterator, Mapping
+from contextlib import contextmanager
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
 from statistics import fmean
 from typing import Any
 
-from apt_classifier.attack.kb import AttackKnowledgeBase
-from apt_classifier.attack.related import related_groups
-from apt_classifier.attribution import AttributionStage
-from apt_classifier.classifiers.profile_forest import PROFILE_FOREST_NAME, SOURCE_COUNTRY_NAME
-from apt_classifier.config import Settings
-from apt_classifier.embeddings import SentenceTransformerEmbedder
-from apt_classifier.evaluation import (
+REPO_ROOT = Path(__file__).resolve().parent.parent
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
+from apt_classifier.attack.kb import AttackKnowledgeBase  # noqa: E402
+from apt_classifier.attack.parse import strip_attack_citations  # noqa: E402
+from apt_classifier.attack.related import related_groups  # noqa: E402
+from apt_classifier.attribution import AttributionStage  # noqa: E402
+from apt_classifier.behavior_text import behavior_text_votes  # noqa: E402
+from apt_classifier.classifiers.profile_forest import (  # noqa: E402
+    PROFILE_FOREST_NAME,
+    SOURCE_COUNTRY_NAME,
+)
+from apt_classifier.config import Settings  # noqa: E402
+from apt_classifier.embeddings import SentenceTransformerEmbedder  # noqa: E402
+from apt_classifier.evaluation import (  # noqa: E402
     AttributionEvaluationCase,
     AttributionPrediction,
     bootstrap_interval,
@@ -64,42 +97,54 @@ from apt_classifier.evaluation import (
     source_fingerprint,
     write_artifact,
 )
-from apt_classifier.evidence.iocs import match_software_aliases
-from apt_classifier.evidence.models import EvidenceLedger, Observation, Provenance
-from apt_classifier.group_mlp import refit_without_groups
-from apt_classifier.llm import OpenRouterClient
-from apt_classifier.profile_forest import fit_profile_forest
-from apt_classifier.session import AttributionEngine
-from apt_classifier.vectorstore import (
+from apt_classifier.evidence.iocs import match_software_aliases  # noqa: E402
+from apt_classifier.evidence.models import (  # noqa: E402
+    EvidenceLedger,
+    EvidenceStatus,
+    Observation,
+    Provenance,
+)
+from apt_classifier.group_mlp import refit_without_groups  # noqa: E402
+from apt_classifier.knowledge_store.listing import normalise_url  # noqa: E402
+from apt_classifier.knowledge_store.members import (  # noqa: E402
+    StoreMembers,
+    citation_keys,
+    members_path,
+    store_members_votes,
+)
+from apt_classifier.llm import OpenRouterClient  # noqa: E402
+from apt_classifier.nb_background import nb_background_enabled  # noqa: E402
+from apt_classifier.overlap_cluster import SAME_ACTIVITY_LINKS, link_kind  # noqa: E402
+from apt_classifier.procedure_match import procedure_match_votes  # noqa: E402
+from apt_classifier.profile_forest import fit_profile_forest  # noqa: E402
+from apt_classifier.session import AttributionEngine  # noqa: E402
+from apt_classifier.text_group import text_group_votes  # noqa: E402
+from apt_classifier.vectorstore import (  # noqa: E402
     ChromaVectorStore,
     VectorHit,
     _actor_name_pattern,
     _sanitize_procedure,
     normalize_procedure_text,
 )
-
-REPO_ROOT = Path(__file__).resolve().parent.parent
-
-
-def _evidence_name_pattern(names: tuple[str, ...]) -> re.Pattern[str] | None:
-    """The actor-name pattern for *evidence* text (fold statements, real-report statements).
-
-    Like ``vectorstore._actor_name_pattern``, but a name that ends a sentence ("the backdoor known
-    as Carbanak.") is replaced too; a dot followed by a word character still protects file and
-    family names (Patchwork.dll, Silence.Downloader). The indexed procedure sentences keep the
-    index's pattern: changing it there would need a re-index and a combiner refit.
-    """
-    ordered = sorted(
-        (name for name in names if name), key=lambda item: (-len(item), item.casefold())
-    )
-    if not ordered:
-        return None
-    return re.compile(
-        r"(?<![\w.-])(?:" + "|".join(re.escape(name) for name in ordered) + r")"
-        r"(?P<possessive>['’]s)?(?![\w-]|\.\w)",
-        re.IGNORECASE,
-    )
-
+from scripts.report_anonymizer import (  # noqa: E402
+    LEVELS,
+    MALWARE_LEVELS,
+    ReportAnonymizer,
+    actor_names,
+)
+from scripts.report_anonymizer import (  # noqa: E402
+    evidence_name_pattern as _evidence_name_pattern,
+)
+from scripts.run_tooling import (  # noqa: E402
+    acceptance_fingerprint_inputs,
+    acceptance_identity,
+    add_exemplar_backend_arguments,
+    exemplar_backend_problem,
+    exemplar_identity,
+    exemplar_setting_overrides,
+    exemplar_signature,
+    technique_micro_metrics,
+)
 
 FINGERPRINTED_SOURCES = (
     REPO_ROOT / "apt_classifier" / "fusion.py",
@@ -118,16 +163,48 @@ FINGERPRINTED_SOURCES = (
     REPO_ROOT / "apt_classifier" / "torch_forest.py",
     REPO_ROOT / "apt_classifier" / "classifiers" / "profile_forest.py",
     REPO_ROOT / "apt_classifier" / "group_mlp.py",
+    REPO_ROOT / "apt_classifier" / "text_group.py",
+    REPO_ROOT / "apt_classifier" / "behavior_text.py",
+    REPO_ROOT / "apt_classifier" / "procedure_match.py",
+    # technique mapping inputs: the exemplar votes, the acceptance model and the dense index
+    REPO_ROOT / "apt_classifier" / "exemplars.py",
+    REPO_ROOT / "apt_classifier" / "exemplar_store.py",
+    REPO_ROOT / "apt_classifier" / "acceptance.py",
+    REPO_ROOT / "apt_classifier" / "vectorstore.py",
+    # Top-three programme: documented-cluster naming, related groups, software questions
+    REPO_ROOT / "apt_classifier" / "overlap_cluster.py",
+    REPO_ROOT / "apt_classifier" / "attack" / "related.py",
+    REPO_ROOT / "apt_classifier" / "attack" / "same_activity.py",
+    REPO_ROOT / "apt_classifier" / "software_questions.py",
 )
 
 
 @dataclass(frozen=True)
 class Fold:
-    group_id: str
+    # None for an open-set report: its actor is in no ATT&CK group
+    group_id: str | None
     held_out_techniques: frozenset[str]
     observations: tuple[str, ...]
     held_out_texts: frozenset[str]
     report_id: str = ""
+    # groups also counted correct (umbrella / sub-group), fixed with the labels before any run
+    accept: frozenset[str] = frozenset()
+    kind: str = ""
+    # statements the strict level dropped as the report's own attribution prose, by reason
+    attribution_dropped: tuple[tuple[str, int], ...] = ()
+    # development report sets (vendor, campaigns, advisories): a campaign report's campaign,
+    # hidden from the knowledge base while it runs; the normalized indexed forms of the ATT&CK
+    # texts that cite or copy the report and of its own statements, hidden from the dense and
+    # lexical indexes under any group; and the same texts raw, for the text-based members
+    hidden_campaign: str = ""
+    hidden_texts: frozenset[str] = frozenset()
+    hidden_raw: tuple[str, ...] = ()
+    # the knowledge store's members (knowledge_store/members.py): a dated report reads only posts
+    # available before ``as_of`` (its available_from, else its publication date), never its own
+    # post (``store_keys``) or a copy of it (``store_statements``, the copy rule)
+    as_of: str = ""
+    store_keys: tuple[str, ...] = ()
+    store_statements: tuple[str, ...] = ()
 
 
 class FoldStore:
@@ -141,12 +218,15 @@ class FoldStore:
         held_out_techniques: frozenset[str],
         held_out_texts: frozenset[str],
         hide_group_entirely: bool = False,
+        any_group_texts: frozenset[str] = frozenset(),
     ) -> None:
         self._store = store
         self.group_id = group_id
         self.held_out_techniques = held_out_techniques
         self.held_out_texts = held_out_texts
         self.hide_group_entirely = hide_group_entirely
+        # a development report's cited or copied texts, hidden under whichever group owns them
+        self.any_group_texts = any_group_texts
         self.dropped = {"technique": 0, "behavior": 0, "profile": 0}
 
     def __getattr__(self, name: str) -> Any:
@@ -155,7 +235,9 @@ class FoldStore:
     def query_techniques(
         self, texts: list[str], *, n_results: int = 10, fields: tuple[str, ...] | None = None
     ) -> list[list[VectorHit]]:
-        extra = len(self.held_out_texts)
+        # over-fetch to refill what is hidden (a development report hides hundreds of texts; any
+        # query meets only a few of them, so the refill is capped; folds hide at most 24)
+        extra = min(len(self.held_out_texts), 40)
         raw = self._store.query_techniques(texts, n_results=n_results + extra, fields=fields)
         output: list[list[VectorHit]] = []
         for hits in raw:
@@ -169,6 +251,10 @@ class FoldStore:
         return output
 
     def _hides_behavior(self, hit: VectorHit) -> bool:
+        if self.any_group_texts and (
+            normalize_procedure_text(hit.document) in self.any_group_texts
+        ):
+            return True
         if str(hit.metadata.get("group_id") or "") != self.group_id:
             return False
         if self.hide_group_entirely:
@@ -210,19 +296,48 @@ class FoldStore:
         return kept[:n_results]
 
 
-def actor_names(kb: AttackKnowledgeBase) -> tuple[str, ...]:
-    """Every ATT&CK group name and alias, longest first, as the replacement pattern needs."""
-    return tuple(
-        sorted(
-            {
-                name.strip()
-                for group in kb.groups.values()
-                for name in (group.name, *group.aliases)
-                if name and name.strip()
-            },
-            key=lambda item: (-len(item), item.casefold()),
-        )
+LEAK_CONTROL = "dense+lexical"  # recorded in fold artifacts; before 2026-10-03 only "dense"
+
+
+def fold_lexical_index(index: Any, held_out_texts: frozenset[str]) -> tuple[Any, int]:
+    """The BM25 index rebuilt without the documents whose normalized text is held out, and how
+    many were removed. Document frequencies and the average length are recomputed, so it equals
+    an index built without those sentences (a hit filter would keep their corpus statistics);
+    about 0.07 s on the real knowledge base. A sentence can be several documents (a technique
+    and its sub-technique, several groups): every one goes."""
+    kept = tuple(
+        document
+        for document in index.documents
+        if normalize_procedure_text(document.text) not in held_out_texts
     )
+    removed = len(index.documents) - len(kept)
+    if not removed:
+        return index, 0
+    frequencies: Counter[str] = Counter()
+    for document in kept:
+        frequencies.update(set(document.tokens))
+    average = sum(len(d.tokens) for d in kept) / len(kept) if kept else 1.0
+    return type(index)(kept, dict(frequencies), average), removed
+
+
+def hide_lexical(engine: Any, held_out_texts: frozenset[str]) -> int | None:
+    """Swap ``engine.lexical_index`` for the fold's filtered index; returns the number of hidden
+    documents (``None`` when nothing is hidden). Fails closed when there is something to hide but
+    no index while retrieval is lexical or hybrid: retrieval would then build its own,
+    unfiltered index. The caller restores the original index afterwards."""
+    if not held_out_texts:
+        return None
+    index = getattr(engine, "lexical_index", None)
+    if index is None:
+        mode = str(getattr(getattr(engine, "settings", None), "technique_retrieval_mode", "hybrid"))
+        if mode in ("hybrid", "lexical"):
+            raise RuntimeError(
+                f"fold leak control: retrieval mode {mode!r} but the engine has no lexical index "
+                "to filter (retrieval would build an unfiltered one)"
+            )
+        return None
+    engine.lexical_index, removed = fold_lexical_index(index, held_out_texts)
+    return removed
 
 
 def build_folds(
@@ -276,44 +391,153 @@ def build_folds(
     return folds
 
 
-def load_report_folds(path: Path, *, max_observations: int) -> list[Fold]:
-    """Real-report folds from ``scripts/prepare_cti_hal.py`` output (one fold per report).
+def load_report_folds(
+    path: Path,
+    *,
+    max_observations: int | None,
+    anonymizer: ReportAnonymizer | None = None,
+    sample_seed: int | None = None,
+    kb: AttackKnowledgeBase | None = None,
+) -> list[Fold]:
+    """Real-report folds (one per report) from ``prepare_cti_hal.py`` or
+    ``prepare_elastic_reports.py`` output.
 
-    Observations are the report's human-annotated statements; the expected group is the
-    report's subject. Nothing is hidden from the store: these sentences were never indexed,
-    and the group's own documented behaviour is legitimate evidence for a real report.
+    Observations are the report's statements; the expected group is the report's subject
+    (``null`` for an open-set report). Nothing is hidden from the store: these sentences were
+    never indexed, and the group's own documented behaviour is legitimate evidence for a real
+    report. With an ``anonymizer`` (strict and tradecraft) the report's own attribution prose is
+    dropped first, on the text as reported; then at most ``max_observations`` statements are
+    kept (``None`` = all), the first ones, or a seeded random sample in report order when
+    ``sample_seed`` is given (the volume diagnostic). Report-level ``technique_ids`` join the
+    statements' labels as the gold set.
+
+    A development report (a row with ``hidden_texts``: vendor, campaigns, advisories) hides those
+    ATT&CK texts and its own statements in every indexed form (raw, and anonymized with the
+    index's and the evidence's pattern; needs ``kb``), and a campaign report names its
+    ``campaign_id``, hidden from the knowledge base while it runs.
     """
+    hide_forms = None
+    if kb is not None:
+        names = actor_names(kb)
+        evidence, index = _evidence_name_pattern(names), _actor_name_pattern(names)
+
+        def hide_forms(raw: str) -> set[str]:
+            return {
+                normalize_procedure_text(strip_attack_citations(raw).strip()),
+                normalize_procedure_text(_sanitize_procedure(raw, names, pattern=index)),
+                normalize_procedure_text(_sanitize_procedure(raw, names, pattern=evidence)),
+            } - {""}
+
     folds: list[Fold] = []
     for line in Path(path).read_text(encoding="utf-8").splitlines():
         if not line.strip():
             continue
         row = json.loads(line)
-        texts = tuple(
-            str(item["text"]).strip()
+        statements = [
+            item
             for item in row.get("statements", [])
             if len(str(item.get("text", "")).split()) >= 3
-        )[:max_observations]
+        ]
+        dropped: Counter[str] = Counter()
+        if anonymizer is not None and statements:
+            paragraphs = (
+                [item.get("paragraph") for item in statements]
+                if any("paragraph" in item for item in statements)
+                else None
+            )
+            flags = anonymizer.attribution_flags(
+                [str(item["text"]) for item in statements],
+                paragraphs=paragraphs,
+                section_flags=[bool(item.get("section_attribution")) for item in statements],
+            )
+            dropped.update(flag for flag in flags if flag)
+            statements = [item for item, flag in zip(statements, flags, strict=True) if not flag]
+        texts = tuple(str(item["text"]).strip() for item in statements)
+        report_id = str(row.get("report_id") or "")
+        if max_observations is not None and len(texts) > max_observations:
+            if sample_seed is None:
+                texts = texts[:max_observations]
+            else:
+                rng = random.Random(f"{sample_seed}:{report_id}")
+                chosen = sorted(rng.sample(range(len(texts)), max_observations))
+                texts = tuple(texts[index] for index in chosen)
         if not texts:
             continue
         techniques = frozenset(
             technique_id
             for item in row.get("statements", [])
             for technique_id in item.get("technique_ids", [])
-        )
+        ) | frozenset(row.get("technique_ids") or ())
+        group_id = row.get("group_id")
+        hidden_raw: tuple[str, ...] = ()
+        hidden: frozenset[str] = frozenset()
+        if "hidden_texts" in row:
+            if hide_forms is None:
+                raise ValueError(f"{report_id}: hidden_texts need the knowledge base (kb=)")
+            hidden_raw = tuple(
+                dict.fromkeys(
+                    [str(text) for text in row.get("hidden_texts") or ()]
+                    + [str(item["text"]) for item in row.get("statements", [])]
+                )
+            )
+            hidden = frozenset(form for raw in hidden_raw for form in hide_forms(raw))
+        own = row.get("store_key") or (normalise_url(str(row["url"])) if row.get("url") else "")
         folds.append(
             Fold(
-                group_id=str(row["group_id"]),
+                group_id=str(group_id) if group_id is not None else None,
                 held_out_techniques=techniques,
                 observations=texts,
                 held_out_texts=frozenset(),
-                report_id=str(row.get("report_id") or ""),
+                report_id=report_id,
+                accept=frozenset(row.get("accept") or ()),
+                kind=str(row.get("kind") or ""),
+                attribution_dropped=tuple(sorted(dropped.items())),
+                hidden_campaign=str(row.get("campaign_id") or ""),
+                hidden_texts=hidden,
+                hidden_raw=hidden_raw,
+                as_of=str(row.get("available_from") or row.get("published") or "")[:10],
+                store_keys=(str(own),) if own else (),
+                store_statements=tuple(
+                    str(item.get("text", "")) for item in row.get("statements", [])
+                ),
             )
         )
     return folds
 
 
+@contextmanager
+def hidden_campaign(kb: Any, campaign_id: str) -> Iterator[bool]:
+    """Hide one campaign from the knowledge base for a campaign report (its technique list feeds
+    the campaign-profile member, its description the strategic-context members); restores the
+    campaign and the groups' links afterwards. Yields whether anything was hidden."""
+    campaigns = getattr(kb, "campaigns", None)
+    if not campaign_id or not isinstance(campaigns, dict) or campaign_id not in campaigns:
+        yield False
+        return
+    original = dict(campaigns)
+    linked = [
+        (group, list(group.campaign_ids))
+        for group in kb.groups.values()
+        if campaign_id in (getattr(group, "campaign_ids", None) or ())
+    ]
+    del campaigns[campaign_id]
+    for group, ids in linked:
+        group.campaign_ids = [item for item in ids if item != campaign_id]
+    try:
+        yield True
+    finally:
+        campaigns.clear()
+        campaigns.update(original)
+        for group, ids in linked:
+            group.campaign_ids = ids
+
+
 def anonymize_report_folds(
-    folds: list[Fold], kb: AttackKnowledgeBase
+    folds: list[Fold],
+    kb: AttackKnowledgeBase,
+    *,
+    level: str = "names",
+    extra_names: tuple[str, ...] = (),
 ) -> tuple[list[Fold], list[dict[str, Any]], dict[str, Any]]:
     """Replace every ATT&CK group name and alias in the report statements with "the adversary".
 
@@ -323,9 +547,18 @@ def anonymize_report_folds(
     G0008 and S0030), so the software matches the replacement removes are counted with the
     engine's own matcher over the joined narrative, as the classifier context reads it.
     Returns the folds, one record per fold, and the totals.
+
+    ``strict`` and ``tradecraft`` (``scripts/report_anonymizer.py``) replace ordinary-word aliases
+    only in their ATT&CK spelling and then mask cluster names, object ids, places and sponsors
+    (and ATT&CK malware for tradecraft); each record then also carries a ``strict`` entry with
+    what was masked, the attribution statements dropped at load, the software lost beyond the
+    names pass (expected empty at strict) and a residual audit. ``names`` is unchanged.
     """
+    if level not in LEVELS:
+        raise ValueError(f"unknown anonymization level {level!r}")
     names = actor_names(kb)
     pattern = _evidence_name_pattern(names)
+    anonymizer = ReportAnonymizer(kb, level, extra_names=extra_names) if level != "names" else None
     owners: dict[str, set[str]] = {}
     for group in kb.groups.values():
         for name in (group.name, *group.aliases):
@@ -338,7 +571,10 @@ def anonymize_report_folds(
         replaced: Counter[str] = Counter()
         changed = 0
         for text in fold.observations:
-            found = list(pattern.finditer(text)) if pattern is not None else []
+            if anonymizer is not None:
+                found = anonymizer.name_matches(text)
+            else:
+                found = list(pattern.finditer(text)) if pattern is not None else []
             if not found:
                 texts.append(text)
                 continue
@@ -347,7 +583,11 @@ def anonymize_report_folds(
                 match.group(0).removesuffix(match.group("possessive") or "").casefold()
                 for match in found
             )
-            texts.append(_sanitize_procedure(text, names, pattern=pattern))
+            texts.append(
+                anonymizer.replace_names(text)
+                if anonymizer is not None
+                else _sanitize_procedure(text, names, pattern=pattern)
+            )
         removed: Counter[str] = Counter()
         lost: set[str] = set()
         if changed:
@@ -362,16 +602,34 @@ def anonymize_report_folds(
                 if match.software_id
             )
             removed, lost = before - after, set(before) - set(after)
-        records.append(
-            {
-                "statements_changed": changed,
-                "replacements": sum(replaced.values()),
-                "names": dict(sorted(replaced.items())),
-                "own_group_named": any(fold.group_id in owners.get(name, ()) for name in replaced),
-                "software_matches_removed": sum(removed.values()),
-                "software_ids_removed": sorted(lost),
+        record = {
+            "statements_changed": changed,
+            "replacements": sum(replaced.values()),
+            "names": dict(sorted(replaced.items())),
+            "own_group_named": any(fold.group_id in owners.get(name, ()) for name in replaced),
+            "software_matches_removed": sum(removed.values()),
+            "software_ids_removed": sorted(lost),
+        }
+        if anonymizer is not None:
+            named = Counter(
+                match.software_id
+                for match in match_software_aliases(" ".join(texts), kb)
+                if match.software_id
+            )
+            texts, masked = anonymizer.mask(texts)
+            after_mask = Counter(
+                match.software_id
+                for match in match_software_aliases(" ".join(texts), kb)
+                if match.software_id
+            )
+            record["strict"] = {
+                **masked,
+                "attribution_dropped": dict(fold.attribution_dropped),
+                # software the names pass kept but masking removed (tradecraft: malware, on purpose)
+                "software_lost_beyond_names": sorted(set(named) - set(after_mask)),
+                "residuals": anonymizer.residuals(texts),
             }
-        )
+        records.append(record)
         anonymized.append(replace(fold, observations=tuple(texts)))
     names_replaced: Counter[str] = Counter()
     software_reports: Counter[str] = Counter()
@@ -391,6 +649,41 @@ def anonymize_report_folds(
         # software id -> number of reports in which it is no longer detected
         "software_ids_removed": dict(sorted(software_reports.items())),
     }
+    if anonymizer is not None:
+        strict = [record["strict"] for record in records]
+        masked_counts: Counter[str] = Counter()
+        roles: Counter[str] = Counter()
+        attribution: Counter[str] = Counter()
+        codenames: Counter[str] = Counter()
+        protected: Counter[str] = Counter()
+        lost_beyond: Counter[str] = Counter()
+        malware: Counter[str] = Counter()
+        behavior: Counter[str] = Counter()
+        for item in strict:
+            masked_counts.update(item["replacements"])
+            roles.update(item["gazetteer_roles"])
+            attribution.update(item["attribution_dropped"])
+            codenames.update(item["codenames_kept"])
+            protected.update(item["protected_by_software"])
+            lost_beyond.update(item["software_lost_beyond_names"])
+            malware.update(item.get("malware_masked", {}))
+            behavior.update(item.get("behavior_masked", {}))
+        totals["strict"] = {
+            "level": level,
+            "replacements": dict(sorted(masked_counts.items())),
+            "gazetteer_roles": dict(sorted(roles.items())),
+            "attribution_statements_dropped": dict(sorted(attribution.items())),
+            "codenames_kept": dict(sorted(codenames.items())),
+            "protected_by_software": dict(sorted(protected.items())),
+            "duplicates_merged": sum(item["duplicates_merged"] for item in strict),
+            # software id -> reports where masking removed it beyond the names pass
+            "software_lost_beyond_names": dict(sorted(lost_beyond.items())),
+            "residuals": sum(len(item["residuals"]) for item in strict),
+            **(
+                {"malware_masked": dict(sorted(malware.items()))} if level in MALWARE_LEVELS else {}
+            ),
+            **({"behavior_masked": dict(behavior.most_common())} if level == "behavior" else {}),
+        }
     return anonymized, records, totals
 
 
@@ -476,16 +769,35 @@ def _separation_fields(state: Any, truth: str | None, decision: Any) -> dict[str
 
 def _combiner_fields(state: Any, truth: str | None) -> dict[str, Any]:
     """Learned-combiner diagnostics per row: the truth's rank in the RRF order the combiner
-    started from, the probability it assigned to its leader, and its status."""
+    started from, the probability it assigned to its leader, and its status. For offline
+    replays also every combiner probability (the RRF top N), the probabilities of the gate
+    window's members, the RRF order to place 60 (the head from ``rrf_ranks``; past the head the
+    deterministic order is the RRF order), and whether the truth reached the gate window."""
     info = getattr(state.context, "combiner", None)
+    discrimination = getattr(state.context, "discrimination", None)
+    window = [item.group_id for item in discrimination.scores] if discrimination is not None else []
+    window_fields = {"truth_in_window": (truth in window) if truth else None}
     if not isinstance(info, dict):
-        return {"rrf_rank": None, "combiner_leader_probability": None, "combiner_status": None}
+        return {
+            "rrf_rank": None,
+            "combiner_leader_probability": None,
+            "combiner_status": None,
+            **window_fields,
+        }
     ranks = info.get("rrf_ranks") or {}
+    probabilities = info.get("probabilities") or {}
+    deterministic = state.deterministic_fusion or state.fusion
+    head = [gid for gid, _ in sorted(ranks.items(), key=lambda item: item[1])]
+    tail = [entry.group_id for entry in deterministic.entries[len(head) : 60]]
     return {
         "rrf_rank": ranks.get(truth) if truth else None,
         "combiner_leader_probability": info.get("leader_probability"),
         "combiner_null_probability": info.get("null_probability"),
         "combiner_status": info.get("status"),
+        "combiner_probabilities": dict(probabilities),
+        "window_probabilities": {gid: probabilities.get(gid, 0.0) for gid in window},
+        "rrf_top60": (head + tail)[:60],
+        **window_fields,
     }
 
 
@@ -541,9 +853,464 @@ def _top3_fields(state: Any, ranked: list[str]) -> dict[str, Any]:
     }
 
 
+def _combiner_artifact(settings: Any, engine: Any) -> dict[str, Any] | None:
+    """Which combiner artifact scored the run (path, content hash, top N, pipeline fingerprint),
+    so a later replay can tell artifacts fitted on different lists apart."""
+    model = getattr(engine, "combiner", None)
+    path = getattr(settings, "attribution_combiner_path", None)
+    if model is None or not path:
+        return None
+    try:
+        digest = hashlib.sha256(Path(path).read_bytes()).hexdigest()[:24]
+    except OSError:
+        digest = None
+    return {
+        "path": str(path),
+        "sha256": digest,
+        "top_n": int(getattr(model, "top_n", 0) or 0),
+        "pipeline_fingerprint": getattr(model, "pipeline_fingerprint", None),
+        # the fold evidence its training lists hid (combiners fitted before 2026-10-03 record
+        # none: dense store only, the BM25 index was not filtered)
+        "lists_leak_control": (getattr(model, "metadata", None) or {}).get(
+            "lists_leak_control", "dense (unrecorded)"
+        ),
+    }
+
+
+def _cluster_fields(state: Any, decision: Any) -> dict[str, Any]:
+    """The named documented-overlap cluster (if any) and the engine's cluster candidate for the
+    leader (recorded whether or not cluster naming is on, so the gate can be replayed)."""
+    info = (
+        state.context.combiner if isinstance(getattr(state.context, "combiner", None), dict) else {}
+    )
+    return {
+        "named_cluster": list(getattr(decision, "named_cluster", ()) or ()) if decision else [],
+        "cluster_separation": getattr(decision, "cluster_separation", None) if decision else None,
+        "cluster_discriminative": (
+            getattr(decision, "cluster_discriminative", None) if decision else None
+        ),
+        "cluster_probability": getattr(decision, "cluster_probability", None) if decision else None,
+        "cluster_candidate": info.get("cluster"),
+    }
+
+
 def _rank_of(fusion: Any, group_id: str) -> int | None:
     ranked = [entry.group_id for entry in fusion.entries]
     return ranked.index(group_id) + 1 if group_id in ranked else None
+
+
+def _truth_exclusive_software(kb: Any, software_ids: Any, truth: set[str]) -> list[str]:
+    """Detected ATT&CK software that only the truth (or an accepted) group uses: a lookup, not
+    tradecraft, so per-report tables can say which hits came from a malware name."""
+    exclusive = []
+    for software_id in sorted(software_ids or ()):
+        record = kb.software.get(software_id)
+        users = set(getattr(record, "group_ids", ()) or ())
+        if truth and users and users <= truth:
+            exclusive.append(software_id)
+    return exclusive
+
+
+# ----- software interview: enumerated simulation (docs 21.3.15 C) -----
+SOFTWARE_INTERVIEW_Q = (0.1, 0.3, 1.0)
+SOFTWARE_INTERVIEW_FP = (0.0, 0.05)
+_STAGE_CODES = {
+    "insufficient_evidence": "ins",
+    "unresolved_activity_cluster": "unr",
+    "known_group_shortlist": "sho",
+    "known_group_hypothesis": "hyp",
+    "known_cluster_hypothesis": "clu",
+}
+
+
+def _named_members(decision: Any) -> list[str]:
+    """The named set of a decision: the group, the cluster's members, or nothing."""
+    if decision is None:
+        return []
+    stage = decision.stage.value
+    if stage == AttributionStage.KNOWN_CLUSTER_HYPOTHESIS.value:
+        return [str(gid) for gid in decision.named_cluster]
+    if stage == AttributionStage.KNOWN_GROUP_HYPOTHESIS.value and decision.leading_group_id:
+        return [str(decision.leading_group_id)]
+    return []
+
+
+def enumerate_software_interview(
+    engine: Any, state: Any, truth_software: set[str]
+) -> dict[str, Any]:
+    """Every answer path of the software questions on an analysed case.
+
+    The questions are the engine's own (``AttributionEngine.software_question``: asked while the
+    case is not named, at most INTERVIEW_SOFTWARE_MAX_QUESTIONS). Each is answered "found" and, on
+    a second branch, "not found" through ``answer_question``, which re-scores the case exactly as
+    an analyst answer does; "not checked" records nothing, so it equals not asking and is no
+    branch (at most 2^3 leaves). Every node is kept (path, stage, named set, separation) so leaf
+    probabilities under any answer model are computed afterwards. ``truth_software`` is the true
+    group's full ATT&CK software list (the removed actor's own list for removed-actor rows); only
+    which asked items it contains is stored. The state is restored to its analysed form."""
+    answers = state.ledger.question_answers
+    root = len(answers)
+    baseline = _named_members(state.attribution_decision)
+    nodes: list[dict[str, Any]] = []
+    truth_asked: set[str] = set()
+
+    def visit(path: tuple[str, ...]) -> None:
+        decision = state.attribution_decision
+        question = engine.software_question(state)
+        nodes.append(
+            {
+                "path": "|".join(path),
+                "stage": _STAGE_CODES.get(decision.stage.value, decision.stage.value)
+                if decision is not None
+                else None,
+                "named": _named_members(decision),
+                "separation": round(float(decision.separation), 3)
+                if decision is not None
+                else None,
+                "leaf": question is None,
+            }
+        )
+        if question is None:
+            return
+        if question.software_id in truth_software:
+            truth_asked.add(str(question.software_id))
+        depth = len(answers)
+        for found in (True, False):
+            del answers[depth:]
+            state.current_question = question
+            engine.answer_question(
+                state, EvidenceStatus.POSITIVE if found else EvidenceStatus.NEGATIVE
+            )
+            step = f"{question.software_id}:{question.target_rank}:{'F' if found else 'N'}"
+            visit((*path, step))
+
+    try:
+        visit(())
+    finally:
+        del answers[root:]
+        state.current_question = None
+        if len(nodes) > 1:
+            engine.rescore(state)
+    return {
+        "baseline_named": baseline,
+        "truth_documents": sorted(truth_asked),
+        "nodes": nodes,
+    }
+
+
+def _path_steps(path: str) -> list[tuple[str, str]]:
+    """[(software id, "F" | "N"), ...] of an encoded node path."""
+    return [(step.split(":")[0], step.split(":")[-1]) for step in path.split("|")] if path else []
+
+
+def _path_probability(path: str, truth: set[str], q: float, fp: float) -> float:
+    """Answer model: "found" with probability q when the true group's ATT&CK entry lists the
+    malware, with probability fp (a wrong "found") otherwise; "not found" in every other case."""
+    probability = 1.0
+    for software_id, answer in _path_steps(path):
+        found = q if software_id in truth else fp
+        probability *= found if answer == "F" else 1.0 - found
+    return probability
+
+
+def _software_expectations(
+    known_rows: list[dict[str, Any]], unknown_rows: list[dict[str, Any]], q: float, fp: float
+) -> dict[str, float]:
+    keys = (
+        "questions",
+        "found_answers",
+        "named",
+        "correct",
+        "gained",
+        "wrong_added",
+        "lost",
+        "removed_questions",
+        "removed_found_answers",
+        "removed_named",
+        "removed_named_added",
+    )
+    totals = dict.fromkeys(keys, 0.0)
+    for arm, rows in (("known", known_rows), ("unknown", unknown_rows)):
+        for row in rows:
+            simulation = row.get("software_interview")
+            if not simulation:
+                continue
+            truth = set(simulation["truth_documents"])
+            base = set(simulation["baseline_named"])
+            base_correct = arm == "known" and row["group_id"] in base
+            base_wrong = arm == "known" and bool(base) and not base_correct
+            for node in simulation["nodes"]:
+                if not node["leaf"]:
+                    continue
+                probability = _path_probability(node["path"], truth, q, fp)
+                if probability <= 0:
+                    continue
+                steps = _path_steps(node["path"])
+                found = sum(1 for _, answer in steps if answer == "F")
+                named = set(node["named"])
+                if arm == "unknown":
+                    totals["removed_questions"] += probability * len(steps)
+                    totals["removed_found_answers"] += probability * found
+                    totals["removed_named"] += probability * bool(named)
+                    totals["removed_named_added"] += probability * (bool(named) and not base)
+                    continue
+                correct = row["group_id"] in named
+                wrong = bool(named) and not correct
+                totals["questions"] += probability * len(steps)
+                totals["found_answers"] += probability * found
+                totals["named"] += probability * bool(named)
+                totals["correct"] += probability * correct
+                totals["gained"] += probability * (correct and not base_correct)
+                totals["wrong_added"] += probability * (wrong and not base_wrong)
+                totals["lost"] += probability * (base_correct and not correct)
+    result = {key: round(value, 4) for key, value in totals.items()}
+    result["hit_rate"] = (
+        round(totals["found_answers"] / totals["questions"], 4) if totals["questions"] else None
+    )
+    return result
+
+
+def summarize_software_interview(
+    known_rows: list[dict[str, Any]],
+    unknown_rows: list[dict[str, Any]],
+    *,
+    cluster_naming: bool,
+) -> dict[str, Any]:
+    """Expected values of the enumerated software interview and the pre-registered criteria
+    C1-C8 (docs 21.3.15). "Gained", "wrong added" and "lost" compare each leaf with the row's own
+    baseline (no netting across rows); every expectation is exact (all leaves enumerated)."""
+    expected = {
+        f"q={q},fp={fp}": _software_expectations(known_rows, unknown_rows, q, fp)
+        for q in SOFTWARE_INTERVIEW_Q
+        for fp in SOFTWARE_INTERVIEW_FP
+    }
+    possible_wrong = 0  # leaves with positive probability at fp = 0 (any 0 < q < 1)
+    possible_removed = 0
+    lost_leaves = 0  # any leaf (fp > 0 makes every leaf possible)
+    all_not_found_changed = 0
+    all_not_found_named = 0
+    baseline_named = 0
+    monotonicity_violations = 0
+    rows_asked = questions = leaves = 0
+    for arm, rows in (("known", known_rows), ("unknown", unknown_rows)):
+        for row in rows:
+            simulation = row.get("software_interview")
+            if not simulation:
+                continue
+            truth = set(simulation["truth_documents"])
+            base = set(simulation["baseline_named"])
+            baseline_named += bool(base)
+            base_correct = arm == "known" and row["group_id"] in base
+            base_wrong = arm == "known" and bool(base) and not base_correct
+            by_path = {node["path"]: node for node in simulation["nodes"]}
+            rows_asked += not by_path.get("", {"leaf": True})["leaf"]
+            for node in simulation["nodes"]:
+                named = set(node["named"])
+                steps = _path_steps(node["path"])
+                if steps and steps[-1][1] == "N":
+                    parent = by_path.get("|".join(node["path"].split("|")[:-1]))
+                    parent_named = set(parent["named"]) if parent is not None else set()
+                    if named and named != parent_named:
+                        monotonicity_violations += 1
+                if not node["leaf"]:
+                    questions += 1
+                    continue
+                leaves += 1
+                if all(answer == "N" for _, answer in steps):
+                    all_not_found_changed += named != base
+                    all_not_found_named += bool(named)
+                feasible = all(answer == "N" or sid in truth for sid, answer in steps)
+                if arm == "known":
+                    correct = row["group_id"] in named
+                    if feasible and bool(named) and not correct and not base_wrong:
+                        possible_wrong += 1
+                    if base_correct and not correct:
+                        lost_leaves += 1
+                elif feasible and named and not base:
+                    possible_removed += 1
+    zero = {q: expected[f"q={q},fp=0.0"] for q in SOFTWARE_INTERVIEW_Q}
+    five = {q: expected[f"q={q},fp=0.05"] for q in SOFTWARE_INTERVIEW_Q}
+    c1 = {
+        "wrong_added": {str(q): zero[q]["wrong_added"] for q in SOFTWARE_INTERVIEW_Q},
+        "removed_named": {str(q): zero[q]["removed_named"] for q in SOFTWARE_INTERVIEW_Q},
+        "possible_wrong_leaves": possible_wrong,
+        "possible_removed_leaves": possible_removed,
+    }
+    c1["pass"] = possible_wrong == 0 and possible_removed == 0
+    c5 = {
+        str(q): round(five[q]["wrong_added"] + five[q]["removed_named_added"], 4)
+        for q in SOFTWARE_INTERVIEW_Q
+    }
+    criteria: dict[str, Any] = {
+        "C1": c1,
+        "C2": {
+            "gained_q0.3": zero[0.3]["gained"],
+            "gained_q1.0": zero[1.0]["gained"],
+            "pass": zero[0.3]["gained"] >= 8 and zero[1.0]["gained"] >= 30,
+        },
+        "C3": {
+            "lost_leaves": lost_leaves,
+            "lost": {key: value["lost"] for key, value in expected.items()},
+            "pass": lost_leaves == 0,
+        },
+        "C4": {
+            "baseline_named": baseline_named,
+            "all_not_found_named": all_not_found_named,
+            "rows_changed": all_not_found_changed,
+            "pass": all_not_found_changed == 0,
+        },
+        "C5": {
+            "wrong_plus_removed_fp0.05": c5,
+            "pass": all(value <= 1.0 for value in c5.values()),
+        },
+        "C6": {
+            "pass": None,
+            "note": "compare the expected names with scripts/software_interview_replay.py",
+        },
+        "C7": {"violations": monotonicity_violations, "pass": monotonicity_violations == 0},
+    }
+    criteria["C8"] = (
+        {
+            "C1": c1["pass"],
+            "C5": criteria["C5"]["pass"],
+            "pass": c1["pass"] and criteria["C5"]["pass"],
+        }
+        if cluster_naming
+        else {"pass": None, "note": "run with --set attribution_cluster_naming=true"}
+    )
+    return {
+        "mode": "enumerate",
+        "answer_model": {
+            "found_if_truth_documents": "q",
+            "found_otherwise": "fp (wrong found)",
+            "not_checked": "same as not asking (no branch)",
+            "q": list(SOFTWARE_INTERVIEW_Q),
+            "fp": list(SOFTWARE_INTERVIEW_FP),
+        },
+        "rows_asked": rows_asked,
+        "questions": questions,
+        "leaves": leaves,
+        "expected": expected,
+        "criteria": criteria,
+    }
+
+
+# an undated report reads no store post at all (its date cannot hide what came after it)
+NO_STORE = "0001-01-01"
+
+
+def store_case(
+    engine: Any,
+    fold: Fold,
+    *,
+    hide_evidence: bool = True,
+    citations: dict[tuple[str, str], frozenset[str]] | None = None,
+    remove_actor: bool = False,
+    undated: str = "none",
+) -> Any:
+    """Set the case the knowledge store's members read for ``fold`` (a no-op without them).
+
+    A dated report reads the store before its date (``as_of``) without its own post and its
+    copies. An undated report reads nothing (``undated="none"``, the development and training
+    sets) or the whole store without its own post and copies (``"whole"``, CTI-HAL's rule). An
+    ATT&CK fold case has no date and reads the whole store without the posts ATT&CK cites for its
+    held-out sentences. ``remove_actor`` (the unknown-actor arms) also drops the actor's own
+    documents and links."""
+    if getattr(engine, "store_members", None) is None:
+        return None
+    removed = {fold.group_id} if remove_actor and fold.group_id else set()
+    if fold.report_id:
+        as_of = fold.as_of or (None if undated == "whole" else NO_STORE)
+        return engine.set_store_case(
+            as_of=as_of,
+            keys=fold.store_keys,
+            statements=fold.store_statements,
+            removed_actors=removed,
+        )
+    hidden: set[str] = set()
+    if hide_evidence and fold.group_id is not None:
+        for technique_id in fold.held_out_techniques:
+            hidden |= (citations or {}).get((fold.group_id, technique_id), frozenset())
+    return engine.set_store_case(hidden=hidden, removed_actors=removed)
+
+
+def parse_weight_grid(items: list[str] | None) -> list[dict[str, float]]:
+    """``NAME=v1,v2,...`` items -> every combination of those classifiers' weights (the store
+    members' development grid, prereg ``knowledge_store_decisive_2026-11-04``)."""
+    axes: list[list[tuple[str, float]]] = []
+    for item in items or ():
+        name, sep, values = item.partition("=")
+        if not sep or not name or not values:
+            raise ValueError(f"--weight-grid wants NAME=v1,v2,...: {item!r}")
+        axes.append([(name, float(value)) for value in values.split(",")])
+    return [dict(combination) for combination in itertools.product(*axes)] if axes else []
+
+
+def grid_key(weights: Mapping[str, float]) -> str:
+    return ",".join(f"{name}={value:g}" for name, value in sorted(weights.items()))
+
+
+def grid_outcomes(
+    engine: Any, state: Any, grid: list[dict[str, float]], truth: set[str]
+) -> dict[str, dict[str, Any]]:
+    """Per weight combination of ``grid``: the leader, the truth's best rank and the naming
+    decision from this case's classifier results fused with those weights. The classifiers do not
+    read the weights, so only fusion and the gate run again; a member at weight 0 is left out of
+    fusion exactly as if it were not loaded (``fusion.filter_eligible_results``)."""
+    context = state.context
+    eligible = set(context.eligible_group_ids or ())
+    saved = {name: getattr(context, name, None) for name in ("discrimination", "combiner")}
+    outcomes: dict[str, dict[str, Any]] = {}
+    try:
+        for overrides in grid:
+            weights = {**state.weights, **overrides}
+            fusion = engine._fuse(state.classifier_results, weights, eligible, context)
+            trial = copy.copy(state)
+            trial.fusion = trial.deterministic_fusion = fusion
+            trial.weights = weights
+            decision = engine._assess_stage(trial)
+            ranked = [entry.group_id for entry in fusion.entries]
+            ranks = [ranked.index(group_id) + 1 for group_id in truth if group_id in ranked]
+            named = _named_members(decision)
+            outcomes[grid_key(overrides)] = {
+                "leading": decision.leading_group_id,
+                "rank": min(ranks) if ranks else None,
+                "top5": ranked[:5],
+                "stage": decision.stage.value,
+                "named": named,
+                "named_right": bool(named and truth & set(named)),
+            }
+    finally:
+        for name, value in saved.items():
+            setattr(context, name, value)
+    return outcomes
+
+
+def summarize_grid(
+    grid: list[dict[str, float]], known: list[dict[str, Any]], open_set: list[dict[str, Any]]
+) -> dict[str, dict[str, Any]]:
+    """Per weight combination: known reports with the right group first (the leader, or an
+    accepted group) and in the top five, names right and wrong, and names on the open set."""
+    out: dict[str, dict[str, Any]] = {}
+    for weights in grid:
+        key = grid_key(weights)
+        cells = [row["grid"][key] for row in known if "grid" in row]
+        opened = [row["grid"][key] for row in open_set if "grid" in row]
+        truths = [{row.get("group_id"), *(row.get("accept") or ())} - {None} for row in known]
+        out[key] = {
+            "weights": dict(weights),
+            "known": len(cells),
+            "first": sum(
+                cell["leading"] in truth for cell, truth in zip(cells, truths, strict=True)
+            ),
+            "top5": sum(cell["rank"] is not None and cell["rank"] <= 5 for cell in cells),
+            "named": sum(bool(cell["named"]) for cell in cells),
+            "named_right": sum(cell["named_right"] for cell in cells),
+            "named_wrong": sum(bool(cell["named"]) and not cell["named_right"] for cell in cells),
+            "open_set": len(opened),
+            "open_set_named": sum(bool(cell["named"]) for cell in opened),
+        }
+    return out
 
 
 def run_known(
@@ -552,22 +1319,93 @@ def run_known(
     *,
     hide_evidence: bool = True,
     client: OpenRouterClient | None = None,
+    software_interview: bool = False,
+    citations: dict[tuple[str, str], frozenset[str]] | None = None,
+    store_undated: str = "none",
+    weight_grid: list[dict[str, float]] | None = None,
 ) -> tuple[list[dict[str, Any]], dict]:
     rows: list[dict[str, Any]] = []
     base_store = engine.store
+    base_text = getattr(engine, "text_group", None)
+    base_text_status = getattr(engine, "text_group_status", None)
+    base_behavior = getattr(engine, "behavior_text", None)
+    base_behavior_status = getattr(engine, "behavior_text_status", None)
+    base_procedure = getattr(engine, "procedure_match", None)
+    base_procedure_status = getattr(engine, "procedure_match_status", None)
+    base_lexical = getattr(engine, "lexical_index", None)
     related = related_groups(engine.kb)
-    dropped_total = {"technique": 0, "behavior": 0, "profile": 0}
+    dropped_total = {"technique": 0, "behavior": 0, "profile": 0, "lexical": 0}
+    members_changed = False
     try:
         for fold in folds:
+            # a development report hides its cited / copied texts even where nothing else is
+            member_hiding = hide_evidence or bool(fold.hidden_raw)
+            member_techniques = fold.held_out_techniques if hide_evidence else frozenset()
+            member_texts = (fold.held_out_texts if hide_evidence else frozenset()) | frozenset(
+                fold.hidden_raw
+            )
+            if base_text is not None and member_hiding:
+                # the text model's group documents hide the fold like the store does
+                engine.set_text_group(
+                    base_text.without(
+                        engine.kb,
+                        group_id=fold.group_id,
+                        techniques=member_techniques,
+                        texts=member_texts,
+                    )
+                )
+            if base_behavior is not None and member_hiding:
+                # the behaviour-text index hides the fold the same way
+                engine.set_behavior_text(
+                    base_behavior.without(
+                        engine.kb,
+                        group_id=fold.group_id,
+                        techniques=member_techniques,
+                        texts=member_texts,
+                    )
+                )
+            if base_procedure is not None and member_hiding:
+                # and so does the procedure member's technique-indexed corpus
+                engine.set_procedure_match(
+                    base_procedure.without(
+                        engine.kb,
+                        group_id=fold.group_id,
+                        techniques=member_techniques,
+                        texts=member_texts,
+                    )
+                )
+            if member_hiding:
+                members_changed = True
+            elif members_changed:
+                # a report without hidden texts after one with: the members as shipped
+                if base_text is not None:
+                    engine.set_text_group(base_text, base_text_status)
+                if base_behavior is not None:
+                    engine.set_behavior_text(base_behavior, base_behavior_status)
+                if base_procedure is not None:
+                    engine.set_procedure_match(base_procedure, base_procedure_status)
+                members_changed = False
+            engine.lexical_index = base_lexical
+            held_texts = (fold.held_out_texts if hide_evidence else frozenset()) | fold.hidden_texts
+            hidden_lexical = hide_lexical(engine, held_texts)
             proxy = FoldStore(
                 base_store,
                 group_id=fold.group_id,
                 held_out_techniques=fold.held_out_techniques if hide_evidence else frozenset(),
-                held_out_texts=fold.held_out_texts if hide_evidence else frozenset(),
+                held_out_texts=held_texts,
+                any_group_texts=fold.hidden_texts,
             )
             engine.store = proxy
+            store_slice = store_case(
+                engine,
+                fold,
+                hide_evidence=hide_evidence,
+                citations=citations,
+                undated=store_undated,
+            )
             cost_before = client.total_usage.cost_usd if client is not None else 0.0
-            state = engine.analyze(_ledger(fold))
+            with hidden_campaign(engine.kb, fold.hidden_campaign):
+                state = engine.analyze(_ledger(fold))
             # ``fusion`` is what the analyst sees (includes the LLM vote in production);
             # ``deterministic_fusion`` is the ranking before the vote and drives the stage.
             fusion = state.fusion
@@ -598,18 +1436,35 @@ def run_known(
                 dropped_total["llm_unavailable_at"] = label  # type: ignore[assignment]
                 print(f"stopping: all LLM calls failed at {label}", file=sys.stderr)
                 break
+            # a report with no gold technique labels has no recall (not zero recall)
+            no_gold = None if fold.report_id and not fold.held_out_techniques else 0.0
+            truth = {fold.group_id, *fold.accept} - {None}
+            lenient = [ranked.index(gid) + 1 for gid in truth if gid in ranked]
+            extra: dict[str, Any] = {}
+            if fold.accept or fold.kind:
+                extra = {
+                    "accept": sorted(fold.accept),
+                    "lenient_rank": min(lenient) if lenient else None,
+                    "kind": fold.kind,
+                }
             rows.append(
                 {
                     "group_id": fold.group_id,
                     "report_id": fold.report_id,
+                    **(
+                        {"store": _store_case_fields(engine, store_slice)}
+                        if store_slice is not None
+                        else {}
+                    ),
                     "observations": len(fold.observations),
                     "held_out_techniques": sorted(fold.held_out_techniques),
                     "accepted_techniques": sorted(observed),
                     "technique_recall": (
                         len(observed & fold.held_out_techniques) / len(fold.held_out_techniques)
                         if fold.held_out_techniques
-                        else 0.0
+                        else no_gold
                     ),
+                    **extra,
                     "rank": ranked.index(fold.group_id) + 1 if fold.group_id in ranked else None,
                     "deterministic_rank": _rank_of(deterministic, fold.group_id),
                     **_combiner_fields(state, fold.group_id),
@@ -625,7 +1480,10 @@ def run_known(
                         )
                         / len(fold.held_out_techniques)
                         if fold.held_out_techniques
-                        else 0.0
+                        else no_gold
+                    ),
+                    "truth_exclusive_software": _truth_exclusive_software(
+                        engine.kb, state.context.software_ids, truth
                     ),
                     "eligible_groups": (
                         len(state.context.eligible_group_ids)
@@ -647,20 +1505,60 @@ def run_known(
                         gid != fold.group_id and gid in related.get(fold.group_id, {})
                         for gid in ranked[:3]
                     ),
+                    # the same, counting only links that document the same activity (docs 10.11)
+                    "leader_same_activity_as_truth": bool(
+                        ranked
+                        and ranked[0] != fold.group_id
+                        and link_kind(engine.kb, fold.group_id, ranked[0]) in SAME_ACTIVITY_LINKS
+                    ),
+                    "top3_same_activity_as_truth": any(
+                        gid != fold.group_id
+                        and link_kind(engine.kb, fold.group_id, gid) in SAME_ACTIVITY_LINKS
+                        for gid in ranked[:3]
+                    ),
                     "candidates": len(ranked),
                     "top3": ranked[:3],
                     "stage": decision.stage.value if decision else None,
                     "margin": decision.margin if decision else None,
                     "maturity": decision.maturity_score if decision else None,
                     "leading": decision.leading_group_id if decision else None,
+                    **_cluster_fields(state, decision),
                     **_top3_fields(state, ranked),
                 }
             )
+            if software_interview:
+                group = engine.kb.groups.get(fold.group_id)
+                rows[-1]["software_interview"] = enumerate_software_interview(
+                    engine, state, set(getattr(group, "software_ids", ()) or ())
+                )
+            if weight_grid:
+                rows[-1]["grid"] = grid_outcomes(engine, state, weight_grid, truth)
             for key, value in proxy.dropped.items():
                 dropped_total[key] += value
+            rows[-1]["lexical_hidden"] = hidden_lexical or 0
+            dropped_total["lexical"] += rows[-1]["lexical_hidden"]
     finally:
         engine.store = base_store
+        if base_text is not None:
+            engine.set_text_group(base_text, base_text_status)
+        if base_behavior is not None:
+            engine.set_behavior_text(base_behavior, base_behavior_status)
+        if base_procedure is not None:
+            engine.set_procedure_match(base_procedure, base_procedure_status)
+        engine.lexical_index = base_lexical
+        if getattr(engine, "store_members", None) is not None:
+            engine.clear_store_case()
     return rows, dropped_total
+
+
+def _store_case_fields(engine: Any, case: Any) -> dict[str, Any]:
+    """What a row's store members read: the date, the artifact (a pin) and the hidden posts."""
+    return {
+        "as_of": case.as_of,
+        "pin": engine.store_state.pin,
+        "hidden_posts": len(case.hidden),
+        "removed_actors": sorted(case.removed_actors),
+    }
 
 
 def _forest_votes(engine: Any) -> bool:
@@ -692,6 +1590,8 @@ def run_unknown(
     folds: list[Fold],
     *,
     client: OpenRouterClient | None = None,
+    software_interview: bool = False,
+    citations: dict[tuple[str, str], frozenset[str]] | None = None,
 ) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
     for fold in folds:
@@ -712,6 +1612,13 @@ def run_unknown(
             hide_group_entirely=True,
         )
         engine = AttributionEngine(settings, reduced, proxy, client)  # type: ignore[arg-type]
+        if nb_background_enabled(settings) and engine.nb_background is None:
+            # the reference accepts a knowledge base with groups removed; anything else would
+            # silently score this fold with the shipped member
+            raise RuntimeError(f"Naive Bayes background {engine.nb_background_status}")
+        # the reduced knowledge base's index lacks the actor's own sentences; identical
+        # sentences of other records are hidden too, as the dense store does
+        hidden_lexical = hide_lexical(engine, fold.held_out_texts)
         forest = "off"
         if _forest_votes(engine):
             engine.set_profile_forest(_refit_forest_without_actor(engine, reduced))
@@ -721,6 +1628,32 @@ def run_unknown(
             # exact refit on the reduced knowledge base (fresh draws), never a masked output
             engine.set_group_mlp(refit_without_groups(engine.group_mlp, reduced))
             group_mlp = "refit without the actor"
+        text_group = "off"
+        if getattr(engine, "text_group", None) is not None:
+            engine.set_text_group(
+                engine.text_group.without(
+                    reduced, group_id=fold.group_id, texts=fold.held_out_texts, remove_group=True
+                )
+            )
+            text_group = "refit without the actor"
+        behavior_text = "off"
+        if getattr(engine, "behavior_text", None) is not None:
+            engine.set_behavior_text(
+                engine.behavior_text.without(
+                    reduced, group_id=fold.group_id, texts=fold.held_out_texts, remove_group=True
+                )
+            )
+            behavior_text = "refit without the actor"
+        procedure_match = "off"
+        if getattr(engine, "procedure_match", None) is not None:
+            engine.set_procedure_match(
+                engine.procedure_match.without(
+                    reduced, group_id=fold.group_id, texts=fold.held_out_texts, remove_group=True
+                )
+            )
+            procedure_match = "refit without the actor"
+        # the store members read the whole store without the actor and the cited posts
+        store_slice = store_case(engine, fold, citations=citations, remove_actor=True)
         cost_before = client.total_usage.cost_usd if client is not None else 0.0
         state = engine.analyze(_ledger(fold))
         fusion = state.fusion
@@ -728,9 +1661,18 @@ def run_unknown(
         rows.append(
             {
                 "group_id": fold.group_id,
+                **(
+                    {"store": _store_case_fields(engine, store_slice)}
+                    if store_slice is not None
+                    else {}
+                ),
                 "observations": len(fold.observations),
                 "profile_forest": forest,
                 "group_mlp": group_mlp,
+                "text_group": text_group,
+                "behavior_text": behavior_text,
+                "procedure_match": procedure_match,
+                "lexical_hidden": hidden_lexical or 0,
                 "llm": _llm_accounting(state, client, cost_before),
                 **_separation_fields(state, None, decision),
                 **_combiner_fields(state, None),
@@ -739,9 +1681,16 @@ def run_unknown(
                 "margin": decision.margin if decision else None,
                 "maturity": decision.maturity_score if decision else None,
                 "top3": [entry.group_id for entry in fusion.entries[:3]],
+                "software_ids": sorted(state.context.software_ids),
+                **_cluster_fields(state, decision),
                 **_top3_fields(state, [entry.group_id for entry in fusion.entries]),
             }
         )
+        if software_interview:
+            # the removed actor's own ATT&CK list answers; the engine sees the reduced base
+            rows[-1]["software_interview"] = enumerate_software_interview(
+                engine, state, set(kb.groups[fold.group_id].software_ids)
+            )
     return rows
 
 
@@ -754,6 +1703,8 @@ def summarize(
     known_rows: list[dict[str, Any]], unknown_rows: list[dict[str, Any]]
 ) -> dict[str, Any]:
     named = AttributionStage.KNOWN_GROUP_HYPOTHESIS.value
+    cluster = AttributionStage.KNOWN_CLUSTER_HYPOTHESIS.value
+    named_stages = {named, cluster}
     cases = [
         AttributionEvaluationCase(
             case_id=_case_id("known", index, row),
@@ -771,12 +1722,18 @@ def summarize(
     ]
     predictions = [
         AttributionPrediction(
-            _case_id("known", index, row), tuple(row["top3"]), row["stage"] == named
+            _case_id("known", index, row),
+            tuple(row["top3"]),
+            row["stage"] in named_stages,
+            tuple(row.get("named_cluster") or ()),
         )
         for index, row in enumerate(known_rows)
     ] + [
         AttributionPrediction(
-            _case_id("unknown", index, row), tuple(row["top3"]), row["stage"] == named
+            _case_id("unknown", index, row),
+            tuple(row["top3"]),
+            row["stage"] in named_stages,
+            tuple(row.get("named_cluster") or ()),
         )
         for index, row in enumerate(unknown_rows)
     ]
@@ -792,6 +1749,13 @@ def summarize(
         if known_rows
         else 0.0
     )
+    if known_rows and all("leader_same_activity_as_truth" in row for row in known_rows):
+        # cluster-aware with same-activity links only (cluster_top1 counts any ATT&CK relation,
+        # shared rare malware included)
+        metrics["same_activity_top1"] = fmean(
+            1.0 if row["rank"] == 1 or row.get("leader_same_activity_as_truth") else 0.0
+            for row in known_rows
+        )
     named_rows = [row for row in known_rows if row["stage"] == named]
     metrics["named_risk_cluster_aware"] = (
         fmean(
@@ -810,9 +1774,29 @@ def summarize(
     metrics["median_rank"] = (
         sorted(r if r else 10**6 for r in ranks)[len(ranks) // 2] if ranks else None
     )
-    metrics["mean_technique_recall"] = (
-        fmean(row["technique_recall"] for row in known_rows) if known_rows else 0.0
-    )
+    recalls = [row["technique_recall"] for row in known_rows if row["technique_recall"] is not None]
+    metrics["mean_technique_recall"] = fmean(recalls) if recalls else (None if known_rows else 0.0)
+    if len(recalls) != len(known_rows):
+        # reports without gold technique labels have no recall (Elastic posts without links)
+        metrics["technique_recall_reports"] = len(recalls)
+    metrics.update(technique_micro_metrics(known_rows))
+    if ranks:
+        hits = sum(1 for rank in ranks if rank == 1)
+        metrics["top1_count"] = hits
+        metrics["top1_wilson95"] = [round(value, 4) for value in _wilson(hits, len(ranks))]
+        by_group: dict[str, list[float]] = {}
+        for row in known_rows:
+            by_group.setdefault(row["group_id"], []).append(1.0 if row["rank"] == 1 else 0.0)
+        metrics["group_macro_top1"] = fmean(fmean(values) for values in by_group.values())
+    if any(row.get("accept") for row in known_rows):
+        lenient = [row.get("lenient_rank", row["rank"]) for row in known_rows]
+        metrics["lenient_top1"] = fmean(1.0 if rank == 1 else 0.0 for rank in lenient)
+        metrics["lenient_top3"] = fmean(1.0 if rank and rank <= 3 else 0.0 for rank in lenient)
+        metrics["lenient_named_correct"] = sum(
+            1
+            for row, rank in zip(known_rows, lenient, strict=True)
+            if row["stage"] == named and rank == 1
+        )
     metrics["named_correct"] = sum(1 for row in named_rows if row["rank"] == 1)
     if known_rows and all(row.get("separation") is not None for row in known_rows):
         metrics["separation_auc"] = _auc(
@@ -858,6 +1842,28 @@ def summarize(
         metrics["deterministic_top1"] = fmean(1.0 if r == 1 else 0.0 for r in det)
         metrics["deterministic_top5"] = fmean(1.0 if r and r <= 5 else 0.0 for r in det)
         metrics["deterministic_mrr"] = fmean(1.0 / r if r else 0.0 for r in det)
+    clusters = [row for row in known_rows if row["stage"] == cluster]
+    unknown_clusters = sum(1 for row in unknown_rows if row["stage"] == cluster)
+    if clusters or unknown_clusters or any("named_cluster" in row for row in known_rows):
+        # a cluster name is correct when the truth is a member (named_risk above counts it so);
+        # named_correct keeps its single-group meaning
+        correct = [row for row in clusters if row["group_id"] in (row.get("named_cluster") or ())]
+        metrics["named_cluster_correct"] = len(correct)
+        metrics["named_cluster_wrong"] = len(clusters) - len(correct) + unknown_clusters
+        metrics["named_cluster_recovered"] = sum(1 for row in correct if row["rank"] != 1)
+        metrics["cluster_coverage"] = (
+            (len(clusters) + unknown_clusters) / (len(known_rows) + len(unknown_rows))
+            if known_rows or unknown_rows
+            else 0.0
+        )
+        singles = [row for row in known_rows if row["stage"] == named]
+        single_unknown = sum(1 for row in unknown_rows if row["stage"] == named)
+        single_total = len(singles) + single_unknown
+        metrics["named_risk_single"] = (
+            (sum(1 for row in singles if row["rank"] != 1) + single_unknown) / single_total
+            if single_total
+            else 0.0
+        )
     if known_rows:
         metrics["top3"] = fmean(
             1.0 if row["rank"] and row["rank"] <= 3 else 0.0 for row in known_rows
@@ -867,6 +1873,13 @@ def summarize(
             metrics["cluster_top3"] = fmean(
                 1.0
                 if (row["rank"] and row["rank"] <= 3) or row.get("top3_related_to_truth")
+                else 0.0
+                for row in known_rows
+            )
+        if all("top3_same_activity_as_truth" in row for row in known_rows):
+            metrics["same_activity_top3"] = fmean(
+                1.0
+                if (row["rank"] and row["rank"] <= 3) or row.get("top3_same_activity_as_truth")
                 else 0.0
                 for row in known_rows
             )
@@ -910,6 +1923,88 @@ def _inactive_combiner_rows(rows: list[dict[str, Any]]) -> list[str]:
     ]
 
 
+def _exemplar_fingerprint_inputs(settings: Any, index: Any) -> dict[str, Any] | None:
+    """The exemplar index and query settings the mapping ran with (as benchmark_mapping)."""
+    if index is None:
+        return None
+    return {
+        "fingerprint": index.fingerprint,
+        "count": len(index),
+        "k": int(getattr(settings, "technique_exemplar_k", 64)),
+        "tau": float(getattr(settings, "technique_exemplar_tau", 0.05)),
+        "duplicate_similarity": float(
+            getattr(settings, "technique_exemplar_duplicate_similarity", 0.95)
+        ),
+        "new_candidates": int(getattr(settings, "technique_exemplar_new_candidates", 0)),
+        # backend, search and collection (a Chroma copy is a different input)
+        "store": exemplar_signature(index),
+    }
+
+
+def _file_sha256(path: Path) -> str:
+    return hashlib.sha256(Path(path).read_bytes()).hexdigest()
+
+
+def _wilson(hits: int, total: int, z: float = 1.96) -> tuple[float, float]:
+    """Wilson score interval for a proportion; sound at n = 8 and at 0/n or n/n, where the
+    percentile bootstrap collapses to a point."""
+    if total <= 0:
+        return (0.0, 0.0)
+    share = hits / total
+    denominator = 1 + z * z / total
+    centre = (share + z * z / (2 * total)) / denominator
+    half = z * ((share * (1 - share) / total + z * z / (4 * total * total)) ** 0.5) / denominator
+    return (max(0.0, centre - half), min(1.0, centre + half))
+
+
+def open_set_metrics(
+    open_rows: list[dict[str, Any]], known_rows: list[dict[str, Any]]
+) -> dict[str, Any]:
+    """Reports whose actor is in no ATT&CK group: every name given there is unsupported.
+
+    Also the combined named risk (wrong names on the labelled reports plus any name on the open
+    set, over all names) and how often each group leads the open-set rankings, a null for the
+    labelled hits (a group that leads many unrelated reports carries less information).
+
+    A documented-cluster name (ATTRIBUTION_CLUSTER_NAMING) is a name given too: on the open set
+    it counts in ``named`` (members under ``named_clusters``), on the labelled set it is wrong
+    when the truth is not a member, as ``summarize`` counts it.
+    """
+    named = AttributionStage.KNOWN_GROUP_HYPOTHESIS.value
+    cluster = AttributionStage.KNOWN_CLUSTER_HYPOTHESIS.value
+    stages = Counter(str(row["stage"]) for row in open_rows)
+    names = Counter(str(row.get("leading")) for row in open_rows if row["stage"] == named)
+    clusters = Counter(
+        "+".join(str(gid) for gid in row.get("named_cluster") or ())
+        for row in open_rows
+        if row["stage"] == cluster
+    )
+    leaders = Counter(row["top3"][0] for row in open_rows if row.get("top3"))
+    by_kind: dict[str, dict[str, int]] = {}
+    for row in open_rows:
+        kind = row.get("kind") or "unknown"
+        entry = by_kind.setdefault(kind, {"reports": 0, "named": 0})
+        entry["reports"] += 1
+        entry["named"] += 1 if row["stage"] in (named, cluster) else 0
+    known_named = [row for row in known_rows if row["stage"] == named]
+    known_clusters = [row for row in known_rows if row["stage"] == cluster]
+    wrong = sum(1 for row in known_named if row["rank"] != 1) + sum(
+        1 for row in known_clusters if row["group_id"] not in (row.get("named_cluster") or ())
+    )
+    open_named = sum(names.values()) + sum(clusters.values())
+    all_named = len(known_named) + len(known_clusters) + open_named
+    return {
+        "reports": len(open_rows),
+        "named": open_named,
+        "named_groups": dict(names.most_common()),
+        **({"named_clusters": dict(clusters.most_common())} if clusters else {}),
+        "stage_distribution": dict(sorted(stages.items())),
+        "by_kind": by_kind,
+        "leader_counts": dict(leaders.most_common()),
+        "combined_named_risk": (wrong + open_named) / all_named if all_named else 0.0,
+    }
+
+
 def _auc(positives: list[float], negatives: list[float]) -> float | None:
     """Rank-based AUC of a score for separating two groups (0.5 = uninformative)."""
     if not positives or not negatives:
@@ -935,21 +2030,48 @@ def _coerce(value: str) -> Any:
         return value
 
 
-def default_output(pipeline: str, *, real_reports: bool, anonymize_actors: bool) -> Path:
+# the anonymization level each real-report set publishes as its headline (``*_current``)
+# the development sets (vendor, campaigns, advisories) are the combiner's real-report training
+# lists (scripts/fit_attribution_combiner.py --real-reports); run here for diagnosis only
+HEADLINE_LEVEL = {
+    "advisories": "strict",
+    "campaigns": "names",
+    "cti_hal": "names",
+    "decisive": "behavior",
+    "elastic": "strict",
+    "fresh": "strict",
+    "vendor": "strict",
+}
+
+
+def default_output(
+    pipeline: str,
+    *,
+    real_reports: bool,
+    anonymize_actors: bool,
+    report_set: str = "cti_hal",
+    anonymization: str | None = None,
+) -> Path:
     """Artifact path when ``--output`` is not given, named as the Makefile targets name it.
 
     Every mode has its own file, so a run never replaces another benchmark's artifact: a
     real-report run used to overwrite ``attribution_heldout_*`` (the ATT&CK folds, which the
     verification collector reads as the attribution gate), and a run on the statements as
-    reported must not replace the anonymized CTI-HAL headline.
+    reported must not replace the anonymized CTI-HAL headline. A report set's headline level
+    writes ``attribution_{set}_current`` (``_production``); any other level writes
+    ``attribution_{set}_{level}``, statements as reported ``attribution_{set}_as_reported``.
     """
     production = pipeline == "production"
     if not real_reports:
         name = "attribution_heldout_" + ("production" if production else "current")
-    elif anonymize_actors:
-        name = "attribution_cti_hal_" + ("production" if production else "current")
+        return REPO_ROOT / "data" / "audits" / f"{name}.json"
+    level = anonymization or ("names" if anonymize_actors else None)
+    if level == HEADLINE_LEVEL[report_set]:
+        name = f"attribution_{report_set}_" + ("production" if production else "current")
     else:
-        name = "attribution_cti_hal_as_reported" + ("_production" if production else "")
+        name = f"attribution_{report_set}_{level or 'as_reported'}" + (
+            "_production" if production else ""
+        )
     return REPO_ROOT / "data" / "audits" / f"{name}.json"
 
 
@@ -1016,11 +2138,67 @@ def main(argv: list[str] | None = None) -> int:
         help="reports.jsonl from scripts/prepare_cti_hal.py: run real-report attribution "
         "instead of the held-out ATT&CK folds (no unknown-actor arm, no evidence hiding)",
     )
-    parser.add_argument(
+    anonymize = parser.add_mutually_exclusive_group()
+    anonymize.add_argument(
         "--anonymize-actors",
         action="store_true",
         help="real-report mode: replace every ATT&CK group name and alias in the statements with "
-        '"the adversary" before analysis, as the held-out folds do (default: statements as reported)',
+        '"the adversary" before analysis, as the held-out folds do (default: statements as '
+        "reported); the same as --anonymize names",
+    )
+    anonymize.add_argument(
+        "--anonymize",
+        choices=LEVELS,
+        help="real-report mode: names (as --anonymize-actors), strict (also the report's own "
+        "attribution prose, vendor cluster names, places and sponsors), tradecraft (strict "
+        "plus ATT&CK malware names) or behavior (tradecraft plus malware names ATT&CK does not "
+        "list, evaluation only); see scripts/report_anonymizer.py",
+    )
+    parser.add_argument(
+        "--report-set",
+        choices=sorted(HEADLINE_LEVEL),
+        default="cti_hal",
+        help="which real-report set --cti-hal points at; names the artifact and the benchmark "
+        "(cti_hal: names is the headline; elastic: strict is the headline)",
+    )
+    parser.add_argument(
+        "--open-set",
+        type=Path,
+        help="real-report mode: reports whose actor is in no ATT&CK group (group_id null), "
+        "analysed like the labelled ones and reported apart under open_set",
+    )
+    parser.add_argument(
+        "--report-observations",
+        type=int,
+        help="real-report mode: statements read per report (0 = all; default: cti_hal 30, "
+        "elastic all)",
+    )
+    parser.add_argument(
+        "--report-sample-seed",
+        type=int,
+        help="with --report-observations: a seeded random sample in report order instead of "
+        "the first ones (the volume diagnostic)",
+    )
+    parser.add_argument(
+        "--store-undated",
+        choices=("none", "whole"),
+        default="none",
+        help="what an undated report's store members read: nothing (default; the development "
+        "sets) or the whole store without the report's own post and its copies (CTI-HAL)",
+    )
+    parser.add_argument(
+        "--mask-store-names",
+        action="store_true",
+        help="with --anonymize behavior: also mask every malware name the knowledge store's posts "
+        "introduce (its members artifact), in every arm (prereg knowledge_store_decisive)",
+    )
+    parser.add_argument(
+        "--weight-grid",
+        nargs="+",
+        metavar="NAME=V1,V2",
+        help="also fuse every case again for each combination of these classifiers' weights "
+        "(rows gain 'grid', metrics 'grid'); each named classifier must be loaded, i.e. voting "
+        "in the run's settings (the store members' development rule)",
     )
     parser.add_argument(
         "--allow-inactive-combiner",
@@ -1035,20 +2213,47 @@ def main(argv: list[str] | None = None) -> int:
         metavar="KEY=VALUE",
         help="override a Settings field for this run (e.g. --set technique_family_weight=2.0)",
     )
+    add_exemplar_backend_arguments(parser)
+    parser.add_argument(
+        "--simulate-software-interview",
+        choices=("enumerate",),
+        help="after each row, walk every found / not-found path of the software questions "
+        "through the real pipeline and report expected values for q in {0.1, 0.3, 1.0} and a "
+        "wrong-found rate in {0, 0.05} plus the criteria C1-C8 (docs 21.3.15); turns "
+        "INTERVIEW_SOFTWARE_QUESTIONS on unless --set says otherwise. Default: off",
+    )
     args = parser.parse_args(argv)
-    if args.anonymize_actors and args.cti_hal is None:
+    level = args.anonymize or ("names" if args.anonymize_actors else None)
+    if level is not None and args.cti_hal is None:
         parser.error("--anonymize-actors needs --cti-hal; the ATT&CK folds are always anonymized")
+    if args.cti_hal is None and (
+        args.open_set is not None
+        or args.report_observations is not None
+        or args.report_sample_seed is not None
+    ):
+        parser.error("--open-set and --report-observations need --cti-hal")
+    if args.output is None and (
+        args.report_observations is not None or args.report_sample_seed is not None
+    ):
+        # a diagnostic arm must never take the headline's file name
+        parser.error("--report-observations and --report-sample-seed need an explicit --output")
     if args.output is None:
         args.output = default_output(
             args.pipeline,
             real_reports=args.cti_hal is not None,
             anonymize_actors=args.anonymize_actors,
+            report_set=args.report_set,
+            anonymization=level,
         )
 
     try:
         overrides = pipeline_overrides(args.pipeline, args.set)
     except ValueError as error:
         parser.error(str(error))
+    overrides.update(exemplar_setting_overrides(args))
+    simulate = args.simulate_software_interview is not None
+    if simulate:
+        overrides.setdefault("interview_software_questions", True)
     settings = Settings(**overrides)
     production = args.pipeline == "production"
     client = OpenRouterClient(settings) if production else None
@@ -1056,16 +2261,56 @@ def main(argv: list[str] | None = None) -> int:
     embedder = SentenceTransformerEmbedder.from_settings(settings)
     store = ChromaVectorStore(settings, embedder)
     real_reports = args.cti_hal is not None
+    extra_names: tuple[str, ...] = ()
     actor_records: list[dict[str, Any]] = []
     actor_totals: dict[str, Any] | None = None
+    open_folds: list[Fold] = []
+    open_records: list[dict[str, Any]] = []
+    open_totals: dict[str, Any] | None = None
+    report_cap: int | None = None
     if real_reports:
-        folds = load_report_folds(args.cti_hal, max_observations=max(args.max_observations, 30))
+        if args.report_observations is not None:
+            report_cap = args.report_observations or None
+        elif args.report_set == "cti_hal":
+            report_cap = max(args.max_observations, 30)
+        dropper = ReportAnonymizer(kb, level) if level != "names" else None
+        loaded = load_report_folds(
+            args.cti_hal,
+            max_observations=report_cap,
+            anonymizer=dropper,
+            sample_seed=args.report_sample_seed,
+            kb=kb,
+        )
+        folds = [fold for fold in loaded if fold.group_id is not None]
+        open_folds = [fold for fold in loaded if fold.group_id is None]
+        if args.open_set is not None:
+            open_folds += load_report_folds(
+                args.open_set,
+                max_observations=report_cap,
+                anonymizer=dropper,
+                sample_seed=args.report_sample_seed,
+                kb=kb,
+            )
         if args.sample is not None:
             folds = sample_folds(folds, args.sample, args.seed)
         elif args.limit is not None:
             folds = folds[: args.limit]
-        if args.anonymize_actors:
-            folds, actor_records, actor_totals = anonymize_report_folds(folds, kb)
+        if args.mask_store_names:
+            if level != "behavior":
+                parser.error("--mask-store-names needs --anonymize behavior")
+            path = members_path(settings)
+            masking = StoreMembers.load(path, kb)
+            if masking is None:
+                parser.error(f"--mask-store-names: no members artifact at {path}")
+            extra_names = masking.masking_names
+        if level is not None:
+            folds, actor_records, actor_totals = anonymize_report_folds(
+                folds, kb, level=level, extra_names=extra_names
+            )
+            if open_folds:
+                open_folds, open_records, open_totals = anonymize_report_folds(
+                    open_folds, kb, level=level, extra_names=extra_names
+                )
     else:
         folds = build_folds(
             kb,
@@ -1079,6 +2324,61 @@ def main(argv: list[str] | None = None) -> int:
     if not folds:
         parser.error("no eligible groups")
     engine = AttributionEngine(settings, kb, store, client)  # type: ignore[arg-type]
+    problem = exemplar_backend_problem(engine.exemplar_index, args.require_exemplar_backend)
+    if problem:
+        print(f"refusing to run: {problem} ({engine.exemplar_status})", file=sys.stderr)
+        return 2
+    if text_group_votes(settings) and engine.text_group is None:
+        print(
+            f"refusing to run: TEXT_GROUP_WEIGHT > 0 but the text model is "
+            f"{engine.text_group_status!r} (build it with make fit-text-group)",
+            file=sys.stderr,
+        )
+        return 3
+    if behavior_text_votes(settings) and engine.behavior_text is None:
+        print(
+            f"refusing to run: BEHAVIOR_TEXT_WEIGHT > 0 but the behaviour-text member is "
+            f"{engine.behavior_text_status!r} (it reads TEXT_GROUP_PATH)",
+            file=sys.stderr,
+        )
+        return 3
+    if procedure_match_votes(settings) and engine.procedure_match is None:
+        print(
+            f"refusing to run: PROCEDURE_MATCH_WEIGHT > 0 but the procedure member is "
+            f"{engine.procedure_match_status!r} (it reads TEXT_GROUP_PATH)",
+            file=sys.stderr,
+        )
+        return 3
+    if store_members_votes(settings) and engine.store_members is None:
+        print(
+            f"refusing to run: a store member's weight is > 0 but its artifact is "
+            f"{engine.store_members_status!r} (scripts/knowledge_store.py members)",
+            file=sys.stderr,
+        )
+        return 3
+    grid = parse_weight_grid(args.weight_grid)
+    loaded = {getattr(classifier, "name", None) for classifier in engine.classifiers}
+    missing = sorted({name for weights in grid for name in weights} - loaded)
+    if missing:
+        print(
+            f"refusing to run: --weight-grid names classifiers not loaded: {missing}",
+            file=sys.stderr,
+        )
+        return 3
+    # an ATT&CK fold hides from the store members the posts ATT&CK cites for its held-out
+    # sentences (real reports hide their own post and its copies instead)
+    citations = (
+        citation_keys(settings.attack_bundle_path)
+        if engine.store_members is not None and not real_reports
+        else None
+    )
+    if nb_background_enabled(settings) and engine.nb_background is None:
+        print(
+            f"refusing to run: NAIVE_BAYES_BACKGROUND_ENABLED but the reference is "
+            f"{engine.nb_background_status!r} (build it with scripts/fit_nb_background.py)",
+            file=sys.stderr,
+        )
+        return 3
     combiner_expected = bool(getattr(settings, "attribution_combiner_enabled", False))
     if (
         combiner_expected
@@ -1095,7 +2395,14 @@ def main(argv: list[str] | None = None) -> int:
     started = time.time()
     try:
         known_rows, dropped = run_known(
-            engine, folds, hide_evidence=not real_reports, client=client
+            engine,
+            folds,
+            hide_evidence=not real_reports,
+            client=client,
+            software_interview=simulate,
+            citations=citations,
+            store_undated=args.store_undated,
+            weight_grid=grid,
         )
     except LLMUnavailableError as error:
         print(f"aborted: {error}", file=sys.stderr)
@@ -1106,6 +2413,28 @@ def main(argv: list[str] | None = None) -> int:
     # rows follow the folds in order (a truncated production run keeps a prefix)
     for row, record in zip(known_rows, actor_records, strict=False):
         row["actor_name_replacement"] = record
+    open_rows: list[dict[str, Any]] = []
+    if open_folds and not dropped.get("llm_unavailable_at"):
+        started = time.time()
+        try:
+            open_rows, open_dropped = run_known(
+                engine,
+                open_folds,
+                hide_evidence=False,
+                client=client,
+                store_undated=args.store_undated,
+                weight_grid=grid,
+            )
+        except LLMUnavailableError:
+            # credit ran out after the labelled reports: keep them, record the open set as cut
+            open_rows, open_dropped = [], {"llm_unavailable_at": "open set, first report"}
+        for key in ("technique", "behavior", "profile"):
+            dropped[key] += open_dropped.get(key, 0)
+        if open_dropped.get("llm_unavailable_at"):
+            dropped["open_set_llm_unavailable_at"] = open_dropped["llm_unavailable_at"]
+        for row, record in zip(open_rows, open_records, strict=False):
+            row["actor_name_replacement"] = record
+        known_seconds += time.time() - started
     unknown_folds = (
         []
         if real_reports
@@ -1113,12 +2442,32 @@ def main(argv: list[str] | None = None) -> int:
     )
     started = time.time()
     unknown_rows = (
-        run_unknown(settings, kb, store, unknown_folds, client=client) if unknown_folds else []
+        run_unknown(
+            settings,
+            kb,
+            store,
+            unknown_folds,
+            client=client,
+            software_interview=simulate,
+            citations=citations,
+        )
+        if unknown_folds
+        else []
     )
     if client is not None:
         client.close()
     unknown_seconds = time.time() - started
     metrics = summarize(known_rows, unknown_rows)
+    if grid:
+        metrics["grid"] = summarize_grid(grid, known_rows, open_rows)
+    if open_folds:
+        metrics["open_set"] = open_set_metrics(open_rows, known_rows)
+        if any("llm" in row for row in open_rows):
+            # the run's spend includes the open-set reports
+            metrics["llm"] = summarize(known_rows, unknown_rows + open_rows)["llm"]
+    acceptance = acceptance_identity(
+        engine.settings, engine.acceptance_model, engine.acceptance_model_status
+    )
     fingerprint_inputs = {
         "attack_version": kb.version,
         "embedding_model": settings.embedding_model,
@@ -1128,7 +2477,11 @@ def main(argv: list[str] | None = None) -> int:
         "rrf_k": settings.rrf_k,
         "thresholds": engine.attribution_thresholds.__dict__,
         "acceptance_model": engine.acceptance_model_status,
+        # the acceptance artifact actually loaded and the exemplar index it ran with
+        "acceptance_artifact": acceptance_fingerprint_inputs(acceptance),
+        "exemplar_index": _exemplar_fingerprint_inputs(engine.settings, engine.exemplar_index),
         "combiner": engine.combiner_status,
+        "combiner_artifact": _combiner_artifact(settings, engine),
         "profile_forest": {
             "status": engine.profile_forest_status,
             "fingerprint": getattr(engine.profile_forest, "fingerprint", None),
@@ -1136,6 +2489,71 @@ def main(argv: list[str] | None = None) -> int:
         },
         # the channel weights the gate window was scored with (offline replays read them)
         "discrimination_weights": dict(vars(engine.discrimination_weights)),
+        # only when the text model votes, so a default run keeps its fingerprint inputs
+        **(
+            {
+                "text_group": {
+                    "status": engine.text_group_status,
+                    "fingerprint": getattr(engine.text_group, "fingerprint", None),
+                    "runtime": getattr(engine.text_group, "runtime", None),
+                }
+            }
+            if text_group_votes(settings)
+            else {}
+        ),
+        **(
+            {
+                "behavior_text": {
+                    "status": engine.behavior_text_status,
+                    "fingerprint": getattr(engine.behavior_text, "fingerprint", None),
+                    "params": getattr(engine.behavior_text, "params", None),
+                }
+            }
+            if behavior_text_votes(settings)
+            else {}
+        ),
+        **(
+            {
+                "procedure_match": {
+                    "status": engine.procedure_match_status,
+                    "fingerprint": getattr(engine.procedure_match, "fingerprint", None),
+                    "params": getattr(engine.procedure_match, "params", None),
+                }
+            }
+            if procedure_match_votes(settings)
+            else {}
+        ),
+        # only when a store member votes, so a default run keeps its fingerprint inputs
+        **(
+            {
+                "store_members": {
+                    "status": engine.store_members_status,
+                    "pinned": bool(getattr(settings, "knowledge_store_pinned", False)),
+                    "artifacts": {
+                        str(pin): members.fingerprint
+                        for pin, members in (engine.store_members or {}).items()
+                    },
+                    "weights": engine._store_weights(),
+                }
+            }
+            if store_members_votes(settings)
+            else {}
+        ),
+        **(
+            {"mask_store_names": len(extra_names)} if real_reports and args.mask_store_names else {}
+        ),
+        **({"weight_grid": [grid_key(weights) for weights in grid]} if grid else {}),
+        # only with the Naive Bayes correction on, so a default run keeps its fingerprint inputs
+        **(
+            {
+                "nb_background": {
+                    "status": engine.nb_background_status,
+                    "fingerprint": getattr(engine.nb_background, "fingerprint", None),
+                }
+            }
+            if nb_background_enabled(settings)
+            else {}
+        ),
         # only when the network votes, so a default run keeps its fingerprint inputs
         **(
             {
@@ -1148,6 +2566,21 @@ def main(argv: list[str] | None = None) -> int:
             else {}
         ),
         "source_fingerprint": source_fingerprint(FINGERPRINTED_SOURCES),
+        # real reports: the anonymizer rules and the exact input files read
+        **(
+            {
+                "report_rules": source_fingerprint(
+                    (REPO_ROOT / "scripts" / "report_anonymizer.py",)
+                ),
+                "report_inputs": {
+                    str(path): _file_sha256(path)
+                    for path in (args.cti_hal, args.open_set)
+                    if path is not None
+                },
+            }
+            if real_reports
+            else {}
+        ),
         "platform_from_text": bool(getattr(settings, "technique_platform_from_text", False)),
         "pipeline": args.pipeline,
         "verifier_mode": str(getattr(settings, "technique_verifier_mode", "ambiguous")),
@@ -1159,7 +2592,9 @@ def main(argv: list[str] | None = None) -> int:
     }
     report = {
         "generated_at": datetime.now(UTC).isoformat(),
-        "benchmark": "attribution_cti_hal_reports" if real_reports else "attribution_text_heldout",
+        "benchmark": f"attribution_{args.report_set}_reports"
+        if real_reports
+        else "attribution_text_heldout",
         "source": str(args.cti_hal)
         if real_reports
         else "ATT&CK procedure sentences (held out per group)",
@@ -1177,23 +2612,62 @@ def main(argv: list[str] | None = None) -> int:
             "sample": args.sample,
             "limit": args.limit,
             "truncated_at": dropped.get("llm_unavailable_at"),
+            # fold evidence hidden from the dense store and the BM25 index; real reports hide nothing
+            "leak_control": (
+                "none (real reports)"
+                if real_reports
+                else LEAK_CONTROL
+                + (
+                    " (synthetic paraphrases not hidden)"
+                    if getattr(settings, "technique_include_synthetic", False)
+                    else ""
+                )
+            ),
             # the ATT&CK folds are always anonymized; real reports only with --anonymize-actors
-            "actor_names": (
-                "as_reported" if real_reports and not args.anonymize_actors else "anonymized"
+            "actor_names": ("as_reported" if real_reports and level is None else "anonymized"),
+            **(
+                {
+                    "report_set": args.report_set,
+                    "anonymization": level,
+                    # statements read per report (None = all), as applied
+                    "report_observations": report_cap,
+                    "report_sample_seed": args.report_sample_seed,
+                    "open_set": str(args.open_set) if args.open_set is not None else None,
+                    "open_set_reports": len(open_rows),
+                }
+                if real_reports
+                else {}
             ),
         },
         "pipeline_fingerprint": pipeline_fingerprint(fingerprint_inputs),
         "fingerprint_inputs": fingerprint_inputs,
+        "exemplar_status": engine.exemplar_status,
+        "acceptance_model_status": engine.acceptance_model_status,
+        "acceptance_model": acceptance,
+        "exemplars": exemplar_identity(
+            engine.settings, engine.exemplar_index, engine.exemplar_status
+        ),
         "leak_control": {
             "dropped_hits": dropped,
+            "dropped_hits_unknown": {
+                "lexical": sum(int(row.get("lexical_hidden") or 0) for row in unknown_rows)
+            },
             **({"actor_name_replacement": actor_totals} if actor_totals is not None else {}),
+            **({"open_set_actor_name_replacement": open_totals} if open_totals is not None else {}),
         },
         "runtime_seconds": {"known": round(known_seconds, 1), "unknown": round(unknown_seconds, 1)},
         "metrics": metrics,
         "known": known_rows,
         "unknown": unknown_rows,
+        **({"open_set": open_rows} if open_folds else {}),
     }
-    inactive = _inactive_combiner_rows(known_rows + unknown_rows)
+    if simulate:
+        report["software_interview"] = summarize_software_interview(
+            known_rows,
+            unknown_rows,
+            cluster_naming=bool(getattr(settings, "attribution_cluster_naming", False)),
+        )
+    inactive = _inactive_combiner_rows(known_rows + unknown_rows + open_rows)
     if combiner_expected and inactive and not args.allow_inactive_combiner:
         print(
             f"refusing to write {args.output}: the learned combiner is enabled but was inactive "
@@ -1209,6 +2683,12 @@ def main(argv: list[str] | None = None) -> int:
         )
         for key in (
             "top1",
+            "top1_count",
+            "top1_wilson95",
+            "lenient_top1",
+            "lenient_top3",
+            "top3",
+            "group_macro_top1",
             "cluster_top1",
             "top5",
             "mrr",
@@ -1234,6 +2714,38 @@ def main(argv: list[str] | None = None) -> int:
         if "llm" in metrics:
             print("  llm:", metrics["llm"])
         print("  leak-control dropped hits:", dropped)
+        if "open_set" in metrics:
+            print(
+                "  open set:",
+                {k: v for k, v in metrics["open_set"].items() if k != "leader_counts"},
+            )
+        for key, cell in (metrics.get("grid") or {}).items():
+            print(
+                f"  grid {key}: first {cell['first']}/{cell['known']}, top5 {cell['top5']}, "
+                f"names {cell['named']} ({cell['named_wrong']} wrong), open-set names "
+                f"{cell['open_set_named']}/{cell['open_set']}"
+            )
+        if actor_totals is not None and "strict" in actor_totals:
+            print("  strict masking:", actor_totals["strict"])
+        if simulate:
+            simulation = report["software_interview"]
+            print(
+                f"  software interview: {simulation['rows_asked']} rows asked, "
+                f"{simulation['questions']} questions, {simulation['leaves']} leaves"
+            )
+            for key in ("q=0.1,fp=0.0", "q=0.3,fp=0.0", "q=1.0,fp=0.0", "q=0.3,fp=0.05"):
+                item = simulation["expected"][key]
+                print(
+                    f"    {key:14s} gained {item['gained']:.2f} wrong added "
+                    f"{item['wrong_added']:.2f} lost {item['lost']:.2f} removed named "
+                    f"{item['removed_named']:.2f} hit rate {item['hit_rate']}"
+                )
+            print(
+                "    criteria: "
+                + " ".join(
+                    f"{name}={value.get('pass')}" for name, value in simulation["criteria"].items()
+                )
+            )
         if actor_totals is not None:
             print(
                 f"  actor names anonymized: {actor_totals['reports_changed']}/"
@@ -1243,6 +2755,11 @@ def main(argv: list[str] | None = None) -> int:
                 f"{actor_totals['software_matches_removed']} {actor_totals['software_ids_removed']}"
             )
         print(f"wrote {destination}")
+    problem = exemplar_backend_problem(engine.exemplar_index, args.require_exemplar_backend)
+    if problem:
+        # written (the exemplar header carries the counters) but the run fails the requirement
+        print(problem, file=sys.stderr)
+        return 2
     return 0
 
 

@@ -9,12 +9,29 @@ candidate" option. Group-level K-fold cross-validation reports out-of-fold ranki
 against the reciprocal-rank-fusion order of the same lists before the final refit.
 
     PYTHONPATH=. .venv/bin/python scripts/fit_attribution_combiner.py --seeds 11 23 37 --variants 5 --unknown-all
+
+Outputs (``--output``, ``--report`` and a ``--lists-cache`` that will be written) replace an
+existing file only with ``--overwrite``, and are written outside the repository (a worktree's
+``data/models`` symlink) only with ``--allow-shared-output``. The default (shipped) paths
+also need ``--overwrite-production``, and evaluation fold seeds are refused unless
+``--lists-only`` (lists for reports, no fit).
+
+Development report sets (``--real-reports``: vendor, campaigns, advisories) add one list per
+report and reading; their weight is chosen by group-level cross-validation within a fold margin.
+Store-built sets (``--store-reports``, prereg store_training_lists_2026-11-09: the knowledge
+store's posts published before 2025, each reading the pinned store before its own date) add known,
+open-set (null) and, with ``--store-unknown``, removed-actor lists at the strict and
+behaviour-with-store-names-masked readings; the real lists keep one fixed weight and the store
+lists' weight is chosen by a time split (``--choice-from``: posts before it train, the later ones
+are scored) within ``--store-guard-margin`` fold clean top-1 of store weight 0. A chosen store
+weight of 0 writes the report only and exits with 4.
 """
 
 from __future__ import annotations
 
 import argparse
 import copy
+import gc
 import gzip
 import importlib.util
 import json
@@ -24,6 +41,7 @@ import time
 from collections import Counter
 from collections.abc import Iterable
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -34,6 +52,7 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from apt_classifier.attack.kb import AttackKnowledgeBase  # noqa: E402
+from apt_classifier.behavior_text import behavior_text_votes  # noqa: E402
 from apt_classifier.combiner import (  # noqa: E402
     FEATURE_NAMES,
     AttributionCombiner,
@@ -43,9 +62,26 @@ from apt_classifier.combiner import (  # noqa: E402
 from apt_classifier.config import Settings  # noqa: E402
 from apt_classifier.embeddings import SentenceTransformerEmbedder  # noqa: E402
 from apt_classifier.group_mlp import precompute_draws, refit_without_groups  # noqa: E402
+from apt_classifier.knowledge_store.members import (  # noqa: E402
+    StoreMembers,
+    citation_keys,
+    members_path,
+    store_members_votes,
+)
+from apt_classifier.nb_background import nb_background_enabled  # noqa: E402
+from apt_classifier.procedure_match import procedure_match_votes  # noqa: E402
 from apt_classifier.separation import discriminate, technique_document_counts  # noqa: E402
 from apt_classifier.session import AttributionEngine  # noqa: E402
+from apt_classifier.text_group import text_group_votes  # noqa: E402
 from apt_classifier.vectorstore import ChromaVectorStore  # noqa: E402
+from scripts.run_tooling import (  # noqa: E402
+    add_exemplar_backend_arguments,
+    add_output_guard_arguments,
+    enforce_output_guard,
+    exemplar_backend_problem,
+    exemplar_setting_overrides,
+    exemplar_signature,
+)
 
 
 def _benchmark_module() -> Any:
@@ -198,6 +234,14 @@ def perturb(
     return ctx
 
 
+def lists_leak_control(records: Iterable[dict[str, Any]]) -> str:
+    """The leak control the training lists were generated under, read from the records
+    themselves (a reused cache keeps its own): lists written before 2026-10-03 carry no marker
+    and hid fold evidence from the dense store only."""
+    markers = {str(r.get("leak_control") or "dense (unrecorded)") for r in records}
+    return markers.pop() if len(markers) == 1 else "mixed: " + ", ".join(sorted(markers))
+
+
 def generate_lists(
     engine: AttributionEngine,
     bench: Any,
@@ -209,15 +253,69 @@ def generate_lists(
     limit: int | None,
     log: Any,
     regime: Regime = DEFAULT_REGIME,
+    resume: dict[str, Any] | None = None,
+    checkpoint: Any = None,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
-    """Clean and randomised lists for every training seed; returns (lists, stats)."""
+    """Clean and randomised lists for every training seed; returns (lists, stats).
+
+    ``checkpoint`` (when given) is called after every seed with ``{"records", "pool", "stats"}``;
+    ``resume`` is such a checkpoint: its seeds are not generated again and the false-positive
+    pool carries over, so a resumed run writes the lists an uninterrupted one would."""
     kb = engine.kb
     base_store = engine.store
-    records: list[dict[str, Any]] = []
-    stats: dict[str, Any] = {"seeds": {}, "pool_techniques": 0}
-    pool: dict[str, list[float]] = {}
+    base_text = getattr(engine, "text_group", None)
+    base_text_status = getattr(engine, "text_group_status", None)
+    base_behavior = getattr(engine, "behavior_text", None)
+    base_behavior_status = getattr(engine, "behavior_text_status", None)
+    base_procedure = getattr(engine, "procedure_match", None)
+    base_procedure_status = getattr(engine, "procedure_match_status", None)
+    citations = (
+        citation_keys(engine.settings.attack_bundle_path)
+        if getattr(engine, "store_members", None) is not None
+        else None
+    )
+
+    def hide_text(fold: Any) -> None:
+        # the store members read the whole store without the posts ATT&CK cites for the fold
+        bench.store_case(engine, fold, citations=citations)
+        # the text model's group documents hide the fold like the store does (cheap refit)
+        if base_text is not None:
+            engine.set_text_group(
+                base_text.without(
+                    kb,
+                    group_id=fold.group_id,
+                    techniques=fold.held_out_techniques,
+                    texts=fold.held_out_texts,
+                )
+            )
+        if base_behavior is not None:
+            engine.set_behavior_text(
+                base_behavior.without(
+                    kb,
+                    group_id=fold.group_id,
+                    techniques=fold.held_out_techniques,
+                    texts=fold.held_out_texts,
+                )
+            )
+        if base_procedure is not None:
+            engine.set_procedure_match(
+                base_procedure.without(
+                    kb,
+                    group_id=fold.group_id,
+                    techniques=fold.held_out_techniques,
+                    texts=fold.held_out_texts,
+                )
+            )
+
+    base_lexical = getattr(engine, "lexical_index", None)
+    records: list[dict[str, Any]] = list((resume or {}).get("records") or [])
+    stats: dict[str, Any] = dict((resume or {}).get("stats") or {"seeds": {}, "pool_techniques": 0})
+    pool: dict[str, list[float]] = dict((resume or {}).get("pool") or {})
     try:
         for seed in seeds:
+            if str(seed) in stats["seeds"]:
+                log(f"seed {seed}: resumed from the checkpoint")
+                continue
             folds = bench.build_folds(kb, seed=seed, limit=limit, **fold_args)
             log(f"seed {seed}: {len(folds)} folds")
             started = time.time()
@@ -229,6 +327,9 @@ def generate_lists(
                     held_out_techniques=fold.held_out_techniques,
                     held_out_texts=fold.held_out_texts,
                 )
+                hide_text(fold)
+                engine.lexical_index = base_lexical
+                bench.hide_lexical(engine, fold.held_out_texts)
                 state = engine.analyze(bench._ledger(fold))  # noqa: SLF001
                 clean_states.append((fold, state))
                 documented = _documented(kb, fold.group_id)
@@ -241,6 +342,8 @@ def generate_lists(
             rng = random.Random(seed * 1000 + 17)
             clean = randomised = skipped = 0
             for fold, state in clean_states:
+                # the variants re-score this fold's context: same hidden text model
+                hide_text(fold)
                 context = state.context
                 lst = list_from_state(
                     engine,
@@ -254,7 +357,13 @@ def generate_lists(
                     skipped += 1
                 else:
                     records.append(
-                        {"seed": seed, "group_id": fold.group_id, "variant": 0, **lst.to_dict()}
+                        {
+                            "seed": seed,
+                            "group_id": fold.group_id,
+                            "variant": 0,
+                            "leak_control": bench.LEAK_CONTROL,
+                            **lst.to_dict(),
+                        }
                     )
                     clean += 1
                 for variant in range(1, variants + 1):
@@ -271,6 +380,7 @@ def generate_lists(
                             "seed": seed,
                             "group_id": fold.group_id,
                             "variant": variant,
+                            "leak_control": bench.LEAK_CONTROL,
                             **lst.to_dict(),
                         }
                     )
@@ -283,8 +393,19 @@ def generate_lists(
                 "seconds": round(time.time() - started, 1),
             }
             log(f"seed {seed}: {clean} clean + {randomised} randomised lists, {skipped} skipped")
+            if checkpoint is not None:
+                checkpoint({"records": records, "pool": pool, "stats": stats})
     finally:
         engine.store = base_store
+        if base_text is not None:
+            engine.set_text_group(base_text, base_text_status)
+        if base_behavior is not None:
+            engine.set_behavior_text(base_behavior, base_behavior_status)
+        if base_procedure is not None:
+            engine.set_procedure_match(base_procedure, base_procedure_status)
+        engine.lexical_index = base_lexical
+        if getattr(engine, "store_members", None) is not None:
+            engine.clear_store_case()
     return records, stats
 
 
@@ -299,12 +420,22 @@ def generate_unknown_lists(
     fold_args: dict[str, Any],
     limit: int | None,
     log: Any,
+    resume: dict[str, Any] | None = None,
+    checkpoint: Any = None,
 ) -> list[dict[str, Any]]:
+    """One removed-actor list per fold of ``seed``. ``checkpoint`` (when given) is called every 25
+    folds with ``{"records", "processed"}``; ``resume`` is such a checkpoint (its folds skipped)."""
     folds = bench.build_folds(kb, seed=seed, limit=limit, **fold_args)
-    records = []
+    records = list((resume or {}).get("records") or [])
+    processed = int((resume or {}).get("processed") or 0)
+    if processed:
+        log(f"  unknown: resumed after {processed}/{len(folds)} folds")
     started = time.time()
     draws = None
+    citations = None
     for index, fold in enumerate(folds, 1):
+        if index <= processed:
+            continue
         reduced = copy.deepcopy(kb)
         del reduced.groups[fold.group_id]
         for campaign in reduced.campaigns.values():
@@ -322,6 +453,9 @@ def generate_unknown_lists(
             hide_group_entirely=True,
         )
         engine = AttributionEngine(settings, reduced, proxy, None)  # type: ignore[arg-type]
+        if nb_background_enabled(settings) and engine.nb_background is None:
+            raise RuntimeError(f"Naive Bayes background {engine.nb_background_status}")
+        bench.hide_lexical(engine, fold.held_out_texts)
         if bench._forest_votes(engine):  # noqa: SLF001
             # the shipped forest knows the removed actor; the null option must be learned from
             # a model that never saw it (same parameters and seed, GPU when available)
@@ -332,17 +466,578 @@ def generate_unknown_lists(
             if draws is None:
                 draws = precompute_draws(kb, engine.group_mlp.metadata.get("params"))
             engine.set_group_mlp(refit_without_groups(engine.group_mlp, reduced, draws))
+        if getattr(engine, "text_group", None) is not None:
+            engine.set_text_group(
+                engine.text_group.without(
+                    reduced, group_id=fold.group_id, texts=fold.held_out_texts, remove_group=True
+                )
+            )
+        if getattr(engine, "behavior_text", None) is not None:
+            engine.set_behavior_text(
+                engine.behavior_text.without(
+                    reduced, group_id=fold.group_id, texts=fold.held_out_texts, remove_group=True
+                )
+            )
+        if getattr(engine, "procedure_match", None) is not None:
+            engine.set_procedure_match(
+                engine.procedure_match.without(
+                    reduced, group_id=fold.group_id, texts=fold.held_out_texts, remove_group=True
+                )
+            )
+        if getattr(engine, "store_members", None) is not None:
+            if citations is None:
+                citations = citation_keys(settings.attack_bundle_path)
+            # the whole store without the actor and the posts ATT&CK cites for the fold
+            bench.store_case(engine, fold, citations=citations, remove_actor=True)
         state = engine.analyze(bench._ledger(fold))  # noqa: SLF001
         fusion = state.deterministic_fusion or state.fusion
-        if not fusion.entries:
-            continue
-        lst = list_from_state(
-            engine, state.classifier_results, fusion, state.context, top_n=top_n, truth=None
-        )
-        records.append({"seed": seed, "group_id": fold.group_id, "variant": -1, **lst.to_dict()})
+        if fusion.entries:
+            lst = list_from_state(
+                engine, state.classifier_results, fusion, state.context, top_n=top_n, truth=None
+            )
+            records.append(
+                {
+                    "seed": seed,
+                    "group_id": fold.group_id,
+                    "variant": -1,
+                    "leak_control": bench.LEAK_CONTROL,
+                    **lst.to_dict(),
+                }
+            )
+        # one engine (and knowledge-base copy) per fold: release it before the next one is built
+        del engine, state, reduced, proxy
+        gc.collect()
         if index % 25 == 0:
             log(f"  unknown {index}/{len(folds)} ({time.time() - started:.0f} s)")
+            if checkpoint is not None:
+                checkpoint({"records": records, "processed": index})
     return records
+
+
+@dataclass(frozen=True)
+class RealCondition:
+    """How a development report is read for its training list: the anonymization level and the
+    statement cap (``None`` = every statement). The defaults mirror the two test conditions:
+    CTI-HAL's headline (names, the first 30 statements) and Elastic's (strict, all).
+    ``behavior+store`` is the behaviour level that also masks the names the knowledge store's
+    posts introduce (the benchmark's ``--anonymize behavior --mask-store-names``)."""
+
+    level: str
+    cap: int | None
+    mask_store_names: bool = False
+
+    @classmethod
+    def parse(cls, value: str) -> RealCondition:
+        level, _, cap = value.partition(":")
+        level, plus, extra = level.partition("+")
+        if plus and (extra != "store" or level != "behavior"):
+            raise ValueError(f"{value!r}: only 'behavior+store' adds store-name masking")
+        return cls(
+            level=level, cap=None if cap in ("", "all") else int(cap), mask_store_names=bool(plus)
+        )
+
+    @property
+    def label(self) -> str:
+        level = f"{self.level}+store" if self.mask_store_names else self.level
+        return f"{level}:{self.cap if self.cap is not None else 'all'}"
+
+
+DEFAULT_REAL_CONDITIONS = (RealCondition("names", 30), RealCondition("strict", None))
+# the store posts' two readings (prereg store_training_lists_2026-11-09): every statement at strict,
+# and at the behaviour level with the store's own names masked
+DEFAULT_STORE_CONDITIONS = (
+    RealCondition("strict", None),
+    RealCondition("behavior", None, mask_store_names=True),
+)
+
+
+def load_real_folds(
+    bench: Any,
+    kb: AttackKnowledgeBase,
+    path: Path,
+    condition: RealCondition,
+    *,
+    extra_names: tuple[str, ...] = (),
+    open_set: bool = False,
+) -> list[Any]:
+    """A development report set read under one condition (as the benchmark reads it): the
+    reports of a documented group, or with ``open_set`` those whose actor is in no ATT&CK group.
+    Every level but ``names`` drops the report's own attribution prose first; ``extra_names``
+    (the store's names, for ``behavior+store``) are masked with the actor names."""
+    from scripts.report_anonymizer import ReportAnonymizer
+
+    if condition.mask_store_names and not extra_names:
+        raise ValueError(f"{condition.label} needs the store's masking names")
+    dropper = ReportAnonymizer(kb, condition.level) if condition.level != "names" else None
+    folds = bench.load_report_folds(path, max_observations=condition.cap, anonymizer=dropper, kb=kb)
+    folds = [
+        fold
+        for fold in folds
+        if (fold.group_id is None if open_set else fold.group_id in kb.groups)
+    ]
+    folds, _, _ = bench.anonymize_report_folds(
+        folds,
+        kb,
+        level=condition.level,
+        extra_names=extra_names if condition.mask_store_names else (),
+    )
+    return folds
+
+
+def _hide_members(engine: AttributionEngine, kb: Any, fold: Any, *, remove_group: bool) -> None:
+    """The text-based members without the report's cited / copied texts (and, for the unknown
+    arm, without the actor)."""
+    texts = frozenset(fold.hidden_raw)
+    for attribute, setter in (
+        ("text_group", engine.set_text_group),
+        ("behavior_text", engine.set_behavior_text),
+        ("procedure_match", engine.set_procedure_match),
+    ):
+        member = getattr(engine, attribute, None)
+        if member is not None:
+            setter(
+                member.without(kb, group_id=fold.group_id, texts=texts, remove_group=remove_group)
+            )
+
+
+class _FullEngineCases:
+    """Runs reports through the full engine one at a time: each hides the ATT&CK texts that cite
+    or copy it (dense, lexical and text-based members, restored before the next report) and its
+    campaign, and reads the knowledge store as its date allows. ``restore`` puts the engine
+    back."""
+
+    MEMBERS = ("text_group", "behavior_text", "procedure_match")
+
+    def __init__(self, engine: AttributionEngine, kb: AttackKnowledgeBase, bench: Any) -> None:
+        self.engine, self.kb, self.bench = engine, kb, bench
+        self.base_store = engine.store
+        self.base_lexical = getattr(engine, "lexical_index", None)
+        self.saved = {
+            name: (getattr(engine, name, None), getattr(engine, f"{name}_status", None))
+            for name in self.MEMBERS
+        }
+        self.setters = {name: getattr(engine, f"set_{name}") for name in self.MEMBERS}
+
+    def run(
+        self, fold: Any, *, top_n: int, truth: str | None
+    ) -> tuple[CombinerList, dict[str, int]]:
+        """One report's list (``truth`` its group, or None for an open-set report) and what was
+        hidden from the indexes for it."""
+        engine, bench = self.engine, self.bench
+        for name, (member, status) in self.saved.items():
+            if member is not None:
+                self.setters[name](member, status)
+        _hide_members(engine, self.kb, fold, remove_group=False)
+        engine.lexical_index = self.base_lexical
+        lexical = bench.hide_lexical(engine, fold.hidden_texts) or 0
+        proxy = bench.FoldStore(
+            self.base_store,
+            group_id=fold.group_id,
+            held_out_techniques=frozenset(),
+            held_out_texts=fold.hidden_texts,
+            any_group_texts=fold.hidden_texts,
+        )
+        engine.store = proxy
+        # a dated report's store members read the store before its date; an undated one
+        # (campaigns, advisories) reads none of it
+        bench.store_case(engine, fold)
+        with bench.hidden_campaign(engine.kb, fold.hidden_campaign):
+            state = engine.analyze(bench._ledger(fold))  # noqa: SLF001
+            lst = list_from_state(
+                engine,
+                state.classifier_results,
+                state.deterministic_fusion or state.fusion,
+                state.context,
+                top_n=top_n,
+                truth=truth,
+            )
+        return lst, {**proxy.dropped, "lexical": lexical}
+
+    def restore(self) -> None:
+        engine = self.engine
+        engine.store = self.base_store
+        engine.lexical_index = self.base_lexical
+        for name, (member, status) in self.saved.items():
+            if member is not None:
+                self.setters[name](member, status)
+        if getattr(engine, "store_members", None) is not None:
+            engine.clear_store_case()
+
+
+def _release_gpu() -> None:
+    # each removed-actor engine refits the forest on the GPU next to the technique head
+    import torch
+
+    gc.collect()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+
+
+def _removed_actor_engine(
+    settings: Settings, kb: AttackKnowledgeBase, store: Any, bench: Any, fold: Any
+) -> tuple[AttributionEngine, AttackKnowledgeBase]:
+    """An engine on the knowledge base without the report's group (its campaigns' and software's
+    links too), its learned members refitted or reduced without it, the report's cited or copied
+    texts hidden and the store read before the report's date without the actor."""
+    reduced = copy.deepcopy(kb)
+    del reduced.groups[fold.group_id]
+    for campaign in reduced.campaigns.values():
+        if fold.group_id in getattr(campaign, "group_ids", []):
+            campaign.group_ids = [g for g in campaign.group_ids if g != fold.group_id]
+    for software in reduced.software.values():
+        if fold.group_id in getattr(software, "group_ids", []):
+            software.group_ids = [g for g in software.group_ids if g != fold.group_id]
+    reduced.recompute_statistics()
+    proxy = bench.FoldStore(
+        store,
+        group_id=fold.group_id,
+        held_out_techniques=frozenset(),
+        held_out_texts=fold.hidden_texts,
+        hide_group_entirely=True,
+        any_group_texts=fold.hidden_texts,
+    )
+    reduced_engine = AttributionEngine(settings, reduced, proxy, None)  # type: ignore[arg-type]
+    if nb_background_enabled(settings) and reduced_engine.nb_background is None:
+        raise RuntimeError(f"Naive Bayes background {reduced_engine.nb_background_status}")
+    bench.hide_lexical(reduced_engine, fold.hidden_texts)
+    if bench._forest_votes(reduced_engine):  # noqa: SLF001
+        reduced_engine.set_profile_forest(
+            bench._refit_forest_without_actor(reduced_engine, reduced)  # noqa: SLF001
+        )
+    if getattr(reduced_engine, "group_mlp", None) is not None:
+        reduced_engine.set_group_mlp(refit_without_groups(reduced_engine.group_mlp, reduced))
+    _hide_members(reduced_engine, reduced, fold, remove_group=True)
+    bench.store_case(reduced_engine, fold, remove_actor=True)
+    return reduced_engine, reduced
+
+
+def _removed_actor_list(
+    reduced_engine: AttributionEngine,
+    reduced: AttackKnowledgeBase,
+    bench: Any,
+    fold: Any,
+    top_n: int,
+) -> CombinerList | None:
+    """The removed-actor list of one reading of a report (None when nothing was fused)."""
+    with bench.hidden_campaign(reduced, fold.hidden_campaign):
+        state = reduced_engine.analyze(bench._ledger(fold))  # noqa: SLF001
+        fusion = state.deterministic_fusion or state.fusion
+        if not fusion.entries:
+            return None
+        return list_from_state(
+            reduced_engine,
+            state.classifier_results,
+            fusion,
+            state.context,
+            top_n=top_n,
+            truth=None,
+        )
+
+
+def _known_real_lists(
+    engine: AttributionEngine,
+    kb: AttackKnowledgeBase,
+    bench: Any,
+    sets: dict[str, Path],
+    conditions: list[RealCondition],
+    top_n: int,
+    log: Any,
+    records: list[dict[str, Any]],
+    stats: dict[str, Any],
+    skip: frozenset[tuple[str, str]] = frozenset(),
+    on_done: Any = None,
+) -> None:
+    cases = _FullEngineCases(engine, kb, bench)
+    try:
+        for set_name, path in sets.items():
+            for variant, condition in enumerate(conditions):
+                if (set_name, condition.label) in skip:
+                    continue
+                folds = load_real_folds(bench, kb, path, condition)
+                started = time.time()
+                outside = 0
+                hidden = {"technique": 0, "behavior": 0, "profile": 0, "lexical": 0}
+                for fold in folds:
+                    lst, dropped = cases.run(fold, top_n=top_n, truth=fold.group_id)
+                    outside += lst.truth_index is None
+                    for key, value in dropped.items():
+                        hidden[key] += value
+                    records.append(
+                        {
+                            "seed": None,
+                            "group_id": fold.group_id,
+                            "variant": variant,
+                            "source": f"real:{set_name}",
+                            "condition": condition.label,
+                            "report_id": fold.report_id,
+                            "leak_control": "dense+lexical+members (cited/copied texts)",
+                            **lst.to_dict(),
+                        }
+                    )
+                stats["sets"].setdefault(set_name, {})[condition.label] = {
+                    "reports": len(folds),
+                    "truth_outside_top_n": outside,
+                    "hidden_hits": hidden,
+                    "seconds": round(time.time() - started, 1),
+                }
+                log(
+                    f"real {set_name} {condition.label}: {len(folds)} lists, truth outside the "
+                    f"top {top_n} in {outside}; hidden hits {hidden}"
+                )
+                if on_done is not None:
+                    on_done(records)
+    finally:
+        cases.restore()
+
+
+def generate_real_lists(
+    engine: AttributionEngine | None,
+    settings: Settings,
+    kb: AttackKnowledgeBase,
+    store: ChromaVectorStore,
+    bench: Any,
+    *,
+    sets: dict[str, Path],
+    conditions: Iterable[RealCondition],
+    unknown: bool,
+    top_n: int,
+    log: Any,
+    known: bool = True,
+    skip_known: frozenset[tuple[str, str]] = frozenset(),
+    skip_unknown: frozenset[str] = frozenset(),
+    on_done: Any = None,
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    """One list per development report and condition (truth = its group; skipped without
+    ``known``), plus, with ``unknown``, one removed-actor list per report under the first
+    condition (truth = None).
+    Each report hides the ATT&CK texts that cite or copy it and its own statements (the
+    benchmark's development-set rule); a campaign report also hides its campaign. ``on_done``
+    is called with the lists so far after every set and condition (a checkpoint); the
+    ``skip_*`` pairs and sets were done by an earlier run."""
+    conditions = list(conditions)
+    records: list[dict[str, Any]] = []
+    stats: dict[str, Any] = {"sets": {}, "conditions": [c.label for c in conditions]}
+    if known:
+        assert engine is not None, "the known lists need the engine"
+        _known_real_lists(
+            engine, kb, bench, sets, conditions, top_n, log, records, stats, skip_known, on_done
+        )
+    if unknown:
+        _release_gpu()
+        unknown_count = 0
+        for set_name, path in sets.items():
+            if set_name in skip_unknown:
+                continue
+            folds = load_real_folds(bench, kb, path, conditions[0])
+            started = time.time()
+            for fold in folds:
+                _release_gpu()
+                reduced_engine, reduced = _removed_actor_engine(settings, kb, store, bench, fold)
+                lst = _removed_actor_list(reduced_engine, reduced, bench, fold, top_n)
+                if lst is None:
+                    continue
+                unknown_count += 1
+                records.append(
+                    {
+                        "seed": None,
+                        "group_id": fold.group_id,
+                        "variant": -1,
+                        "source": f"real:{set_name}",
+                        "condition": conditions[0].label,
+                        "report_id": fold.report_id,
+                        "leak_control": "dense+lexical+members (cited/copied texts), actor removed",
+                        **lst.to_dict(),
+                    }
+                )
+                del reduced_engine, reduced
+            log(f"real {set_name} unknown: {len(folds)} reports ({time.time() - started:.0f} s)")
+            if on_done is not None:
+                on_done(records)
+        stats["unknown_lists"] = unknown_count
+    return records, stats
+
+
+# the decisive test's window opens on this day (prereg knowledge_store_decisive_2026-11-04): no
+# store post published on or after it is ever a training list
+DECISIVE_WINDOW_START = "2025-01-01"
+
+
+def load_store_rows(path: Path, *, before: str = DECISIVE_WINDOW_START) -> list[dict[str, Any]]:
+    """A store-built report set's rows, refused unless every post is dated before ``before`` and
+    carries the ATT&CK texts that copy it (``scripts/refresh_hidden_texts.py``)."""
+    rows = [
+        json.loads(line)
+        for line in Path(path).read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    for row in rows:
+        published = str(row.get("published") or "")[:10]
+        if not published or published >= before:
+            raise ValueError(
+                f"{path}: {row.get('report_id')} is dated {published or 'nowhere'}; store "
+                f"training posts must be published before {before}"
+            )
+        if "hidden_texts" not in row:
+            raise ValueError(
+                f"{path}: {row.get('report_id')} has no hidden_texts (run "
+                "scripts/refresh_hidden_texts.py on the set first)"
+            )
+    return rows
+
+
+def generate_store_lists(
+    engine: AttributionEngine | None,
+    settings: Settings,
+    kb: AttackKnowledgeBase,
+    store: Any,
+    bench: Any,
+    *,
+    sets: dict[str, Path],
+    conditions: Iterable[RealCondition],
+    unknown: bool,
+    top_n: int,
+    log: Any,
+    extra_names: tuple[str, ...] = (),
+    known: bool = True,
+    done: frozenset[tuple[str, str, str]] = frozenset(),
+    on_done: Any = None,
+    checkpoint_every: int = 25,
+) -> list[dict[str, Any]]:
+    """Training lists from the knowledge store's dated posts (prereg
+    store_training_lists_2026-11-09), every post under every reading: a known list (``arm``
+    "known", truth = its group) or, for an open-set post, a null list ("open", truth None), and
+    with ``unknown`` a removed-actor list per known post ("removed", truth None; one reduced
+    engine serves all readings of a post). Each post reads the store before its own date without
+    its own post and copies (with the actor dropped in the removed arm) and hides the ATT&CK
+    texts that copy it. Records carry the post's ``published`` date (the weight choice's time
+    split) and, for open-set posts, ``open:<actor>`` as the group the cross-validation splits
+    on. ``done`` holds the (report_id, condition, arm) of a resumed cache; ``on_done`` gets the
+    new records every ``checkpoint_every`` lists and at the end of each pass."""
+    conditions = list(conditions)
+    meta = {
+        str(row.get("report_id")): row for path in sets.values() for row in load_store_rows(path)
+    }
+    records: list[dict[str, Any]] = []
+    pending = 0
+
+    def add(set_name: str, condition: RealCondition, fold: Any, arm: str, lst: Any) -> None:
+        nonlocal pending
+        row = meta.get(fold.report_id, {})
+        records.append(
+            {
+                "seed": None,
+                "group_id": fold.group_id or f"open:{row.get('actor') or fold.report_id}",
+                "variant": -1 if arm != "known" else conditions.index(condition),
+                "source": f"store:{set_name}",
+                "condition": condition.label,
+                "arm": arm,
+                "report_id": fold.report_id,
+                "published": str(row.get("published") or "")[:10],
+                "leak_control": "dense+lexical+members (copied texts), store before its date"
+                + (", actor removed" if arm == "removed" else ""),
+                **lst.to_dict(),
+            }
+        )
+        pending += 1
+        if on_done is not None and pending >= checkpoint_every:
+            on_done(records)
+            pending = 0
+
+    def flush() -> None:
+        nonlocal pending
+        if on_done is not None and pending:
+            on_done(records)
+        pending = 0
+
+    if known:
+        assert engine is not None, "the known and open-set lists need the engine"
+        cases = _FullEngineCases(engine, kb, bench)
+        try:
+            for set_name, path in sets.items():
+                for condition in conditions:
+                    for arm in ("known", "open"):
+                        folds = load_real_folds(
+                            bench,
+                            kb,
+                            path,
+                            condition,
+                            extra_names=extra_names,
+                            open_set=arm == "open",
+                        )
+                        started, count = time.time(), 0
+                        for fold in folds:
+                            if (fold.report_id, condition.label, arm) in done:
+                                continue
+                            lst, _ = cases.run(fold, top_n=top_n, truth=fold.group_id)
+                            add(set_name, condition, fold, arm, lst)
+                            count += 1
+                        if folds:
+                            log(
+                                f"store {set_name} {condition.label} {arm}: {count} new of "
+                                f"{len(folds)} posts ({time.time() - started:.0f} s)"
+                            )
+            flush()
+        finally:
+            cases.restore()
+    if unknown:
+        _release_gpu()
+        for set_name, path in sets.items():
+            readings = [
+                (
+                    condition,
+                    {
+                        f.report_id: f
+                        for f in load_real_folds(
+                            bench, kb, path, condition, extra_names=extra_names
+                        )
+                    },
+                )
+                for condition in conditions
+            ]
+            ids = list(dict.fromkeys(rid for _, folds in readings for rid in folds))
+            started, count = time.time(), 0
+            for report_id in ids:
+                todo = [
+                    (condition, folds[report_id])
+                    for condition, folds in readings
+                    if report_id in folds and (report_id, condition.label, "removed") not in done
+                ]
+                if not todo:
+                    continue
+                _release_gpu()
+                reduced_engine, reduced = _removed_actor_engine(
+                    settings, kb, store, bench, todo[0][1]
+                )
+                for condition, fold in todo:
+                    lst = _removed_actor_list(reduced_engine, reduced, bench, fold, top_n)
+                    if lst is not None:
+                        add(set_name, condition, fold, "removed", lst)
+                        count += 1
+                del reduced_engine, reduced
+            log(
+                f"store {set_name} removed-actor: {count} new lists over {len(ids)} posts "
+                f"({time.time() - started:.0f} s)"
+            )
+            flush()
+    return records
+
+
+def is_real(record: dict[str, Any]) -> bool:
+    return str(record.get("source") or "").startswith("real:")
+
+
+def is_store(record: dict[str, Any]) -> bool:
+    return str(record.get("source") or "").startswith("store:")
+
+
+def is_fold(record: dict[str, Any]) -> bool:
+    """An ATT&CK fold list (clean, randomised or removed-actor), not a report's."""
+    return not is_real(record) and not is_store(record)
+
+
+def trainable(record: dict[str, Any]) -> bool:
+    """A list the fit can use: the unknown arm, or a known list whose truth is in it."""
+    return record.get("truth") is None or record["truth"] in record.get("group_ids", [])
 
 
 # ----------------------------------------------------------------------------- evaluation
@@ -407,30 +1102,216 @@ def cross_validate(
     null_option: bool,
     seed: int,
     log: Any,
+    real_weights: Iterable[int] = (0,),
+    fold_top1_margin: float = 0.01,
 ) -> dict[str, Any]:
-    """Group-level K-fold: every list of a group (clean, randomised, unknown) sits in one split."""
-    groups = sorted({r["group_id"] for r in records})
+    """Group-level K-fold: every list of a group (clean, randomised, unknown, real) sits in one
+    split. Without real-report lists the l2 with the best mixed fold MRR is chosen (as before).
+    With them, each (real weight, l2) is scored out of fold; the reference is the fold clean
+    top-1 of weight 0 at its best-mixed-MRR l2, and among the points whose fold clean top-1 is
+    within ``fold_top1_margin`` of it the best real-report MRR wins (ties: the smaller weight,
+    then the larger l2)."""
+    usable = [r for r in records if trainable(r)]
+    has_real = any(is_real(r) for r in usable)
+    weights = sorted({int(w) for w in real_weights}) if has_real else [0]
+    groups = sorted({r["group_id"] for r in usable})
     rng = random.Random(seed)
     rng.shuffle(groups)
     split_of = {g: i % folds for i, g in enumerate(groups)}
     report: dict[str, Any] = {"folds": folds, "groups": len(groups), "grid": {}}
-    best_l2 = l2_grid[0]
-    best_mrr = -1.0
-    for l2 in l2_grid:
-        metrics = _cv_metrics(records, split_of, folds, l2, null_option)
-        report["grid"][str(l2)] = metrics
-        log(
-            f"l2={l2}: clean top1 {metrics['combiner']['clean']['top1']:.3f} "
-            f"(rrf {metrics['rrf']['clean']['top1']:.3f}), randomised top1 "
-            f"{metrics['combiner']['randomised']['top1']:.3f} "
-            f"(rrf {metrics['rrf']['randomised']['top1']:.3f}), mixed mrr "
-            f"{metrics['combiner']['mixed']['mrr']:.3f} (rrf {metrics['rrf']['mixed']['mrr']:.3f}), "
-            f"leader auc {metrics['calibration']['auc']:.3f}"
+    entries: list[tuple[int, float, dict[str, Any]]] = []
+    for weight in weights:
+        for l2 in l2_grid:
+            metrics = _cv_metrics(usable, split_of, folds, l2, null_option, real_weight=weight)
+            key = f"w{weight}_l2{l2}" if has_real else str(l2)
+            report["grid"][key] = metrics
+            entries.append((weight, l2, metrics))
+            real = metrics["combiner"].get("real")
+            log(
+                f"w={weight} l2={l2}: clean top1 {metrics['combiner']['clean']['top1']:.3f} "
+                f"(rrf {metrics['rrf']['clean']['top1']:.3f}), randomised top1 "
+                f"{metrics['combiner']['randomised']['top1']:.3f}, mixed mrr "
+                f"{metrics['combiner']['mixed']['mrr']:.3f} (rrf {metrics['rrf']['mixed']['mrr']:.3f})"
+                + (
+                    f", real top1 {real['top1']:.3f} mrr {real['mrr']:.3f} "
+                    f"(rrf {metrics['rrf']['real']['top1']:.3f}/{metrics['rrf']['real']['mrr']:.3f})"
+                    if real
+                    else ""
+                )
+                + f", leader auc {metrics['calibration']['auc']:.3f}"
+            )
+    base = max((e for e in entries if e[0] == 0), key=lambda e: e[2]["combiner"]["mixed"]["mrr"])
+    if not has_real:
+        report["chosen_l2"] = base[1]
+        report["chosen_real_weight"] = 0
+        return report
+    reference = base[2]["combiner"]["clean"]["top1"]
+    eligible = [
+        e for e in entries if e[2]["combiner"]["clean"]["top1"] >= reference - fold_top1_margin
+    ]
+    chosen = max(eligible, key=lambda e: (e[2]["combiner"]["real"]["mrr"], -e[0], e[1]))
+    report["selection"] = {
+        "rule": "best real-report MRR among points within the fold clean top-1 margin of weight 0",
+        "reference": {"real_weight": 0, "l2": base[1], "clean_top1": reference},
+        "margin": fold_top1_margin,
+        "eligible": [f"w{e[0]}_l2{e[1]}" for e in eligible],
+    }
+    report["chosen_l2"] = chosen[1]
+    report["chosen_real_weight"] = chosen[0]
+    return report
+
+
+def _time_split_scores(
+    model: AttributionCombiner, items: list[tuple[str, CombinerList]]
+) -> dict[str, dict[str, float]]:
+    """Per reading: how many of the held-out posts the model puts first, mean reciprocal rank
+    and count. A post whose group is outside its list counts as a miss (rank 0)."""
+    out: dict[str, dict[str, float]] = {}
+    for condition, lst in items:
+        cell = out.setdefault(condition, {"first": 0, "mrr": 0.0, "count": 0})
+        cell["count"] += 1
+        if lst.truth is None or lst.truth not in lst.group_ids:
+            continue
+        probabilities, _ = model.probabilities(lst)
+        ordered = sorted(
+            lst.group_ids, key=lambda g: (-probabilities.get(g, 0.0), lst.group_ids.index(g))
         )
-        if metrics["combiner"]["mixed"]["mrr"] > best_mrr:
-            best_mrr = metrics["combiner"]["mixed"]["mrr"]
-            best_l2 = l2
-    report["chosen_l2"] = best_l2
+        rank = ordered.index(lst.truth) + 1
+        cell["first"] += rank == 1
+        cell["mrr"] += 1.0 / rank
+    for cell in out.values():
+        cell["mrr"] = cell["mrr"] / cell["count"] if cell["count"] else 0.0
+    return out
+
+
+def select_store_weight(
+    records: list[dict[str, Any]],
+    *,
+    folds: int,
+    l2_grid: list[float],
+    null_option: bool,
+    seed: int,
+    log: Any,
+    real_weight: int,
+    store_weights: Iterable[int],
+    choice_from: str,
+    guard_margin: float = 0.02,
+    choice_condition: str = "behavior+store:all",
+    tie_condition: str = "strict:all",
+) -> dict[str, Any]:
+    """The store lists' weight by a time split (prereg store_training_lists_2026-11-09): per
+    (store weight, l2) a combiner fitted on the fold lists, the real-report lists at their fixed
+    ``real_weight`` and the store lists of posts published before ``choice_from`` (times the
+    store weight) is scored on the known lists of the later store posts. Most later posts first
+    at ``choice_condition`` wins; ties go to ``tie_condition`` first places, then the
+    ``choice_condition`` MRR, the smaller store weight, the larger l2. Guard: the point's fold
+    clean top-1 (group-level cross-validation with every store list in training, as now) is at
+    most ``guard_margin`` below store weight 0 at its best mixed fold MRR l2. A chosen weight of
+    0 means the store lists do not help (the step stops)."""
+    if guard_margin < 0:
+        raise ValueError("the guard margin is a loss allowance (>= 0)")
+    usable = [r for r in records if trainable(r)]
+    weights = sorted({int(w) for w in store_weights} | {0})
+    groups = sorted({r["group_id"] for r in usable})
+    rng = random.Random(seed)
+    rng.shuffle(groups)
+    split_of = {g: i % folds for i, g in enumerate(groups)}
+    base = [CombinerList.from_dict(r) for r in usable if is_fold(r)]
+    base += [CombinerList.from_dict(r) for r in usable if is_real(r)] * real_weight
+    early = [
+        CombinerList.from_dict(r)
+        for r in usable
+        if is_store(r) and str(r.get("published") or "") < choice_from
+    ]
+    later = [
+        (str(r.get("condition")), CombinerList.from_dict(r))
+        for r in records
+        if is_store(r) and r.get("arm") == "known" and str(r.get("published") or "") >= choice_from
+    ]
+    if not later:
+        raise ValueError(f"no known store post published on or after {choice_from}")
+    report: dict[str, Any] = {
+        "folds": folds,
+        "groups": len(groups),
+        "real_weight": real_weight,
+        "choice_from": choice_from,
+        "store_lists_before": len(early),
+        "store_known_posts_scored": dict(Counter(condition for condition, _ in later)),
+        "grid": {},
+    }
+    points: list[dict[str, Any]] = []
+    for weight in weights:
+        for l2 in l2_grid:
+            metrics = _cv_metrics(
+                usable,
+                split_of,
+                folds,
+                l2,
+                null_option,
+                real_weight=real_weight,
+                store_weight=weight,
+            )
+            model = AttributionCombiner.fit(
+                base + early * weight,
+                attack_version="cv",
+                pipeline_fingerprint="cv",
+                l2=l2,
+                null_option=null_option,
+            )
+            later_scores = _time_split_scores(model, later)
+            key = f"s{weight}_l2{l2}"
+            report["grid"][key] = {**metrics, "time_split": later_scores}
+            point = {
+                "key": key,
+                "store_weight": weight,
+                "l2": l2,
+                "clean_top1": metrics["combiner"]["clean"]["top1"],
+                "mixed_mrr": metrics["combiner"]["mixed"]["mrr"],
+                "scores": later_scores,
+            }
+            points.append(point)
+            empty = {"first": 0, "mrr": 0.0, "count": 0}
+            choice = later_scores.get(choice_condition, empty)
+            tie = later_scores.get(tie_condition, empty)
+            log(
+                f"store w={weight} l2={l2}: fold clean top1 {point['clean_top1']:.3f}, later "
+                f"posts first {choice['first']}/{choice['count']} ({choice_condition}), "
+                f"{tie['first']}/{tie['count']} ({tie_condition}), mrr {choice['mrr']:.3f}"
+            )
+
+    def score(point: dict[str, Any], condition: str, field: str) -> float:
+        return float(point["scores"].get(condition, {}).get(field, 0))
+
+    reference = max((p for p in points if p["store_weight"] == 0), key=lambda p: p["mixed_mrr"])
+    eligible = [p for p in points if p["clean_top1"] >= reference["clean_top1"] - guard_margin]
+    chosen = max(
+        eligible,
+        key=lambda p: (
+            score(p, choice_condition, "first"),
+            score(p, tie_condition, "first"),
+            score(p, choice_condition, "mrr"),
+            -p["store_weight"],
+            p["l2"],
+        ),
+    )
+    report["selection"] = {
+        "rule": (
+            f"most store posts from {choice_from} first at {choice_condition} (ties: "
+            f"{tie_condition} first, {choice_condition} MRR, smaller weight, larger l2) among "
+            f"points within {guard_margin} fold clean top-1 of store weight 0"
+        ),
+        "reference": {
+            "store_weight": 0,
+            "l2": reference["l2"],
+            "clean_top1": reference["clean_top1"],
+        },
+        "margin": guard_margin,
+        "eligible": [p["key"] for p in eligible],
+        "chosen": chosen["key"],
+    }
+    report["chosen_l2"] = chosen["l2"]
+    report["chosen_real_weight"] = real_weight
+    report["chosen_store_weight"] = chosen["store_weight"]
     return report
 
 
@@ -440,14 +1321,32 @@ def _cv_metrics(
     folds: int,
     l2: float,
     null_option: bool,
+    *,
+    real_weight: int = 0,
+    store_weight: int = 0,
 ) -> dict[str, Any]:
-    combiner_lists: dict[str, list[tuple[CombinerList, AttributionCombiner]]] = {
+    buckets: dict[str, list[tuple[CombinerList, AttributionCombiner]]] = {
         "clean": [],
         "randomised": [],
     }
+    real_buckets: dict[str, list[tuple[CombinerList, AttributionCombiner]]] = {}
     null_pairs: list[tuple[float, float]] = []
+    real_null_pairs: list[tuple[float, float]] = []
+    store_null_pairs: list[tuple[float, float]] = []
     for split in range(folds):
-        train = [CombinerList.from_dict(r) for r in records if split_of[r["group_id"]] != split]
+        train = [
+            CombinerList.from_dict(r)
+            for r in records
+            if split_of[r["group_id"]] != split and is_fold(r)
+        ]
+        for weight, kind in ((real_weight, is_real), (store_weight, is_store)):
+            if weight:
+                extra = [
+                    CombinerList.from_dict(r)
+                    for r in records
+                    if split_of[r["group_id"]] != split and kind(r)
+                ]
+                train += extra * weight
         model = AttributionCombiner.fit(
             train, attack_version="cv", pipeline_fingerprint="cv", l2=l2, null_option=null_option
         )
@@ -455,16 +1354,40 @@ def _cv_metrics(
             if split_of[record["group_id"]] != split:
                 continue
             lst = CombinerList.from_dict(record)
+            if is_store(record):
+                # store posts: their own buckets and null pairs, never the fold or real metrics
+                null = float(model.probabilities(lst)[1] or 0.0) if null_option else None
+                if record["variant"] == -1:
+                    if null is not None:
+                        store_null_pairs.append((null, 1.0))
+                    continue
+                for key in ("store", f"store {record.get('condition')}"):
+                    real_buckets.setdefault(key, []).append((lst, model))
+                if null is not None:
+                    store_null_pairs.append((null, 0.0))
+                continue
+            real = is_real(record)
             if record["variant"] == -1:
                 if null_option:
-                    null_pairs.append((float(model.probabilities(lst)[1] or 0.0), 1.0))
+                    pair = (float(model.probabilities(lst)[1] or 0.0), 1.0)
+                    (real_null_pairs if real else null_pairs).append(pair)
+                continue
+            if real:
+                for key in (
+                    "real",
+                    f"real {record.get('condition')}",
+                    f"real {str(record['source']).removeprefix('real:')}",
+                ):
+                    real_buckets.setdefault(key, []).append((lst, model))
+                if null_option:
+                    real_null_pairs.append((float(model.probabilities(lst)[1] or 0.0), 0.0))
                 continue
             bucket = "clean" if record["variant"] == 0 else "randomised"
-            combiner_lists[bucket].append((lst, model))
+            buckets[bucket].append((lst, model))
             if null_option:
                 null_pairs.append((float(model.probabilities(lst)[1] or 0.0), 0.0))
 
-    def scored(items: list[tuple[CombinerList, AttributionCombiner]]) -> dict[str, float]:
+    def scored(items: list[tuple[CombinerList, AttributionCombiner]]) -> dict[str, Any]:
         hits1 = hits5 = 0
         reciprocal = 0.0
         pairs = []
@@ -488,10 +1411,25 @@ def _cv_metrics(
             "_pairs": pairs,
         }
 
-    out: dict[str, Any] = {"combiner": {}, "rrf": {}, "l2": l2}
+    def auc(pairs: list[tuple[float, float]]) -> float:
+        pos = [p for p, y in pairs if y > 0]
+        neg = [p for p, y in pairs if y == 0]
+        if not pos or not neg:
+            return 0.0
+        return sum(1.0 if p > q else 0.5 if p == q else 0.0 for p in pos for q in neg) / (
+            len(pos) * len(neg)
+        )
+
+    out: dict[str, Any] = {
+        "combiner": {},
+        "rrf": {},
+        "l2": l2,
+        "real_weight": real_weight,
+        **({"store_weight": store_weight} if store_weight else {}),
+    }
     all_pairs: list[tuple[float, float]] = []
     mixed_items: list[tuple[CombinerList, AttributionCombiner]] = []
-    for bucket, items in combiner_lists.items():
+    for bucket, items in buckets.items():
         result = scored(items)
         all_pairs += result.pop("_pairs")
         out["combiner"][bucket] = result
@@ -501,39 +1439,60 @@ def _cv_metrics(
     mixed.pop("_pairs")
     out["combiner"]["mixed"] = mixed
     out["rrf"]["mixed"] = _rank_metrics([lst for lst, _ in mixed_items], None)
-    positives = [p for p, y in all_pairs if y > 0]
-    negatives = [p for p, y in all_pairs if y == 0]
+    real_pairs: list[tuple[float, float]] = []
+    for bucket, items in sorted(real_buckets.items()):
+        result = scored(items)
+        pairs = result.pop("_pairs")
+        if bucket == "real":
+            real_pairs = pairs
+        out["combiner"][bucket] = result
+        out["rrf"][bucket] = _rank_metrics([lst for lst, _ in items], None)
     brier = float(np.mean([(p - y) ** 2 for p, y in all_pairs])) if all_pairs else 0.0
-    auc = (
-        sum(1.0 if p > q else 0.5 if p == q else 0.0 for p in positives for q in negatives)
-        / (len(positives) * len(negatives))
-        if positives and negatives
-        else 0.0
-    )
     out["calibration"] = {
         "brier": brier,
-        "auc": auc,
-        "leader_correct_share": (len(positives) / len(all_pairs)) if all_pairs else 0.0,
+        "auc": auc(all_pairs),
+        "leader_correct_share": (
+            (sum(1 for _, y in all_pairs if y > 0) / len(all_pairs)) if all_pairs else 0.0
+        ),
     }
-    if null_pairs:
-        pos = [p for p, y in null_pairs if y > 0]
-        neg = [p for p, y in null_pairs if y == 0]
-        out["null_option"] = {
+    if real_pairs:
+        out["calibration_real"] = {
+            "brier": float(np.mean([(p - y) ** 2 for p, y in real_pairs])),
+            "auc": auc(real_pairs),
+            "leader_correct_share": sum(1 for _, y in real_pairs if y > 0) / len(real_pairs),
+        }
+    for name, pairs in (
+        ("null_option", null_pairs),
+        ("null_option_real", real_null_pairs),
+        ("null_option_store", store_null_pairs),
+    ):
+        if not pairs:
+            continue
+        pos = [p for p, y in pairs if y > 0]
+        neg = [p for p, y in pairs if y == 0]
+        out[name] = {
             "unknown_lists": len(pos),
             "known_lists": len(neg),
             "mean_null_probability_unknown": float(np.mean(pos)) if pos else 0.0,
             "mean_null_probability_known": float(np.mean(neg)) if neg else 0.0,
-            "auc": (
-                sum(1.0 if p > q else 0.5 if p == q else 0.0 for p in pos for q in neg)
-                / (len(pos) * len(neg))
-                if pos and neg
-                else 0.0
-            ),
+            "auc": auc(pairs),
         }
     return out
 
 
 # ----------------------------------------------------------------------------- main
+
+
+# fold seeds kept for evaluation and design (docs 21.3.13-21.3.15, the member gates of 21.3.19
+# and 21.3.20, the real-report combiner gate, the probability floor gate, the procedure-core
+# gate, the knowledge-store test 131/137/139, the Naive Bayes background gate 149/151/157):
+# never fitted on
+EVALUATION_SEEDS = frozenset(
+    {7, 41, 43, 47, 53, 59, 61, 67, 73, 79, 83, 89, 101, 103, 107, 109, 113, 127}
+    | {131, 137, 139, 149, 151, 157}
+)
+# report sets that are tests: never a source of training lists
+TEST_REPORT_SETS = ("cti_hal", "elastic")
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -564,7 +1523,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--lists-cache",
         type=Path,
-        default=REPO_ROOT / "data" / "models" / "combiner" / "training_lists.jsonl.gz",
+        default=REPO_ROOT / "data" / "models" / "combiner" / "training_lists_fsum.jsonl.gz",
     )
     parser.add_argument(
         "--reuse-cache", action="store_true", help="skip generation and fit from the cache"
@@ -572,7 +1531,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--output",
         type=Path,
-        default=REPO_ROOT / "data" / "models" / "combiner" / "attribution_combiner.json",
+        default=REPO_ROOT / "data" / "models" / "combiner" / "attribution_combiner_fsum.json",
     )
     parser.add_argument(
         "--report",
@@ -591,8 +1550,169 @@ def main(argv: list[str] | None = None) -> int:
         help="inject generic (widely documented) false positives preferentially",
     )
     parser.add_argument("--set", action="append", default=[], metavar="KEY=VALUE")
+    parser.add_argument(
+        "--real-reports",
+        nargs="+",
+        default=[],
+        metavar="SET=PATH",
+        help="development report sets (vendor, campaigns, advisories) whose lists join the fold "
+        "lists; never CTI-HAL or Elastic",
+    )
+    parser.add_argument(
+        "--real-conditions",
+        default=",".join(c.label for c in DEFAULT_REAL_CONDITIONS),
+        help="level:cap per real-report reading (cap 'all' = every statement)",
+    )
+    parser.add_argument(
+        "--real-unknown", action="store_true", help="removed-actor lists for the real reports"
+    )
+    parser.add_argument("--real-cache", type=Path, help="gzip JSONL of the real-report lists")
+    parser.add_argument(
+        "--reuse-real-cache", action="store_true", help="read the real-report lists from the cache"
+    )
+    parser.add_argument(
+        "--real-weights",
+        default="0,3,10,30",
+        help="cross-validated copies of each real-report list in the fit",
+    )
+    parser.add_argument(
+        "--fold-top1-margin",
+        type=float,
+        default=0.01,
+        help="fold clean top-1 a real-report weight may lose against weight 0",
+    )
+    parser.add_argument(
+        "--store-reports",
+        nargs="+",
+        default=[],
+        metavar="SET=PATH",
+        help="store-built report sets (posts dated before 2025, hidden_texts refreshed): known "
+        "posts give known (and with --store-unknown removed-actor) lists, open-set posts null "
+        "lists (prereg store_training_lists_2026-11-09); needs the store members, pinned",
+    )
+    parser.add_argument(
+        "--store-conditions",
+        default=",".join(c.label for c in DEFAULT_STORE_CONDITIONS),
+        help="readings of the store posts (behavior+store masks the store's own names)",
+    )
+    parser.add_argument(
+        "--store-unknown",
+        action="store_true",
+        help="removed-actor lists for the known store posts, under every reading",
+    )
+    parser.add_argument("--store-cache", type=Path, help="gzip JSONL of the store lists")
+    parser.add_argument(
+        "--reuse-store-cache",
+        action="store_true",
+        help="read the store lists from the cache and generate only the missing ones",
+    )
+    parser.add_argument(
+        "--store-weights", default="0,3,10,30", help="store-list weights the time split compares"
+    )
+    parser.add_argument(
+        "--choice-from",
+        default="2024-01-01",
+        help="store posts from this date are the time split's held-out slice",
+    )
+    parser.add_argument(
+        "--store-guard-margin",
+        type=float,
+        default=0.02,
+        help="fold clean top-1 a store weight may lose against store weight 0",
+    )
     parser.add_argument("--quiet", action="store_true")
+    parser.add_argument(
+        "--lists-only",
+        action="store_true",
+        help="generate and cache the lists, do not fit (allowed on evaluation seeds, for reports)",
+    )
+    parser.add_argument(
+        "--overwrite-production",
+        action="store_true",
+        help="allow writing the default (shipped) artifact, lists cache and report paths",
+    )
+    add_output_guard_arguments(parser)
+    add_exemplar_backend_arguments(parser)
     args = parser.parse_args(argv)
+    evaluation = sorted(set(args.seeds) & EVALUATION_SEEDS)
+    if evaluation and not args.lists_only:
+        parser.error(
+            f"seeds {evaluation} are evaluation seeds; fit on 11/23/37 (or use --lists-only)"
+        )
+    defaults = {
+        "--output": (args.output, parser.get_default("output")),
+        "--lists-cache": (args.lists_cache, parser.get_default("lists_cache")),
+        "--report": (args.report, parser.get_default("report")),
+    }
+    shipped = [
+        flag
+        for flag, (value, default) in defaults.items()
+        if Path(value).resolve() == Path(default).resolve()
+        and not (args.lists_only and flag != "--lists-cache")
+    ]
+    if shipped and not args.overwrite_production:
+        parser.error(
+            f"{', '.join(shipped)} would overwrite the shipped files; pass other paths or "
+            "--overwrite-production"
+        )
+    real_sets: dict[str, Path] = {}
+    for item in args.real_reports:
+        name, _, value = item.partition("=")
+        if not value:
+            parser.error(f"--real-reports takes SET=PATH, got {item!r}")
+        if name in TEST_REPORT_SETS or any(t in value for t in ("cti_hal", "elastic")):
+            parser.error(f"{item}: CTI-HAL and Elastic are test sets, never training lists")
+        real_sets[name] = Path(value)
+    if real_sets and args.real_cache is None:
+        parser.error("--real-reports needs --real-cache")
+    real_conditions = [RealCondition.parse(v) for v in args.real_conditions.split(",") if v]
+    real_weight_values = [int(v) for v in args.real_weights.split(",") if v != ""]
+    store_sets: dict[str, Path] = {}
+    for item in args.store_reports:
+        name, _, value = item.partition("=")
+        if not value:
+            parser.error(f"--store-reports takes SET=PATH, got {item!r}")
+        if name in TEST_REPORT_SETS or any(t in value for t in ("cti_hal", "elastic")):
+            parser.error(f"{item}: CTI-HAL and Elastic are test sets, never training lists")
+        store_sets[name] = Path(value)
+    try:
+        store_conditions = [RealCondition.parse(v) for v in args.store_conditions.split(",") if v]
+    except ValueError as error:
+        parser.error(str(error))
+    if store_sets:
+        if args.store_cache is None:
+            parser.error("--store-reports needs --store-cache")
+        if len(real_weight_values) != 1:
+            parser.error(
+                "with --store-reports the real-report lists keep one fixed weight "
+                "(--real-weights 10); the store lists get theirs from --store-weights"
+            )
+        for path in store_sets.values():
+            try:
+                load_store_rows(path)
+            except (OSError, ValueError) as error:
+                parser.error(str(error))
+    # a reused cache is only read; every other output is written at the end of an hour-long run
+    # (--lists-only writes the cache alone: no artifact, no report)
+    writes_cache = not (args.reuse_cache and args.lists_cache.is_file())
+    writes_real_cache = bool(real_sets) and not (
+        args.reuse_real_cache and args.real_cache is not None and args.real_cache.is_file()
+    )
+    writes_store_cache = bool(store_sets) and not (
+        args.reuse_store_cache and args.store_cache is not None and args.store_cache.is_file()
+    )
+    enforce_output_guard(
+        parser,
+        args,
+        [
+            None if args.lists_only else args.output,
+            None if args.lists_only else args.report,
+            args.lists_cache if writes_cache else None,
+            args.real_cache if writes_real_cache else None,
+            args.store_cache if writes_store_cache else None,
+        ],
+        repo_root=REPO_ROOT,
+    )
 
     def log(message: str) -> None:
         if not args.quiet:
@@ -602,11 +1722,59 @@ def main(argv: list[str] | None = None) -> int:
     overrides = bench.pipeline_overrides("local", args.set)
     # features must come from the plain RRF order: no discriminative blend, no combiner
     overrides.update({"attribution_rerank_blend": 0.0, "attribution_combiner_enabled": False})
+    overrides.update(exemplar_setting_overrides(args))
     settings = Settings(**overrides)
     kb = AttackKnowledgeBase.load(settings.kb_path)
     embedder = SentenceTransformerEmbedder.from_settings(settings)
     store = ChromaVectorStore(settings, embedder)
     engine = AttributionEngine(settings, kb, store, None)  # type: ignore[arg-type]
+    problem = exemplar_backend_problem(engine.exemplar_index, args.require_exemplar_backend)
+    if problem:
+        parser.error(f"{problem} ({engine.exemplar_status})")
+    if text_group_votes(settings) and engine.text_group is None:
+        raise SystemExit(
+            f"refusing to fit: TEXT_GROUP_WEIGHT > 0 but the text model is "
+            f"{engine.text_group_status!r} (build it with make fit-text-group)"
+        )
+    if behavior_text_votes(settings) and engine.behavior_text is None:
+        raise SystemExit(
+            f"refusing to fit: BEHAVIOR_TEXT_WEIGHT > 0 but the behaviour-text member is "
+            f"{engine.behavior_text_status!r} (it reads TEXT_GROUP_PATH)"
+        )
+    if store_members_votes(settings) and engine.store_members is None:
+        raise SystemExit(
+            f"refusing to fit: a store member's weight is > 0 but its artifact is "
+            f"{engine.store_members_status!r} (scripts/knowledge_store.py members)"
+        )
+    if procedure_match_votes(settings) and engine.procedure_match is None:
+        raise SystemExit(
+            f"refusing to fit: PROCEDURE_MATCH_WEIGHT > 0 but the procedure member is "
+            f"{engine.procedure_match_status!r} (it reads TEXT_GROUP_PATH)"
+        )
+    store_extra_names: tuple[str, ...] = ()
+    if store_sets:
+        # a post must read the store before its date through the lists of its time (the pins),
+        # never the current names
+        if not (
+            store_members_votes(settings) and bool(getattr(settings, "knowledge_store_pinned", 0))
+        ):
+            raise SystemExit(
+                "refusing --store-reports: the store lists need the store members "
+                "(STORE_TEXT_WEIGHT > 0) read through the pinned copies (KNOWLEDGE_STORE_PINNED=true)"
+            )
+        if any(c.mask_store_names for c in store_conditions):
+            masking = StoreMembers.load(members_path(settings), kb)
+            if masking is None:
+                raise SystemExit(
+                    f"--store-reports: no members artifact at {members_path(settings)}"
+                )
+            store_extra_names = tuple(masking.masking_names)
+    if nb_background_enabled(settings) and engine.nb_background is None:
+        raise SystemExit(
+            f"refusing to fit: NAIVE_BAYES_BACKGROUND_ENABLED but the reference is "
+            f"{engine.nb_background_status!r} (build it with scripts/fit_nb_background.py)"
+        )
+    stamp = args.lists_cache.with_name(args.lists_cache.name + ".pipeline")
     fold_args = {
         "coverage": args.coverage,
         "min_behaviors": args.min_behaviors,
@@ -626,12 +1794,224 @@ def main(argv: list[str] | None = None) -> int:
         generic_pool=args.generic_pool,
     )
     stats: dict[str, Any] = {"regime": regime.__dict__}
+    # what the artifact records about the engine, kept so the engine can be released before the
+    # memory-heavy steps (the removed-actor engines, the fold lists, the cross-validation)
+    fingerprint = engine.combiner_fingerprint
+    exemplar_status = engine.exemplar_status
+    exemplar_store = exemplar_signature(engine.exemplar_index)
+    exemplar_problem = exemplar_backend_problem(
+        engine.exemplar_index, args.require_exemplar_backend
+    )
+    generate_folds = not (args.reuse_cache and args.lists_cache.is_file())
+    # a reused cache of another pipeline is refused now, not after hours of store lists (the
+    # checks where each cache is read stay)
+    early = [(args.lists_cache, "--reuse-cache", True)] if not generate_folds else []
+    if real_sets and not writes_real_cache:
+        early.append((args.real_cache, "--reuse-real-cache", False))
+    for cache, flag, missing_ok in early:
+        cache_stamp = cache.with_name(cache.name + ".pipeline")
+        cached = cache_stamp.read_text().strip() if cache_stamp.is_file() else None
+        if cached != fingerprint and not (missing_ok and cached is None):
+            raise SystemExit(
+                f"refusing {flag}: {cache} was generated by pipeline {cached}, "
+                f"this run is {fingerprint}"
+            )
+
+    def release_engine() -> None:
+        nonlocal engine
+        if engine is not None and not generate_folds:
+            import gc
+
+            engine = None
+            gc.collect()
+
+    # the store lists: the known and open-set pass needs the engine, so it runs before any
+    # removed-actor arm may release it; the store's removed-actor pass runs after the real lists
+    stored: list[dict[str, Any]] = []
+    store_args: dict[str, Any] = {}
+
+    def store_pass(arm: str) -> None:
+        nonlocal stored
+        base = list(stored)
+        stored = base + generate_store_lists(
+            engine,
+            settings,
+            kb,
+            store,
+            bench,
+            **store_args,
+            known=arm == "known",
+            unknown=arm == "removed",
+            done=frozenset(
+                (str(r["report_id"]), str(r["condition"]), str(r["arm"])) for r in stored
+            ),
+            on_done=lambda so_far: write_store(base + so_far),
+        )
+
+    if store_sets:
+        store_stamp = args.store_cache.with_name(args.store_cache.name + ".pipeline")
+
+        def write_store(records_out: list[dict[str, Any]]) -> None:
+            args.store_cache.parent.mkdir(parents=True, exist_ok=True)
+            temporary = args.store_cache.with_name(args.store_cache.name + ".tmp")
+            with gzip.open(temporary, "wt", encoding="utf-8") as handle:
+                for record in records_out:
+                    handle.write(json.dumps(record) + "\n")
+            temporary.replace(args.store_cache)
+            store_stamp.write_text(fingerprint + "\n")
+            log(f"wrote {len(records_out)} store lists to {args.store_cache}")
+
+        if not writes_store_cache:
+            cached_stamp = store_stamp.read_text().strip() if store_stamp.is_file() else None
+            if cached_stamp != fingerprint:
+                raise SystemExit(
+                    f"refusing --reuse-store-cache: {args.store_cache} was generated by pipeline "
+                    f"{cached_stamp}, this run is {fingerprint}"
+                )
+            with gzip.open(args.store_cache, "rt", encoding="utf-8") as handle:
+                stored = [json.loads(line) for line in handle if line.strip()]
+            log(f"loaded {len(stored)} store lists from {args.store_cache}")
+        store_args.update(
+            {
+                "sets": store_sets,
+                "conditions": store_conditions,
+                "top_n": args.top_n,
+                "log": log,
+                "extra_names": store_extra_names,
+            }
+        )
+        store_pass("known")
+    records: list[dict[str, Any]] = []
+    real_records: list[dict[str, Any]] = []
+    if real_sets:
+        real_stamp = args.real_cache.with_name(args.real_cache.name + ".pipeline")
+
+        def write_real(records_out: list[dict[str, Any]]) -> None:
+            args.real_cache.parent.mkdir(parents=True, exist_ok=True)
+            with gzip.open(args.real_cache, "wt", encoding="utf-8") as handle:
+                for record in records_out:
+                    handle.write(json.dumps(record) + "\n")
+            real_stamp.write_text(fingerprint + "\n")
+            log(f"wrote {len(records_out)} real-report lists to {args.real_cache}")
+
+        existing: list[dict[str, Any]] = []
+        if not writes_real_cache:
+            cached_stamp = real_stamp.read_text().strip() if real_stamp.is_file() else None
+            if cached_stamp != fingerprint:
+                raise SystemExit(
+                    f"refusing --reuse-real-cache: {args.real_cache} was generated by pipeline "
+                    f"{cached_stamp}, this run is {fingerprint}"
+                )
+            with gzip.open(args.real_cache, "rt", encoding="utf-8") as handle:
+                existing = [json.loads(line) for line in handle if line.strip()]
+            log(f"loaded {len(existing)} real-report lists from {args.real_cache}")
+        # a cache is resumed: the sets and conditions it holds are not generated again
+        done_known = frozenset(
+            (str(r["source"]).removeprefix("real:"), str(r.get("condition")))
+            for r in existing
+            if r["variant"] != -1
+        )
+        done_unknown = frozenset(
+            str(r["source"]).removeprefix("real:") for r in existing if r["variant"] == -1
+        )
+        missing_known = [
+            (name, c.label)
+            for name in real_sets
+            for c in real_conditions
+            if (name, c.label) not in done_known
+        ]
+        if missing_known:
+            # checkpointed after every set and condition, before the removed-actor arm
+            new_known, real_stats = generate_real_lists(
+                engine,
+                settings,
+                kb,
+                store,
+                bench,
+                sets=real_sets,
+                conditions=real_conditions,
+                unknown=False,
+                top_n=args.top_n,
+                log=log,
+                skip_known=done_known,
+                on_done=lambda so_far: write_real(existing + so_far),
+            )
+            stats["real"] = real_stats
+            existing = existing + new_known
+        missing_unknown = [name for name in real_sets if name not in done_unknown]
+        if args.real_unknown and null_option and missing_unknown:
+            release_engine()
+            new_unknown, unknown_stats = generate_real_lists(
+                engine,
+                settings,
+                kb,
+                store,
+                bench,
+                sets=real_sets,
+                conditions=real_conditions,
+                unknown=True,
+                top_n=args.top_n,
+                log=log,
+                known=False,
+                skip_unknown=done_unknown,
+                on_done=lambda so_far: write_real(existing + so_far),
+            )
+            stats.setdefault("real", {})["unknown_lists"] = unknown_stats.get("unknown_lists", 0)
+            existing = existing + new_unknown
+        real_records = existing
+        stats["real_counts"] = dict(
+            Counter(
+                f"{r['source']} {r.get('condition')} "
+                + ("unknown" if r["variant"] == -1 else "in list" if trainable(r) else "outside")
+                for r in real_records
+            )
+        )
+    store_records: list[dict[str, Any]] = []
+    if store_sets:
+        if args.store_unknown and null_option:
+            release_engine()
+            store_pass("removed")
+        store_records = stored
+        stats["store_counts"] = dict(
+            Counter(
+                f"{r['source']} {r['condition']} {r['arm']}"
+                + ("" if r["arm"] != "known" else " in list" if trainable(r) else " outside")
+                for r in store_records
+            )
+        )
     if args.reuse_cache and args.lists_cache.is_file():
+        cached_stamp = stamp.read_text().strip() if stamp.is_file() else None
+        if cached_stamp is not None and cached_stamp != fingerprint:
+            raise SystemExit(
+                f"refusing --reuse-cache: {args.lists_cache} was generated by pipeline "
+                f"{cached_stamp}, this run is {fingerprint}"
+            )
         with gzip.open(args.lists_cache, "rt", encoding="utf-8") as handle:
             records = [json.loads(line) for line in handle if line.strip()]
         log(f"loaded {len(records)} lists from {args.lists_cache}")
     else:
-        records, stats = generate_lists(
+        # the fold lists are checkpointed after every seed and every 25 removed-actor folds (a
+        # memory watchdog may stop a long run); a checkpoint of another pipeline is ignored
+        partial = args.lists_cache.with_name(args.lists_cache.name + ".partial")
+        saved: dict[str, Any] = {}
+        if partial.is_file():
+            with gzip.open(partial, "rt", encoding="utf-8") as handle:
+                saved = json.load(handle)
+            if saved.get("pipeline") != fingerprint:
+                log(f"ignoring {partial}: another pipeline")
+                saved = {}
+            else:
+                log(f"resuming from {partial}")
+
+        def save(**update: Any) -> None:
+            saved.update(update, pipeline=fingerprint)
+            partial.parent.mkdir(parents=True, exist_ok=True)
+            temporary = partial.with_name(partial.name + ".tmp")
+            with gzip.open(temporary, "wt", encoding="utf-8") as handle:
+                json.dump(saved, handle)
+            temporary.replace(partial)
+
+        records, fold_stats = generate_lists(
             engine,
             bench,
             seeds=args.seeds,
@@ -641,7 +2021,10 @@ def main(argv: list[str] | None = None) -> int:
             limit=args.limit,
             log=log,
             regime=regime,
+            resume=saved.get("folds"),
+            checkpoint=lambda state: save(folds=state),
         )
+        stats.update(fold_stats)
         stats["regime"] = regime.__dict__
         if null_option and (args.unknown_all or args.unknown):
             unknown = generate_unknown_lists(
@@ -654,6 +2037,8 @@ def main(argv: list[str] | None = None) -> int:
                 fold_args=fold_args,
                 limit=None if args.unknown_all else args.unknown,
                 log=log,
+                resume=saved.get("unknown"),
+                checkpoint=lambda state: save(unknown=state),
             )
             records += unknown
             stats["unknown_lists"] = len(unknown)
@@ -661,33 +2046,109 @@ def main(argv: list[str] | None = None) -> int:
         with gzip.open(args.lists_cache, "wt", encoding="utf-8") as handle:
             for record in records:
                 handle.write(json.dumps(record) + "\n")
+        stamp.write_text(fingerprint + "\n")
+        partial.unlink(missing_ok=True)
         log(f"wrote {len(records)} lists to {args.lists_cache}")
+    if args.lists_only:
+        log("lists only: no fit")
+        return 0
+    release_engine()
+    records = records + real_records + store_records
     if not records:
         print("no training lists", file=sys.stderr)
         return 1
     l2_grid = [float(v) for v in args.l2_grid.split(",")]
-    cv = cross_validate(
-        records, folds=args.cv_folds, l2_grid=l2_grid, null_option=null_option, seed=97, log=log
-    )
+    if store_records:
+        cv = select_store_weight(
+            records,
+            folds=args.cv_folds,
+            l2_grid=l2_grid,
+            null_option=null_option,
+            seed=97,
+            log=log,
+            real_weight=real_weight_values[0],
+            store_weights=[int(v) for v in args.store_weights.split(",") if v != ""],
+            choice_from=args.choice_from,
+            guard_margin=args.store_guard_margin,
+        )
+        if not cv["chosen_store_weight"]:
+            # the registered stop: the store lists do not help, so no combiner is written
+            args.report.parent.mkdir(parents=True, exist_ok=True)
+            args.report.write_text(
+                json.dumps(
+                    {
+                        "generated_at": datetime.now(UTC).isoformat(timespec="seconds"),
+                        "outcome": "store weight 0 chosen: no artifact written (the step stops)",
+                        "pipeline_fingerprint": fingerprint,
+                        "records": len(records),
+                        "generation": stats,
+                        "cross_validation": cv,
+                    },
+                    indent=2,
+                ),
+                encoding="utf-8",
+            )
+            log(f"store weight 0 chosen: no combiner written; report {args.report}")
+            return 4
+    else:
+        cv = cross_validate(
+            records,
+            folds=args.cv_folds,
+            l2_grid=l2_grid,
+            null_option=null_option,
+            seed=97,
+            log=log,
+            real_weights=real_weight_values,
+            fold_top1_margin=args.fold_top1_margin,
+        )
     chosen = float(cv["chosen_l2"])
-    lists = [CombinerList.from_dict(r) for r in records]
+    real_weight = int(cv.get("chosen_real_weight") or 0)
+    store_weight = int(cv.get("chosen_store_weight") or 0)
+    lists = [CombinerList.from_dict(r) for r in records if is_fold(r) and trainable(r)]
+    lists += [
+        CombinerList.from_dict(r) for r in records if is_real(r) and trainable(r)
+    ] * real_weight
+    lists += [
+        CombinerList.from_dict(r) for r in records if is_store(r) and trainable(r)
+    ] * store_weight
     model = AttributionCombiner.fit(
         lists,
         attack_version=str(getattr(kb, "version", "") or ""),
-        pipeline_fingerprint=engine.combiner_fingerprint,
+        pipeline_fingerprint=fingerprint,
         l2=chosen,
         null_option=null_option,
         top_n=args.top_n,
         metadata={
             "seeds": list(args.seeds),
+            # training lists hide each fold from the dense store and the BM25 index
+            "lists_leak_control": lists_leak_control(records),
             "variants": args.variants,
             "fold_args": fold_args,
             "generation": stats,
             "cross_validation": cv,
             "records": len(records),
+            "real_reports": {name: str(path) for name, path in real_sets.items()},
+            "real_conditions": [c.label for c in real_conditions],
+            "real_weight": real_weight,
+            **(
+                {
+                    "store_reports": {name: str(path) for name, path in store_sets.items()},
+                    "store_conditions": [c.label for c in store_conditions],
+                    "store_weight": store_weight,
+                    "choice_from": args.choice_from,
+                }
+                if store_sets
+                else {}
+            ),
             "feature_count": len(FEATURE_NAMES),
+            # the exemplar library the lists' technique mapping ran with
+            "exemplar_status": exemplar_status,
+            "exemplar_store": exemplar_store,
         },
     )
+    if exemplar_problem:
+        print(f"refusing to write {args.output}: {exemplar_problem}", file=sys.stderr)
+        return 2
     path = model.save(args.output)
     args.report.parent.mkdir(parents=True, exist_ok=True)
     args.report.write_text(
@@ -695,8 +2156,10 @@ def main(argv: list[str] | None = None) -> int:
             {
                 "generated_at": model.metadata["fitted_at"],
                 "artifact": str(path),
-                "pipeline_fingerprint": engine.combiner_fingerprint,
+                "pipeline_fingerprint": fingerprint,
                 "records": len(records),
+                "real_weight": real_weight,
+                **({"store_weight": store_weight} if store_sets else {}),
                 "generation": stats,
                 "cross_validation": cv,
                 "weights": {
@@ -720,10 +2183,22 @@ def main(argv: list[str] | None = None) -> int:
         encoding="utf-8",
     )
     counts = Counter(
-        "unknown" if r["variant"] == -1 else "clean" if r["variant"] == 0 else "randomised"
+        (
+            f"real {r.get('condition')} " + ("unknown" if r["variant"] == -1 else "known")
+            if is_real(r)
+            else f"store {r.get('condition')} {r.get('arm')}"
+            if is_store(r)
+            else (
+                "unknown" if r["variant"] == -1 else "clean" if r["variant"] == 0 else "randomised"
+            )
+        )
         for r in records
     )
-    log(f"fitted l2={chosen}: {dict(counts)} lists -> {path}; report {args.report}")
+    log(
+        f"fitted l2={chosen}, real weight {real_weight}"
+        + (f", store weight {store_weight}" if store_sets else "")
+        + f": {dict(counts)} lists -> {path}; report {args.report}"
+    )
     return 0
 
 

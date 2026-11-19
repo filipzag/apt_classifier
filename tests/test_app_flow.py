@@ -36,6 +36,7 @@ def _assert_clean(app: AppTest) -> None:
 def local_mode(monkeypatch, tmp_path):
     # an empty env var overrides the key in .env, which is what makes the app run local-only
     monkeypatch.setenv("OPENROUTER_API_KEY", "")
+    monkeypatch.setenv("LOCAL_LLM_ENABLED", "false")
     get_settings.cache_clear()
     from app.ui import runtime
 

@@ -1,12 +1,17 @@
 import math
 import re
 from collections import Counter
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import asdict, dataclass, field, replace
 from types import SimpleNamespace
 from typing import Any
 
-from apt_classifier.acceptance import candidate_features
+from apt_classifier.acceptance import (
+    DEFAULT_DENSE_COLLECTION,
+    candidate_features,
+    contract_mismatches,
+    retrieval_contract,
+)
 from apt_classifier.attack.parse import split_sentences, strip_attack_citations
 from apt_classifier.classifiers.base import ClassifierContext
 from apt_classifier.evidence.iocs import match_software_aliases
@@ -24,11 +29,31 @@ from apt_classifier.exemplars import (
     DEFAULT_DUPLICATE_SIMILARITY as EXEMPLAR_DUPLICATE_SIMILARITY,
 )
 from apt_classifier.exemplars import DEFAULT_K as EXEMPLAR_K
+from apt_classifier.exemplars import (
+    DEFAULT_SEGMENT_VOTES as EXEMPLAR_SEGMENT_VOTES,
+)
 from apt_classifier.exemplars import DEFAULT_TAU as EXEMPLAR_TAU
+from apt_classifier.exemplars import DEFAULT_VOTE_NORM as EXEMPLAR_VOTE_NORM
 from apt_classifier.exemplars import EVIDENCE_SOURCE as EXEMPLAR_SOURCE
-from apt_classifier.exemplars import ExemplarVotes, exemplar_query_text
+from apt_classifier.exemplars import (
+    SEGMENT_VOTE_MODES,
+    ExemplarVotes,
+    exemplar_kwargs,
+    exemplar_query_text,
+    pool_votes,
+)
 from apt_classifier.exemplars import parent_map as exemplar_parent_map
 from apt_classifier.platforms import PlatformScope, ledger_platforms, observation_scope
+from apt_classifier.technique_head import DEFAULT_NEW_CANDIDATES as HEAD_NEW_CANDIDATES
+from apt_classifier.technique_head import DEFAULT_TOP_FAMILIES as HEAD_TOP_FAMILIES
+from apt_classifier.technique_head import EVIDENCE_SOURCE as TECHNIQUE_HEAD_SOURCE
+from apt_classifier.technique_head import (
+    TechniqueHeadScores,
+    describe_head_scores,
+    pool_scores,
+    scores_prose,
+    technique_head_kwargs,
+)
 from apt_classifier.technique_signals import find_signals
 from apt_classifier.vectorstore import (
     ChromaVectorStore,
@@ -260,6 +285,8 @@ class LexicalTechniqueIndex:
     average_length: float
     postings: dict[str, tuple[tuple[int, int], ...]] = field(default_factory=dict, repr=False)
     norms: tuple[float, ...] = field(default=(), repr=False)
+    # the sentence fields indexed (from_kb); part of the acceptance model's retrieval contract
+    fields: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         if self.documents and (not self.postings or len(self.norms) != len(self.documents)):
@@ -322,7 +349,7 @@ class LexicalTechniqueIndex:
             if documents
             else 1.0
         )
-        return cls(tuple(documents), dict(frequencies), average)
+        return cls(tuple(documents), dict(frequencies), average, fields=tuple(fields))
 
     def query(self, text: str, *, n_results: int) -> list[VectorHit]:
         query_tokens = _lexical_tokens(text)
@@ -429,6 +456,140 @@ class RetrievalResult:
 # and very unconfident to demote.
 RERANKER_PROMOTE_THRESHOLD = 0.8
 RERANKER_DEMOTE_THRESHOLD = 0.2
+# dense hits within this similarity of an observation's best hit become candidates
+DENSE_RELATIVE_MARGIN = 0.12
+# the single-answer cap of the calibrated gate (2026-10-19): follow the artifact's gate record, or off
+SINGLE_ANSWER_CAP = "model"
+SINGLE_ANSWER_CAP_MODES = ("model", "off")
+# head-first acceptance (2026-10-20, prereg cribl_head_first): a candidate the technique head
+# gives at least the artifact's bar is accepted outright; model / off / a forced bar
+HEAD_FIRST = "model"
+HEAD_FIRST_REASON = "technique head probability passed the dev-selected bar"
+# sibling replacement (2026-10-20, prereg cribl_sibling_replacement): the head's preferred member
+# of a family replaces an accepted sibling; model / off / a forced ratio
+HEAD_SIBLING = "model"
+SIBLING_REASON = "technique head prefers this member of the family over the accepted sibling"
+SIBLING_REPLACED_REASON = (
+    "replaced by the technique head's preferred member of the family; requires review"
+)
+# the agreement filter (2026-10-19, prereg cribl_head_agreement): an accepted technique stays
+# accepted only when the technique head picks it too (off: no filter)
+HEAD_AGREEMENT = "off"
+HEAD_AGREEMENT_MODES = ("off", "technique", "family", "top3")
+AGREEMENT_REVIEW_REASON = "the technique head does not pick this technique; requires review"
+MODEL_ACCEPT_REASON = "calibrated acceptance model score passed the dev-selected threshold"
+CAP_REVIEW_REASON = (
+    "single-answer cap: a more probable mapping was accepted for this observation; requires review"
+)
+
+
+def default_lexical_fields(*, include_synthetic: bool, include_detection: bool) -> tuple[str, ...]:
+    """The fields ``retrieve_techniques`` indexes when it builds its own lexical index."""
+    base = tuple(
+        field for field in LEXICAL_DEFAULT_FIELDS if include_synthetic or field != "synthetic"
+    )
+    return (*base, "detection") if include_detection else base
+
+
+def lexical_fields(settings: Any) -> tuple[str, ...]:
+    """The fields of the serving lexical index (``AttributionEngine``, the benchmarks and the
+    acceptance fit build theirs with this): ATT&CK names, descriptions and procedure sentences,
+    plus the synthetic sentences when ``technique_include_synthetic`` is set. Detection text is
+    never indexed lexically, whatever ``technique_include_detection`` says for dense retrieval."""
+    include_synthetic = bool(getattr(settings, "technique_include_synthetic", False))
+    return tuple(
+        field for field in LEXICAL_DEFAULT_FIELDS if include_synthetic or field != "synthetic"
+    )
+
+
+def retrieval_kwargs(
+    settings: Any, *, exemplar_index: Any, lexical_index: Any, technique_head: Any = None
+) -> dict[str, Any]:
+    """The settings-driven keyword arguments of ``retrieve_techniques``.
+
+    ``AttributionEngine.map_techniques``, ``scripts/benchmark_mapping.py``,
+    ``scripts/fit_acceptance_model.py`` and the tuning harness all retrieve with these, so the
+    acceptance model is fitted on exactly the candidates it later judges. Call sites add what is
+    theirs alone (store, reranker, acceptance model, ``finalize``, ``cues_enabled``, a mode
+    override). The fallbacks for settings objects that lack a field are those the serving call
+    always used. ``technique_head`` is the loaded :class:`apt_classifier.technique_head.
+    TechniqueHeadClient` (``None``: off)."""
+    return {
+        "threshold": getattr(settings, "similarity_threshold", 0.45),
+        "top_k": getattr(settings, "retrieval_top_k", 30),
+        "behavior_threshold": getattr(settings, "behavior_similarity_threshold", 0.55),
+        "behavior_top_k": getattr(settings, "behavior_retrieval_top_k", 20),
+        "retrieval_mode": getattr(settings, "technique_retrieval_mode", "hybrid"),
+        "candidate_pool": getattr(settings, "technique_candidate_pool", 12),
+        "include_detection": getattr(settings, "technique_include_detection", False),
+        "parent_policy": getattr(settings, "technique_parent_policy", "ancestor_compatible"),
+        "lexical_index": lexical_index,
+        "acceptance_threshold": getattr(settings, "technique_acceptance_threshold", 0.75),
+        "relative_margin": getattr(settings, "technique_relative_margin", 0.08),
+        "rank_by_acceptance": bool(getattr(settings, "technique_rank_by_acceptance", False)),
+        "corroboration_accept_observations": int(
+            getattr(settings, "technique_corroboration_accept_observations", 0)
+        ),
+        "corroboration_accept_min_probability": float(
+            getattr(settings, "technique_corroboration_accept_min_probability", 0.2)
+        ),
+        "rrf_k": int(getattr(settings, "technique_rrf_k", 60)),
+        "corroboration_bonus": float(getattr(settings, "technique_corroboration_bonus", 0.0)),
+        "segment_acceptance": bool(getattr(settings, "technique_segment_acceptance", False)),
+        "hierarchy_parent_mode": str(getattr(settings, "technique_hierarchy_parent_mode", "off")),
+        "include_synthetic": bool(getattr(settings, "technique_include_synthetic", False)),
+        "platform_from_text": bool(getattr(settings, "technique_platform_from_text", False)),
+        "dense_relative_margin": float(
+            getattr(settings, "technique_dense_relative_margin", DENSE_RELATIVE_MARGIN)
+        ),
+        "dense_overfetch": int(getattr(settings, "technique_dense_overfetch", 0) or 0),
+        **exemplar_kwargs(settings, exemplar_index),
+        **technique_head_kwargs(settings, technique_head),
+        "single_answer_cap": str(
+            getattr(settings, "technique_single_answer_cap", SINGLE_ANSWER_CAP) or SINGLE_ANSWER_CAP
+        ),
+        "technique_head_agreement": str(
+            getattr(settings, "technique_head_agreement", HEAD_AGREEMENT) or HEAD_AGREEMENT
+        ),
+        "technique_head_first": str(
+            getattr(settings, "technique_head_first", HEAD_FIRST) or HEAD_FIRST
+        ),
+        "technique_head_sibling": str(
+            getattr(settings, "technique_head_sibling", HEAD_SIBLING) or HEAD_SIBLING
+        ),
+    }
+
+
+def _dense_collection(store: Any) -> str:
+    """The ATT&CK technique collection a store reads (a configured copy, or the default)."""
+    name = getattr(store, "technique_collection_name", None) if store is not None else None
+    return name if isinstance(name, str) and name else DEFAULT_DENSE_COLLECTION
+
+
+def retrieval_contract_for(
+    settings: Any, exemplar_index: Any, *, store: Any = None, technique_head: Any = None
+) -> dict[str, Any]:
+    """The retrieval contract a run with these settings meets, for
+    :func:`apt_classifier.acceptance.load_acceptance_model` (``contract=``): the arguments of
+    :func:`retrieval_kwargs`, the serving lexical fields, the store's technique collection and
+    the technique head (its checkpoint fingerprint) when one is loaded."""
+    collection = (
+        _dense_collection(store)
+        if store is not None
+        else str(getattr(settings, "technique_collection_name", "") or DEFAULT_DENSE_COLLECTION)
+    )
+    return retrieval_contract(
+        retrieval_kwargs(
+            settings,
+            exemplar_index=exemplar_index,
+            lexical_index=None,
+            technique_head=technique_head,
+        ),
+        exemplar_index,
+        lexical_fields=lexical_fields(settings),
+        dense_collection=collection,
+        technique_head=technique_head,
+    )
 
 
 def retrieve_techniques(
@@ -465,6 +626,17 @@ def retrieve_techniques(
     exemplar_duplicate_similarity: float = EXEMPLAR_DUPLICATE_SIMILARITY,
     exemplar_new_candidates: int = 0,
     platform_from_text: bool = False,
+    dense_relative_margin: float = DENSE_RELATIVE_MARGIN,
+    dense_overfetch: int = 0,
+    exemplar_vote_norm: str = EXEMPLAR_VOTE_NORM,
+    exemplar_segment_votes: str = EXEMPLAR_SEGMENT_VOTES,
+    technique_head: Any = None,
+    technique_head_new_candidates: int = HEAD_NEW_CANDIDATES,
+    technique_head_top_families: int = HEAD_TOP_FAMILIES,
+    single_answer_cap: str = SINGLE_ANSWER_CAP,
+    technique_head_agreement: str = HEAD_AGREEMENT,
+    technique_head_first: str = HEAD_FIRST,
+    technique_head_sibling: str = HEAD_SIBLING,
 ) -> RetrievalResult:
     """Retrieve ATT&CK technique candidates for the positive observations in a ledger.
 
@@ -474,11 +646,47 @@ def retrieve_techniques(
     documented only for other operating systems are dropped from that observation's hits and
     candidates, so compatible techniques take their place in the pool.
 
-    ``exemplar_index`` (:class:`apt_classifier.exemplars.ExemplarIndex`) adds what the nearest
-    labelled real-report sentences say about each candidate as ``exemplar`` evidence (the
-    acceptance model reads it) and appends up to ``exemplar_new_candidates`` techniques that
-    only the exemplars suggest. An acceptance model fitted with exemplars is not used when the
-    same index is unavailable (diagnostics say why).
+    ``exemplar_index`` (:class:`apt_classifier.exemplars.ExemplarIndex`, or the Chroma-served
+    :class:`apt_classifier.exemplar_store.ChromaExemplarStore`, a library with its own fingerprint)
+    adds what the nearest labelled real-report sentences say about each candidate as
+    ``exemplar`` evidence (the acceptance model reads it) and appends up to
+    ``exemplar_new_candidates`` techniques that only the exemplars suggest. An acceptance model
+    fitted with exemplars is not used when the same index is unavailable (diagnostics say why).
+
+    ``exemplar_vote_norm`` shares a neighbour's weight among its labels (``label_split``) and
+    ``exemplar_segment_votes`` (``max`` / ``mean``) also queries the exemplars per sentence of a
+    segmented observation, pooling the votes per technique (:func:`apt_classifier.exemplars.
+    pool_votes`); exemplar-only candidates then come from the pooled ranking. The defaults are
+    the shipped behaviour.
+
+    ``technique_head`` (:class:`apt_classifier.technique_head.TechniqueHeadClient`) scores every
+    observation (each sentence of a segmented one, pooled by the largest probability) with the
+    fine-tuned technique head: every candidate gets ``technique_head`` evidence (the acceptance
+    model's schema-4 features) and up to ``technique_head_new_candidates`` of the head's proposals
+    (its best technique in each of the ``technique_head_top_families`` most probable families)
+    that retrieval missed are appended after the pool with fused score 0, like exemplar-only
+    candidates. A request the service fails leaves its observations without head evidence
+    (counted in ``diagnostics["technique_head_errors"]``). An acceptance model fitted with the
+    head is not used on another head or without one.
+
+    ``technique_head_first`` (``model``, the default, ``off``, or a forced bar): accept a
+    candidate outright when the head's joint probability for it reaches the acceptance
+    artifact's head-first bar (``AcceptanceModel.head_first_min_probability``); the context
+    guards still apply and the calibrated gate judges everything else.
+
+    ``technique_head_agreement`` (``off``, the default; ``technique``, ``family`` or ``top3``):
+    keep an accepted technique of an observation the head scored only when the head picks it
+    too (its most probable technique, its most probable family, or one of its three most
+    probable families); the others return to review.
+
+    ``single_answer_cap`` (``model``, the default, or ``off``): whether the calibrated gate
+    keeps at most one probability-only acceptance per observation when the acceptance model
+    carries a cap (``AcceptanceModel.second_min_probability``; a second one stays only above
+    that bar); ``off`` ignores the model's cap for an ablation.
+
+    ``dense_relative_margin`` is how far below an observation's best dense hit a technique's
+    hit may lie and still become a candidate; ``dense_overfetch`` is the number of sentence
+    hits fetched per query (0: ``max(3 * top_k, 4 * candidate_pool)``).
 
     ``cues_enabled=False`` disables the regex cue tables (``_EXPLICIT_TECHNIQUE_CUES``
     and ``technique_signals.SIGNALS``) so benchmarks can report retrieval quality
@@ -486,7 +694,11 @@ def retrieve_techniques(
 
     ``acceptance_model`` is an optional calibrated per-candidate scorer
     (:class:`apt_classifier.acceptance.AcceptanceModel`); when supplied it replaces the
-    rule-based one-primary acceptance in :func:`finalize_retrieval_candidates`.
+    rule-based one-primary acceptance in :func:`finalize_retrieval_candidates`. A model that
+    carries a retrieval contract (every artifact does; one fitted before contracts is held only
+    to the knobs new with them, :func:`apt_classifier.acceptance.legacy_contract`) is not used
+    when these arguments depart from it, with the reason in
+    ``diagnostics["acceptance_model_disabled"]``.
 
     Observations longer than ``LONG_OBSERVATION_WORDS`` words are split into sentences for
     retrieval and the per-sentence hits are merged per technique, so multi-technique
@@ -496,6 +708,16 @@ def retrieve_techniques(
         raise ValueError("unsupported technique retrieval mode")
     if parent_policy not in {"ancestor_compatible", "exact_only", "legacy_expand"}:
         raise ValueError("unsupported parent policy")
+    if exemplar_segment_votes not in SEGMENT_VOTE_MODES:
+        raise ValueError(f"unsupported exemplar segment votes {exemplar_segment_votes!r}")
+    if parse_single_answer_cap(single_answer_cap) is None:
+        raise ValueError(f"unsupported single-answer cap {single_answer_cap!r}")
+    if technique_head_agreement not in HEAD_AGREEMENT_MODES:
+        raise ValueError(f"unsupported technique head agreement {technique_head_agreement!r}")
+    if parse_single_answer_cap(technique_head_first) is None:
+        raise ValueError(f"unsupported technique head first {technique_head_first!r}")
+    if parse_head_ratio(technique_head_sibling) is None:
+        raise ValueError(f"unsupported technique head sibling {technique_head_sibling!r}")
     observations = [
         observation
         for observation in ledger.observations
@@ -520,20 +742,21 @@ def retrieve_techniques(
     # Over-fetch dense sentence vectors so that duplicate sentences from the
     # same technique do not crowd out unique techniques. The results are
     # aggregated by technique in _best_technique_hits before candidate scoring.
-    dense_overfetch = max(top_k * 3, candidate_pool * 4)
+    dense_depth = (
+        int(dense_overfetch) if int(dense_overfetch) > 0 else max(top_k * 3, candidate_pool * 4)
+    )
     flat_dense = (
-        _query_technique_vectors(store, flat_segments, n_results=dense_overfetch, fields=fields)
+        _query_technique_vectors(store, flat_segments, n_results=dense_depth, fields=fields)
         if dense_enabled
         else [[] for _ in flat_segments]
     )
     dense_hits = _regroup(flat_dense, segments)
     if lexical_enabled and lexical_index is None:
-        lexical_fields = tuple(
-            field for field in LEXICAL_DEFAULT_FIELDS if include_synthetic or field != "synthetic"
-        )
         lexical_index = LexicalTechniqueIndex.from_kb(
             kb,
-            fields=(*lexical_fields, "detection") if include_detection else lexical_fields,
+            fields=default_lexical_fields(
+                include_synthetic=include_synthetic, include_detection=include_detection
+            ),
         )
     flat_lexical = (
         [
@@ -544,7 +767,7 @@ def retrieve_techniques(
         else [[] for _ in flat_segments]
     )
     lexical_hits = _regroup(flat_lexical, segments)
-    exemplar_votes, exemplar_status = _exemplar_votes(
+    exemplar_votes, exemplar_status, exemplar_stats = _exemplar_votes(
         observations,
         store,
         kb,
@@ -552,7 +775,14 @@ def retrieve_techniques(
         k=exemplar_k,
         tau=exemplar_tau,
         duplicate_similarity=exemplar_duplicate_similarity,
+        vote_norm=exemplar_vote_norm,
+        segment_votes=exemplar_segment_votes,
+        segments=segments,
     )
+    head_scores, head_status, head_errors, head_skipped = _technique_head_scores(
+        observations, segments, technique_head, top_families=technique_head_top_families
+    )
+    head_active = technique_head is not None and head_status.startswith("active")
     acceptance_disabled: str | None = None
     if acceptance_model is not None and getattr(acceptance_model, "requires_exemplars", False):
         runtime = (
@@ -565,7 +795,63 @@ def retrieve_techniques(
                 f"{runtime or exemplar_status}"
             )
             acceptance_model = None
+    if acceptance_model is not None and getattr(acceptance_model, "requires_technique_head", False):
+        runtime = getattr(technique_head, "fingerprint", None) if head_active else None
+        if runtime != getattr(acceptance_model, "technique_head_fingerprint", None):
+            acceptance_disabled = (
+                "acceptance model needs technique head "
+                f"{getattr(acceptance_model, 'technique_head_fingerprint', None)}, runtime has "
+                f"{runtime or head_status}"
+            )
+            acceptance_model = None
+    contract = getattr(acceptance_model, "contract", None) if acceptance_model is not None else None
+    if isinstance(contract, Mapping):
+        # the knobs the model's features were fitted under (fail closed on any difference)
+        runtime_contract = retrieval_contract(
+            {
+                "threshold": threshold,
+                "top_k": top_k,
+                "candidate_pool": candidate_pool,
+                "retrieval_mode": retrieval_mode,
+                "parent_policy": parent_policy,
+                "include_detection": include_detection,
+                "include_synthetic": include_synthetic,
+                "platform_from_text": platform_from_text,
+                "segment_acceptance": segment_acceptance,
+                "hierarchy_parent_mode": hierarchy_parent_mode,
+                "rrf_k": rrf_k,
+                "dense_relative_margin": dense_relative_margin,
+                "dense_overfetch": dense_overfetch,
+                "exemplar_k": exemplar_k,
+                "exemplar_tau": exemplar_tau,
+                "exemplar_duplicate_similarity": exemplar_duplicate_similarity,
+                "exemplar_new_candidates": exemplar_new_candidates,
+                "exemplar_vote_norm": exemplar_vote_norm,
+                "exemplar_segment_votes": exemplar_segment_votes,
+                "technique_head_new_candidates": technique_head_new_candidates,
+                "technique_head_top_families": technique_head_top_families,
+            },
+            exemplar_index if exemplar_status == "active" else None,
+            lexical_fields=getattr(lexical_index, "fields", None)
+            or default_lexical_fields(
+                include_synthetic=include_synthetic, include_detection=include_detection
+            ),
+            dense_collection=_dense_collection(store),
+            technique_head=technique_head if head_active else None,
+        )
+        problems = contract_mismatches(
+            contract,
+            runtime_contract,
+            exemplars=bool(getattr(acceptance_model, "requires_exemplars", False)),
+            technique_head=bool(getattr(acceptance_model, "requires_technique_head", False)),
+        )
+        if problems:
+            acceptance_disabled = "acceptance model retrieval contract not met: " + "; ".join(
+                problems
+            )
+            acceptance_model = None
     exemplar_added = 0
+    head_added = 0
     candidates: list[TechniqueCandidate] = []
     segmented_observations = 0
     case_platforms = ledger_platforms(ledger)
@@ -588,7 +874,11 @@ def retrieve_techniques(
                 _merge_best(
                     selected_dense,
                     _best_technique_hits(
-                        raw_dense, threshold, platform_scope, max_candidates=max(top_k, 1)
+                        raw_dense,
+                        threshold,
+                        platform_scope,
+                        relative_margin=dense_relative_margin,
+                        max_candidates=max(top_k, 1),
                     ),
                 )
             selected_lexical: dict[str, VectorHit] = {}
@@ -628,6 +918,7 @@ def retrieve_techniques(
                 candidate_pool=candidate_pool,
                 cues_enabled=cues_enabled,
                 rrf_k=rrf_k,
+                dense_relative_margin=dense_relative_margin,
             )
         if cues_enabled:
             observation_candidates = _merge_explicit_candidates(
@@ -648,19 +939,38 @@ def retrieve_techniques(
             observation, kb, observation_candidates
         )
         votes = exemplar_votes[observation_index]
-        if votes is not None:
+        scores = head_scores[observation_index]
+        if scores is not None and not scores.ok:
+            scores = None
+        whole_view = segment_count <= 1 or not segment_acceptance
+        if votes is not None and exemplar_new_candidates > 0 and whole_view:
             before = len(observation_candidates)
-            if exemplar_new_candidates > 0 and (segment_count <= 1 or not segment_acceptance):
-                observation_candidates = _append_exemplar_candidates(
-                    observation,
-                    kb,
-                    observation_candidates,
-                    votes,
-                    limit=int(exemplar_new_candidates),
-                    platform_scope=platform_scope,
-                )
+            observation_candidates = _append_exemplar_candidates(
+                observation,
+                kb,
+                observation_candidates,
+                votes,
+                limit=int(exemplar_new_candidates),
+                platform_scope=platform_scope,
+            )
             exemplar_added += len(observation_candidates) - before
+        if scores is not None and technique_head_new_candidates > 0 and whole_view:
+            before = len(observation_candidates)
+            observation_candidates = _append_technique_head_candidates(
+                observation,
+                kb,
+                observation_candidates,
+                scores,
+                limit=int(technique_head_new_candidates),
+                platform_scope=platform_scope,
+            )
+            head_added += len(observation_candidates) - before
+        if votes is not None:
             observation_candidates = _attach_exemplar_evidence(observation_candidates, votes)
+        if scores is not None:
+            observation_candidates = _attach_technique_head_evidence(
+                observation_candidates, scores, observation
+            )
         candidates.extend(observation_candidates)
     behavior_query = getattr(store, "query_group_behaviors", None)
     behavior_hits = (
@@ -717,6 +1027,46 @@ def retrieve_techniques(
             "reranker_load_error": getattr(reranker, "load_error", None),
             "exemplars": exemplar_status,
             "exemplar_candidates_added": exemplar_added,
+            # where the library came from and how its Chroma candidate search did (counters
+            # stay 0 for the npz backend and for exact search)
+            "exemplar_backend": getattr(exemplar_index, "backend", None)
+            if exemplar_index is not None
+            else None,
+            "exemplar_search": getattr(exemplar_index, "search", None)
+            if exemplar_index is not None
+            else None,
+            "exemplar_recall_misses": int(exemplar_stats.get("recall_misses", 0)),
+            "exemplar_search_fallbacks": int(exemplar_stats.get("search_fallbacks", 0)),
+            # non-default tuning knobs only, so default diagnostics stay as they were
+            **(
+                {"exemplar_segment_votes": exemplar_segment_votes}
+                if exemplar_segment_votes != EXEMPLAR_SEGMENT_VOTES
+                else {}
+            ),
+            **(
+                {"exemplar_vote_norm": exemplar_vote_norm}
+                if exemplar_vote_norm != EXEMPLAR_VOTE_NORM
+                else {}
+            ),
+            **(
+                {"dense_relative_margin": dense_relative_margin}
+                if dense_relative_margin != DENSE_RELATIVE_MARGIN
+                else {}
+            ),
+            **({"dense_overfetch": dense_depth} if int(dense_overfetch) > 0 else {}),
+            # the technique head (apt_classifier.technique_head), only when one is configured
+            **(
+                {
+                    "technique_head": head_status,
+                    "technique_head_candidates_added": head_added,
+                    "technique_head_errors": head_errors,
+                    # log-derived observations the head does not read (prose only, for now)
+                    "technique_head_skipped_logs": head_skipped,
+                    "technique_head_fingerprint": getattr(technique_head, "fingerprint", None),
+                }
+                if technique_head is not None
+                else {}
+            ),
             "target_platforms": case_platforms,
             "platform_from_text": platform_from_text,
             "platform_scopes": platform_scopes,
@@ -742,6 +1092,10 @@ def retrieve_techniques(
         rank_by_acceptance=rank_by_acceptance,
         corroboration_accept_observations=corroboration_accept_observations,
         corroboration_accept_min_probability=corroboration_accept_min_probability,
+        single_answer_cap=single_answer_cap,
+        technique_head_agreement=technique_head_agreement,
+        technique_head_first=technique_head_first,
+        technique_head_sibling=technique_head_sibling,
     )
 
 
@@ -759,27 +1113,62 @@ def _exemplar_votes(
     k: int,
     tau: float,
     duplicate_similarity: float,
-) -> tuple[list[ExemplarVotes | None], str]:
-    """Exemplar votes per observation (``None`` entries when the index is unavailable)."""
+    vote_norm: str = EXEMPLAR_VOTE_NORM,
+    segment_votes: str = EXEMPLAR_SEGMENT_VOTES,
+    segments: list[list[str]] | None = None,
+) -> tuple[list[ExemplarVotes | None], str, dict[str, int]]:
+    """Exemplar votes per observation (``None`` entries when the index is unavailable), the
+    status, and the library's query counters (a Chroma store's recall misses and fallbacks).
+
+    The whole-text query is the shipped one (one embedding call, one ``query_vectors`` call;
+    ``vote_norm`` is passed only when it is not the default). With ``segment_votes`` the
+    sentences of segmented observations are queried in a second pair of calls and pooled with
+    the whole-text votes, so the whole-text votes themselves are unchanged."""
     empty: list[ExemplarVotes | None] = [None] * len(observations)
     if exemplar_index is None:
-        return empty, "off"
+        return empty, "off", {}
     if not observations:
-        return empty, "active"
+        return empty, "active", {}
     embedder = getattr(store, "embedder", None)
     if embedder is None or not callable(getattr(embedder, "embed", None)):
-        return empty, "no embedder on the store"
+        return empty, "no embedder on the store", {}
     vectors = embedder.embed(
         [exemplar_query_text(str(observation.text)) for observation in observations]
     )
-    votes = exemplar_index.query_vectors(
-        vectors,
-        parent_of=exemplar_parent_map(kb),
-        k=k,
-        tau=tau,
-        duplicate_similarity=duplicate_similarity,
-    )
-    return list(votes), "active"
+    query: dict[str, Any] = {
+        "parent_of": exemplar_parent_map(kb),
+        "k": k,
+        "tau": tau,
+        "duplicate_similarity": duplicate_similarity,
+    }
+    if vote_norm != EXEMPLAR_VOTE_NORM:
+        query["vote_norm"] = vote_norm
+    votes: list[ExemplarVotes | None] = list(exemplar_index.query_vectors(vectors, **query))
+    stats = _query_stats(exemplar_index)
+    pending = [
+        (position, text)
+        for position, group in enumerate(segments or [])
+        if segment_votes != EXEMPLAR_SEGMENT_VOTES and len(group) > 1
+        for text in group
+    ]
+    if pending:
+        segment_vectors = embedder.embed([exemplar_query_text(str(text)) for _, text in pending])
+        per_segment = list(exemplar_index.query_vectors(segment_vectors, **query))
+        for key, value in _query_stats(exemplar_index).items():
+            stats[key] = int(stats.get(key, 0)) + int(value)
+        pooled: dict[int, list[ExemplarVotes]] = {}
+        for (position, _), segment_vote in zip(pending, per_segment, strict=True):
+            pooled.setdefault(position, []).append(segment_vote)
+        for position, extra in pooled.items():
+            whole = votes[position]
+            if whole is not None:
+                votes[position] = pool_votes([whole, *extra], segment_votes)
+    return votes, "active", stats
+
+
+def _query_stats(exemplar_index: Any) -> dict[str, int]:
+    stats = getattr(exemplar_index, "last_query_stats", None)
+    return dict(stats) if isinstance(stats, dict) else {}
 
 
 def _exemplar_evidence(
@@ -867,6 +1256,143 @@ def _attach_exemplar_evidence(
     return output
 
 
+def _technique_head_scores(
+    observations: list[Any],
+    segments: list[list[str]],
+    technique_head: Any,
+    *,
+    top_families: int,
+) -> tuple[list[TechniqueHeadScores | None], str, int, int]:
+    """The technique head's scores per observation (``None`` entries when the head is off, the
+    observation comes from logs, or the request failed), the status, how many requests failed
+    in this call and how many log-derived observations were left unscored (prose only, for
+    now: :func:`apt_classifier.technique_head.scores_prose`). A segmented observation is scored
+    sentence by sentence and pooled (the head reads one sentence)."""
+    empty: list[TechniqueHeadScores | None] = [None] * len(observations)
+    if technique_head is None:
+        return empty, "off", 0, 0
+    if not getattr(technique_head, "available", False):
+        return empty, str(getattr(technique_head, "status", "unavailable")), 0, 0
+    if not observations:
+        return empty, "active", 0, 0
+    texts: list[str] = []
+    spans: list[tuple[int, int] | None] = []
+    skipped = 0
+    for observation, group in zip(observations, segments, strict=True):
+        if not scores_prose(observation):
+            spans.append(None)
+            skipped += 1
+            continue
+        parts = [str(text) for text in group if str(text).strip()] or [str(observation.text)]
+        spans.append((len(texts), len(parts)))
+        texts.extend(parts)
+    failed_before = int(getattr(technique_head, "errors", 0))
+    scored = list(technique_head.score(texts)) if texts else []
+    failed = int(getattr(technique_head, "errors", 0)) - failed_before
+    output: list[TechniqueHeadScores | None] = []
+    for span in spans:
+        if span is None:
+            output.append(None)
+            continue
+        start, count = span
+        parts = [item for item in scored[start : start + count] if item is not None]
+        if not parts:
+            output.append(None)
+        elif count == 1:
+            output.append(parts[0])
+        else:
+            output.append(pool_scores(parts, top_families=top_families))
+    status = "active" if not failed else f"active ({failed} requests failed)"
+    return output, status, failed, skipped
+
+
+def _technique_head_evidence(
+    scores: TechniqueHeadScores, technique_id: str, *, head_only: bool, words: int = 0
+) -> TechniqueRetrievalEvidence:
+    features = scores.features(technique_id, head_only=head_only, words=words)
+    rank = scores.technique_ranks.get(technique_id)
+    return TechniqueRetrievalEvidence(
+        source=TECHNIQUE_HEAD_SOURCE,
+        field="sentence",
+        score=features["th_technique_p"],
+        rank=rank,
+        rationale=describe_head_scores(scores, technique_id),
+        metadata={
+            "features": features,
+            "head_only": head_only,
+            "top_family": scores.top_family,
+            "proposals": list(scores.proposals),
+        },
+    )
+
+
+def _append_technique_head_candidates(
+    observation: Any,
+    kb: Any,
+    candidates: list[TechniqueCandidate],
+    scores: TechniqueHeadScores,
+    *,
+    limit: int,
+    platform_scope: PlatformScope | None,
+) -> list[TechniqueCandidate]:
+    """The head's proposals that retrieval did not produce, appended after the pool (fused score
+    0, never displacing a retrieved candidate); the acceptance model judges them on the head's
+    evidence (and the exemplar votes attached afterwards)."""
+    techniques = getattr(kb, "techniques", {}) or {}
+    present = {candidate.technique_id for candidate in candidates}
+    output = list(candidates)
+    next_rank = len(candidates) + 1
+    for technique_id in scores.proposals:
+        if len(output) - len(candidates) >= limit:
+            break
+        if technique_id in present or technique_id not in techniques:
+            continue
+        technique = techniques[technique_id]
+        if not _platform_matches(_record_value(technique, "platforms", ()), platform_scope):
+            continue
+        output.append(
+            TechniqueCandidate(
+                observation_id=observation.id,
+                technique_id=technique_id,
+                technique_name=_technique_name(kb, technique_id),
+                parent_technique_id=str(_record_value(technique, "parent_id", "") or "") or None,
+                is_subtechnique=bool(_record_value(technique, "is_subtechnique", False)),
+                fused_score=0.0,
+                fused_rank=next_rank,
+                evidence=[
+                    _technique_head_evidence(
+                        scores, technique_id, head_only=True, words=_word_count(observation)
+                    )
+                ],
+                state=TechniqueCandidateState.NEEDS_REVIEW,
+                state_reason="technique head proposal; acceptance not yet evaluated",
+            )
+        )
+        present.add(technique_id)
+        next_rank += 1
+    return output
+
+
+def _attach_technique_head_evidence(
+    candidates: list[TechniqueCandidate], scores: TechniqueHeadScores, observation: Any = None
+) -> list[TechniqueCandidate]:
+    output = []
+    words = _word_count(observation)
+    for candidate in candidates:
+        if candidate.evidence_for(TECHNIQUE_HEAD_SOURCE) is not None:
+            output.append(candidate)
+            continue
+        evidence = _technique_head_evidence(
+            scores, candidate.technique_id, head_only=False, words=words
+        )
+        output.append(candidate.model_copy(update={"evidence": [*candidate.evidence, evidence]}))
+    return output
+
+
+def _word_count(observation: Any) -> int:
+    return len(str(getattr(observation, "text", "") or "").split())
+
+
 def _observation_segments(text: str) -> list[str]:
     """Split long observations into sentences for retrieval; short ones stay whole."""
     if len(text.split()) <= LONG_OBSERVATION_WORDS:
@@ -944,6 +1470,7 @@ def _build_segmented_candidates(
     candidate_pool: int,
     cues_enabled: bool,
     rrf_k: int,
+    dense_relative_margin: float = DENSE_RELATIVE_MARGIN,
 ) -> list[TechniqueCandidate]:
     merged: dict[str, TechniqueCandidate] = {}
     support: dict[str, int] = {}
@@ -952,7 +1479,11 @@ def _build_segmented_candidates(
     ):
         view = _segment_view(observation, text)
         dense = _best_technique_hits(
-            raw_dense, threshold, platform_scope, max_candidates=max(top_k, 1)
+            raw_dense,
+            threshold,
+            platform_scope,
+            relative_margin=dense_relative_margin,
+            max_candidates=max(top_k, 1),
         )
         lexical = _best_lexical_hits(
             raw_lexical, kb, platform_scope=platform_scope, max_candidates=max(top_k, 1)
@@ -1081,6 +1612,10 @@ def finalize_retrieval_candidates(
     rank_by_acceptance: bool = False,
     corroboration_accept_observations: int = 0,
     corroboration_accept_min_probability: float = 0.2,
+    single_answer_cap: str = SINGLE_ANSWER_CAP,
+    technique_head_agreement: str = HEAD_AGREEMENT,
+    technique_head_first: str = HEAD_FIRST,
+    technique_head_sibling: str = HEAD_SIBLING,
 ) -> RetrievalResult:
     """Assign mapping states only after all candidate evidence is available.
 
@@ -1112,6 +1647,10 @@ def finalize_retrieval_candidates(
                 acceptance_model=acceptance_model,
                 segment_acceptance=segment_acceptance,
                 hierarchy_parent_mode=hierarchy_parent_mode,
+                single_answer_cap=single_answer_cap,
+                technique_head_agreement=technique_head_agreement,
+                technique_head_first=technique_head_first,
+                technique_head_sibling=technique_head_sibling,
             )
         )
     corroborated = 0
@@ -1399,6 +1938,64 @@ def _distinct_word_count(text: str) -> int:
     return len({match.group(0).casefold() for match in _WORD_RE.finditer(text)})
 
 
+def context_gate_flags(view_text: str) -> dict[str, bool]:
+    """The guards of the text a group of candidates is judged on (the observation, or its
+    sentence with segment acceptance): ``benign`` context and ``sparse`` text (fewer than
+    ``MIN_SIMILARITY_ONLY_WORDS`` distinct words) forbid similarity-only acceptance."""
+    return {
+        "benign": _BENIGN_INDICATORS.search(view_text) is not None,
+        "sparse": _distinct_word_count(view_text) < MIN_SIMILARITY_ONLY_WORDS,
+    }
+
+
+def candidate_gate_flags(
+    candidate: TechniqueCandidate,
+    view_text: str,
+    *,
+    threshold: float,
+    context: Mapping[str, bool] | None = None,
+) -> dict[str, bool]:
+    """The runtime guards ``_assign_states_for_group`` applies to one candidate.
+
+    ``benign`` / ``sparse`` (:func:`context_gate_flags` of ``view_text``, or ``context`` when
+    the caller computed it once for the group), ``hierarchy_parent`` (a derived parent, never
+    accepted) and ``cue_supported`` (a structured signal or explicit cue corroborated by a dense
+    hit at ``threshold`` or a lexical rank of at most 3: accepted whatever the model says).
+    The acceptance fit and the tuning harness score thresholds with these, and the benchmarks
+    store them per candidate row, so offline decisions follow the runtime gate."""
+    flags = dict(context) if context is not None else context_gate_flags(view_text)
+    dense = candidate.evidence_for("dense")
+    lexical = candidate.evidence_for("lexical")
+    dense_score = float(dense.score or 0.0) if dense is not None else 0.0
+    lexical_support = lexical is not None and (lexical.rank or 999) <= 3
+    cue = (
+        candidate.evidence_for("structured_signal") is not None
+        or candidate.evidence_for("explicit_cue") is not None
+    )
+    return {
+        "benign": bool(flags["benign"]),
+        "sparse": bool(flags["sparse"]),
+        "hierarchy_parent": candidate.evidence_for("hierarchy_parent") is not None,
+        "cue_supported": cue and (dense_score >= threshold or lexical_support),
+    }
+
+
+def runtime_gate_masks(flags: Sequence[Mapping[str, bool]]) -> tuple[list[bool], list[bool]]:
+    """``(blocked, forced)`` per candidate row for
+    :func:`apt_classifier.acceptance.choose_threshold_runtime`, from
+    :func:`candidate_gate_flags` plus ``parent_suppressed`` (:func:`suppressed_parent_flags`).
+
+    A hierarchy parent and a parent left out of the accepted set are never accepted; a benign or
+    sparse context blocks only the probability path; a cue-supported row is accepted otherwise."""
+    blocked: list[bool] = []
+    forced: list[bool] = []
+    for row in flags:
+        never = bool(row.get("hierarchy_parent")) or bool(row.get("parent_suppressed"))
+        blocked.append(never or bool(row.get("benign")) or bool(row.get("sparse")))
+        forced.append(not never and bool(row.get("cue_supported")))
+    return blocked, forced
+
+
 def _passes_similarity_gate(
     candidate: TechniqueCandidate,
     *,
@@ -1445,6 +2042,11 @@ def _acceptance_probability(
     reordered by probability, judges exactly the same number: features such as the
     fused rank and margins are only meaningful in the fusion order they were fitted on.
     """
+    picker = getattr(model, "model_for", None)
+    if callable(picker):
+        # a head-aware pair (acceptance.HeadAwareAcceptance): the model fitted with the
+        # technique head for candidates that carry its evidence, the plain one for the rest
+        model = picker(candidate)
     threshold = getattr(model, "threshold", None)
     if hasattr(model, "prior_features"):
         features = {**features, **model.prior_features(candidate.technique_id)}
@@ -1557,6 +2159,10 @@ def _assign_candidate_states(
     acceptance_model: Any = None,
     segment_acceptance: bool = False,
     hierarchy_parent_mode: str = "off",
+    single_answer_cap: str = SINGLE_ANSWER_CAP,
+    technique_head_agreement: str = HEAD_AGREEMENT,
+    technique_head_first: str = HEAD_FIRST,
+    technique_head_sibling: str = HEAD_SIBLING,
 ) -> list[TechniqueCandidate]:
     """Assign AUTO_ACCEPTED / NEEDS_REVIEW / AUTO_REJECTED per candidate.
 
@@ -1576,6 +2182,10 @@ def _assign_candidate_states(
             reranker=reranker,
             acceptance_model=acceptance_model,
             hierarchy_parent_mode=hierarchy_parent_mode,
+            single_answer_cap=single_answer_cap,
+            technique_head_agreement=technique_head_agreement,
+            technique_head_first=technique_head_first,
+            technique_head_sibling=technique_head_sibling,
         )
     decided: dict[str, TechniqueCandidate] = {}
     for view, views, group in judged:
@@ -1589,6 +2199,10 @@ def _assign_candidate_states(
             reranker=reranker,
             acceptance_model=acceptance_model,
             hierarchy_parent_mode=hierarchy_parent_mode,
+            single_answer_cap=single_answer_cap,
+            technique_head_agreement=technique_head_agreement,
+            technique_head_first=technique_head_first,
+            technique_head_sibling=technique_head_sibling,
         )
         for original, result in zip(group, results, strict=True):
             decided[original.technique_id] = original.model_copy(
@@ -1612,6 +2226,10 @@ def _assign_states_for_group(
     reranker: Any = None,
     acceptance_model: Any = None,
     hierarchy_parent_mode: str = "off",
+    single_answer_cap: str = SINGLE_ANSWER_CAP,
+    technique_head_agreement: str = HEAD_AGREEMENT,
+    technique_head_first: str = HEAD_FIRST,
+    technique_head_sibling: str = HEAD_SIBLING,
 ) -> list[TechniqueCandidate]:
     dense_scores = sorted(
         (
@@ -1666,12 +2284,16 @@ def _assign_states_for_group(
     )
     reranker_validated = bool(reranker is not None and getattr(reranker, "validated", False))
     observation_text = str(getattr(observation, "text", ""))
-    benign_context = _BENIGN_INDICATORS.search(observation_text) is not None
-    sparse_context = _distinct_word_count(observation_text) < MIN_SIMILARITY_ONLY_WORDS
+    context = context_gate_flags(observation_text)
+    benign_context = context["benign"]
+    sparse_context = context["sparse"]
     output: list[TechniqueCandidate] = []
     for candidate in candidates:
         verification = candidate.verification
-        if candidate.evidence_for("hierarchy_parent") is not None:
+        flags = candidate_gate_flags(
+            candidate, observation_text, threshold=threshold, context=context
+        )
+        if flags["hierarchy_parent"]:
             output.append(
                 candidate.model_copy(
                     update={
@@ -1686,7 +2308,7 @@ def _assign_states_for_group(
                 candidate.model_copy(
                     update={
                         "state": TechniqueCandidateState.AUTO_REJECTED,
-                        "state_reason": "OpenRouter verifier: unsupported",
+                        "state_reason": "LLM verifier: unsupported",
                     }
                 )
             )
@@ -1696,20 +2318,14 @@ def _assign_states_for_group(
                 candidate.model_copy(
                     update={
                         "state": TechniqueCandidateState.AUTO_ACCEPTED,
-                        "state_reason": "OpenRouter verifier: supported",
+                        "state_reason": "LLM verifier: supported",
                     }
                 )
             )
             continue
         dense = candidate.evidence_for("dense")
         lexical = candidate.evidence_for("lexical")
-        signal = candidate.evidence_for("structured_signal")
-        explicit = candidate.evidence_for("explicit_cue")
-        dense_score = float(dense.score or 0.0) if dense is not None else 0.0
-        lexical_support = lexical is not None and (lexical.rank or 999) <= 3
-        cue_supported = (signal is not None or explicit is not None) and (
-            dense_score >= threshold or lexical_support
-        )
+        cue_supported = flags["cue_supported"]
         # Signals and explicit cues propose a mapping but can never accept it
         # alone: each needs dense or lexical corroboration.  A benign-context
         # observation never hides candidates, but similarity alone is not
@@ -1741,17 +2357,26 @@ def _assign_states_for_group(
                         rationale="calibrated acceptance model",
                     )
                 )
-            model_accepted = model_says_yes and not benign_context and not sparse_context
+            # head-first (prereg cribl_head_first): the head's joint probability for this
+            # candidate at or above the artifact's bar accepts it outright
+            head_first_bar = _head_first_bar(acceptance_model, candidate, technique_head_first)
+            head_probability = _head_probability(candidate)
+            head_first = head_first_bar is not None and head_probability >= head_first_bar
+            model_accepted = (
+                (model_says_yes or head_first) and not benign_context and not sparse_context
+            )
             accepted = model_accepted or cue_supported
             reason = (
                 "structured or explicit behavior supported by retrieval"
                 if cue_supported
                 else "calibrated acceptance model score passed the dev-selected threshold"
+                if model_accepted and model_says_yes
+                else f"{HEAD_FIRST_REASON} ({head_probability:.2f})"
                 if model_accepted
                 else "benign-context observation: similarity-only mapping requires review"
-                if benign_context and model_says_yes
+                if benign_context and (model_says_yes or head_first)
                 else "observation too sparse for similarity-only acceptance"
-                if sparse_context and model_says_yes
+                if sparse_context and (model_says_yes or head_first)
                 else "calibrated acceptance model score below threshold; requires review"
             )
         else:
@@ -1807,6 +2432,12 @@ def _assign_states_for_group(
         if extra_evidence:
             update["evidence"] = [*candidate.evidence, *extra_evidence]
         output.append(candidate.model_copy(update=update))
+    if acceptance_model is not None and technique_head_sibling != "off":
+        output = _apply_sibling_replacement(output, acceptance_model, technique_head_sibling)
+    if acceptance_model is not None and single_answer_cap != "off":
+        output = _apply_single_answer_cap(output, acceptance_model, single_answer_cap)
+    if technique_head_agreement != "off":
+        output = _apply_head_agreement(output, technique_head_agreement)
     if hierarchy_parent_mode == "off":
         return output
     return _apply_hierarchy_consistency(
@@ -1815,6 +2446,242 @@ def _assign_states_for_group(
         relative_margin=relative_margin,
         fill_unaccepted=hierarchy_parent_mode == "swap_and_fill",
     )
+
+
+def parse_single_answer_cap(value: Any) -> str | float | None:
+    """``model`` (follow the artifact), ``off``, or a forced bar in (0, 1] for an ablation
+    (``TECHNIQUE_SINGLE_ANSWER_CAP=1.0`` is strictly one acceptance); ``None`` when invalid."""
+    text = str(value if value is not None else "model").strip().lower() or "model"
+    if text in SINGLE_ANSWER_CAP_MODES:
+        return text
+    try:
+        bar = float(text)
+    except ValueError:
+        return None
+    return bar if 0.0 < bar <= 1.0 else None
+
+
+def parse_head_ratio(value: Any) -> str | float | None:
+    """``model`` (follow the artifact), ``off``, or a forced ratio > 0 for an ablation; ``None``
+    when invalid."""
+    text = str(value if value is not None else "model").strip().lower() or "model"
+    if text in SINGLE_ANSWER_CAP_MODES:
+        return text
+    try:
+        ratio = float(text)
+    except ValueError:
+        return None
+    return ratio if ratio > 0.0 else None
+
+
+def _sibling_ratio(
+    model: Any, candidate: TechniqueCandidate, mode: Any = HEAD_SIBLING
+) -> float | None:
+    parsed = parse_head_ratio(mode)
+    if isinstance(parsed, float):
+        return parsed
+    if parsed != "model" or model is None:
+        return None
+    picker = getattr(model, "model_for", None)
+    if callable(picker):
+        model = picker(candidate)
+    ratio = getattr(model, "sibling_min_ratio", None)
+    return float(ratio) if ratio is not None else None
+
+
+def _apply_sibling_replacement(
+    candidates: list[TechniqueCandidate], model: Any, mode: Any = HEAD_SIBLING
+) -> list[TechniqueCandidate]:
+    """The head's preferred member of a family replaces an accepted sibling (prereg
+    cribl_sibling_replacement): for each candidate accepted on probability alone, the candidate
+    of the same family with the highest head probability takes its place when the head prefers
+    it by the model's ratio; cue-supported, verifier and head-first decisions are untouched."""
+    if not candidates:
+        return candidates
+    ratio = _sibling_ratio(model, candidates[0], mode)
+    if ratio is None:
+        return candidates
+    head = [_head_probability(candidate) for candidate in candidates]
+    families: dict[str, list[int]] = {}
+    for index, candidate in enumerate(candidates):
+        if candidate.evidence_for("hierarchy_parent") is None:
+            families.setdefault(str(candidate.technique_id).split(".", 1)[0], []).append(index)
+    output = list(candidates)
+    for members in families.values():
+        if len(members) < 2:
+            continue
+        best = max(members, key=lambda i: (head[i], -i))
+        if head[best] <= 0.0:
+            continue
+        for index in members:
+            candidate = output[index]
+            if (
+                index == best
+                or candidate.state is not TechniqueCandidateState.AUTO_ACCEPTED
+                or candidate.state_reason != MODEL_ACCEPT_REASON
+                or head[best] < ratio * head[index]
+            ):
+                continue
+            target = output[best]
+            if (
+                target.verification.verdict is TechniqueVerificationVerdict.UNSUPPORTED
+                or target.state is TechniqueCandidateState.AUTO_REJECTED
+            ):
+                continue
+            output[index] = candidate.model_copy(
+                update={
+                    "state": TechniqueCandidateState.NEEDS_REVIEW,
+                    "state_reason": SIBLING_REPLACED_REASON,
+                }
+            )
+            if target.state is not TechniqueCandidateState.AUTO_ACCEPTED:
+                output[best] = target.model_copy(
+                    update={
+                        "state": TechniqueCandidateState.AUTO_ACCEPTED,
+                        "state_reason": f"{SIBLING_REASON} ({head[best]:.2f} vs {head[index]:.2f})",
+                    }
+                )
+    return output
+
+
+def _head_probability(candidate: TechniqueCandidate) -> float:
+    """The technique head's joint probability for the candidate (0 without head evidence)."""
+    evidence = candidate.evidence_for(TECHNIQUE_HEAD_SOURCE)
+    if evidence is None:
+        return 0.0
+    features = (evidence.metadata or {}).get("features") or {}
+    try:
+        return float(features.get("th_technique_p", 0.0) or 0.0)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _head_first_bar(
+    model: Any, candidate: TechniqueCandidate, mode: Any = HEAD_FIRST
+) -> float | None:
+    """The head-first bar: a forced one (``mode`` a number), else the bar of the model judging
+    the candidate (``model_for`` for a head-aware pair); ``None`` when there is no rule."""
+    parsed = parse_single_answer_cap(mode)
+    if isinstance(parsed, float):
+        return parsed
+    if parsed != "model" or model is None:
+        return None
+    picker = getattr(model, "model_for", None)
+    if callable(picker):
+        model = picker(candidate)
+    bar = getattr(model, "head_first_min_probability", None)
+    return float(bar) if bar is not None else None
+
+
+def _second_answer_bar(
+    model: Any, candidates: Sequence[TechniqueCandidate], mode: Any = SINGLE_ANSWER_CAP
+) -> float | None:
+    """The cap's bar: a forced one (``mode`` a number), else the bar of the model judging these
+    candidates (a head-aware pair answers per observation through ``model_for``); ``None`` when
+    there is no cap."""
+    parsed = parse_single_answer_cap(mode)
+    if isinstance(parsed, float):
+        return parsed
+    if parsed != "model":
+        return None
+    picker = getattr(model, "model_for", None)
+    if callable(picker) and candidates:
+        model = picker(candidates[0])
+    bar = getattr(model, "second_min_probability", None)
+    return float(bar) if bar is not None else None
+
+
+def _apply_single_answer_cap(
+    candidates: list[TechniqueCandidate], model: Any, mode: Any = SINGLE_ANSWER_CAP
+) -> list[TechniqueCandidate]:
+    """At most one acceptance on probability alone per observation: the most probable stays,
+    another only at or above the bar (the model's, or a forced one); cue-supported, verifier
+    and reranker decisions are untouched. The capped ones return to review with the reason
+    recorded."""
+    bar = _second_answer_bar(model, candidates, mode)
+    if bar is None:
+        return candidates
+    scored: list[tuple[float, int]] = []
+    for index, candidate in enumerate(candidates):
+        if (
+            candidate.state is TechniqueCandidateState.AUTO_ACCEPTED
+            and candidate.state_reason == MODEL_ACCEPT_REASON
+        ):
+            evidence = candidate.evidence_for(ACCEPTANCE_EVIDENCE_SOURCE)
+            probability = (
+                float(evidence.score)
+                if evidence is not None and evidence.score is not None
+                else 0.0
+            )
+            scored.append((probability, index))
+    if len(scored) < 2:
+        return candidates
+    scored.sort(key=lambda item: (-item[0], candidates[item[1]].technique_id))
+    capped = {index for probability, index in scored[1:] if probability < bar}
+    if not capped:
+        return candidates
+    return [
+        candidate.model_copy(
+            update={
+                "state": TechniqueCandidateState.NEEDS_REVIEW,
+                "state_reason": CAP_REVIEW_REASON,
+            }
+        )
+        if index in capped
+        else candidate
+        for index, candidate in enumerate(candidates)
+    ]
+
+
+def head_agrees(candidate: TechniqueCandidate, level: str) -> bool | None:
+    """Whether the technique head picks this candidate at ``level`` (``technique``: its most
+    probable technique; ``family``: its most probable family; ``top3``: one of its three most
+    probable families); ``None`` when the candidate carries no head evidence."""
+    evidence = candidate.evidence_for(TECHNIQUE_HEAD_SOURCE)
+    if evidence is None:
+        return None
+    features = dict((evidence.metadata or {}).get("features") or {})
+    try:
+        technique_rank = float(features.get("th_technique_rank", 0.0))
+        family_rank = float(features.get("th_family_rank", 0.0))
+    except (TypeError, ValueError):
+        return False
+    if level == "technique":
+        return technique_rank >= 1.0
+    if level == "family":
+        return family_rank >= 1.0
+    if level == "top3":
+        return family_rank >= 1.0 / 3 - 1e-9
+    raise ValueError(f"unsupported technique head agreement {level!r}")
+
+
+def _apply_head_agreement(
+    candidates: list[TechniqueCandidate], level: str
+) -> list[TechniqueCandidate]:
+    """Keep an accepted technique only when the head agrees (prereg cribl_head_agreement):
+    verifier verdicts and candidates without head evidence (observations the head did not
+    score) are left alone; the rest return to review with the reason recorded."""
+    output = []
+    for candidate in candidates:
+        if (
+            candidate.state is not TechniqueCandidateState.AUTO_ACCEPTED
+            or candidate.verification.verdict is TechniqueVerificationVerdict.SUPPORTED
+        ):
+            output.append(candidate)
+            continue
+        agrees = head_agrees(candidate, level)
+        if agrees is None or agrees:
+            output.append(candidate)
+            continue
+        output.append(
+            candidate.model_copy(
+                update={
+                    "state": TechniqueCandidateState.NEEDS_REVIEW,
+                    "state_reason": AGREEMENT_REVIEW_REASON,
+                }
+            )
+        )
+    return output
 
 
 def _plausible(candidate: TechniqueCandidate, dense_floor: float) -> bool:
@@ -2033,28 +2900,14 @@ def _materialize_candidates(
     # Include both AUTO_ACCEPTED and NEEDS_REVIEW candidates so that cue-only
     # proposals remain visible to the analyst and to benchmarks. The state is
     # preserved in metadata["mapping_state"] so reviewers can filter on it.
-    visible = [
-        candidate
-        for candidate in candidates
-        if candidate.state
-        in (TechniqueCandidateState.AUTO_ACCEPTED, TechniqueCandidateState.NEEDS_REVIEW)
-    ]
-    child_parents_by_observation: dict[str, set[str]] = {}
-    for candidate in visible:
-        if candidate.parent_technique_id:
-            child_parents_by_observation.setdefault(candidate.observation_id, set()).add(
-                candidate.parent_technique_id
-            )
+    visible = _visible_candidates(candidates)
+    child_parents_by_observation = _child_parents(visible)
     matches: list[TechniqueMatch] = []
     score_evidence: dict[str, list[float]] = {}
     observation_ids: dict[str, set[str]] = {}
     for candidate in visible:
-        if (
-            candidate.technique_id
-            in child_parents_by_observation.get(candidate.observation_id, set())
-            and candidate.evidence_for("hierarchy_parent") is None
-            and candidate.evidence_for("dense") is None
-            and candidate.evidence_for("lexical") is None
+        if _suppressed_parent(
+            candidate, child_parents_by_observation.get(candidate.observation_id, set())
         ):
             continue
         score = _candidate_strength(candidate)
@@ -2125,6 +2978,45 @@ def _materialize_candidates(
         for technique_id, scores in score_evidence.items()
     }
     return matches, observed, observation_ids
+
+
+def _visible_candidates(candidates: Sequence[TechniqueCandidate]) -> list[TechniqueCandidate]:
+    return [
+        candidate
+        for candidate in candidates
+        if candidate.state
+        in (TechniqueCandidateState.AUTO_ACCEPTED, TechniqueCandidateState.NEEDS_REVIEW)
+    ]
+
+
+def _child_parents(visible: Sequence[TechniqueCandidate]) -> dict[str, set[str]]:
+    """Per observation, the parents of its visible sub-technique candidates."""
+    output: dict[str, set[str]] = {}
+    for candidate in visible:
+        if candidate.parent_technique_id:
+            output.setdefault(candidate.observation_id, set()).add(candidate.parent_technique_id)
+    return output
+
+
+def _suppressed_parent(candidate: TechniqueCandidate, child_parents: set[str]) -> bool:
+    """A parent of a visible child of the same observation with no hierarchy, dense or lexical
+    evidence of its own (a cue- or exemplar-only parent): never materialized."""
+    return (
+        candidate.technique_id in child_parents
+        and candidate.evidence_for("hierarchy_parent") is None
+        and candidate.evidence_for("dense") is None
+        and candidate.evidence_for("lexical") is None
+    )
+
+
+def suppressed_parent_flags(candidates: Sequence[TechniqueCandidate]) -> list[bool]:
+    """Per candidate, whether ``_materialize_candidates`` leaves it out of the matches (and so
+    out of the accepted techniques) even when it is accepted; see :func:`runtime_gate_masks`."""
+    child_parents = _child_parents(_visible_candidates(candidates))
+    return [
+        _suppressed_parent(candidate, child_parents.get(candidate.observation_id, set()))
+        for candidate in candidates
+    ]
 
 
 def _candidate_strength(candidate: TechniqueCandidate) -> float:
@@ -2330,11 +3222,12 @@ def build_classifier_context(
         for observation in ledger.observations
         if observation.status is EvidenceStatus.POSITIVE and observation.metadata.get("software_id")
     }
-    narrative = " ".join(
-        observation.text
+    statements = tuple(
+        str(observation.text)
         for observation in ledger.observations
         if observation.status is EvidenceStatus.POSITIVE
     )
+    narrative = " ".join(statements)
     software_ids.update(
         match.software_id for match in match_software_aliases(narrative, kb) if match.software_id
     )
@@ -2349,6 +3242,20 @@ def build_classifier_context(
         narrative=narrative,
         parent_policy=str(getattr(retrieval, "parent_policy", "ancestor_compatible")),
     )
+    # the positive observations' texts in order, for the behaviour-text member (set after
+    # construction: the context dataclass is hashed into the combiner fingerprint)
+    context.statements = statements
+    # per accepted technique, the texts of its supporting statements (the procedure member)
+    texts_by_id = {
+        str(observation.id): str(observation.text)
+        for observation in ledger.observations
+        if observation.status is EvidenceStatus.POSITIVE
+    }
+    context.technique_statements = {
+        str(technique_id): tuple(texts_by_id[i] for i in ids if i in texts_by_id)
+        for technique_id, ids in technique_observations.items()
+        if technique_id in observed
+    }
     context.soft_techniques = soft
     context.soft_technique_observations = soft_observations
     # Contrastive near misses: same qualification as soft evidence, but they only reach the
@@ -2366,6 +3273,10 @@ def build_classifier_context(
     context.specific_behavior_scores = retrieval.specific_behavior_scores
     context.specific_behavior_signals = retrieval.specific_behavior_signals
     context.specific_behavior_matches = tuple(retrieval.specific_behavior_matches or ())
+    # the software the case text names, before any interview answer; the answers are applied
+    # here as well as on rescoring, so a reloaded case reaches the identical decision
+    context.document_software_ids = set(software_ids)
+    apply_software_answers(context, ledger)
     return context
 
 
@@ -2435,6 +3346,33 @@ def refresh_context_answers(
         existing = set(context.technique_observations.get(answer.technique_id, ()))
         existing.add(answer.id)
         context.technique_observations[answer.technique_id] = tuple(sorted(existing))
+    apply_software_answers(context, ledger)
+    return context
+
+
+def apply_software_answers(context: Any, ledger: EvidenceLedger) -> Any:
+    """Software interview answers (software_questions.py) on top of the software the case text
+    names. A "found" counts exactly like a name matched in the text (``software_ids``); a "not
+    found" goes to ``negative_software_ids``, which only the naming gate reads (never a classifier,
+    the fusion or the combiner), and never cancels software the text names or an analyst found.
+    Recomputed from the ledger each time, so the result never depends on earlier passes."""
+    document = getattr(context, "document_software_ids", None)
+    if document is None:
+        document = set(getattr(context, "software_ids", set()) or set())
+        context.document_software_ids = set(document)
+    found: set[str] = set()
+    not_found: set[str] = set()
+    for answer in ledger.question_answers:
+        software_id = getattr(answer, "software_id", None)
+        if getattr(answer, "kind", "technique") != "software" or not software_id:
+            continue
+        if answer.status is EvidenceStatus.POSITIVE:
+            found.add(software_id)
+        elif answer.status is EvidenceStatus.NEGATIVE:
+            not_found.add(software_id)
+    context.software_ids = set(document) | found
+    context.interview_found_software = found - set(document)
+    context.negative_software_ids = not_found - context.software_ids
     return context
 
 
@@ -2566,7 +3504,7 @@ def _best_technique_hits(
     hits: list[VectorHit],
     threshold: float,
     platform_scope: PlatformScope | None = None,
-    relative_margin: float = 0.12,
+    relative_margin: float = DENSE_RELATIVE_MARGIN,
     max_candidates: int = 6,
 ) -> dict[str, VectorHit]:
     eligible = [

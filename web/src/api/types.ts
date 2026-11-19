@@ -5,6 +5,7 @@ export type Stage =
   | 'unresolved_activity_cluster'
   | 'known_group_shortlist'
   | 'known_group_hypothesis'
+  | 'known_cluster_hypothesis'
 
 export type CandidateState = 'auto_accepted' | 'needs_review' | 'auto_rejected'
 
@@ -22,9 +23,15 @@ export interface SystemInfo {
   combiner: string
   /** labelled-sentence exemplar index; when not active the acceptance model is off too */
   exemplars?: string
+  /** where the exemplar library is served from: "npz", "chroma (exact)", "chroma (hnsw)" or "off" */
+  exemplar_backend?: string
+  /** the fine-tuned technique head's local service: "active", "active (unpinned)", "disabled" or "unavailable: ..." */
+  technique_head?: string
   /** random-forest group and source-country models, e.g. "active (cuda)" */
   profile_forest?: string
   group_mlp?: string
+  /** free-text TF-IDF group model; "disabled (weight 0)" unless TEXT_GROUP_WEIGHT > 0 */
+  text_group?: string
   index: {
     ok: boolean
     technique_sentences?: number
@@ -33,9 +40,18 @@ export interface SystemInfo {
     error?: string
   }
   llm_spend_usd: number
+  /** who answers the LLM tasks: OpenRouter, the local Ollama model, both, or nothing */
+  llm_provider?: 'openrouter' | 'local' | 'hybrid' | 'none'
+  /** model that answers each task (`local/…` runs on Ollama); null when unavailable */
+  llm_models?: Record<'extraction' | 'verifier' | 'cyberre' | 'review', string | null>
+  /** how report prose becomes observations: OpenRouter whole-report extraction, the local
+   * model rewriting each split sentence, or the plain sentence split */
+  prose_normalisation?: 'extract' | 'sentences' | 'split'
   cases: number
   elastic_mcp: boolean
   classifier_weights: Record<string, number>
+  /** opt-in second opinion from a language model (display only); absent on an older API */
+  model_opinion?: ModelOpinionStatus
 }
 
 export interface CaseSummary {
@@ -43,6 +59,8 @@ export interface CaseSummary {
   stage?: Stage | null
   leading_group?: string | null
   leading_group_name?: string | null
+  /** members of a named documented-overlap cluster, leader first */
+  named_cluster?: string[]
   accepted_techniques?: number
   answers?: number
 }
@@ -144,12 +162,26 @@ export interface RankingEntry {
   discrimination: Discrimination | null
 }
 
+export interface NamedCluster {
+  members: { group_id: string; name: string }[]
+  label: string
+  reason: string
+  separation: number
+  discriminative: number
+  probability: number | null
+  runner_up_group_id: string | null
+  runner_up_name: string | null
+}
+
 export interface DecisionInfo {
   stage: Stage
   label: string
   summary: string
   advice: string
+  /** a single group is named (a named cluster is reported through named_kind / named_cluster) */
   named: boolean
+  named_kind?: 'group' | 'cluster' | null
+  named_cluster?: NamedCluster | null
   leading_group_id: string | null
   leading_group_name: string
   leading_score: number
@@ -161,7 +193,9 @@ export interface DecisionInfo {
   runner_up_group_id: string | null
   runner_up_name: string | null
   runner_up_related: boolean
-  related_groups: { group_id: string; name: string; reason: string }[]
+  // ATT&CK-related groups; only "same_activity" documents the same actor (a cluster), the rest are
+  // different actors ATT&CK merely links (shared rare malware, or a description calling them distinct)
+  related_groups: { group_id: string; name: string; reason: string; link: string }[]
   rationale: string
   cluster_id: string | null
   gate_mode: string
@@ -236,6 +270,79 @@ export interface ReviewInfo {
   fame_bias: { kendall_tau: number; prominence_correlation: number; largest_promotions: string[] }
   advocate: { counter_case: string; missing_evidence: string[] }
   audit_path: string | null
+}
+
+/** One group the model put forward; matched to ATT&CK by its name only (model_opinion.py) */
+export interface ModelOpinionCandidate {
+  /** the model's own text */
+  name: string
+  /** ATT&CK group with that name or alias; null when the name is not an ATT&CK group */
+  group_id: string | null
+  attack_name: string | null
+  /** the model's own stated number, never calibrated; null when it gave none */
+  probability: number | null
+}
+
+export type ModelOpinionDecision = 'name' | 'open' | 'not_in_attack'
+
+/** how the model's first choice relates to the product's answer */
+export type ModelOpinionAgreementKind =
+  | 'no_candidate'
+  | 'outside_attack'
+  | 'no_product_leader'
+  | 'same'
+  | 'named_pair'
+  | 'same_activity'
+  | 'shortlist'
+  | 'different'
+
+/** The analyst-requested second opinion of a language model: shown beside the product's
+ * answer, never part of it (no ranking, gate, label or export reads it). */
+export interface ModelOpinion {
+  /** ISO 8601, UTC */
+  asked_at: string
+  /** the model that answered */
+  model: string
+  effort: string
+  prompt_version: number
+  decision: ModelOpinionDecision
+  /** null when the model gave no candidate */
+  first: ModelOpinionCandidate | null
+  /** at most three, the first choice included */
+  candidates: ModelOpinionCandidate[]
+  /** the model would name an ATT&CK group and states at least `confident_rule.probability` */
+  confident_name: boolean
+  /** applies is false when the answering model or effort is not the tested one */
+  confident_rule: { probability: number; applies: boolean }
+  rationale: string
+  agreement: { kind: ModelOpinionAgreementKind; text: string }
+  statements_sent: number
+  /** more than statements_sent when the case was cut to the first statements */
+  statements_total: number
+  /** ATT&CK group names and aliases replaced before the text was sent */
+  names_masked: number
+  cost_usd: number
+  prompt_tokens: number
+  completion_tokens: number
+  /** the case statements changed after this answer */
+  stale: boolean
+  note: string
+}
+
+/** `system.model_opinion`: whether the second opinion can be asked (service.py) */
+export interface ModelOpinionStatus {
+  /** MODEL_OPINION_ENABLED; the block is not shown at all when false */
+  enabled: boolean
+  /** enabled, an OpenRouter key is set and the model is not a local one */
+  available: boolean
+  model: string
+  effort: string
+  status: 'disabled' | 'needs an OpenRouter key' | 'needs a cloud model' | 'ready'
+  confident_probability: number
+  /** the only model the confident-name cut-off was tested for */
+  registered_model: string
+  registered_effort: string
+  cost_note: string
 }
 
 export interface CyberREResult {
@@ -330,6 +437,8 @@ export interface CasePayload {
   retrieval_diagnostics: Record<string, unknown>
   interview: { complete: boolean; stop_reason: string | null; answered: number; has_question: boolean }
   review: ReviewInfo | null
+  /** the model's second opinion, when the analyst asked for one (display only) */
+  model_opinion: ModelOpinion | null
   cyberre: { results: Record<string, CyberREResult> }
   intel: { snapshot: IntelSnapshotSummary | null; matches: IntelMatch[] }
   group_label: string | null
@@ -346,6 +455,13 @@ export interface InterviewQuestion {
   probability_yes: number
   information_gain: number
   investigation_priority: number
+  /** "software": a fixed-wording question about one malware entry (found / not found / not checked) */
+  kind?: 'technique' | 'software'
+  software_id?: string | null
+  /** top-three place of the one candidate ATT&CK documents the malware for */
+  target_rank?: number | null
+  /** predicted change of the naming gate's separation if the malware is found */
+  delta_found?: number | null
 }
 
 export interface InterviewLead {
@@ -362,7 +478,14 @@ export interface InterviewState {
   complete: boolean
   stop_reason: string | null
   selection_error: string | null
-  answered: { question: string; technique_id: string | null; status: string; text: string | null }[]
+  answered: {
+    question: string
+    technique_id: string | null
+    status: string
+    text: string | null
+    kind?: 'technique' | 'software'
+    software_id?: string | null
+  }[]
   max_questions: number
   question: InterviewQuestion | null
   leads: InterviewLead[]
@@ -471,6 +594,18 @@ export interface DistinguishLead {
   first_step: string
 }
 
+export interface DistinguishSoftware {
+  software_id: string
+  name: string
+  group_id: string
+  group_name: string
+  target_rank: number
+  users: string[]
+  delta_found: number
+  delta_not_found: number
+  technique_count: number
+}
+
 export interface DistinguishResponse {
   top_k: number
   /** size of the naming gate's window (combiner top 5 plus RRF top 5), the default top_k */
@@ -497,9 +632,18 @@ export interface DistinguishResponse {
   techniques: DistinguishTechnique[]
   pending: DistinguishPending[]
   leads: DistinguishLead[]
+  /** malware only one top-three candidate documents: what the software questions ask about */
+  software?: DistinguishSoftware[]
 }
 
-export type Top3State = 'named' | 'overlap' | 'split' | 'thin' | 'not_separated' | 'empty'
+export type Top3State =
+  | 'named'
+  | 'named_cluster'
+  | 'overlap'
+  | 'split'
+  | 'thin'
+  | 'not_separated'
+  | 'empty'
 
 export interface Top3Summary {
   state: Top3State
@@ -507,6 +651,36 @@ export interface Top3Summary {
   summary: string
   leader?: { group_id: string; name: string }
   other?: { group_id: string; name: string } | null
+  /** calibrated confidence label (display only, never a decision); null when off */
+  confidence?: Top3Confidence | null
+}
+
+/** per-label counts of one evaluation set, from the calibration artifact */
+export interface Top3ConfidenceMeasured {
+  source: string
+  rows: number
+  strong: { n: number; right: number }
+  set: { n: number; right: number }
+  open: { n: number; truth_in_top3: number }
+}
+
+/** How often cases like this one were right on ATT&CK test folds (confidence_labels.py) */
+export interface Top3Confidence {
+  label: 'strong' | 'set' | 'open'
+  /** wording: named_lower = named by the gate, calibrated label lower; named_cluster = the gate's pair */
+  text_key: 'strong' | 'one_of_these' | 'open' | 'named_lower' | 'named_cluster'
+  /** calibrated probability that the shown answer holds (null when open) */
+  probability: number | null
+  p_leader: number | null
+  p_top2: number | null
+  p_top3: number | null
+  set_size: number
+  group_ids: string[]
+  members: { group_id: string; name: string }[]
+  /** set is null in a strong-only artifact: "one of these" is never shown */
+  thresholds: { strong: number; set: number | null }
+  measured: { folds: Top3ConfidenceMeasured | null; real_reports: Top3ConfidenceMeasured | null }
+  note: string
 }
 
 /** another top-three member holds clearly more exclusive evidence than the leader */
@@ -543,7 +717,13 @@ export interface Top3Candidate {
   broad_profile: boolean
   named_software: { id: string; name: string }[]
   /** groups ATT&CK documents as overlapping with this one, with their rank in this case */
-  related: { group_id: string; name: string; reason: string; rank: number | null }[]
+  related: {
+    group_id: string
+    name: string
+    reason: string
+    link: 'same_activity' | 'nesting' | 'description' | 'shared_software'
+    rank: number | null
+  }[]
   /** ATT&CK's own description and campaigns, not an inference from this case */
   documented: {
     origins: { country: string; sentence: string }[]
@@ -570,7 +750,11 @@ export interface Top3Pair {
   separation: number
   favours: string | null
   related_reason: string | null
+  // how ATT&CK links the pair: the same activity (reviewed table), nesting profiles, a description mention
+  // that is not the same activity, or only rare shared malware (null: not linked)
+  link: 'same_activity' | 'nesting' | 'description' | 'shared_software' | null
   containment: number
+  // one cluster under the naming gate's scope (not for a shared-malware-only link by default)
   overlap_cluster: boolean
   a_only: Top3OneSided
   b_only: Top3OneSided
@@ -583,6 +767,17 @@ export interface Top3View extends Top3Summary {
   /** channel weights the naming gate scored the exclusive evidence with */
   weights: Record<'technique' | 'behavior' | 'software' | 'soft' | 'negative', number> | null
   display_order_differs?: boolean
+  /** "not found" software interview answers and their effect on the leader's separation */
+  negative_software?: {
+    software_ids: string[]
+    applied: string[]
+    penalty: number
+    total_before: number
+    total: number
+    separation_before: number
+    separation: number
+    members: string[]
+  } | null
   combiner_note?: string
   thresholds: {
     separation: number

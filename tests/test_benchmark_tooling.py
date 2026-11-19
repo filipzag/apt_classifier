@@ -688,6 +688,7 @@ def test_attribution_default_output_matches_the_makefile_and_never_collides():
     import shlex
 
     from scripts.attribution_benchmark import REPO_ROOT, default_output
+    from scripts.report_anonymizer import LEVELS
 
     modes = [
         (pipeline, real_reports, anonymize)
@@ -695,7 +696,34 @@ def test_attribution_default_output_matches_the_makefile_and_never_collides():
         for real_reports, anonymize in ((False, False), (True, True), (True, False))
     ]
     paths = [default_output(p, real_reports=r, anonymize_actors=a) for p, r, a in modes]
-    assert len(set(paths)) == len(modes)  # no mode overwrites another mode's artifact
+    # the Elastic set and the other anonymization levels add their own files
+    paths += [
+        default_output(p, real_reports=True, anonymize_actors=False, report_set=s, anonymization=lv)
+        for p in ("local", "production")
+        for s, levels in (("cti_hal", ("strict", "tradecraft")), ("elastic", LEVELS + (None,)))
+        for lv in levels
+    ]
+    assert len(set(paths)) == len(paths)  # no mode overwrites another mode's artifact
+    assert (
+        default_output(
+            "local",
+            real_reports=True,
+            anonymize_actors=False,
+            report_set="elastic",
+            anonymization="strict",
+        ).name
+        == "attribution_elastic_current.json"
+    )  # strict is the Elastic headline
+    assert (
+        default_output(
+            "local",
+            real_reports=True,
+            anonymize_actors=True,
+            report_set="cti_hal",
+            anonymization="names",
+        ).name
+        == "attribution_cti_hal_current.json"
+    )  # names stays the CTI-HAL headline
     assert default_output("local", real_reports=True, anonymize_actors=False).name == (
         "attribution_cti_hal_as_reported.json"
     )
@@ -710,13 +738,19 @@ def test_attribution_default_output_matches_the_makefile_and_never_collides():
             flags[flags.index("--pipeline") + 1] if "--pipeline" in flags else "local",
             real_reports="--cti-hal" in flags,
             anonymize_actors="--anonymize-actors" in flags,
+            report_set=flags[flags.index("--report-set") + 1]
+            if "--report-set" in flags
+            else "cti_hal",
+            # exact token: "--anonymize" must not match "--anonymize-actors"
+            anonymization=flags[flags.index("--anonymize") + 1] if "--anonymize" in flags else None,
         )
         written = (
             REPO_ROOT / flags[flags.index("--output") + 1] if "--output" in flags else expected
         )
         assert written == expected, line
         calls += 1
-    assert calls >= 5  # benchmark-attribution, benchmark-cti-hal (2), both production targets
+    # benchmark-attribution, benchmark-cti-hal (2), benchmark-elastic (4), three production targets
+    assert calls >= 10
 
 
 def test_attribution_summary_reports_deterministic_ranking_and_llm_cost():
@@ -997,3 +1031,1452 @@ def test_attribution_benchmark_lists_rows_scored_without_an_enabled_combiner():
         {"group_id": "G3", "combiner_status": None},  # no fusion, no status
     ]
     assert _inactive_combiner_rows(rows) == ["G2:r2"]
+
+
+# ----------------------------------------------------------------------------- instrumentation
+
+
+def test_output_guard_refuses_shared_paths_and_overwrites(tmp_path: Path):
+    from scripts.run_tooling import guard_output_paths
+
+    repo = tmp_path / "repo"
+    shared = tmp_path / "shared_models"
+    (repo / "data").mkdir(parents=True)
+    shared.mkdir()
+    # a worktree's data/models is a symlink to the main checkout's shared models
+    (repo / "data" / "models").symlink_to(shared, target_is_directory=True)
+    inside = repo / "data" / "audits" / "model.json"
+    through_link = repo / "data" / "models" / "model.json"
+    assert guard_output_paths([inside, None], repo_root=repo) == []
+    problems = guard_output_paths([through_link], repo_root=repo)
+    assert len(problems) == 1 and "--allow-shared-output" in problems[0]
+    assert guard_output_paths([through_link], repo_root=repo, allow_shared=True) == []
+    inside.parent.mkdir(parents=True)
+    inside.write_text("{}", encoding="utf-8")
+    problems = guard_output_paths([inside], repo_root=repo)
+    assert len(problems) == 1 and "--overwrite" in problems[0]
+    assert guard_output_paths([inside], repo_root=repo, overwrite=True) == []
+
+
+@pytest.mark.parametrize(
+    "module, extra, suffix",
+    [
+        ("scripts.fit_acceptance_model", [], ".json"),
+        ("scripts.build_exemplar_index", [], ".npz"),
+        (
+            "scripts.fit_attribution_combiner",
+            ["--lists-cache", "{tmp}/lists.jsonl.gz", "--report", "{tmp}/cv.json"],
+            ".json",
+        ),
+    ],
+)
+def test_fit_scripts_refuse_unsafe_outputs_before_any_work(module, extra, suffix, tmp_path, capsys):
+    import importlib
+
+    main = importlib.import_module(module).main
+    existing = tmp_path / f"existing{suffix}"
+    existing.write_text("{}", encoding="utf-8")
+    flags = [item.format(tmp=tmp_path) for item in extra]
+    # tmp_path lies outside the repository: refused without --allow-shared-output
+    with pytest.raises(SystemExit) as outside:
+        main(["--output", str(tmp_path / f"new{suffix}"), *flags])
+    assert outside.value.code == 2
+    assert "--allow-shared-output" in capsys.readouterr().err
+    # allowed outside, but an existing file is never replaced without --overwrite
+    with pytest.raises(SystemExit) as overwrite:
+        main(["--output", str(existing), "--allow-shared-output", *flags])
+    assert overwrite.value.code == 2
+    assert "--overwrite" in capsys.readouterr().err
+
+
+def test_exemplar_build_guards_the_file_numpy_writes(tmp_path, capsys):
+    """Regression: numpy appends .npz to an --output without it, so the guard must check that
+    file, not the path as typed (which never exists and let the library be replaced)."""
+    import numpy as np
+
+    from apt_classifier.exemplars import ExemplarIndex, npz_path
+    from scripts.build_exemplar_index import main
+
+    assert npz_path(tmp_path / "lib") == tmp_path / "lib.npz"
+    assert npz_path(tmp_path / "lib.v2") == tmp_path / "lib.v2.npz"
+    assert npz_path(tmp_path / "lib.npz") == tmp_path / "lib.npz"
+    shipped = tmp_path / "exemplar_index.npz"
+    shipped.write_bytes(b"the shipped library")
+    with pytest.raises(SystemExit) as refused:
+        main(["--output", str(tmp_path / "exemplar_index"), "--allow-shared-output"])
+    assert refused.value.code == 2 and "--overwrite" in capsys.readouterr().err
+    assert shipped.read_bytes() == b"the shipped library"
+    # save writes, and reports, the same file the guard checked
+    index = ExemplarIndex(
+        embeddings=np.eye(2, dtype=np.float32),
+        labels=(("T1059",), ("T1105",)),
+        texts=("a", "b"),
+        sources=("tram", "tram"),
+        metadata={"kind": "technique_exemplar_index", "schema_version": 1},
+    )
+    written = index.save(tmp_path / "other")
+    assert written == tmp_path / "other.npz" and written.is_file()
+    assert not (tmp_path / "other").exists()
+
+
+def test_makefile_fit_targets_pass_overwrite():
+    makefile = (Path(__file__).resolve().parents[1] / "Makefile").read_text(encoding="utf-8")
+    for script in (
+        "fit_acceptance_model.py",
+        "build_exemplar_index.py",
+        "fit_attribution_combiner.py",
+    ):
+        lines = [line for line in makefile.splitlines() if f"scripts/{script}" in line]
+        assert lines and all("--overwrite" in line for line in lines), script
+        # in a worktree the default outputs resolve outside the repository and stay refused
+        assert all("--allow-shared-output" not in line for line in lines), script
+
+
+def _fake_mapping_pipeline():
+    from types import SimpleNamespace
+
+    from apt_classifier.attack.kb import AttackKnowledgeBase, Technique
+    from apt_classifier.retrieve import LexicalTechniqueIndex
+    from apt_classifier.vectorstore import VectorHit
+
+    kb = AttackKnowledgeBase(
+        version="t",
+        techniques={
+            "T1059.001": Technique(
+                id="T1059.001", name="PowerShell", is_subtechnique=True, parent_id="T1059"
+            ),
+            "T1059": Technique(id="T1059", name="Command and Scripting Interpreter"),
+            "T1105": Technique(id="T1105", name="Ingress Tool Transfer"),
+        },
+    )
+
+    class Store:
+        def query_techniques(self, texts, *, n_results, **kwargs):
+            out = []
+            for text in texts:
+                lower, hits = text.lower(), []
+                if "powershell" in lower:
+                    hits.append(
+                        VectorHit(
+                            "a",
+                            "PowerShell",
+                            {"technique_id": "T1059.001", "field": "description"},
+                            0.1,
+                            0.9,
+                        )
+                    )
+                if "download" in lower:
+                    hits.append(
+                        VectorHit(
+                            "b",
+                            "Transfer",
+                            {"technique_id": "T1105", "field": "description"},
+                            0.3,
+                            0.7,
+                        )
+                    )
+                out.append(hits)
+            return out
+
+        def query_group_profile(self, texts, *, document_type, n_results):
+            return []
+
+        def query_group_behaviors(self, texts, *, n_results):
+            return [[] for _ in texts]
+
+    class Model:
+        """Stand-in acceptance model: p is the dense score (0 without a dense hit)."""
+
+        metadata: dict = {}
+
+        def __init__(self, threshold: float):
+            self.threshold = threshold
+
+        def probability(self, features):
+            return 0.05 + 0.9 * float(features.get("dense_score", 0.0))
+
+    settings = SimpleNamespace(
+        similarity_threshold=0.45,
+        retrieval_top_k=30,
+        technique_candidate_pool=12,
+        technique_parent_policy="ancestor_compatible",
+        technique_acceptance_threshold=0.75,
+        technique_relative_margin=0.08,
+        technique_mapping_preset="balanced",
+        embedding_model="fake",
+        embedding_model_revision="rev",
+    )
+    return kb, Store(), LexicalTechniqueIndex.from_kb(kb), Model, settings
+
+
+def test_candidate_rows_record_probability_exemplar_features_and_guards():
+    from apt_classifier.evaluation import TechniqueEvaluationCase
+    from scripts.benchmark_mapping import run
+
+    kb, store, lexical, Model, settings = _fake_mapping_pipeline()
+    cases = [
+        TechniqueEvaluationCase.from_dict(
+            _row("tram", 1, "PowerShell ran an encoded command and a download", ["T1059.001"])
+        ),
+        # benign context: similarity alone may not accept
+        TechniqueEvaluationCase.from_dict(
+            _row("tram", 2, "Routine maintenance used PowerShell scripts to download", ["T1105"])
+        ),
+        # fewer than three distinct words
+        TechniqueEvaluationCase.from_dict(_row("tram", 3, "powershell download", ["T1105"])),
+    ]
+    block = run(
+        cases,
+        mode="hybrid",
+        settings=settings,
+        kb=kb,
+        store=store,
+        lexical_index=lexical,
+        acceptance_model=Model(0.5),
+        bootstrap_samples=10,
+    )
+    rows = {row["case_id"]: row for row in block["cases"]}
+    first = {item["technique_id"]: item for item in rows["tram-test-000001"]["candidates"]}
+    powershell = first["T1059.001"]
+    assert powershell["acceptance_probability"] == pytest.approx(0.05 + 0.9 * 0.9)
+    assert powershell["cue_supported"] is True  # explicit cue + dense 0.9 >= 0.45
+    assert powershell["benign"] is False and powershell["sparse"] is False
+    assert powershell["parent_technique_id"] == "T1059"
+    # no exemplar index: the features are absent, not zero votes
+    assert powershell["ex_vote"] is None and powershell["exemplar_only"] is False
+    assert {
+        "ex_family",
+        "ex_maxsim_rel",
+        "ex_rank_inv",
+        "ex_count",
+        "ex_top_sim",
+        "ex_vote_x_top",
+    } <= set(powershell)
+    # p clears the threshold, but a benign or sparse context forbids similarity-only acceptance
+    benign = {item["technique_id"]: item for item in rows["tram-test-000002"]["candidates"]}
+    assert benign["T1059.001"]["benign"] is True and benign["T1059.001"]["sparse"] is False
+    assert benign["T1059.001"]["acceptance_probability"] > 0.5
+    assert benign["T1059.001"]["state"] == "needs_review"
+    sparse = {item["technique_id"]: item for item in rows["tram-test-000003"]["candidates"]}
+    assert sparse["T1059.001"]["sparse"] is True and sparse["T1059.001"]["state"] == "needs_review"
+
+
+def test_benchmark_run_records_a_model_refused_inside_retrieval():
+    """Regression: a --modes value outside a stored contract runs the rule-based gate; the run
+    block must say so (not active, the reason, no model threshold in its fingerprint) instead of
+    claiming the calibrated model ran. A contract-less (legacy) model still runs in every mode,
+    as it did before contracts."""
+    from apt_classifier.acceptance import legacy_contract, retrieval_contract
+    from apt_classifier.evaluation import TechniqueEvaluationCase
+    from apt_classifier.retrieve import retrieval_kwargs
+    from scripts.benchmark_mapping import run
+
+    kb, store, lexical, Model, settings = _fake_mapping_pipeline()
+    cases = [
+        TechniqueEvaluationCase.from_dict(
+            _row("tram", 1, "PowerShell ran an encoded command and a download", ["T1059.001"])
+        ),
+        TechniqueEvaluationCase.from_dict(
+            _row("tram", 2, "The operator ran a powershell download cradle", ["T1105"])
+        ),
+    ]
+    stored = Model(0.5)
+    stored.contract = retrieval_contract(
+        retrieval_kwargs(settings, exemplar_index=None, lexical_index=lexical), None
+    )
+    legacy = Model(0.5)
+    legacy.contract = legacy_contract({})
+
+    def block(mode, model):
+        return run(
+            cases,
+            mode=mode,
+            settings=settings,
+            kb=kb,
+            store=store,
+            lexical_index=lexical,
+            acceptance_model=model,
+            bootstrap_samples=5,
+        )
+
+    def probabilities(result):
+        return [
+            row["acceptance_probability"] for case in result["cases"] for row in case["candidates"]
+        ]
+
+    hybrid = block("hybrid", stored)
+    assert hybrid["acceptance_model_active"] is True
+    assert "acceptance_model_disabled" not in hybrid
+    assert hybrid["fingerprint_inputs"]["acceptance_model"]["threshold"] == 0.5
+    assert all(value is not None for value in probabilities(hybrid))
+    for mode in ("lexical", "legacy_dense"):
+        refused = block(mode, stored)
+        assert refused["acceptance_model_active"] is False, mode
+        assert refused["acceptance_model_disabled"]["cases"] == len(cases)
+        (reason,) = refused["acceptance_model_disabled"]["reasons"]
+        assert f"retrieval_mode '{mode}' (fitted with 'hybrid')" in reason
+        assert all(value is None for value in probabilities(refused))
+        # the fingerprint is the rule-based pipeline's, not one with the model's threshold
+        assert refused["fingerprint_inputs"]["acceptance_model"] is None
+        assert refused["pipeline_fingerprint"] == block(mode, None)["pipeline_fingerprint"]
+        # the legacy model is not held to the retrieval mode and scores every case
+        unconstrained = block(mode, legacy)
+        assert unconstrained["acceptance_model_active"] is True, mode
+        assert "acceptance_model_disabled" not in unconstrained
+        assert any(value is not None for value in probabilities(unconstrained))
+
+
+def test_exemplar_columns_carry_the_eight_model_features():
+    from types import SimpleNamespace
+
+    from apt_classifier.exemplars import FEATURE_NAMES
+    from scripts.benchmark_mapping import _exemplar_columns
+
+    features = {name: 0.25 for name in FEATURE_NAMES} | {"exemplar_only": 1.0}
+    evidence = SimpleNamespace(metadata={"features": features, "exemplar_only": True})
+    columns = _exemplar_columns(evidence)
+    assert set(columns) == set(FEATURE_NAMES) and len(columns) == 8
+    assert columns["ex_vote"] == 0.25 and columns["exemplar_only"] is True
+
+
+def test_attribution_fingerprint_covers_the_mapping_modules():
+    from scripts.attribution_benchmark import FINGERPRINTED_SOURCES
+
+    names = {path.name for path in FINGERPRINTED_SOURCES}
+    assert {"exemplars.py", "acceptance.py", "vectorstore.py", "retrieve.py"} <= names
+    assert all(path.is_file() for path in FINGERPRINTED_SOURCES)
+
+
+def test_attribution_summary_adds_technique_micro_metrics():
+    from scripts.attribution_benchmark import summarize
+
+    def row(group, rank, accepted, gold):
+        return {
+            "group_id": group,
+            "report_id": f"r-{group}",
+            "rank": rank,
+            "top3": [group],
+            "stage": "known_group_shortlist",
+            "technique_recall": len(set(accepted) & set(gold)) / len(gold) if gold else None,
+            "accepted_techniques": accepted,
+            "held_out_techniques": gold,
+        }
+
+    known = [
+        row("G1", 1, ["T1", "T2", "T3"], ["T1", "T2"]),
+        row("G2", 2, ["T4"], ["T5", "T6"]),
+        row("G3", 1, ["T7", "T8"], []),  # no gold labels: only the median counts it
+    ]
+    metrics = summarize(known, [])
+    assert metrics["technique_micro_precision"] == pytest.approx(2 / 4)
+    assert metrics["technique_micro_recall"] == pytest.approx(2 / 4)
+    assert metrics["technique_micro_counts"] == {
+        "true_positive": 2,
+        "accepted": 4,
+        "gold": 4,
+        "reports": 2,
+    }
+    assert metrics["median_accepted_techniques"] == 2.0
+
+
+def test_evidenceforge_metadata_records_run_identity(tmp_path: Path):
+    from types import SimpleNamespace
+
+    from scripts.evidenceforge_eval import collect_run_metadata
+
+    scenario = tmp_path / "scenario.yaml"
+    scenario.write_text("x: 1\n", encoding="utf-8")
+    (tmp_path / "GROUND_TRUTH.json").write_text("{}", encoding="utf-8")
+    settings = SimpleNamespace(
+        embedding_model="embed",
+        embedding_model_revision="rev",
+        technique_verifier_model="verify-model",
+        reranker_model="reranker",
+        reranker_model_revision="reranker-rev",
+        technique_retrieval_mode="hybrid",
+        technique_candidate_pool=12,
+        retrieval_top_k=30,
+        similarity_threshold=0.45,
+        technique_acceptance_threshold=0.75,
+        technique_relative_margin=0.08,
+        attack_version="latest",
+        acceptance_model_path=tmp_path / "acceptance.json",
+        acceptance_model_fallback_path=tmp_path / "fallback.json",
+        technique_exemplar_index_path=tmp_path / "exemplars.npz",
+    )
+    (tmp_path / "acceptance.json").write_text("{}", encoding="utf-8")
+
+    class Index:
+        fingerprint = "fp123"
+
+        def __len__(self):
+            return 3
+
+    def engine(threshold):
+        return SimpleNamespace(
+            acceptance_model=SimpleNamespace(threshold=threshold, exemplar_fingerprint="fp123"),
+            acceptance_model_status="active",
+            exemplar_index=Index(),
+            exemplar_status="active",
+        )
+
+    def metadata(**extra):
+        return collect_run_metadata(
+            bundle_dir=tmp_path,
+            scenario_path=scenario,
+            settings=settings,
+            kb=SimpleNamespace(version="15.1"),
+            preset="balanced",
+            pipeline="local",
+            **extra,
+        )
+
+    plain = metadata()
+    assert plain["generated_at"] and "git_commit" in plain and plain["acceptance_model"] is None
+    first, second = metadata(engine=engine(0.21)), metadata(engine=engine(0.30))
+    assert first["acceptance_model"]["threshold"] == 0.21
+    assert first["acceptance_model"]["sha256"]  # the artifact actually loaded is hashed
+    assert first["exemplars"]["fingerprint"] == "fp123" and first["exemplars"]["count"] == 3
+    # a different acceptance artifact never shares a pipeline fingerprint
+    assert (
+        len(
+            {
+                plain["pipeline_fingerprint"],
+                first["pipeline_fingerprint"],
+                second["pipeline_fingerprint"],
+            }
+        )
+        == 3
+    )
+
+
+class _ReadOnlyCollection:
+    def __init__(self, name, *, count, metadata, configuration=None, ids=None):
+        self.name, self.id = name, f"id-{name}"
+        self._count, self.metadata = count, metadata
+        self.configuration_json = configuration or {"hnsw": {"space": "cosine", "ef_search": 100}}
+        self._ids = ids or [f"{name}-{index}" for index in range(count)]
+        self.documents = {item: f"text of {item}" for item in self._ids}
+        self.vectors = {item: [float(len(item)), 0.25, -1.0] for item in self._ids}
+        self.paged_embeddings = False
+
+    def count(self):
+        return self._count
+
+    def get(self, *, include, limit=None, offset=None, ids=None):
+        assert set(include) <= {"documents", "metadatas", "embeddings"}
+        selected = list(ids) if ids is not None else self._ids[offset : offset + limit]
+        # vectors only for an explicit sample of ids, never paged through the whole collection
+        self.paged_embeddings |= "embeddings" in include and ids is None
+        payload = {"ids": selected}
+        if "documents" in include:
+            payload["documents"] = [self.documents[item] for item in selected]
+        if "metadatas" in include:
+            payload["metadatas"] = [{"field": "name"} for _ in selected]
+        if "embeddings" in include:
+            payload["embeddings"] = [self.vectors[item] for item in selected]
+        return payload
+
+    def __getattr__(self, name):
+        if name in {"add", "upsert", "update", "delete", "modify"}:
+            raise AssertionError(f"snapshot called the write method {name}")
+        raise AttributeError(name)
+
+
+class _ReadOnlyClient:
+    def __init__(self, collections):
+        self.collections = collections
+
+    def list_collections(self):
+        return list(self.collections)
+
+    def get_version(self):
+        return "1.0.0"
+
+    def __getattr__(self, name):
+        if name in {"create_collection", "get_or_create_collection", "delete_collection", "reset"}:
+            raise AssertionError(f"snapshot called the write method {name}")
+        raise AttributeError(name)
+
+
+def test_chroma_snapshot_reads_only_and_diff_flags_changes(tmp_path: Path, capsys):
+    from scripts.chroma_snapshot import diff_snapshots, main, take_snapshot
+
+    techniques = _ReadOnlyCollection("attack_techniques", count=3, metadata={"schema_version": 4})
+    groups = _ReadOnlyCollection("attack_groups", count=2, metadata={"kind": "group_profiles"})
+    before = take_snapshot(_ReadOnlyClient([techniques, groups]), hash_ids=True)
+    assert before["collections"]["attack_techniques"]["count"] == 3
+    assert before["collections"]["attack_techniques"]["ids_sha256"]
+    assert before["server_version"] == "1.0.0"
+
+    exemplars = _ReadOnlyCollection("technique_exemplars-0f8d-s1-m32-efc400", count=1, metadata={})
+    after = take_snapshot(_ReadOnlyClient([techniques, groups, exemplars]), hash_ids=True)
+    assert diff_snapshots(before, after)["clean"]  # only an allowed new collection
+
+    stray = _ReadOnlyCollection("attack_techniques_copy", count=1, metadata={})
+    unexpected = diff_snapshots(before, take_snapshot(_ReadOnlyClient([techniques, groups, stray])))
+    assert not unexpected["clean"] and unexpected["unexpected_added"] == ["attack_techniques_copy"]
+
+    changed = _ReadOnlyCollection("attack_techniques", count=4, metadata={"schema_version": 5})
+    report = diff_snapshots(before, take_snapshot(_ReadOnlyClient([changed, groups])))
+    assert not report["clean"] and set(report["changed"]["attack_techniques"]) == {
+        "count",
+        "metadata",
+    }
+    assert diff_snapshots(before, take_snapshot(_ReadOnlyClient([techniques])))["removed"] == [
+        "attack_groups"
+    ]
+
+    path = tmp_path / "before.json"
+    assert (
+        main(
+            ["--output", str(path), "--hash-ids", "--no-hash-content"],
+            client=_ReadOnlyClient([techniques, groups]),
+        )
+        == 0
+    )
+    capsys.readouterr()
+    assert (
+        main(["--diff", str(path), "--hash-ids"], client=_ReadOnlyClient([techniques, groups])) == 0
+    )
+    assert main(["--diff", str(path)], client=_ReadOnlyClient([changed, groups])) == 1
+    assert not techniques.paged_embeddings and not groups.paged_embeddings
+
+
+def _snapshot_main(args, client):
+    from scripts.chroma_snapshot import main
+
+    return main([str(item) for item in args], client=client)
+
+
+def test_chroma_snapshot_never_writes_over_the_baseline_it_compares(tmp_path: Path, capsys):
+    """Regression: --output naming the --diff file (a copy-pasted "before" command) replaced the
+    baseline before it was read, and the diff reported clean."""
+    from tests.chroma_fakes import FakeClient
+
+    client = FakeClient()
+    techniques = client.seed("attack_techniques", metadata={"schema_version": 4})
+    techniques.add(ids=["T1:name:0000"], embeddings=[[0.1, 0.2, 0.3]], documents=["a"])
+    client.calls.clear()  # the test's own setup write
+    before = tmp_path / "R13_before.json"
+    assert _snapshot_main(["--output", before], client) == 0
+    baseline = before.read_text(encoding="utf-8")
+    techniques.add(ids=["T1:name:0001"], embeddings=[[0.3, 0.2, 0.1]], documents=["b"])
+    client.seed("rogue", metadata={})
+    client.calls.clear()  # what a peer session did meanwhile
+    capsys.readouterr()
+    for args in (
+        ["--diff", before, "--output", before],
+        ["--diff", before, "--output", before, "--overwrite"],
+        ["--diff", before, "--diff-output", before],
+        ["--output", before],  # re-running the "before" command
+    ):
+        with pytest.raises(SystemExit) as refused:
+            _snapshot_main(args, client)
+        assert refused.value.code == 2, args
+        assert before.read_text(encoding="utf-8") == baseline, args
+    assert "already exists" in capsys.readouterr().err
+    after = tmp_path / "R13_after.json"
+    assert _snapshot_main(["--diff", before, "--output", after], client) == 1
+    report = json.loads(capsys.readouterr().out)
+    assert report["unexpected_added"] == ["rogue"] and "attack_techniques" in report["changed"]
+    assert _snapshot_main(["--output", after, "--overwrite"], client) == 0
+    assert not client.writes()
+
+
+def test_chroma_snapshot_sees_a_same_shape_reingest(tmp_path: Path, capsys):
+    """Regression: a compatible make ingest upserts in place (same collection id, record ids,
+    count and metadata); only the content hashes see new text or re-embedded vectors."""
+    import numpy as np
+
+    from scripts.chroma_snapshot import diff_snapshots, take_snapshot
+    from tests.chroma_fakes import FakeClient
+
+    client = FakeClient()
+    techniques = client.seed("attack_techniques", metadata={"schema_version": 4})
+    ids = [f"T{index}:procedure:0000" for index in range(40)]
+    vectors = np.random.default_rng(3).normal(size=(40, 8)).astype(np.float32)
+    techniques.add(
+        ids=ids,
+        embeddings=vectors,
+        documents=[f"sentence {index}" for index in range(40)],
+        metadatas=[{"field": "procedure"} for _ in ids],
+    )
+    client.calls.clear()  # the test's own setup write
+    before = take_snapshot(client, hash_content=True, embedding_sample=16)
+    shallow = take_snapshot(client, hash_ids=True)
+    entry = before["collections"]["attack_techniques"]
+    assert entry["records_read"] == 40 and entry["embeddings_sample_size"] == 16
+    assert diff_snapshots(before, take_snapshot(client, hash_content=True, embedding_sample=16))[
+        "clean"
+    ]
+    # the same text re-embedded elsewhere: tiny float differences on every vector
+    for index, item in enumerate(ids):
+        techniques.tamper(item, embedding=vectors[index] + np.float32(1e-6))
+    reembedded = diff_snapshots(
+        before, take_snapshot(client, hash_content=True, embedding_sample=16)
+    )
+    assert not reembedded["clean"]
+    assert set(reembedded["changed"]["attack_techniques"]) == {"embeddings_sample_sha256"}
+    # a regenerated sentence with the same per-technique count
+    techniques.tamper(ids[7], document="a different synthetic sentence")
+    rewritten = diff_snapshots(
+        before, take_snapshot(client, hash_content=True, embedding_sample=16)
+    )
+    assert "records_sha256" in rewritten["changed"]["attack_techniques"]
+    # an ids-only snapshot misses both (the defect)
+    assert diff_snapshots(shallow, take_snapshot(client, hash_ids=True))["clean"]
+    # a diff hashes at least what its baseline hashed, even when told not to
+    path = tmp_path / "before.json"
+    path.write_text(json.dumps(before), encoding="utf-8")
+    capsys.readouterr()
+    assert _snapshot_main(["--diff", path, "--no-hash-content"], client) == 1
+    # and an offline AFTER file lacking a hash BEFORE recorded is not clean
+    lacking = tmp_path / "after.json"
+    lacking.write_text(json.dumps(take_snapshot(client)), encoding="utf-8")
+    diff_path = tmp_path / "diff.json"
+    args = ["--diff", path, "--after", lacking, "--diff-output", diff_path]
+    assert _snapshot_main(args, client) == 1
+    report = json.loads(diff_path.read_text(encoding="utf-8"))
+    assert report["not_compared"]["attack_techniques"] == [
+        "ids_sha256",
+        "records_sha256",
+        "embeddings_sample_sha256",
+    ]
+    capsys.readouterr()
+    assert not client.writes()
+
+
+def test_run_ledger_appends_one_redacted_line_per_run(tmp_path: Path, capsys):
+    from scripts.chroma_snapshot import take_snapshot
+    from scripts.run_ledger import main
+
+    artifact = tmp_path / "run.json"
+    artifact.write_text(
+        json.dumps(
+            {
+                "artifact_hash": "h1",
+                "generated_at": "2026-10-02T00:00:00+00:00",
+                "parameters": {"pipeline": "local"},
+                "pipeline_fingerprint": "pf",
+                "fingerprint_inputs": {"source_fingerprint": "sf", "combiner": "active"},
+                "acceptance_model": {
+                    "path": "data/models/acceptance/acceptance_model.json",
+                    "threshold": 0.21,
+                },
+                "metrics": {"llm": {"verifier_calls": 0, "verifier_errors": 0, "cost_usd": 0.0}},
+            }
+        ),
+        encoding="utf-8",
+    )
+    collection = _ReadOnlyCollection("attack_techniques", count=1, metadata={})
+    snapshot = tmp_path / "snapshot.json"
+    snapshot.write_text(json.dumps(take_snapshot(_ReadOnlyClient([collection]))), encoding="utf-8")
+    ledger = tmp_path / "ledger.jsonl"
+    environ = {
+        "TECHNIQUE_EXEMPLAR_BACKEND": "npz",
+        "OPENROUTER_API_KEY": "sk-secret",
+        "HOME": "/home/someone",
+    }
+    for run_id in ("R01", "R02"):
+        args = ["append", "--ledger", str(ledger), "--run-id", run_id, "--artifact", str(artifact)]
+        args += ["--snapshot-before", str(snapshot), "--snapshot-after", str(snapshot)]
+        args += ["--command", "scripts/benchmark_mapping.py --output x", "--verdict", "recorded"]
+        assert main(args, environ=environ) == 0
+    capsys.readouterr()
+    lines = [json.loads(line) for line in ledger.read_text(encoding="utf-8").splitlines()]
+    assert [line["run_id"] for line in lines] == ["R01", "R02"]
+    entry = lines[0]
+    assert entry["env"] == {"OPENROUTER_API_KEY": "<set>", "TECHNIQUE_EXEMPLAR_BACKEND": "npz"}
+    assert "sk-secret" not in ledger.read_text(encoding="utf-8")
+    described = entry["artifacts"][0]
+    assert described["artifact_hash"] == "h1" and described["pipeline_fingerprints"] == {
+        "artifact": "pf"
+    }
+    assert (
+        described["source_fingerprints"] == {"artifact": "sf"} and described["combiner"] == "active"
+    )
+    assert entry["llm_cost_usd"] == 0.0 and entry["chroma"]["clean"] is True
+    assert entry["argv"][0] == "scripts/benchmark_mapping.py"
+
+
+def test_fingerprints_cover_the_exemplar_store():
+    from scripts.attribution_benchmark import FINGERPRINTED_SOURCES as ATTRIBUTION
+    from scripts.benchmark_mapping import FINGERPRINTED_SOURCES as MAPPING
+
+    for sources in (ATTRIBUTION, MAPPING):
+        assert "exemplar_store.py" in {path.name for path in sources}
+        assert all(path.is_file() for path in sources)
+
+
+def test_exemplar_backend_flags_and_requirement():
+    import argparse
+
+    from apt_classifier import exemplar_store
+    from scripts.run_tooling import (
+        add_exemplar_backend_arguments,
+        exemplar_backend_problem,
+        exemplar_identity,
+        exemplar_setting_overrides,
+        exemplar_signature,
+    )
+
+    parser = argparse.ArgumentParser()
+    add_exemplar_backend_arguments(parser)
+    assert exemplar_setting_overrides(parser.parse_args([])) == {}
+    args = parser.parse_args(
+        [
+            "--exemplar-backend",
+            "chroma",
+            "--exemplar-search",
+            "hnsw",
+            "--require-exemplar-backend",
+            "chroma",
+        ]
+    )
+    assert exemplar_setting_overrides(args) == {
+        "technique_exemplar_backend": "chroma",
+        "technique_exemplar_search": "hnsw",
+    }
+
+    class Chroma:
+        backend = "chroma"
+        fingerprint = "fp"
+
+        def __len__(self):
+            return 2
+
+        def signature(self):
+            return {"backend": "chroma", "search": "hnsw", "fingerprint": "fp"}
+
+    class Npz(Chroma):
+        backend = "npz"
+
+        def signature(self):
+            return {"backend": "npz", "search": "exact", "fingerprint": "fp"}
+
+    exemplar_store.reset_query_totals()
+    assert exemplar_backend_problem(Npz(), None) is None  # not required
+    assert exemplar_backend_problem(Npz(), "npz") is None
+    assert "loaded from npz" in exemplar_backend_problem(Npz(), "chroma")
+    assert "no exemplar library" in exemplar_backend_problem(None, "chroma")
+    assert exemplar_backend_problem(Chroma(), "chroma") is None
+    exemplar_store._add_totals({"queries": 3, "search_fallbacks": 3})  # noqa: SLF001
+    assert "fell back" in exemplar_backend_problem(Chroma(), "chroma")
+    identity = exemplar_identity(argparse.Namespace(), Chroma(), "active")
+    assert identity["backend"] == "chroma" and identity["signature"]["search"] == "hnsw"
+    assert identity["query_totals"]["search_fallbacks"] == 3
+    exemplar_store.reset_query_totals()
+    assert (
+        exemplar_signature(object()) is None
+        and exemplar_identity(None, None, "off")["backend"] is None
+    )
+
+
+# ----- fit / serve alignment (retrieval_kwargs, runtime guards, threshold selection) -----
+
+
+class _StopRetrieval(Exception):
+    pass
+
+
+def _capture_retrieve(monkeypatch, module) -> dict:
+    captured: dict = {}
+
+    def recorder(ledger, store, kb, **kwargs):
+        captured.update(kwargs)
+        raise _StopRetrieval
+
+    monkeypatch.setattr(module, "retrieve_techniques", recorder)
+    return captured
+
+
+CALL_SITE_KEYS = {"lexical_index", "acceptance_model", "reranker", "finalize", "cues_enabled"}
+
+
+@pytest.mark.parametrize(
+    "changes",
+    [
+        {},
+        {"technique_exemplar_k": 128, "technique_dense_relative_margin": 0.2},
+        {"technique_include_synthetic": True, "technique_segment_acceptance": True},
+    ],
+)
+def test_engine_benchmark_and_fit_retrieve_with_the_same_arguments(monkeypatch, changes):
+    """The serving call, the public benchmark and the acceptance fit cannot drift: they pass
+    retrieve_techniques the same settings-driven arguments (the fit used to add the synthetic
+    sentences and leave out segment acceptance)."""
+    import apt_classifier.session as session_module
+    import scripts.benchmark_mapping as benchmark_module
+    import scripts.fit_acceptance_model as fit_module
+    from apt_classifier.evaluation import TechniqueEvaluationCase
+    from apt_classifier.retrieve import LexicalTechniqueIndex, lexical_fields
+    from tests.test_session import FakeLLM, FakeStore, _kb, _ledger, _settings
+
+    engine = session_module.AttributionEngine(_settings(**changes), _kb(), FakeStore(), FakeLLM())
+    settings = engine.settings
+    served = _capture_retrieve(monkeypatch, session_module)
+    with pytest.raises(_StopRetrieval):
+        engine.map_techniques(_ledger("PowerShell executed an encoded command."), mode="local")
+    case = TechniqueEvaluationCase.from_dict(_row("tram", 1, "PowerShell ran a script"))
+    lexical = LexicalTechniqueIndex.from_kb(engine.kb, fields=lexical_fields(settings))
+    benchmarked = _capture_retrieve(monkeypatch, benchmark_module)
+    with pytest.raises(_StopRetrieval):
+        benchmark_module.run(
+            [case],
+            mode=settings.technique_retrieval_mode,
+            settings=settings,
+            kb=engine.kb,
+            store=FakeStore(),
+            lexical_index=lexical,
+            exemplar_index=engine.exemplar_index,
+        )
+    fitted = _capture_retrieve(monkeypatch, fit_module)
+    with pytest.raises(_StopRetrieval):
+        fit_module.extract_rows(
+            [case],
+            settings=settings,
+            kb=engine.kb,
+            store=FakeStore(),
+            lexical_index=lexical,
+            exemplar_index=engine.exemplar_index,
+        )
+    shared = {key: value for key, value in served.items() if key not in CALL_SITE_KEYS}
+    assert {k: v for k, v in benchmarked.items() if k not in CALL_SITE_KEYS} == shared
+    assert {k: v for k, v in fitted.items() if k not in CALL_SITE_KEYS} == shared
+    assert fitted["acceptance_model"] is None
+    assert (
+        served["lexical_index"].fields
+        == benchmarked["lexical_index"].fields
+        == fitted["lexical_index"].fields
+    )
+    assert shared["include_synthetic"] is bool(changes.get("technique_include_synthetic", False))
+
+
+def test_fit_rows_carry_the_runtime_guards_and_dump_without_pickles(tmp_path):
+    import numpy as np
+
+    from apt_classifier.acceptance import FEATURE_NAMES, choose_threshold_runtime
+    from apt_classifier.evaluation import TechniqueEvaluationCase
+    from scripts.fit_acceptance_model import dump_rows, extract_rows
+
+    kb, store, lexical, _, settings = _fake_mapping_pipeline()
+    cases = [
+        TechniqueEvaluationCase.from_dict(
+            _row("tram", 1, "PowerShell ran an encoded command and a download", ["T1059.001"])
+        ),
+        TechniqueEvaluationCase.from_dict(
+            _row("tram", 2, "Routine maintenance used PowerShell scripts to download", ["T1105"])
+        ),
+        TechniqueEvaluationCase.from_dict(_row("tram", 3, "powershell download", ["T1105"])),
+    ]
+    fitted = extract_rows(cases, settings=settings, kb=kb, store=store, lexical_index=lexical)
+    count = len(fitted.rows)
+    assert count == len(fitted.labels) == len(fitted.case_ids) == len(fitted.flags)
+    assert len(fitted.technique_ids) == count and fitted.expected_counts == {
+        case.case_id: 1 for case in cases
+    }
+    flags = {
+        (case_id, technique_id): row
+        for case_id, technique_id, row in zip(
+            fitted.case_ids, fitted.technique_ids, fitted.flags, strict=True
+        )
+    }
+    first = flags[("tram-test-000001", "T1059.001")]
+    assert set(first) == {
+        "benign",
+        "sparse",
+        "hierarchy_parent",
+        "cue_supported",
+        "parent_suppressed",
+    }
+    assert first["cue_supported"] and not first["benign"]
+    assert flags[("tram-test-000002", "T1059.001")]["benign"]
+    assert flags[("tram-test-000003", "T1059.001")]["sparse"]
+    # a lexical hit of its own keeps the parent of a visible child in the accepted set
+    assert not flags[("tram-test-000001", "T1059")]["parent_suppressed"]
+    blocked, forced = fitted.masks()
+    for row, never, always in zip(fitted.flags, blocked, forced, strict=True):
+        assert never == any(
+            row[key] for key in ("benign", "sparse", "hierarchy_parent", "parent_suppressed")
+        )
+        assert always == (row["cue_supported"] and not row["hierarchy_parent"])
+    choice = choose_threshold_runtime(
+        [0.5] * count,
+        fitted.labels,
+        fitted.case_ids,
+        fitted.expected_counts,
+        blocked=blocked,
+        forced=forced,
+        technique_ids=fitted.technique_ids,
+    )
+    assert choice["forced_rows"] == sum(forced)
+    path = dump_rows(
+        tmp_path / "rows",  # no suffix: written exactly where asked
+        fitted,
+        datasets={case.case_id: "tram" for case in cases},
+        in_sample=[0.5] * count,
+        out_of_fold=None,
+        folds=None,
+        groups=None,
+        summary={"threshold": 0.5},
+    )
+    assert path == tmp_path / "rows" and path.is_file()
+    with np.load(path, allow_pickle=False) as payload:
+        assert payload["features"].shape == (count, len(FEATURE_NAMES))
+        assert list(payload["feature_names"]) == list(FEATURE_NAMES)
+        assert payload["blocked"].tolist() == blocked
+        assert payload["parent_suppressed"].shape == (count,)
+        assert np.isnan(payload["p_out_of_fold"]).all() and (payload["folds"] == -1).all()
+        assert json.loads(str(payload["summary"])) == {"threshold": 0.5}
+
+
+def test_fit_script_threshold_flags_and_dump_guard(monkeypatch, tmp_path, capsys):
+    import scripts.fit_acceptance_model as fit_module
+
+    def no_work(*args, **kwargs):
+        raise AssertionError("the guard must refuse before any work")
+
+    monkeypatch.setattr(fit_module, "Settings", no_work)
+    inside = fit_module.REPO_ROOT / "data" / "audits" / "never_written_by_tests.json"
+    assert not inside.exists()
+    with pytest.raises(SystemExit) as refused:
+        fit_module.main(["--output", str(inside), "--dump-rows", str(tmp_path / "rows.npz")])
+    assert refused.value.code == 2
+    assert "rows.npz" in capsys.readouterr().err and not inside.exists()
+    with pytest.raises(SystemExit):
+        fit_module.main(["--threshold-selection", "nested"])
+    assert "invalid choice" in capsys.readouterr().err
+
+
+def test_threshold_selection_out_of_fold_with_the_runtime_rule():
+    from apt_classifier.acceptance import AcceptanceModel, choose_threshold
+    from apt_classifier.evaluation import TechniqueEvaluationCase
+    from scripts.fit_acceptance_model import extract_rows, select_threshold
+
+    kb, store, lexical, _, settings = _fake_mapping_pipeline()
+    texts = [
+        ("PowerShell ran an encoded command", ["T1059.001"]),
+        ("the operator used powershell to download a tool", ["T1105"]),
+        ("a download of the second stage followed", ["T1105"]),
+        ("powershell scripts collected host details", ["T1059.001"]),
+        ("they used powershell and a download cradle", ["T1059.001", "T1105"]),
+        ("files were staged after a download from the server", ["T1105"]),
+    ]
+    cases = [
+        TechniqueEvaluationCase.from_dict(
+            _row("tram" if index % 2 else "expert", index, text, labels)
+        )
+        for index, (text, labels) in enumerate(texts * 2)
+    ]
+
+    class Embedder:
+        def embed(self, values):
+            # one direction per case, so no two cases are near-copies
+            return [
+                [1.0 if i == j else 0.0 for j in range(len(values))] for i in range(len(values))
+            ]
+
+    fitted = extract_rows(cases, settings=settings, kb=kb, store=store, lexical_index=lexical)
+    model = AcceptanceModel.fit(fitted.rows, fitted.labels, attack_version="t")
+    probabilities = [model.probability(row) for row in fitted.rows]
+    common = {
+        "cases": cases,
+        "datasets": {case.case_id: case.source.rsplit(":", 1)[-1] for case in cases},
+        "embedder": Embedder(),
+        "attack_version": "t",
+        "l2": 1.0,
+        "min_precision": 0.5,
+        "cv_folds": 3,
+    }
+    in_sample = select_threshold(fitted, probabilities, method="in_sample", **common)
+    assert in_sample.operating_point == choose_threshold(
+        probabilities, fitted.labels, fitted.case_ids, fitted.expected_counts, min_precision=0.5
+    )
+    assert in_sample.out_of_fold is None and in_sample.selection["runtime_rule_exact"]
+    oof = select_threshold(fitted, probabilities, method="oof_runtime", **common)
+    assert oof.out_of_fold.shape == (len(fitted.rows),)
+    assert set(oof.folds) == {case.case_id for case in cases} and set(oof.folds.values()) == {
+        0,
+        1,
+        2,
+    }
+    assert oof.operating_point["rule"] == "runtime"
+    assert oof.selection["out_of_fold_runtime"] == oof.operating_point
+    assert oof.selection["cv"]["groups"] == len(cases)
+    assert oof.selection["in_sample_gap"] == pytest.approx(
+        abs(oof.operating_point["threshold"] - oof.selection["in_sample_runtime"]["threshold"])
+    )
+    with pytest.raises(ValueError):
+        select_threshold(fitted, probabilities, method="nested", **common)
+
+
+def test_combiner_fields_record_window_probabilities_and_the_rrf_order_to_60():
+    from types import SimpleNamespace
+
+    from scripts.attribution_benchmark import _combiner_fields
+
+    entries = [SimpleNamespace(group_id=f"G{i:02d}") for i in range(70)]
+    # combiner reordered the head (top 3 of the RRF top 4); the tail stays in RRF order
+    head_order = ["G02", "G00", "G03", "G01"]
+    fusion = SimpleNamespace(
+        entries=[SimpleNamespace(group_id=g) for g in head_order] + entries[4:]
+    )
+    window = SimpleNamespace(scores=[SimpleNamespace(group_id=g) for g in ("G02", "G00", "G05")])
+    context = SimpleNamespace(
+        discrimination=window,
+        combiner={
+            "status": "active",
+            "probabilities": {"G00": 0.2, "G01": 0.1, "G02": 0.6, "G03": 0.05},
+            "rrf_ranks": {"G00": 1, "G01": 2, "G02": 3, "G03": 4},
+            "leader_probability": 0.6,
+            "null_probability": 0.05,
+        },
+    )
+    state = SimpleNamespace(context=context, deterministic_fusion=fusion, fusion=fusion)
+    fields = _combiner_fields(state, "G05")
+    assert fields["rrf_top60"][:5] == ["G00", "G01", "G02", "G03", "G04"]
+    assert len(fields["rrf_top60"]) == 60
+    assert fields["window_probabilities"] == {"G02": 0.6, "G00": 0.2, "G05": 0.0}
+    assert fields["truth_in_window"] is True and fields["rrf_rank"] is None
+    off = _combiner_fields(
+        SimpleNamespace(context=SimpleNamespace(discrimination=None, combiner=None)), "G05"
+    )
+    assert off["combiner_status"] is None and off["truth_in_window"] is False
+
+
+def test_attribution_summary_counts_cluster_names_by_membership():
+    from scripts.attribution_benchmark import summarize
+
+    def row(group, rank, stage, cluster=()):
+        return {
+            "group_id": group,
+            "report_id": f"r-{group}-{rank}-{stage}",
+            "rank": rank,
+            "top3": [group] if rank == 1 else ["G0999", group],
+            "stage": stage,
+            "technique_recall": 0.5,
+            "observations": 5,
+            "named_cluster": list(cluster),
+        }
+
+    known = [
+        row("G1", 1, "known_group_hypothesis"),
+        row("G2", 2, "known_cluster_hypothesis", ("G0999", "G2")),  # recovered by the cluster
+        row("G3", 1, "known_cluster_hypothesis", ("G3", "G4")),
+        row("G5", 2, "known_cluster_hypothesis", ("G0999", "G6")),  # wrong cluster
+        row("G7", 1, "known_group_shortlist"),
+    ]
+    unknown = [
+        {
+            "group_id": "G8",
+            "rank": None,
+            "top3": ["G9"],
+            "stage": "known_cluster_hypothesis",
+            "named_cluster": ["G9", "G10"],
+        },
+        {
+            "group_id": "G11",
+            "rank": None,
+            "top3": ["G12"],
+            "stage": "known_group_shortlist",
+            "named_cluster": [],
+        },
+    ]
+    metrics = summarize(known, unknown)
+    assert metrics["named_cluster_correct"] == 2
+    assert metrics["named_cluster_recovered"] == 1
+    assert metrics["named_cluster_wrong"] == 2  # one known, one removed actor
+    assert metrics["named_correct"] == 1  # single-group names keep their meaning
+    # named risk counts every name: 1 single + 3 known clusters + 1 removed actor, 2 wrong
+    assert metrics["named_risk"] == pytest.approx(2 / 5)
+    assert metrics["named_risk_single"] == 0.0
+    assert metrics["cluster_coverage"] == pytest.approx(4 / 7)
+
+
+def test_software_interview_enumeration_walks_every_answer_path_through_the_pipeline():
+    """The enumerated simulation on a tiny fixture: every found / not-found path is scored by the
+    real engine (re-running it with the answers added, as an analyst answer is), the leaf
+    probabilities of the answer model sum to one, the criteria are computed, and the rows of a
+    run without the flag are exactly the rows of a run with it minus the simulation."""
+    from apt_classifier.evidence.models import EvidenceStatus, QuestionAnswer
+    from scripts.attribution_benchmark import (
+        Fold,
+        _ledger,
+        _path_probability,
+        run_known,
+        summarize_software_interview,
+    )
+    from tests.test_software_questions import LSASS, POWERSHELL, software_engine
+
+    engine = software_engine()
+    fold = Fold(
+        group_id="G3",
+        held_out_techniques=frozenset({"T1059.001", "T1003.001"}),
+        observations=(POWERSHELL, LSASS),
+        held_out_texts=frozenset(),
+    )
+    plain, _ = run_known(engine, [fold], hide_evidence=False)
+    simulated, _ = run_known(engine, [fold], hide_evidence=False, software_interview=True)
+    simulation = simulated[0].pop("software_interview")
+    assert "software_interview" not in plain[0]
+    assert json.dumps(simulated[0], sort_keys=True, default=str) == json.dumps(
+        plain[0], sort_keys=True, default=str
+    )
+
+    nodes = simulation["nodes"]
+    leaves = [node for node in nodes if node["leaf"]]
+    assert simulation["baseline_named"] == [] and not nodes[0]["leaf"]
+    assert 2 <= len(leaves) <= 8 and len(nodes) == 2 * len(leaves) - 1
+    assert all(len(node["path"].split("|")) <= 3 for node in leaves)
+    truth = set(simulation["truth_documents"])
+    assert truth <= {"S0103", "S0104", "S0108"}
+    for q, fp in ((0.1, 0.0), (0.3, 0.05), (1.0, 0.0)):
+        total = sum(_path_probability(node["path"], truth, q, fp) for node in leaves)
+        assert total == pytest.approx(1.0)
+    # every leaf is what the engine decides for a case analysed with exactly those answers
+    for node in leaves:
+        ledger = _ledger(fold)
+        for step in node["path"].split("|"):
+            software_id, _, answer = step.split(":")
+            ledger.add_question_answer(
+                QuestionAnswer(
+                    question=f"Did you find {software_id}?",
+                    kind="software",
+                    software_id=software_id,
+                    status=EvidenceStatus.POSITIVE if answer == "F" else EvidenceStatus.NEGATIVE,
+                )
+            )
+        replayed = engine.analyze(ledger).attribution_decision
+        named = (
+            [replayed.leading_group_id]
+            if replayed.stage.value == "known_group_hypothesis"
+            else list(replayed.named_cluster)
+        )
+        assert named == node["named"], node
+
+    row = {**simulated[0], "software_interview": simulation}
+    unknown = {
+        "group_id": "G9",
+        "software_interview": {
+            "baseline_named": [],
+            "truth_documents": [],
+            "nodes": [
+                {"path": "", "stage": "sho", "named": [], "separation": 0.1, "leaf": False},
+                {
+                    "path": "S0101:1:F",
+                    "stage": "hyp",
+                    "named": ["G1"],
+                    "separation": 0.9,
+                    "leaf": True,
+                },
+                {"path": "S0101:1:N", "stage": "sho", "named": [], "separation": 0.1, "leaf": True},
+            ],
+        },
+    }
+    summary = summarize_software_interview([row], [unknown], cluster_naming=False)
+    assert summary["mode"] == "enumerate" and summary["rows_asked"] == 2
+    assert set(summary["criteria"]) == {f"C{index}" for index in range(1, 9)}
+    expected = summary["expected"]
+    assert set(expected) == {f"q={q},fp={fp}" for q in (0.1, 0.3, 1.0) for fp in (0.0, 0.05)}
+    # a removed actor is named only through a wrong "found": 0 at fp 0, fp itself at 0.05
+    assert expected["q=0.3,fp=0.0"]["removed_named"] == 0.0
+    assert expected["q=0.3,fp=0.05"]["removed_named"] == pytest.approx(0.05)
+    assert summary["criteria"]["C1"]["possible_removed_leaves"] == 0
+    assert summary["criteria"]["C4"]["pass"] and summary["criteria"]["C7"]["pass"]
+    assert summary["criteria"]["C3"]["pass"] and summary["criteria"]["C8"]["pass"] is None
+    # a "not found" that names something is a monotonicity violation
+    broken = json.loads(json.dumps(unknown))
+    broken["software_interview"]["nodes"][2]["named"] = ["G2"]
+    violated = summarize_software_interview([], [broken], cluster_naming=True)
+    assert violated["criteria"]["C7"] == {"violations": 1, "pass": False}
+    assert violated["criteria"]["C4"]["rows_changed"] == 1
+    assert violated["criteria"]["C8"]["pass"] is not None
+
+
+def test_software_interview_replay_runs_on_a_fixture_row(tmp_path: Path):
+    """The offline replay (C6 cross-check) reproduces the recorded separation from the row's
+    replay inputs, asks the same first question, and compares its expected gains with the
+    pipeline's enumerated simulation."""
+    from scripts.attribution_benchmark import Fold, run_known, summarize_software_interview
+    from scripts.software_interview_replay import RowReplay, replay_artifact
+    from tests.test_software_questions import (
+        LSASS,
+        POWERSHELL,
+        software_engine,
+        software_kb,
+    )
+
+    engine = software_engine()
+    fold = Fold(
+        group_id="G3",
+        held_out_techniques=frozenset({"T1059.001", "T1003.001"}),
+        observations=(POWERSHELL, LSASS),
+        held_out_texts=frozenset(),
+    )
+    rows, _ = run_known(engine, [fold], hide_evidence=False, software_interview=True)
+    overrides = {
+        key: getattr(engine.settings, key)
+        for key in (
+            "technique_mapping_preset",
+            "attribution_combiner_enabled",
+            "attribution_min_maturity",
+            "interview_software_questions",
+        )
+    }
+    artifact = {
+        "parameters": {"seed": 1, "settings_overrides": overrides},
+        "fingerprint_inputs": {"thresholds": dict(engine.attribution_thresholds.__dict__)},
+        "known": rows,
+        "unknown": [],
+        "software_interview": summarize_software_interview(rows, [], cluster_naming=False),
+    }
+    path = tmp_path / "artifact.json"
+    path.write_text(json.dumps(artifact, default=str), encoding="utf-8")
+    kb = software_kb()
+    result = replay_artifact(path, kb)
+    assert result["replay_checks"] == {"rows": 1, "skipped": 0, "separation_matches": 1}
+    replayed = result["rows"]["known"][0]["software_interview"]
+    pipeline = rows[0]["software_interview"]
+    assert replayed["nodes"][0]["path"] == "" and not replayed["nodes"][0]["leaf"]
+    first = lambda nodes: sorted({n["path"].split("|")[0].split(":")[0] for n in nodes[1:]})  # noqa: E731
+    assert first(replayed["nodes"]) == first(pipeline["nodes"])
+    assert set(result["pipeline_comparison"]["gained_replay_minus_pipeline"]) == {
+        "q=0.1",
+        "q=0.3",
+        "q=1.0",
+    }
+    assert result["pipeline_comparison"]["C6"] in {True, False}
+    # a found for the leader's own malware names it in the fixed-window replay
+    replay = RowReplay(kb, rows[0], engine.settings, artifact["fingerprint_inputs"]["thresholds"])
+    assert replay.leader == "G3"
+    assert replay.decide({"S0103"}, set()) == ["G3"]
+    assert replay.decide({"S0101"}, set()) == []  # a rival's malware never names the leader
+    assert replay.decide({"S0103"}, {"S0104", "S0108"}) == []  # not found lowers it below the bar
+
+
+def test_removed_actor_rows_record_software_and_answer_with_the_actors_own_list():
+    """Removed-actor rows keep their software ids, and the simulation answers with the removed
+    actor's own ATT&CK list: malware it shares with one other group looks exclusive to that
+    group once it is removed, and a "found" then names the wrong group (C1 counts it)."""
+    from scripts.attribution_benchmark import Fold, run_unknown, summarize_software_interview
+    from tests.test_session import FakeStore
+    from tests.test_software_questions import LSASS, POWERSHELL, software_kb, software_settings
+
+    fold = Fold(
+        group_id="G3",
+        held_out_techniques=frozenset(),
+        observations=(f"{POWERSHELL} The Greenfin implant was loaded.", LSASS),
+        held_out_texts=frozenset(),
+    )
+    # two questions per candidate, so Bravo is also asked about the shared malware
+    rows = run_unknown(
+        software_settings(interview_software_per_group=2),
+        software_kb(),
+        FakeStore(),
+        [fold],
+        software_interview=True,
+    )
+    row = rows[0]
+    assert row["software_ids"] == ["S0103"]  # named in the text, though its only user is gone
+    simulation = row["software_interview"]
+    assert simulation["truth_documents"] == ["S0106"]  # shared with Bravo before the removal
+    risky = [node for node in simulation["nodes"] if node["path"].endswith("S0106:2:F")]
+    assert risky and risky[0]["named"] == ["G2"]
+    summary = summarize_software_interview([], rows, cluster_naming=False)
+    assert summary["criteria"]["C1"]["possible_removed_leaves"] == 1
+    assert not summary["criteria"]["C1"]["pass"]
+    assert summary["expected"]["q=1.0,fp=0.0"]["removed_named"] == pytest.approx(1.0)
+
+
+def test_cluster_replay_uses_the_scope_each_artifact_recorded(tmp_path, capsys):
+    from scripts.cluster_replay import main, recorded_scope
+
+    assert recorded_scope({}) == "full"  # artifacts from before the setting
+    assert recorded_scope(
+        {"fingerprint_inputs": {"thresholds": {"cluster_scope": "documented"}}}
+    ) == ("documented")
+    candidate = {
+        "members": ["G1", "G2"],
+        "reason": "shared rarely used software KillDisk (S0607)",
+        "link": "shared_software",
+        "nested": False,
+        "separation": 0.8,
+        "discriminative": 5.0,
+        "probability": 0.95,
+    }
+    row = {
+        "group_id": "G1",
+        "rank": 1,
+        "leading": "G1",
+        "stage": "known_group_shortlist",
+        "cluster_candidate": candidate,
+    }
+    artifact = tmp_path / "off.json"
+    artifact.write_text(json.dumps({"known": [row], "unknown": []}), encoding="utf-8")
+
+    def replayed(*extra):
+        assert main([str(artifact), "--json", *extra]) == 0
+        return json.loads(capsys.readouterr().out.strip().splitlines()[-1])
+
+    recorded = replayed()  # no recorded scope: the first rule, which names the pair
+    assert recorded["scope"] == "full" and len(recorded["cluster_correct"]) == 1
+    narrowed = replayed("--scope", "documented")
+    assert narrowed["scope"] == "documented" and narrowed["cluster_correct"] == []
+
+
+def test_fold_lexical_index_hides_held_out_sentences_exactly():
+    """The BM25 index holds the anonymized procedure sentences as documents: per fold it is
+    rebuilt without the held-out ones, equal to an index built without those sentences."""
+    import copy
+    from types import SimpleNamespace
+
+    from apt_classifier.attack.kb import AttackKnowledgeBase, Group, Technique
+    from apt_classifier.retrieve import LexicalTechniqueIndex
+    from apt_classifier.vectorstore import normalize_procedure_text
+    from scripts.attribution_benchmark import build_folds, fold_lexical_index, hide_lexical
+
+    kb = AttackKnowledgeBase(
+        version="t",
+        techniques={
+            f"T{i}": Technique(id=f"T{i}", name=f"Technique {i}", description=f"Generic {i}.")
+            for i in range(1, 7)
+        },
+        groups={
+            "G1": Group(
+                id="G1",
+                name="Alpha",
+                technique_ids=[f"T{i}" for i in range(1, 7)],
+                technique_behaviors={
+                    f"T{i}": [f"Alpha used the zebra{i} loader with quokka{i} beacons."]
+                    for i in range(1, 7)
+                },
+            )
+        },
+    )
+    kb.recompute_statistics()
+    fields = ("name", "description", "procedure")
+    index = LexicalTechniqueIndex.from_kb(kb, fields=fields)
+    (fold,) = build_folds(
+        kb, coverage=0.5, seed=1, min_behaviors=5, min_techniques=5, max_observations=12
+    )
+    leaky = [hit for text in fold.observations for hit in index.query(text, n_results=5)]
+    assert any(normalize_procedure_text(h.document) in fold.held_out_texts for h in leaky)
+
+    filtered, removed = fold_lexical_index(index, fold.held_out_texts)
+    assert removed == len(fold.observations)
+    # equal to an index built from a knowledge base without the held-out sentences
+    clean_kb = copy.deepcopy(kb)
+    for tid in fold.held_out_techniques:
+        del clean_kb.groups["G1"].technique_behaviors[tid]
+    clean = LexicalTechniqueIndex.from_kb(clean_kb, fields=fields)
+    for text in fold.observations:
+        got = [(h.document, round(h.similarity, 9)) for h in filtered.query(text, n_results=8)]
+        want = [(h.document, round(h.similarity, 9)) for h in clean.query(text, n_results=8)]
+        assert got == want
+        assert not any(normalize_procedure_text(d) in fold.held_out_texts for d, _ in got)
+
+    engine = SimpleNamespace(lexical_index=index)
+    assert hide_lexical(engine, fold.held_out_texts) == removed
+    assert (
+        engine.lexical_index is not index
+        and len(engine.lexical_index.documents) == len(index.documents) - removed
+    )
+    assert hide_lexical(SimpleNamespace(lexical_index=index), frozenset()) is None
+    assert fold_lexical_index(index, frozenset({"absent"})) == (index, 0)
+    # no index while retrieval is lexical/hybrid: retrieval would build an unfiltered one
+    with pytest.raises(RuntimeError, match="no lexical index"):
+        hide_lexical(SimpleNamespace(lexical_index=None), fold.held_out_texts)
+    dense = SimpleNamespace(
+        lexical_index=None, settings=SimpleNamespace(technique_retrieval_mode="dense")
+    )
+    assert hide_lexical(dense, fold.held_out_texts) is None
+
+
+def test_fold_lexical_index_removes_every_document_of_a_hidden_sentence():
+    """One held-out sentence can be several BM25 documents (a technique and its sub-technique,
+    or several groups): all of them go."""
+    from apt_classifier.retrieve import LexicalDocument, LexicalTechniqueIndex
+    from scripts.attribution_benchmark import fold_lexical_index
+
+    def doc(i, tid, text):
+        return LexicalDocument(
+            f"{tid}:procedure:{i:04d}", tid, "procedure", text, tuple(text.split())
+        )
+
+    documents = (
+        doc(0, "T1", "hidden zebra sentence"),
+        doc(1, "T1.001", "hidden zebra sentence"),
+        doc(2, "T2", "other quokka sentence"),
+    )
+    frequencies = {}
+    for d in documents:
+        for token in set(d.tokens):
+            frequencies[token] = frequencies.get(token, 0) + 1
+    index = LexicalTechniqueIndex(documents, frequencies, 3.0)
+    filtered, removed = fold_lexical_index(index, frozenset({"hidden zebra sentence"}))
+    assert removed == 2
+    assert [d.technique_id for d in filtered.documents] == ["T2"]
+    assert filtered.document_frequencies["sentence"] == 1
+    assert filtered.query("hidden zebra", n_results=5) == []
+
+
+def test_fold_leak_control_is_recorded_and_checked():
+    from scripts.collect_verification import compose, fold_leak_control_warning
+    from scripts.fit_attribution_combiner import lists_leak_control
+
+    assert lists_leak_control([{"leak_control": "dense+lexical"}] * 2) == "dense+lexical"
+    # a reused pre-fix cache has no marker and is not relabelled as clean
+    assert lists_leak_control([{"seed": 11}]) == "dense (unrecorded)"
+    assert lists_leak_control([{"leak_control": "dense+lexical"}, {}]).startswith("mixed:")
+
+    old = {"benchmark": "attribution_text_heldout", "parameters": {"seed": 7}}
+    new = {"benchmark": "attribution_text_heldout", "parameters": {"leak_control": "dense+lexical"}}
+    real = {"benchmark": "attribution_cti_hal_reports", "parameters": {"seed": 7}}
+    assert "BM25" in fold_leak_control_warning(old)
+    assert fold_leak_control_warning(new) is None
+    assert fold_leak_control_warning(real) is None and fold_leak_control_warning(None) is None
+    report = compose(
+        public=None,
+        curated=None,
+        evidenceforge={},
+        public_path=Path("p.json"),
+        curated_path=Path("c.json"),
+        gates=None,
+        attribution={**old, "metrics": {}},
+        attribution_path=Path("a.json"),
+    )
+    assert any("BM25" in w for w in report.get("warnings", []))
+
+
+def test_open_set_metrics_count_a_documented_cluster_name_as_a_name():
+    from scripts.attribution_benchmark import open_set_metrics
+
+    named = "known_group_hypothesis"
+    cluster = "known_cluster_hypothesis"
+    known = [
+        {"group_id": "G0032", "rank": 1, "stage": named},
+        # cluster names: the truth a member (correct), the truth outside it (wrong)
+        {"group_id": "G0050", "rank": 2, "stage": cluster, "named_cluster": ["G0050", "G0007"]},
+        {"group_id": "G0016", "rank": 2, "stage": cluster, "named_cluster": ["G0035", "G0074"]},
+    ]
+    open_rows = [
+        {"stage": named, "leading": "G0032", "top3": ["G0032"], "kind": "apt_like"},
+        {
+            "stage": cluster,
+            "leading": "G0050",
+            "named_cluster": ["G0050", "G0007"],
+            "top3": ["G0050"],
+            "kind": "commodity",
+        },
+        {"stage": "known_group_shortlist", "leading": "G0016", "top3": ["G0016"]},
+    ]
+    result = open_set_metrics(open_rows, known)
+    assert result["named"] == 2
+    assert result["named_groups"] == {"G0032": 1}
+    assert result["named_clusters"] == {"G0050+G0007": 1}
+    assert result["by_kind"]["commodity"] == {"reports": 1, "named": 1}
+    # one wrong cluster name on the labelled set plus two open-set names over five names
+    assert result["combined_named_risk"] == pytest.approx(3 / 5)
+    # without any cluster stage the output keeps its earlier keys
+    assert "named_clusters" not in open_set_metrics(open_rows[:1], known[:1])

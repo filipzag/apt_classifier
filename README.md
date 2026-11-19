@@ -1,330 +1,251 @@
 # Vestige
 
-**Attribution from the traces left behind.** Vestige maps incident observations to MITRE
-ATT&CK, ranks documented threat groups, and names one only when the evidence separates it from
-every alternative. (Python package: `apt_classifier`.)
+**Attribution from the traces left behind.** Vestige maps incident evidence to MITRE ATT&CK, ranks the
+documented threat groups that fit it, and names one only when the evidence separates it from every
+alternative. It is a local web application (React on FastAPI; Python package `apt_classifier`) that accepts
+report prose, analyst notes, EDR/SIEM alerts, Windows/Sysmon logs, IOCs and named tools.
 
-A local, evidence-driven web application (React front end on a FastAPI backend; the legacy Streamlit UI remains available) for ranking threat-group hypotheses from mixed incident evidence. It accepts analyst observations, EDR/SIEM alerts, Windows/Sysmon JSON, IOCs, and named tools.
+Vestige does **not** prove attribution. It ranks groups whose documented ATT&CK tradecraft matches the
+evidence. Shared tools, incomplete reporting and false flags can make the answer wrong.
 
-The application does **not** prove attribution. It ranks groups whose documented MITRE ATT&CK tradecraft overlaps the supplied evidence. Shared tools, incomplete reporting, and false-flag activity can invalidate the result.
+The [technical documentation](docs/TECHNICAL_DOCUMENTATION.md) covers the architecture, algorithms,
+operations, security boundaries and every measurement in detail.
 
-See [`docs/TECHNICAL_DOCUMENTATION.md`](docs/TECHNICAL_DOCUMENTATION.md) for the detailed architecture, data flow, algorithms, operations, security boundaries, and limitations.
+![Assessment page: no group clears the naming bar, so the leader is shown as the closest documented group](docs/images/assessment.png)
 
-## Pipeline
+<sub>An illustrative case (a made-up phishing intrusion, local mode with no LLM): two groups fit, the evidence
+pulls both ways, and Vestige declines to name either.</sub>
 
-1. Normalize prose and alerts into atomic attack-action sentences with `openai/gpt-5.6-sol` through OpenRouter.
-2. Parse supported Windows/Sysmon events deterministically without sending bulk logs to an LLM.
-3. Embed observations with `basel/ATTACK-BERT` and retrieve sentence-level ATT&CK techniques plus actor-specific behavior sentences from local ChromaDB. With a Target OS set for the case (Windows, Linux, macOS, ESXi), techniques documented only for other operating systems are not mapped (docs 5.7).
-4. Capture optional strategic context: target geography, industry, motivation, intended objective, and independently supported sponsor/origin.
-5. Rank groups with deterministic classifiers plus the analyst-requested CyberRE-LLM vote (the LLM zero-shot vote was removed; the LLM extraction, technique verifier and independent review in steps 1 and 7 remain):
-   - Bernoulli Naive Bayes
-   - TF-IDF cosine
-   - weighted Jaccard
-   - actor-specific behavior similarity
-   - semantic technique-profile centroid
-   - group-description similarity
-   - strategic-context profile matching
-   - motivation alignment
-   - campaign-profile overlap
-   - software/tool links
-   - source-country random forest: predicts the source-country class (China, Russia, Iran, North Korea,
-     another state, no documented state origin) from the mapped techniques, motivation and target, and votes
-     for each group through the group's documented country (default since 2026-10-01: real reports improve, the
-     ATT&CK folds lose one case; docs 9.13, 21.3.11). Trained on the GPU from ATT&CK profiles.
-   - group random forest over the same features (wired at weight 0: it helped the ATT&CK folds but hurt real reports)
-   - PyTorch group network over the accepted techniques and named software (`GROUP_MLP_WEIGHT=0`, not loaded:
-     at weight 1.0 it named one wrong group on the ATT&CK folds on 2026-10-01)
-   - opt-in CyberRE-LLM technique filtering and ranking
-6. Fuse applicable classifiers with family-aware Reciprocal Rank Fusion. Naive Bayes, TF-IDF, Jaccard, and the technique centroid share one technique-overlap budget instead of casting four full correlated votes. Actor-specific behavior, software, and campaign classifiers have their own family budgets. Context, motivation, and description signals may rerank only candidates with documented technical support; the analyst-requested CyberRE vote has its own low family budget and cannot introduce a candidate. Abstaining classifiers cast no vote. Groups with zero technical overlap are excluded from authoritative RRF.
-7. Aggregate documented sponsor/origin evidence across the ranked candidates and classify the profile as APT-like state/espionage activity, financially motivated criminal intrusion, mixed, or indeterminate.
-8. Fetch a cached, non-voting live-intelligence layer from CISA KEV, CISA Alerts & Advisories, and explicitly labeled ransomware.live extortion claims; match only explicit case overlaps and add them to the Canvas.
-9. Run a hypothesis-driven chat interview that predicts unobserved behaviors from the current ensemble candidates, recommends ATT&CK-informed telemetry, Windows channels and Event IDs to inspect, and automatically asks the next prioritized question after each analyst response.
-10. Optionally search API-key-scoped Elasticsearch security data through Elastic Agent Builder MCP for the current lead; normalize results locally, stage them for analyst approval, and reanalyze only accepted events.
-11. Run isolated `anthropic/claude-sonnet-5` reviews: blinded ACH, named ACH, fame-bias measurement, devil's advocate, then advisory reconciliation. The deterministic RRF ranking remains authoritative; review-proposed rank changes are recorded but not applied.
+## Strengths and limits
 
-### Technique mapping pipeline
+- **Technique mapping on real report text** is its strongest part: accepted-set F1 0.50 on 968 human-annotated
+  statements from 55 real reports (CTI-HAL).
+- **It names little, and has been right when it names.** On the latest gate it named 115 held-out ATT&CK groups
+  and 12 of 55 real reports with no wrong name, and none of the 22 posts about actors outside ATT&CK.
+- **It ranks the right group first on about half of real reports** (27 of 55 on CTI-HAL, 4 of 8 on Elastic).
+- **It only knows the groups ATT&CK documents.** An actor outside ATT&CK cannot be named, and an actor
+  removed from ATT&CK is occasionally named after a group that shares its malware.
+- **A frontier model ranks better on new reports** (GPT-5.6 Sol 24 of 44 against Vestige's 19, mostly from
+  knowledge outside ATT&CK) but names many more groups wrongly.
+- **It can run without sending case data anywhere**: with no OpenRouter key it uses a local LLM and the local
+  technique head on your GPU.
 
-Technique extraction uses hybrid dense (ATTACK-BERT) plus lexical (BM25-style) retrieval with behavior-focused candidate generation:
+The benchmarks are small, so these are indications, not production accuracy (see [Results](#results)).
 
-- Dense and lexical results are fused at the technique level using RRF, preserving the best supporting sentence and field for each candidate.
-- Generic or non-mappable observations can abstain rather than forcing up to six labels.
-- Parent/sub-technique hierarchy is handled explicitly and non-duplicatively: each evidence claim contributes at most once per group. Observed sub-techniques can support groups that document only the parent via ancestor-compatible matching, but this is discounted and never double-counted.
-- Bounded OpenRouter verification checks ambiguous candidates against the normalized observation and source excerpt. The verifier receives only technique definitions and retrieval evidence—no group names, attribution ranking, or strategic context. Supported candidates are auto-accepted; unsupported are auto-rejected; uncertain cases go to analyst review.
-- Analyst Technique Review allows confirming, rejecting, or replacing mappings before rescoring. Rejection removes only the mapping; it does not create negative incident evidence.
+## Quick start
 
-### Mapping presets
-
-Five presets bundle retrieval, verification, hierarchy, and gating options:
-
-- **Balanced (default):** hybrid retrieval, OpenRouter verification on ambiguous candidates, ancestor-compatible hierarchy matching, strict positive group eligibility.
-- **Conservative:** stronger acceptance requirements, exact-only hierarchy matching, verification on all candidates.
-- **Exploratory:** wider candidate pool; unsupported candidates remain non-voting.
-- **Local only:** hybrid retrieval without OpenRouter; uncertain candidates go to review.
-- **Legacy:** original dense-only ATTACK-BERT retrieval for comparison and rollback.
-
-Actor-specific behavior matching requires distinctive shared operational details and a clear semantic margin over competing group descriptions. Generic observations such as scheduled-task creation or LSASS access make this classifier abstain rather than cast an actor vote.
-
-Country and APT-like assessments are derived from public ATT&CK sponsor/origin descriptions for technically supported candidates. They never interpret victim geography or source IP addresses as attacker origin and return unresolved/low confidence when attribution coverage or candidate separation is weak.
-
-After analysis, the application opens an analyst Canvas linking normalized evidence to ATT&CK techniques, actor-specific behavior, tools, campaigns, strategic context, candidate groups, country hypotheses, intrusion type, and matching live-intelligence records. The CyberRE-LLM tab provides an analyst-triggered full ATT&CK technique filter/ranker for a selected observation; generated CyberRE output is a bounded, non-authoritative RRF vote and does not replace deterministic retrieval. The Diamond Model tab separately organizes the intrusion around adversary, capability, infrastructure, and victim vertices, with explicit status and provenance for each node. Canvas layers and connection types are filterable, and the hypothesis inspector exposes support, contradictions, unmatched observations, and classifier ranks.
-
-CISA KEV and CISA Alerts & Advisories are labeled authoritative for what CISA reports. ransomware.live records are public extortion-site claims, not confirmed breaches; they require independent victim, regulator, law-enforcement, or press corroboration. Live intelligence is excluded from RRF and the isolated reviewer by default to prevent recency and reporting bias.
-
-When no named group meets the evidence bar (stages below *known group hypothesis*), the Assessment
-view says so explicitly and labels the leader as the closest documented group, not an attribution;
-on the attribution benchmarks every named known group was correct (32 of 32 on the ATT&CK folds; 10 of 10
-on the CTI-HAL real reports with the group names removed from the text, 15 of 15 with them left in) and
-all 25 actors removed from ATT&CK were correctly left unnamed. When the leader has documented overlap with another
-group (ATT&CK cross-references or rarely shared tooling, for example Carbanak and FIN7), the view says
-so, because the evidence usually cannot separate them.
-
-The LLM zero-shot opinion was removed from the ensemble on 2026-09-30 to keep ranking deterministic and cheaper; it had changed the analyst-facing rank in one of ten measured reports. CyberRE-LLM output has its own bounded family and re-orders only the ranking the analyst sees: the stage decision (and so the naming gate) and the independent reviewer read a fusion computed without it (docs 9.11, 9.12, 16.2).
-
-### Optional local reranker
-
-A local reranker adapter (`apt_classifier/reranker.py`) can re-score the hybrid retrieval candidate pool with a sentence-transformers cross-encoder trained by `make train-reranker` (ATTACK-BERT base, public train splits, retrieval-mined negatives, dev-calibrated promote/demote band). It only moves candidates it is confident about to the front, can promote or demote acceptance within the calibrated band, never bypasses the benign/sparse guards or cue-corroborated mappings, and never introduces techniques. It is **disabled by default**: the first trained model lowered held-out F1 (0.32 -> 0.26) and clinic hit@1 (0.22 -> 0.06); see `docs/TECHNICAL_DOCUMENTATION.md` 21.3.6 for the evaluation and the fixes it triggered. Enable a model only after it passes the held-out gate, with `RERANKER_ENABLED=true`, `RERANKER_MODEL=<dir>` and the manifest pins (`RERANKER_EXPECTED_*`).
-
-### Benchmarks
-
-Benchmark scripts under `scripts/` measure technique mapping and attribution (ATT&CK
-self-consistency folds and the CTI-HAL real reports; there is no labelled field-data benchmark). Results are composed into
-`data/audits/verification_results_current.json` by `make verify-results` and are never
-typed by hand.
-
-- `scripts/benchmark_mapping.py` (`make benchmark-public`) — **primary gate.** About 1,400
-  held-out public cases (`tram`, `expert`, `derived_procedures` test splits of
-  `tumeteor/mitre-ttp-mapping`), per-case rows, bootstrap confidence intervals, and a
-  with/without-cues ablation. The leaky `procedures` split is refused by default.
-  `make check-regression` compares a fresh run against `data/audits/public_heldout_baseline.json`.
-- `scripts/curated_retrieval_benchmark.py` — 36 curated observations (30 positive incl.
-  multi-label and hierarchy, 6 hard negatives). Development diagnostic: the regex cue tables
-  were written against it, so numbers are reported with and without cues.
-- `scripts/otrf_benchmark.py` — 9 OTRF-style Sysmon log narratives (every expected technique
-  has a dedicated cue).
-- `scripts/evidenceforge_eval.py` (`make evidenceforge-eval-all`) — three synthetic
-  EvidenceForge bundles; only `heldout-clinic` is untouched by tuning. See
-  `docs/EVIDENCEFORGE_EVALUATION.md`.
-- `scripts/attribution_benchmark.py` (`make benchmark-attribution`; `--pipeline production` for the technique verifier, spends credit) — attribution gate: held-out,
-  anonymized procedure sentences per group run through the real pipeline (text in, group out),
-  with a per-fold leak filter and an unknown-actor arm for open-set metrics. Self-consistency over
-  the ATT&CK answer key, NOT real-world attribution accuracy.
-- `scripts/ensemble_benchmark.py` — legacy technique-ID self-consistency diagnostic.
-- `scripts/prepare_cti_hal.py` + `make benchmark-cti-hal` — CTI-HAL (dessertlab): 968 human-annotated
-  statements from 55 real reports on six named groups, used for statement-level mapping and the only
-  real-report attribution measurement (local evaluation only; the corpus publishes no licence).
-  The attribution headline first replaces every ATT&CK group name and alias in the statements with
-  "the adversary", as the ATT&CK folds do (`--anonymize-actors`); the run on the statements as reported
-  is kept beside it (docs 21.3.4b).
-
-#### Current results (artifacts as of 2026-10-01, local pipeline, no LLM verifier)
-
-**Public held-out (hybrid):**
-
-| Split | n | Micro F1 [95% CI] | P | R | hit@1 | hit@3 | hit@10 |
-|---|---|---|---|---|---|---|---|
-| tram (baseline) | 713 | 0.30 [0.26, 0.33] | 0.36 | 0.25 | 0.33 | 0.50 | 0.67 |
-| tram (current) | 713 | 0.43 [0.39, 0.46] | 0.54 | 0.35 | 0.43 | 0.58 | 0.75 |
-| expert (baseline) | 157 | 0.13 [0.10, 0.16] | 0.42 | 0.08 | 0.30 | 0.54 | 0.74 |
-| expert (current) | 157 | 0.18 [0.13, 0.22] | 0.70 | 0.10 | 0.39 | 0.59 | 0.83 |
-| derived_procedures (baseline) | 521 | 0.18 [0.15, 0.22] | 0.26 | 0.14 | 0.21 | 0.33 | 0.55 |
-| derived_procedures (current) | 521 | 0.26 [0.22, 0.29] | 0.39 | 0.19 | 0.24 | 0.43 | 0.67 |
-| **pooled (baseline, 2026-09-22 morning)** | 1391 | 0.22 [0.21, 0.25] | 0.33 | 0.17 | 0.28 | 0.44 | 0.63 |
-| **pooled (current, rule gate only)** | 1391 | 0.30 [0.27, 0.32] | 0.41 | 0.23 | 0.35 | 0.53 | 0.73 |
-| **pooled (current, acceptance model)** | 1391 | 0.32 [0.30, 0.34] | 0.50 | 0.24 | 0.35 | 0.53 | 0.73 |
-| **pooled (current, + ranking by acceptance probability)** | 1391 | 0.32 [0.30, 0.34] | 0.50 | 0.24 | **0.40** | **0.58** | **0.75** |
-| opt-in priors model (not shipped, see docs 21.3.6) | 1391 | 0.36 [0.34, 0.39] | 0.51 | 0.28 | 0.44 | 0.64 | 0.76 |
-| **pooled (current, + labelled-sentence exemplars, 2026-09-30)** | 1391 | **0.42 [0.39, 0.44]** | 0.52 | 0.35 | **0.50** | 0.67 | **0.80** |
-
-Baseline = before the acceptance-gate work; current = after (see docs section 21.3.6). The per-split rows
-predate the acceptance model; with the shipped default (last row) the splits give micro-F1 0.55 (tram), 0.26
-(expert) and 0.31 (derived_procedures). The probability-ranking row was the shipped default from 2026-09-28; since 2026-09-30 the acceptance model also
-reads what the nearest labelled public report sentences say about each candidate (exemplars, docs 8.2 and
-21.3.10). Part of that public gain is within-collection, because the exemplars are the same datasets' train
-splits; the CTI-HAL gain below is the cleaner estimate. The per-technique priors model named a wrong group on
-a real report, so it is kept as an opt-in artifact only (docs 8.2, 21.3.4b).
-
-**Curated retrieval (30 positive + 6 hard-negative cases):**
-
-| Mode | Cues | Top-1 | Top-3 | Top-10 | Accepted-set P / R / F1 | Hard-negative accepted-FP cases |
-|---|---|---|---|---|---|---|
-| **hybrid (default)** | on | 25/30 | 29/30 | 30/30 | 0.79 / 0.74 / 0.76 | 0/6 |
-| hybrid | off | 15/30 | 24/30 | 29/30 | 0.52 / 0.43 / 0.47 | 0/6 |
-| legacy_dense | on | 26/30 | 29/30 | 30/30 | 0.85 / 0.83 / 0.84 | 0/6 |
-| lexical | on | 26/30 | 26/30 | 26/30 | 1.00 / 0.60 / 0.75 | 0/6 |
-
-**OTRF Sysmon (9 cases):** 9/9 top-1 with cues.
-
-**EvidenceForge held-out clinic bundle (narrative, 21 cases):** micro-F1 0.36 (was 0.23 before the
-exemplars), hit@1 0.33 (was 0.22); all three benign red herrings are now accepted (was two), and on the
-development bundles narrated telemetry loses some ranking, so structured-telemetry deployments can set
-`TECHNIQUE_EXEMPLARS_ENABLED=false` (docs 21.3.10). With the OpenRouter verifier enabled (production pipeline,
-measured before the exemplars) narrative micro-F1 was 0.53, recall 0.56.
-
-**Attribution (text in, group out; 153 held-out groups):** top-1 0.83 (was 0.38 before the fusion work and
-0.60 before the learned combiner; 0.84 before the source-country vote, which costs one fold here and gains on real
-reports), top-3 0.93, top-5 0.96, MRR 0.88. With the separation gate 32 known groups are named, all correct, and 0/25 removed
-actors are named (was 4): named risk 0.00 (was 0.56) at 18% coverage.
-
-**CTI-HAL real reports (55 reports, 6 groups; local evaluation only):** statement mapping F1 0.38 (was 0.32 before the
-exemplars), recall 0.34 (was 0.25), hit@1 0.38 (was 0.33); median accepted-technique recall per report 0.42 (was 0.31).
-Attribution, with every ATT&CK group name and alias in the statements replaced by "the adversary" as in the ATT&CK
-folds: **top-1 0.46** (0.44 before the source-country vote), cluster-aware top-1 0.56, top-3 0.53
-(cluster-aware 0.65), top-5 0.60, MRR 0.51 (cluster-aware top-1 0.58, top-5 0.64, MRR 0.53 before the 2026-10-01 anonymizer
-fix, docs 21.3.14); 10 reports
-reached a named hypothesis, all correct (8 before the source-country vote). With the statements as reported (27 of the 55 reports name their own
-group in them) the same pipeline gives top-1 0.56 (was 0.36 before the tool cap, decisive-malware boost, discriminative
-re-ranking, combiner, exemplars and country vote), cluster-aware top-1 0.71, top-5 0.73, MRR 0.64, and 15 named, all
-correct (was 3 under the maturity gate; at the
-previous bar of 0.78 the gate named 7 and 3 were wrong, which is why the bar was raised); every earlier before/after
-comparison in this README and the docs was measured that way. Four of the six top-1 answers lost to the replacement
-are malware evidence removed with the name (Carbanak is both a group and its malware; a diagnostic run keeping such
-aliases gives top-1 0.51), so attribution from tradecraft alone lies between 0.44 and 0.51 (docs 21.3.4b).
-Ordinary-word software aliases (ATT&CK lists "Page" for Elise) now match only in their exact spelling;
-before that fix the exemplar change named Lotus Blossom on a FIN6 report (docs 5.5). With the production pipeline as measured on 2026-09-28 (verifier plus the since-removed LLM vote; 10-report sample, $3.37) technique
-recall on the statements doubles (0.23 -> 0.48, precision 0.49 -> 0.40) while ranking and naming stay the
-same. This is the only attribution number measured on real report text. Refitting the
-acceptance model with the CTI-HAL statements did not help (public F1 0.320 -> 0.313) and was not adopted.
-
-**Ensemble self-consistency (153 groups, 40% coverage):** 147/153 (96%) top-1 without
-campaign voting, MRR 0.977.
-
-These are engineering diagnostics, not production accuracy claims. See
-`docs/TECHNICAL_DOCUMENTATION.md` section 21.3 for definitions and caveats.
-
-## Requirements
-
-- Python 3.11–3.13
-- Docker with permission to access the Docker daemon
-- NVIDIA GPU optional; CPU works but ingestion is slower
-- Node.js 22 with npm for the web front end outside Docker (`make web-install`)
-- OpenRouter API key with access to the configured extraction and review models
-
-## Setup
+Requirements: Python 3.11–3.13, Docker, Node.js 22 with npm. An NVIDIA GPU is optional for the core app but
+required for the optional local LLM (about 4 GB) and technique head (about 3.5 GB). An OpenRouter API key is
+optional.
 
 ```bash
 make setup
-cp .env.example .env
-```
-
-Set `OPENROUTER_API_KEY` in `.env` (optional: without it the app runs in **local mode**, with
-sentence-split extraction and no verifier, CyberRE or AI review), then start Chroma and
-build the index:
-
-```bash
-make up
-make ingest
+cp .env.example .env      # add OPENROUTER_API_KEY here if you have one
+make up                   # local ChromaDB on port 8000
+make ingest               # downloads ATT&CK (~54 MB) and ATTACK-BERT, builds the index
 make web-install
-make run-next
+make run-next             # builds the web app and serves it with the API
 ```
 
-Open http://127.0.0.1:8100 (`make run` starts the legacy Streamlit UI instead). Initial ingestion downloads approximately 54 MB of ATT&CK data and the ATTACK-BERT model.
+Open http://127.0.0.1:8100. Without an OpenRouter key the app uses the [local LLM](#local-llm-ollama) if
+Ollama runs with the model, and otherwise runs in **local mode** (sentence-split extraction, no verifier,
+CyberRE or AI review). `make api-local` forces local mode.
 
-To run the UI in a container next to Chroma instead of from the `.venv`:
+To run the app in a container next to ChromaDB instead: `docker compose up --build` (it reads `.env`, keeps
+its data in the `app_data` volume and listens on `127.0.0.1:8100`; ingest once from the host with
+`CHROMA_HOST=localhost make ingest`, or inside the container). Without [Google sign-in](#google-sign-in) there
+is no authentication, so configure it or put the app behind an SSO proxy before exposing it.
+
+## Using the app
+
+1. **Evidence**: paste the narrative (or load the sample), optionally pick the Target OS and add alerts,
+   indicators, log files and strategic context, then **Analyse evidence**. Cases are saved automatically under
+   `data/cases/` after every change, including the verifier's verdicts, so reopening a case replays them.
+2. **Technique review**: every candidate mapping with its gate reason and evidence; confirm, reject or
+   replace, and the ranking is recomputed. Rejecting a mapping removes it; it does not count as evidence that
+   the technique did not happen.
+3. **Distinguish**: the first three candidates side by side (evidence only one has, documented overlaps,
+   ATT&CK's stated origin and motivation), which techniques separate the shortlist, and which pending mappings
+   or interview leads would sharpen or challenge the leader.
+4. **Interview**: answer predicted-behaviour questions (yes / no / unknown / not visible) to separate the
+   shortlist, with suggested telemetry, Windows channels and Event IDs, and optional Elasticsearch gathering.
+5. **Assessment**: the stage decision with its bars, the ranking, a dossier per candidate, the optional
+   independent AI review, and exports (Markdown, JSON audit, Navigator layers, Attack Flow). With
+   `MODEL_OPINION_ENABLED=true` a button asks GPT-5.6 Sol for its own answer (one paid request, about $0.05)
+   and shows it beside Vestige's; it never changes the ranking, the name, the case file or an export.
+
+| Technique review | Distinguish | Analyst canvas |
+|---|---|---|
+| ![Technique review: each observation's candidate techniques with status, evidence and decision](docs/images/techniques.png) | ![Distinguish: the top three candidates side by side with their exclusive evidence](docs/images/distinguish.png) | ![Analyst canvas: evidence linked to techniques, candidate groups and documented origin](docs/images/canvas.png) |
+
+The Canvas, Diamond Model, live-intelligence and CyberRE views sit beside these steps. Every page shows the
+case status and a **Next** hint; OpenRouter or ChromaDB errors are reported in plain language and never lose
+the case. The legacy Streamlit UI (`make run`, kept on the `streamlit-stable` branch) has no sign-in and
+should only be run locally.
+
+## How it works
+
+1. **Evidence in.** Prose is split into atomic attack-action sentences (by `openai/gpt-5.6-sol` with an
+   OpenRouter key, the local LLM, or a plain sentence split). Supported Windows/Sysmon events are parsed
+   locally and never sent to an LLM.
+2. **Technique mapping.** Each observation is matched to ATT&CK Enterprise 20.0 techniques by dense
+   (ATTACK-BERT) plus lexical (BM25) retrieval. The optional technique head, a fine-tuned 4B model, scores the
+   candidates and may add ones retrieval missed. An acceptance model decides which mappings count, using
+   nearest labelled public report sentences as evidence; the OpenRouter verifier, when used, sees only
+   technique definitions and the evidence, never group names. Generic observations can map to nothing, and
+   the case Target OS keeps techniques of other operating systems out.
+3. **Group ranking.** The core is procedure text: the case's statements are compared with how ATT&CK's
+   procedure examples describe each group's actions, by three members (a free-text group model, a
+   behaviour-text member, and procedure text per accepted technique). Supporting members read the accepted
+   technique list, named software (weighted by rarity) and the strategic context. Procedure text separates
+   groups far better than technique-id lists and keeps doing so when malware names are removed (docs 21.3.24).
+4. **Learned combiner.** A model fitted on ATT&CK folds and 68 development real reports orders the shortlist
+   and gives the leader a calibrated probability. CTI-HAL and Elastic are never used to fit it.
+5. **Naming gate.** A single group is named only when it is clearly separated from the alternatives, its
+   probability is at least 0.20 and above "none of these", and the members that all read the technique list
+   count as one source of evidence. Otherwise the result is a pair ATT&CK documents as the same activity (for
+   example FIN7 and Carbanak), or no name, with the leader shown as the closest documented group, not an
+   attribution.
+6. **Around the answer.** Country and intrusion-type assessments come only from ATT&CK's documented sponsors
+   of supported candidates, never from victim geography or IP addresses. Live intelligence (CISA KEV, CISA
+   advisories, and ransomware.live extortion claims labelled as unverified) is matched to the case but never
+   votes. The AI review (`anthropic/claude-sonnet-5`) runs blinded and named analyses of competing hypotheses
+   and is advisory only.
+
+Docs sections 8–10 hold the full member list, fusion rules and gate bars; 21.3.20 and 21.3.25 the
+procedure-text members; 21.3.22 and 21.3.27 the naming rules.
+
+## Results
+
+Defaults of 2026-10-27 (ATT&CK 20.0, local pipeline with the technique head, no LLM verifier):
+
+| Measure | Result | Docs |
+|---|---|---|
+| Technique mapping, public held-out test splits (1,391 cases), accepted-set micro F1 | 0.463 (0.417 without the technique head) | 21.3.18 |
+| Technique mapping, CTI-HAL statements (968), accepted-set F1 / precision | 0.504 / 0.553 (0.378 / 0.425 without the head) | 21.3.18 |
+| Attribution, ATT&CK folds (seeds 109/113/127, 465 held-out groups): top-1 | 421/465 (0.905); 115 named, 0 wrong; 2 removed actors named | 21.3.25 |
+| Attribution, CTI-HAL (55 real reports, group names removed): top-1 / named | 27/55 (0.49) / 12, 0 wrong (11 after the naming rules of 2026-10-27) | 21.3.25, 21.3.27 |
+| Same, malware names removed too | 20/55 (11 before procedure text became the core) | 21.3.25 |
+| Elastic Security Labs (8 reports, strict) / open set (22 posts) | 4/8, 1 named, correct / 0 named | 21.3.25 |
+| CTI-TAA / AthenaBench attribution, top-ranked correct | 0.54 (ChatGPT-4 0.52) / 0.23 (GPT-5 0.39) | 21.3.26 |
+| 44 vendor reports newer than the model's cut-off, right group first: strict / behaviour only | Vestige 19 / 10; GPT-5.6 Sol 24 / 18 | 21.3.28, 21.3.30 |
+
+On the post-cut-off reports the frontier model named 32 known reports with 8 wrong and 19 open-set posts;
+Vestige named 8 with 1 wrong and 2 open-set posts. The ATT&CK folds measure self-consistency against
+ATT&CK's own answer key, not real-world accuracy, and every real-report set is small. Earlier stages of the
+work and their before/after comparisons are in docs 21.3.
+
+## Optional services
+
+### Local LLM (Ollama)
+
+A small open model on your GPU can take over the LLM steps at no cost (docs 16.4a). It is on by default
+(`LOCAL_LLM_ENABLED=true`) but only used when Ollama answers with the model pulled.
+
+1. Install or upgrade [Ollama](https://ollama.com/download) (0.35 works; 0.16 cannot run Qwen 3.5). The
+   official installer needs sudo:
+
+   ```bash
+   curl -fsSL https://ollama.com/install.sh | sh
+   ```
+
+   Without sudo, unpack the `ollama-linux-amd64.tar.zst` release into your home directory, start it with
+   `OLLAMA_HOST=127.0.0.1:11435 ollama serve` and set `LOCAL_LLM_URL=http://127.0.0.1:11435` in `.env`.
+2. Pull the model and check its speed and GPU memory. `make llm-pull` fetches `qwen3.5:4b` (about 3 GB) and
+   registers `qwen3.5:4b-text`, the same model without its unused image encoder (740 MB less GPU memory):
+
+   ```bash
+   make llm-pull
+   make llm-check
+   ```
+
+3. Restart the app; it looks for the model at start-up.
+
+- **Without `OPENROUTER_API_KEY`:** the technique verifier, interview phrasing and AI review run locally, and
+  report prose is rewritten sentence by sentence before mapping. Nothing leaves the computer.
+- **With a key:** everything stays on OpenRouter unless a step gets a `local/` model id, for example
+  `EXTRACT_MODEL=local/qwen3.5:4b-text` or `TECHNIQUE_VERIFIER_MODEL=local/qwen3.5:4b-text`.
+- **GPU only:** the model never spills onto the CPU; when the GPU is too full the step says so. `make
+  llm-check` also warns when a laptop has capped the GPU's power.
+- **Verifier confidence:** the local verifier accepts a technique only when at least 98% sure
+  (`LOCAL_LLM_VERIFIER_MIN_CONFIDENCE`); the rest stay for the analyst.
+- **Off:** `LOCAL_LLM_ENABLED=false`, or `make api-local` / `make run-local` for no LLM at all.
+
+### Technique head
+
+The fine-tuned 4B technique model (`scripts/cribl_finetune/README.md`, docs 21.3.18) needs its own environment
+(`make cribl-venv`, transformers 5) and the checkpoint under `data/models/cribl_ft/E2/step_52706`, so it runs as
+a separate local service (about 3.5 GB of GPU memory, `http://localhost:8102`):
 
 ```bash
-docker compose up --build
+make technique-head-serve
 ```
 
-The `app` service reads `.env`, keeps its data in the `app_data` volume and listens on
-`127.0.0.1:8100`. Ingest once from the host (`make ingest` with `CHROMA_HOST=localhost`) or inside
-the container. Without Google sign-in (below) there is no authentication; configure it, or put the app behind a
-reverse proxy with SSO, before exposing it.
+The app uses it whenever the service answers with the pinned checkpoint (`TECHNIQUE_HEAD_ENABLED=true`,
+`TECHNIQUE_HEAD_EXPECTED_FINGERPRINT`). When the service is down or serves another checkpoint, mapping runs
+exactly as without it and the status strip says so.
 
-### Using the app
+### Elastic Agent Builder MCP
 
-1. **Intake**: paste the incident narrative (or load the sample), optionally pick the Target OS
-   and add kill-chain notes, alerts, indicators, log files and strategic context, then
-   **Analyse evidence**. The case is saved automatically under `data/cases/` and can be reopened
-   from the sidebar.
-2. **Technique review**: one table of every candidate mapping with its gate reason and evidence.
-   Confirm, reject or replace, then apply; the ranking is recomputed. Changing the Target OS here
-   maps the observations again.
-3. **Distinguish** (web app only): the "Top three" tab puts the first three candidates side by side
-   (evidence only one of them has, documented overlaps, ATT&CK's stated origin and motivation); the
-   "Whole shortlist" tab shows which techniques separate the shortlist and which pending mappings or
-   interview leads would sharpen or challenge the leader.
-4. **Interview**: answer predicted-behaviour questions (yes / no / unknown / not visible) to
-   separate the shortlisted groups; optional Elasticsearch gathering per lead. With a Target OS,
-   techniques documented only for other operating systems are never asked about (here and in the
-   Distinguish leads).
-5. **Assessment**: the stage decision with its bars and glossary, the ranking chart, a dossier
-   per candidate, the optional independent AI review, and exports (Markdown, JSON audit,
-   Navigator layers, Attack Flow) that are always available.
-
-Every page shows the case status strip and a **Next** hint. Errors from OpenRouter (credit, key,
-rate limit) or Chroma are reported in plain language and never lose the case state.
-
-`transformers==4.57.5` is intentionally pinned below v5 because ATTACK-BERT currently publishes a `.bin` checkpoint that transformers v5 cannot load reliably.
-
-### Learned attribution combiner
-
-The shortlist is ordered by a learned combiner (`apt_classifier/combiner.py`): a conditional-logit
-model over per-classifier ranks, the discrimination channels and the case's evidence regime,
-blended half-and-half with reciprocal-rank fusion. It is fitted only on ATT&CK-derived folds
-(`make fit-combiner`, no credit, about an hour) and loads fail-closed on an ATT&CK-version or
-pipeline mismatch. On the held-out ATT&CK folds it lifts top-1 from 0.60 to 0.83 and on the 55
-CTI-HAL real reports (statements as reported) from 0.51 to 0.53 with every named group still correct; the naming gate scores
-the leader against the union of both shortlists so a re-ordering cannot hide a competitor. The
-assessment page shows its calibrated leader probability. Disable with
-`ATTRIBUTION_COMBINER_ENABLED=false`.
-
-### Web front end (FastAPI + React)
-
-The primary interface is a React single-page app served by a FastAPI backend; the Streamlit
-app remains available (`make run`, and unchanged on the `streamlit-stable` branch). The workflow
-is Evidence → Technique review → Distinguish (a "Top three" head-to-head of the first three
-candidates with ATT&CK's documented origin and motivation; which techniques separate the
-shortlist, and which pending mappings or interview leads would sharpen or challenge the leader)
-→ Interview → Assessment, plus the canvas, diamond, live-intelligence and AI-review views.
-
-```bash
-make web-install   # once: npm ci inside web/
-make api           # API on http://127.0.0.1:8100 (loads the embedder and Chroma at startup)
-make web-dev       # Vite dev server on http://127.0.0.1:5173, /api proxied to 8100
-make run-next      # production: build web/dist and serve API + app from port 8100
-```
-
-`make api-local` runs the same API without any OpenRouter call (local mode: sentence split, no
-verifier, no AI review). The API surface is documented at `/docs` (OpenAPI) when the server
-runs; every payload is produced by `api/serializers.py` from an `AnalysisState`, and every
-analyst operation (intake, technique decisions, interview, LLM steps, live intel, exports)
-goes through `apt_classifier/service.py`, the same headless service any other front end would
-use. Cases are saved automatically under `data/cases/` after every change, including the verifier's verdicts, so reopening a case replays them instead of calling the model again. Docker builds the
-web bundle in a Node stage and serves it from the Python image (`docker compose up`, port 8100).
-
-### Users and Google sign-in
-
-The web app can run as a shared team workspace with Google sign-in (OpenID Connect):
-
-1. In the Google Cloud console create an OAuth client ID of type *Web application* and add the
-   authorised redirect URI(s): `http://127.0.0.1:5173/auth/callback` for the Vite dev server,
-   `http://127.0.0.1:8100/auth/callback` when the API serves the built app, and your production
-   URL (`https://<host>/auth/callback`, with `AUTH_PUBLIC_URL=https://<host>`).
-2. Set `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`, `AUTH_SECRET_KEY` and an allowlist
-   (`AUTH_ALLOWED_DOMAINS` and/or `AUTH_ALLOWED_EMAILS`) in `.env`; without an allowlist the
-   server refuses to start in google mode. `AUTH_ADMIN_EMAILS` names administrators; the first
-   user to sign in is an administrator as well.
-3. Restart the API. Every `/api` route now needs a session; the app shows a sign-in page.
-
-Users live in `data/users.db` (SQLite): address, name, picture, role (`admin` or `analyst`),
-active flag, sign-in times. It is personal data: the API creates the file on first start, git
-ignores it and Docker builds leave it out, so back it up separately. Administrators manage users on the *Users* page and can delete any
-case; analysts see every case in the workspace, create cases attributed to them, and can delete
-only their own. Without Google credentials (`AUTH_MODE=auto` or `off`) the app runs as one
-local analyst with administrator rights, which is also how the tests run. The legacy Streamlit
-UI has no sign-in and should only be run locally.
-
-### Optional Elastic Agent Builder MCP
-
-The supported connector targets Elastic Agent Builder MCP on Elasticsearch 9.2+/9.3+ or Elastic Serverless, not the deprecated standalone Elasticsearch MCP server. Create an API key restricted to intended security indices with `read` and `view_index_metadata`, plus Kibana `feature_agentBuilder.read` access, then configure:
+The connector targets Elastic Agent Builder MCP on Elasticsearch 9.2+ or Elastic Serverless (not the deprecated
+standalone Elasticsearch MCP server). Create an API key restricted to the intended security indices with `read`
+and `view_index_metadata`, plus Kibana `feature_agentBuilder.read`, then set:
 
 ```text
-ELASTIC_MCP_URL=https://your-kibana.example/api/agent_builder/mcp
+ELASTIC_MCP_URL=https://your-kibana.example/api/agent_builder/mcp   # custom space: /s/<space>/api/...
 ELASTIC_MCP_API_KEY=<scoped API key>
 ELASTIC_MCP_AUTO_GATHER=false
 ```
 
-For a custom Kibana space, use `https://your-kibana.example/s/<space>/api/agent_builder/mcp`. The connector only calls `platform.core.search`, sends no explicit index so the API key defines the scope, caps returned records, and requires analyst selection before imported events can affect attribution.
+The connector only calls `platform.core.search`, lets the API key define the scope, caps returned records, and
+imports events only after the analyst selects them.
+
+### Google sign-in
+
+The web app can run as a shared team workspace with Google sign-in (OpenID Connect):
+
+1. In the Google Cloud console create an OAuth client ID of type *Web application* with the redirect URIs
+   `http://127.0.0.1:5173/auth/callback` (Vite dev server), `http://127.0.0.1:8100/auth/callback` (built app)
+   and your production `https://<host>/auth/callback` (with `AUTH_PUBLIC_URL=https://<host>`).
+2. Set `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`, `AUTH_SECRET_KEY` and an allowlist (`AUTH_ALLOWED_DOMAINS`
+   and/or `AUTH_ALLOWED_EMAILS`) in `.env`; without an allowlist the server refuses to start in google mode.
+   `AUTH_ADMIN_EMAILS` names administrators; the first user to sign in is one as well.
+3. Restart the API. Every `/api` route then needs a session.
+
+Users live in `data/users.db` (SQLite: address, name, picture, role, active flag, sign-in times). It is
+personal data: git ignores it and Docker builds leave it out, so back it up separately. Administrators manage
+users and can delete any case; analysts see every case, create their own and delete only their own. Without
+Google credentials (`AUTH_MODE=auto` or `off`) the app runs as one local administrator, which is how the
+tests run.
+
+## Configuration
+
+All settings are environment variables documented in `.env.example`. The ones you are most likely to change:
+
+| Area | Setting | Default and meaning |
+|---|---|---|
+| Models | `EXTRACT_MODEL`, `REVIEW_MODEL` | `openai/gpt-5.6-sol`, `anthropic/claude-sonnet-5` (OpenRouter) |
+| | `LOCAL_LLM_ENABLED`, `LOCAL_LLM_URL` | `true`, used only when Ollama answers with the model |
+| | `TECHNIQUE_HEAD_ENABLED` | `true`, used only while the service answers with the pinned checkpoint |
+| | `EMBEDDING_MODEL` | `basel/ATTACK-BERT`, pinned by `EMBEDDING_MODEL_REVISION` |
+| Mapping | `TECHNIQUE_EXEMPLARS_ENABLED` | `true`; `false` for structured-telemetry deployments where narrated logs lose ranking (docs 21.3.10) |
+| | `TECHNIQUE_PLATFORM_FROM_TEXT` | `true`: an observation that names an OS maps only to that OS's techniques |
+| | Mapping preset (in the app) | Balanced (default), Conservative, Exploratory, Local only, Legacy (dense-only) |
+| Attribution | `TEXT_GROUP_WEIGHT`, `BEHAVIOR_TEXT_WEIGHT`, `PROCEDURE_MATCH_WEIGHT` | `1.0`: the procedure-text core. They bind the combiner, so turning one off needs the matching combiner (docs 21.3.25) |
+| | `ATTRIBUTION_COMBINER_PATH`, `CONFIDENCE_LABELS_PATH` | the procedure-core combiner and its labels; `ATTRIBUTION_COMBINER_ENABLED=false` turns the combiner off |
+| | `ATTRIBUTION_HYPOTHESIS_MIN_PROBABILITY` | `0.20`; the floor belongs to its combiner (docs 21.3.22) |
+| | `ATTRIBUTION_HYPOTHESIS_ABOVE_NULL`, `ATTRIBUTION_TECHNIQUE_LIST_ONE_FAMILY` | `true`: a name must beat "none of these", and the technique-list members count once (docs 21.3.27) |
+| | `ATTRIBUTION_CLUSTER_NAMING`, `ATTRIBUTION_CLUSTER_SCOPE` | `true`, `documented`: name a pair only when ATT&CK documents it as the same activity (docs 10.11) |
+| | `SOURCE_COUNTRY_WEIGHT` | `1.0`: source-country vote on (docs 9.13) |
+| Off by default | `MODEL_OPINION_ENABLED` | the paid GPT-5.6 Sol second opinion on the Assessment page (docs 16.6) |
+| | `GROUP_MLP_WEIGHT`, `PROFILE_FOREST_WEIGHT`, `CAMPAIGN_WEIGHT` | `0`: group network, group forest and campaign member; each made a measured result worse (docs 9.9, 9.13, 21.3.11) |
+| | `STORE_TEXT_WEIGHT`, `STORE_SOFTWARE_WEIGHT` | `0`: dated knowledge-store members, no weight beat 0 (docs 12.9) |
+| | `NAIVE_BAYES_BACKGROUND_ENABLED` | `false`: size correction, failed its gate (docs 21.3.33) |
+| | `RERANKER_ENABLED` | `false`: local cross-encoder reranker, lowered held-out F1 (docs 21.3.6) |
+| Live intel | `THREAT_INTEL_DAYS`, `INCLUDE_RANSOMWARE_CLAIMS` | `30`, `true` |
+
+Rollback: the defaults before procedure text became the core are tagged
+`rollback/pre-procedure-core-2026-10-26`; the docs (21.3.25) list the settings that restore them.
 
 ## Supported Windows events
 
@@ -333,84 +254,55 @@ For a custom Kibana space, use `https://your-kibana.example/s/<space>/api/agent_
 
 Inputs may be a JSON array, JSON Lines, an Elastic `hits` export, or EVTX-exported nested JSON.
 
-## Configuration
-
-All settings are environment variables documented in `.env.example`. Important values:
-
-- `EMBEDDING_MODEL=basel/ATTACK-BERT` (pinned by `EMBEDDING_MODEL_REVISION`)
-- `EXTRACT_MODEL=openai/gpt-5.6-sol`
-- `REVIEW_MODEL=anthropic/claude-sonnet-5`
-- `SIMILARITY_THRESHOLD=0.45`
-- `BEHAVIOR_SIMILARITY_THRESHOLD=0.55`
-- `THREAT_INTEL_DAYS=30`
-- `THREAT_INTEL_TIMEOUT=20.0`
-- `THREAT_INTEL_MAX_ITEMS_PER_SOURCE=100`
-- `INCLUDE_RANSOMWARE_CLAIMS=true`
-- `ELASTIC_MCP_URL=` (optional Elastic Agent Builder MCP endpoint)
-- `ELASTIC_MCP_API_KEY=` (optional, scoped Pydantic secret)
-- `ELASTIC_MCP_LOOKBACK_HOURS=72`
-- `ELASTIC_MCP_MAX_RESULTS=20`
-- `ELASTIC_MCP_AUTO_GATHER=false`
-- `RRF_K=20` (group ensemble; `TECHNIQUE_RRF_K=60` for technique-level fusion)
-- `TECHNIQUE_FAMILY_WEIGHT=2.00`
-- `CONTEXT_FAMILY_WEIGHT=1.00`
-- `SPECIFIC_BEHAVIOR_WEIGHT=1.50`
-- `CAMPAIGN_WEIGHT=0.00` (available for inspection, disabled from fusion by default)
-- `GROUP_DESCRIPTION_WEIGHT=0.40`
-- `SEMANTIC_CENTROID_WEIGHT=0.70`
-- `STRATEGIC_CONTEXT_WEIGHT=0.70`
-- `SOFTWARE_WEIGHT=1.20` (software weighted by rarity across groups; `SOFTWARE_IDF_ENABLED=true`; ATT&CK *tool*
-  entries capped at `SOFTWARE_TOOL_WEIGHT_CAP=1.5`; a named malware family documented for at most two groups
-  multiplies the software vote by `1 + SOFTWARE_DECISIVE_BOOST` (2.0), see docs 9.10)
-- `ATTRIBUTION_GATE_MODE=separation` (named hypotheses require candidate-relative separation >= 0.5 and
-  discriminative evidence >= 3.0 among the top-5, chosen by `scripts/attribution_gate_sweep.py` with zero wrong names
-  on both benchmarks; `ATTRIBUTION_RERANK_BLEND=0.5` blends the same evidence into the ranking; docs 10.7)
-- `ATTRIBUTION_HYPOTHESIS_MATURITY=0.82` (the previous maturity/margin gate, `ATTRIBUTION_GATE_MODE=maturity`; see docs 10.6)
-- `TECHNIQUE_INCLUDE_SYNTHETIC=false` (LLM-generated observation sentences per technique in the index;
-  `make generate-synthetic` then `make ingest`; off until the full set is generated and measured, see
-  docs 7.3 and 21.3.6)
-- `SOURCE_COUNTRY_WEIGHT=1.0`, `PROFILE_FOREST_WEIGHT=0.0` (source-country vote on, group forest silent; `make fit-forest`
-  trains both on the GPU when available, `PROFILE_FOREST_DEVICE=cpu` otherwise). To turn the country vote off set
-  `SOURCE_COUNTRY_WEIGHT=0.0` and `ATTRIBUTION_COMBINER_PATH=data/models/combiner/attribution_combiner_no_country.json`
-  (docs 9.13 and 21.3.11)
-- `GROUP_MLP_WEIGHT=0.0` (PyTorch group network, `make fit-mlp`; not loaded at 0. At 1.0 it needs
-  `ATTRIBUTION_COMBINER_PATH=data/models/combiner/attribution_combiner_group_mlp.json` and named one wrong group
-  on the ATT&CK folds on 2026-10-01)
-- `TECHNIQUE_EXEMPLARS_ENABLED=true` (labelled public report sentences as acceptance evidence, `make exemplars`
-  then `make fit-acceptance`; CTI-HAL median accepted-technique recall per report 0.31 -> 0.42; `false` restores
-  the previous calibrated gate through `ACCEPTANCE_MODEL_FALLBACK_PATH`, see docs 8.2 and 21.3.10)
-- `TECHNIQUE_PLATFORM_FROM_TEXT=true` (an observation that names an operating system, "on the Linux server",
-  is mapped only to techniques documented for it, overriding the case's Target OS for that observation;
-  neutral on every benchmark, see docs 5.7 and 21.3.12). The Target OS itself is set per case: pick every
-  operating system the activity touched, leave it empty when unknown (a wrong one hides the right techniques)
-- `TECHNIQUE_RANK_BY_ACCEPTANCE=true` (order each observation's candidates by the acceptance model's
-  probability; held-out hit@1 0.35 -> 0.40 with the accepted set unchanged, see docs 8.2)
-- `TECHNIQUE_CORROBORATION_ACCEPT_OBSERVATIONS=2`, `TECHNIQUE_CORROBORATION_ACCEPT_MIN_PROBABILITY=0.1`
-  (accept a technique left in review when two different observations of the case retrieved it; real-report
-  accepted recall 0.26 -> 0.31 at flat precision, see docs 8.2)
-- `TECHNIQUE_SEGMENT_ACCEPTANCE=false`, `TECHNIQUE_HIERARCHY_PARENT_MODE=off`,
-  `TECHNIQUE_CORROBORATION_BONUS=0.0` (optional per-sentence acceptance for long paragraphs,
-  hierarchy-consistent acceptance, cross-observation corroboration; all measured on the held-out
-  benchmarks and off by default, see docs 21.3.6)
-- `NEGATIVE_EVIDENCE_WEIGHT=0.30`
-
-The OpenRouter key is loaded as a Pydantic secret, is never written to an audit artifact, and is never sent to Chroma.
-
-## Verification
+## Development
 
 ```bash
-make test
+make api           # API on http://127.0.0.1:8100 (OpenAPI at /docs)
+make web-dev       # Vite dev server on http://127.0.0.1:5173, /api proxied to 8100
+make test          # LLM calls are mocked: no network or API spend
 make lint
+make web-check     # tsc + oxlint, before committing web changes
 docker compose config --quiet
 ```
 
-The LLM boundary is mocked in tests, so tests run without network access or API spend. Review prompts/responses from real cases are persisted under `data/audits/` for auditability and are ignored by Git.
+Every analyst operation goes through `apt_classifier/service.py`, and every API payload is produced by
+`api/serializers.py`. `transformers==4.57.5` is pinned below v5 because ATTACK-BERT publishes a `.bin`
+checkpoint that v5 cannot load reliably. `AGENTS.md` lists every fitting, benchmark and experiment command.
+
+### Benchmarks
+
+Results are composed into `data/audits/verification_results_current.json` by `make verify-results` and are
+never typed by hand.
+
+- `make benchmark-public` — **primary mapping gate**: about 1,400 held-out public cases (`tram`, `expert`,
+  `derived_procedures` test splits of `tumeteor/mitre-ttp-mapping`), bootstrap intervals, with and without the
+  regex cues; `make check-regression` compares against the committed baseline.
+- `make benchmark-attribution` — held-out, anonymised ATT&CK procedure sentences per group through the real
+  pipeline, with per-fold leak hiding and a removed-actor arm. Self-consistency, not real-world accuracy.
+- `make benchmark-cti-hal` — CTI-HAL: 968 annotated statements from 55 real reports on six groups, for mapping
+  and attribution with group names removed (local evaluation only; no published licence).
+- `make prepare-elastic` + `make benchmark-elastic` — Elastic Security Labs posts: 8 attributed to one ATT&CK
+  group plus a 22-post open set, labels pre-registered (local evaluation only; post text © Elastic).
+- `scripts/attribution_benchmark.py --report-set vendor|campaigns|advisories` — the 68 development real
+  reports the combiner is fitted on (diagnosis only).
+- `scripts/prepare_fresh_reports.py` + `scripts/fresh_llm_attribution.py` — vendor reports newer than the
+  frontier models' cut-off, Vestige against GPT-5.6 Sol, pre-registered (local only).
+- `scripts/cribl_finetune/external_product_taa.py` — CTI-TAA and AthenaBench attribution (evaluation only,
+  non-commercial licences).
+- Diagnostics: `make benchmark-curated` (36 curated observations, the cue tables were written against them),
+  `scripts/otrf_benchmark.py` (9 Sysmon narratives), `make evidenceforge-eval` (synthetic bundles; only
+  `heldout-clinic` is untouched by tuning, see `docs/EVIDENCEFORGE_EVALUATION.md`).
 
 ## Data and privacy
 
-- ATT&CK vectors and application state live locally in Dockerized ChromaDB.
-- Raw logs are parsed locally.
-- Elastic MCP searches and result normalization run locally between this application and Kibana; the Elastic API key is never sent to OpenRouter.
-- Elastic MCP results remain staged and non-voting until an analyst selects them for import. Imported event text may later enter an OpenRouter review payload if the analyst explicitly runs AI review.
-- Free-text observations, alert text, adaptive-question context, and review payloads are sent to OpenRouter when those features are used.
-- Do not submit evidence to OpenRouter if organizational policy prohibits third-party processing.
+- ATT&CK vectors and application state live locally in ChromaDB; raw logs are parsed locally.
+- Free-text observations, alert text, interview context and review payloads go to OpenRouter only when those
+  features run with a key. Do not use OpenRouter if your policy forbids third-party processing.
+- The model second opinion (off by default) sends the case's observations, with ATT&CK group names and ids
+  removed, only when the analyst clicks its button; vendor and most malware names stay in the text.
+- Without an OpenRouter key (local LLM and technique head on your GPU), no case data leaves the computer; only
+  the live-intelligence feeds are fetched.
+- Elastic MCP searches run between this app and Kibana; the Elastic API key is never sent to OpenRouter.
+  Imported events stay non-voting until the analyst selects them.
+- The OpenRouter key is a Pydantic secret, never written to an audit artifact and never sent to ChromaDB.
+  Review prompts and responses are kept under `data/audits/` (ignored by git).

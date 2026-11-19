@@ -1,0 +1,831 @@
+{
+  "schema": "tune_retrieval_prereg/1",
+  "id": "chroma_exemplars_2026-10-02",
+  "title": "Exemplars in Chroma, retrieval tuned on public dev, re-evaluation without the LLM verifier",
+  "registered": "2026-10-02",
+  "documentation": "docs/TECHNICAL_DOCUMENTATION.md section 21.3.15 (design plan sections 4-7)",
+  "harness": {
+    "script": "scripts/tune_retrieval.py",
+    "reads_from_this_file": [
+      "reference",
+      "families",
+      "selection",
+      "replication",
+      "cv",
+      "e0.decomposition",
+      "dev_only.datasets",
+      "dev_only.cases",
+      "fixed.settings",
+      "fixed.exemplar_library",
+      "operating_points",
+      "amendments",
+      "retry.allowed"
+    ],
+    "git_rule": "sweep, replicate and copy-check refuse this file unless it is tracked, committed and has no uncommitted changes, and unless every commit after the registration commit (the first one touching the file) is declared in 'amendments' ({'amends': <the commit it replaces>, 'reason': ...}, in order), with no more amendments than retry.allowed; its commit, registration commit, history and sha256 are written into every result, and replicate and copy-check refuse a commit other than the sweep's. A rewritten history (commit --amend or a rebase of the registration commit) is not visible to git; the artifacts record the commit they ran on",
+    "commit_before": "R23 (commit C4p)",
+    "checks_before_selection": [
+      "the base settings equal fixed.settings (sweep, replicate, copy-check), and replicate, copy-check and check-fit run under the base settings, exemplar library and harness code the previous step recorded",
+      "the cache holds exactly dev_only.datasets and dev_only.cases cases",
+      "the exemplar library is fixed.exemplar_library (fingerprint, count, split, backend chroma, source npz; never the placeholder)",
+      "sweep: --parity is a passing P1-P3 run (P1 live, cues on and off) of the same cache at the reference with ANN dense search, under the same base settings and row code; copy-check: the same with --dense-source copy on the copy cache"
+    ]
+  },
+  "dev_only": {
+    "split": "dev",
+    "datasets": [
+      "tram",
+      "expert",
+      "derived_procedures"
+    ],
+    "cases": 1147,
+    "refused": [
+      "any test split",
+      "the train split as fit or tuning data",
+      "procedures (leaky)",
+      "cti_hal",
+      "evidenceforge (every bundle)",
+      "elastic",
+      "clinic"
+    ],
+    "fit_data": "public dev only; the exemplar library is the public train split and never dev"
+  },
+  "fixed": {
+    "description": "Never tuned. sweep, replicate and copy-check refuse base settings that differ from fixed.settings and an exemplar library other than fixed.exemplar_library; T1.env pins every fixed setting beside the knobs, so a later run cannot inherit another value from the shell or a .env file.",
+    "settings": {
+      "similarity_threshold": 0.45,
+      "retrieval_top_k": 30,
+      "technique_retrieval_mode": "hybrid",
+      "technique_parent_policy": "ancestor_compatible",
+      "technique_include_detection": false,
+      "technique_segment_acceptance": false,
+      "technique_hierarchy_parent_mode": "off",
+      "technique_rank_by_acceptance": true,
+      "technique_acceptance_threshold": 0.75,
+      "technique_relative_margin": 0.08,
+      "technique_corroboration_bonus": 0.0,
+      "technique_corroboration_accept_observations": 2,
+      "technique_corroboration_accept_min_probability": 0.1,
+      "technique_rrf_k": 60,
+      "technique_exemplar_duplicate_similarity": 0.95,
+      "technique_exemplar_tolerance": 1e-06,
+      "technique_exemplars_enabled": true,
+      "reranker_enabled": false,
+      "embedding_model": "basel/ATTACK-BERT",
+      "embedding_model_revision": "81e30f983a822c606825507b63ae318a6830a8a2"
+    },
+    "duplicate_cut": 0.95,
+    "technique_rrf_k": 60,
+    "cue_tables": "_EXPLICIT_TECHNIQUE_CUES, _BENIGN_INDICATORS and technique_signals.SIGNALS unchanged (hash pinned in tests/test_retrieve.py); never add a cue to fix a case",
+    "embedding_model": "ATTACK-BERT (basel/ATTACK-BERT at revision 81e30f983a822c606825507b63ae318a6830a8a2)",
+    "exemplar_library": {
+      "backend": "chroma",
+      "collection": "technique_exemplars-0f8d2e19a59967c63b03ea71-s1-m32-efc400",
+      "fingerprint": "d8fbb0565e9addeaa3cb048c",
+      "source_fingerprint": "0f8d2e19a59967c63b03ea71",
+      "count": 6360,
+      "split": "train",
+      "tolerance": 1e-06,
+      "identity": "Chroma is the source (decided 2026-10-02): Chroma re-normalises every vector in float32 on insert, so the library it serves is not the npz bit for bit and has its own fingerprint, recomputed from the vectors, labels and manifest Chroma returns. That fingerprint is the library of every harness row (votes read from the Chroma collection with exact search), of B0r and of T1; source_fingerprint is the npz it was copied from (kept as a backup). The loader accepts the library only with every norm within tolerance of 1 and every component within tolerance of the npz.",
+      "tolerance_enforced_by": "fixed.settings.technique_exemplar_tolerance (equal to this tolerance; checked by every selection step and pinned in T1.env as TECHNIQUE_EXEMPLAR_TOLERANCE); prereg-fill refuses a sync report verified at a looser tolerance or measuring a norm or component deviation above it; T1.env also pins TECHNIQUE_EXEMPLAR_LIBRARY_FINGERPRINT to this fingerprint, which the loader checks bit for bit",
+      "fingerprint_filled_by": "tune_retrieval.py prereg-fill --sync-report <the passing sync_exemplars_to_chroma.py --verify-only report> before the registration commit (C4p); sweep, replicate and copy-check refuse the placeholder",
+      "source": "tumeteor/mitre-ttp-mapping tram, expert and derived_procedures train splits (CC-BY-4.0)",
+      "contents": "unchanged: no sentence added, removed or relabelled"
+    },
+    "precision_floor": 0.5,
+    "priors": "none (fit_acceptance_model.py --priors-split none)",
+    "hnsw": {
+      "exemplar_collection": "technique_exemplars-0f8d2e19a59967c63b03ea71-s1-m32-efc400",
+      "space": "cosine",
+      "max_neighbors": 32,
+      "ef_construction": 400,
+      "ef_search": 8192,
+      "overfetch": 2.0,
+      "attack_techniques": "unchanged (ef_search 100, M 16); never modified",
+      "role": "parity settings chosen without labels; never a tuning knob"
+    }
+  },
+  "knobs": {
+    "exemplar_k": {
+      "setting": "technique_exemplar_k",
+      "env": "TECHNIQUE_EXEMPLAR_K",
+      "type": "int",
+      "distance": "log"
+    },
+    "exemplar_tau": {
+      "setting": "technique_exemplar_tau",
+      "env": "TECHNIQUE_EXEMPLAR_TAU",
+      "type": "float",
+      "distance": "log"
+    },
+    "exemplar_new_candidates": {
+      "setting": "technique_exemplar_new_candidates",
+      "env": "TECHNIQUE_EXEMPLAR_NEW_CANDIDATES",
+      "type": "int",
+      "distance": "relative"
+    },
+    "exemplar_vote_norm": {
+      "setting": "technique_exemplar_vote_norm",
+      "env": "TECHNIQUE_EXEMPLAR_VOTE_NORM",
+      "type": "choice",
+      "choices": [
+        "none",
+        "label_split"
+      ],
+      "distance": "categorical"
+    },
+    "exemplar_segment_votes": {
+      "setting": "technique_exemplar_segment_votes",
+      "env": "TECHNIQUE_EXEMPLAR_SEGMENT_VOTES",
+      "type": "choice",
+      "choices": [
+        "off",
+        "max",
+        "mean"
+      ],
+      "distance": "categorical"
+    },
+    "dense_relative_margin": {
+      "setting": "technique_dense_relative_margin",
+      "env": "TECHNIQUE_DENSE_RELATIVE_MARGIN",
+      "type": "float",
+      "distance": "log"
+    },
+    "dense_overfetch": {
+      "setting": "technique_dense_overfetch",
+      "env": "TECHNIQUE_DENSE_OVERFETCH",
+      "type": "int",
+      "distance": "log",
+      "note": "0 = max(3 x retrieval_top_k, 4 x candidate_pool), 90 at the reference; the distance uses that effective depth"
+    },
+    "candidate_pool": {
+      "setting": "technique_candidate_pool",
+      "env": "TECHNIQUE_CANDIDATE_POOL",
+      "type": "int",
+      "distance": "log"
+    },
+    "include_synthetic": {
+      "setting": "technique_include_synthetic",
+      "env": "TECHNIQUE_INCLUDE_SYNTHETIC",
+      "type": "bool",
+      "distance": "categorical",
+      "note": "fit/serve alignment only (E0); never a tuning family"
+    },
+    "platform_from_text": {
+      "setting": "technique_platform_from_text",
+      "env": "TECHNIQUE_PLATFORM_FROM_TEXT",
+      "type": "bool",
+      "distance": "categorical",
+      "note": "fit/serve alignment only (E0); never a tuning family"
+    },
+    "dense_search": {
+      "setting": null,
+      "env": null,
+      "type": "choice",
+      "choices": [
+        "ann",
+        "exact",
+        "copy"
+      ],
+      "distance": "categorical",
+      "note": "harness value: exact runs at serving time only against a Phase 5b collection copy (TECHNIQUE_COLLECTION_NAME, written to T1.env by copy-check, which re-runs the replication on the copy's hits)"
+    },
+    "l2": {
+      "setting": null,
+      "env": null,
+      "fit_argument": "--l2",
+      "type": "float",
+      "distance": "log",
+      "note": "written to T1.fit_args beside T1.env"
+    }
+  },
+  "reference": {
+    "id": "B0r",
+    "description": "fit/serve alignment refit on the Chroma exemplar library (fixed.exemplar_library): the serving retrieval settings (synthetic sentences off, platform-from-text on, ANN dense search at the serving depth 90), weights on all of dev, threshold from the runtime-aligned rule on pooled out-of-fold probabilities. The dev reference every variant must beat; T1 always includes this alignment and T1 := B0r when nothing replicates.",
+    "config": {
+      "exemplar_k": 64,
+      "exemplar_tau": 0.05,
+      "exemplar_new_candidates": 3,
+      "exemplar_vote_norm": "none",
+      "exemplar_segment_votes": "off",
+      "dense_relative_margin": 0.12,
+      "dense_overfetch": 0,
+      "candidate_pool": 12,
+      "include_synthetic": false,
+      "platform_from_text": true,
+      "dense_search": "ann",
+      "l2": 1.0
+    }
+  },
+  "gate_baseline": {
+    "id": "B0",
+    "description": "the shipped system (npz exemplar backend, shipped acceptance model fitted on the npz library 0f8d2e19a59967c63b03ea71, threshold 0.21): the baseline of every gate in section 7; never selected against on dev. The shipped model does not run on the Chroma library (another fingerprint)"
+  },
+  "cv": {
+    "folds": 5,
+    "splitter": "StratifiedGroupKFold greedy assignment (scripts/retrieval_cache.py stratified_group_folds)",
+    "strata": "dataset",
+    "groups": "union-find of cases whose case-text vectors reach cosine 0.90 (document_id == case_id gives no document grouping)",
+    "group_similarity": 0.9,
+    "selection_seeds": [
+      7,
+      11,
+      13
+    ],
+    "replication_seeds": [
+      41,
+      53
+    ],
+    "final_threshold_seed": 7,
+    "nested_inner_folds": 4,
+    "fit": "AcceptanceModel.fit per fold (L2 logistic, Newton), out-of-fold probabilities pooled over the folds"
+  },
+  "e0": {
+    "selection": false,
+    "items": [
+      {
+        "id": "B0-dev",
+        "description": "the shipped weights on serving-identical rows, in-sample, runtime decision at the shipped threshold, cues on and off (report only)"
+      },
+      {
+        "id": "B0r",
+        "description": "the reference above (evaluated at every selection seed)"
+      },
+      {
+        "id": "decomposition",
+        "description": "each fit/serve mismatch alone: fold models fitted on rows of the listed fit settings, threshold by the listed rule on those rows' out-of-fold p, scored on the B0r serving rows (report only)"
+      },
+      {
+        "id": "ann_vs_exact_serving_depth",
+        "description": "share of dev cases whose dense set or candidate pool changes between ANN and exact dense search at depth 90 (feeds E2a); segment recall of Chroma's top 90"
+      },
+      {
+        "id": "fold_leak",
+        "description": "label-free: exemplars with cosine in [0.85, 0.95) (and >= 0.95) to an ATT&CK procedure sentence of attack_techniques (risk R9)",
+        "band": [
+          0.85,
+          0.95
+        ]
+      }
+    ],
+    "decomposition": [
+      {
+        "id": "old_fit",
+        "fit_overrides": {
+          "include_synthetic": true,
+          "platform_from_text": false
+        },
+        "threshold_rule": "p_only",
+        "description": "the shipped procedure: synthetic sentences on, no platform scoping, p-only threshold"
+      },
+      {
+        "id": "fix_synthetic_only",
+        "fit_overrides": {
+          "platform_from_text": false
+        },
+        "threshold_rule": "p_only"
+      },
+      {
+        "id": "fix_platform_only",
+        "fit_overrides": {
+          "include_synthetic": true
+        },
+        "threshold_rule": "p_only"
+      },
+      {
+        "id": "fix_threshold_rule_only",
+        "fit_overrides": {
+          "include_synthetic": true,
+          "platform_from_text": false
+        },
+        "threshold_rule": "runtime"
+      }
+    ]
+  },
+  "families": [
+    {
+      "id": "E1a",
+      "group": "E1",
+      "description": "exemplar bandwidth: (k, tau) jointly (k and tau set one bandwidth; at tau 0.05 about 20 effective neighbours); the reference (64, 0.05) is excluded",
+      "variants": [
+        {
+          "id": "E1a_k32_tau0.03",
+          "set": {
+            "exemplar_k": 32,
+            "exemplar_tau": 0.03
+          }
+        },
+        {
+          "id": "E1a_k32_tau0.05",
+          "set": {
+            "exemplar_k": 32,
+            "exemplar_tau": 0.05
+          }
+        },
+        {
+          "id": "E1a_k32_tau0.08",
+          "set": {
+            "exemplar_k": 32,
+            "exemplar_tau": 0.08
+          }
+        },
+        {
+          "id": "E1a_k64_tau0.03",
+          "set": {
+            "exemplar_k": 64,
+            "exemplar_tau": 0.03
+          }
+        },
+        {
+          "id": "E1a_k64_tau0.08",
+          "set": {
+            "exemplar_k": 64,
+            "exemplar_tau": 0.08
+          }
+        },
+        {
+          "id": "E1a_k128_tau0.03",
+          "set": {
+            "exemplar_k": 128,
+            "exemplar_tau": 0.03
+          }
+        },
+        {
+          "id": "E1a_k128_tau0.05",
+          "set": {
+            "exemplar_k": 128,
+            "exemplar_tau": 0.05
+          }
+        },
+        {
+          "id": "E1a_k128_tau0.08",
+          "set": {
+            "exemplar_k": 128,
+            "exemplar_tau": 0.08
+          }
+        },
+        {
+          "id": "E1a_k256_tau0.03",
+          "set": {
+            "exemplar_k": 256,
+            "exemplar_tau": 0.03
+          }
+        },
+        {
+          "id": "E1a_k256_tau0.05",
+          "set": {
+            "exemplar_k": 256,
+            "exemplar_tau": 0.05
+          }
+        },
+        {
+          "id": "E1a_k256_tau0.08",
+          "set": {
+            "exemplar_k": 256,
+            "exemplar_tau": 0.08
+          }
+        }
+      ]
+    },
+    {
+      "id": "E1b",
+      "group": "E1",
+      "description": "exemplar-only candidates appended per observation",
+      "variants": [
+        {
+          "id": "E1b_new0",
+          "set": {
+            "exemplar_new_candidates": 0
+          }
+        },
+        {
+          "id": "E1b_new5",
+          "set": {
+            "exemplar_new_candidates": 5
+          }
+        },
+        {
+          "id": "E1b_new8",
+          "set": {
+            "exemplar_new_candidates": 8
+          }
+        }
+      ]
+    },
+    {
+      "id": "E1c",
+      "group": "E1",
+      "description": "vote normalisation: each exemplar's weight divided by its label count (830 rows carry up to 9 labels)",
+      "variants": [
+        {
+          "id": "E1c_label_split",
+          "set": {
+            "exemplar_vote_norm": "label_split"
+          }
+        }
+      ]
+    },
+    {
+      "id": "E1d",
+      "group": "E1",
+      "description": "per-sentence exemplar votes for observations over 40 words, pooled per technique with the whole-text votes (targets long multi-label text)",
+      "variants": [
+        {
+          "id": "E1d_segment_max",
+          "set": {
+            "exemplar_segment_votes": "max"
+          }
+        },
+        {
+          "id": "E1d_segment_mean",
+          "set": {
+            "exemplar_segment_votes": "mean"
+          }
+        }
+      ]
+    },
+    {
+      "id": "E2a",
+      "group": "E2",
+      "description": "exact dense search on attack_techniques at the serving depth (adoption needs the Phase 5b collection copy)",
+      "variants": [
+        {
+          "id": "E2a_exact",
+          "set": {
+            "dense_search": "exact"
+          }
+        }
+      ]
+    },
+    {
+      "id": "E2b",
+      "group": "E2",
+      "description": "dense fetch depth; ANN at that depth (what the runtime would do), exact when E2a was adopted (inherited from the current best)",
+      "variants": [
+        {
+          "id": "E2b_depth150",
+          "set": {
+            "dense_overfetch": 150
+          }
+        },
+        {
+          "id": "E2b_depth300",
+          "set": {
+            "dense_overfetch": 300
+          }
+        }
+      ]
+    },
+    {
+      "id": "E2c",
+      "group": "E2",
+      "description": "dense relative margin below the observation's best dense hit",
+      "variants": [
+        {
+          "id": "E2c_margin0.08",
+          "set": {
+            "dense_relative_margin": 0.08
+          }
+        },
+        {
+          "id": "E2c_margin0.16",
+          "set": {
+            "dense_relative_margin": 0.16
+          }
+        },
+        {
+          "id": "E2c_margin0.20",
+          "set": {
+            "dense_relative_margin": 0.2
+          }
+        }
+      ]
+    },
+    {
+      "id": "E2d",
+      "group": "E2",
+      "description": "candidate pool per observation",
+      "variants": [
+        {
+          "id": "E2d_pool16",
+          "set": {
+            "candidate_pool": 16
+          }
+        },
+        {
+          "id": "E2d_pool20",
+          "set": {
+            "candidate_pool": 20
+          }
+        }
+      ]
+    },
+    {
+      "id": "E3",
+      "group": "E3",
+      "description": "acceptance fit L2 penalty (fit_acceptance_model.py --l2)",
+      "variants": [
+        {
+          "id": "E3_l2_0.3",
+          "set": {
+            "l2": 0.3
+          }
+        },
+        {
+          "id": "E3_l2_3.0",
+          "set": {
+            "l2": 3.0
+          }
+        }
+      ]
+    }
+  ],
+  "variant_count": 27,
+  "e4": {
+    "finalist": "the end of the greedy path",
+    "report": "nested-CV F1: per outer fold the threshold comes from inner (4-fold) out-of-fold p on the training folds; pooled over the outer folds; at every selection seed (finalist and B0r)",
+    "then": "replication"
+  },
+  "selection": {
+    "primary_metric": "pooled out-of-fold micro-F1 of the accepted sets (runtime decision, techniques counted once per case, recall counts labels never retrieved), cues on, mean over the selection seeds",
+    "runtime_rule": "(p >= t and not benign and not sparse and not hierarchy_parent and not parent_suppressed) or cue_supported (choose_threshold_runtime, runtime_gate_masks)",
+    "threshold": "choose_threshold_runtime on pooled out-of-fold p: maximise micro-F1 subject to precision >= 0.50, grid 0.05..0.95 step 0.01",
+    "ranking": "rank_candidates_by_acceptance emulated (scored candidates by -p, -fused_score, id; hierarchy parents after them)",
+    "procedure": "families in the listed order; every variant of a family is applied on top of the current best; the family's best variant (tie-break) is tested against the current best with the bar and becomes the current best when it passes",
+    "bar": {
+      "min_delta_f1": 0.01,
+      "bootstrap": {
+        "kind": "paired cluster bootstrap: resample near-duplicate groups with replacement, delta of micro-F1 averaged over the selection seeds",
+        "samples": 1000,
+        "seed": 7,
+        "confidence": 0.95,
+        "ci_lower_above": 0.0
+      },
+      "min_precision": 0.5,
+      "dataset_max_f1_drop": {
+        "tram": 0.02,
+        "derived_procedures": 0.02
+      },
+      "flag_only": {
+        "dataset": "expert",
+        "selects": false,
+        "flag_f1_drop_above": 0.05,
+        "note": "69 short dev cases unlike test expert; reported, never selects"
+      },
+      "min_delta_f1_no_cues": 0.0,
+      "no_cues_scoring": "the cues-on fold models and threshold applied to rows retrieved with the cue tables off (as benchmark_mapping --ablate-cues does)",
+      "min_delta_hit_at_10": -0.01,
+      "max_generic_share_rise": 0.02,
+      "generic_min_groups": 30,
+      "generic_definition": "share of accepted (case, technique) pairs whose technique is documented for at least 30 ATT&CK groups (knowledge base, no labels)",
+      "max_accepted_per_case_rise_relative": 0.25
+    },
+    "tie_break": {
+      "f1_window": 0.005,
+      "order": [
+        "fewer changed knobs against the reference",
+        "closer to the reference: sum over changed knobs of |ln(v/d)| (log knobs, effective values), |v-d|/max(d,1) (exemplar_new_candidates), 1 per categorical knob",
+        "higher out-of-fold precision",
+        "pre-registered order"
+      ]
+    },
+    "comparison_epsilon": 1e-12
+  },
+  "replication": {
+    "seeds": [
+      41,
+      53
+    ],
+    "against": "B0r",
+    "min_delta_f1_per_seed": 0.005,
+    "pooled_bootstrap_ci_lower_above": 0.0,
+    "pooled": "paired cluster bootstrap over both replication seeds (same samples and seed as the bar)",
+    "step_back": "otherwise step back along the greedy path to the last configuration that replicates; worst case T1 := B0r",
+    "outputs": {
+      "replicate": "$OUT/runs/R24_dev_replicate.json (selected, counts, prereg commit, T1 and T1-P40 thresholds at seed 7)",
+      "env": "$OUT/runs/T1.env: one VAR=value per line (every setting knob explicit, then every fixed.settings value pinned, then TECHNIQUE_EXEMPLAR_BACKEND=chroma and TECHNIQUE_EXEMPLAR_COLLECTION of the library the selection ran on; TECHNIQUE_COLLECTION_NAME when exact dense search is served from the collection copy, written by copy-check)",
+      "fit_args": "$OUT/runs/T1.fit_args: --l2 <value> for fit_acceptance_model.py"
+    }
+  },
+  "collection_copy_check": {
+    "when": "only if replicate selects exact dense search (E2a adopted); after Phase 5b, on a cache built with cache --technique-collection-copy from the sweep cache's inputs, and a passing parity --live --dense-source copy run of it",
+    "command": "tune_retrieval.py copy-check --replicate $OUT/runs/R24_dev_replicate.json --cache $OUT/cache/dev_copy --parity $OUT/runs/R21c_parity_copy.json --output $OUT/runs/R24c_copy_check.json --write-env $OUT/runs/T1.env",
+    "rule": "the replication step-back (same seeds, rule and bootstrap) re-run with every exact configuration of the greedy path served from the copy's hits; T1 is its selection (the copy's ANN index is what serves), whether or not it equals the replicate step's",
+    "reported": "same_as_replicate; rows exact vs copy per case (bitwise, and technique/label/guards equal with features within 1e-4); F1 per seed exact and copy; T1 and T1-P40 thresholds on the copy rows",
+    "writes": "T1.env (TECHNIQUE_COLLECTION_NAME=<copy> when the selection searches the dense index exactly) and T1.fit_args",
+    "fit_check": "R25c check-fit takes the copy-check artifact as --sweep"
+  },
+  "operating_points": {
+    "T1": {
+      "min_precision": 0.5,
+      "adoptable": true,
+      "threshold": "pooled out-of-fold p at seed 7 (fit_acceptance_model.py --threshold-selection oof_runtime); weights on all of dev; in-sample threshold recorded, gap above 0.03 flagged"
+    },
+    "T1-P40": {
+      "min_precision": 0.4,
+      "adoptable": false,
+      "opt_in_only": true,
+      "threshold": "the P >= 0.40 point of the same pooled out-of-fold p (tune_retrieval.py rethreshold)",
+      "gates": "G3/G4 offline by re-thresholding stored probabilities; G5-G9 only if T1 passes D1; never the default"
+    }
+  },
+  "fit_check": {
+    "command": "tune_retrieval.py check-fit",
+    "rows_equal_share_min": 0.995,
+    "rows_equal": "technique, label and guards equal and every feature within feature_atol (the fit embeds each case alone, the cache in padded batches; the low bits of the vectors differ, so bitwise equality is reported, not required)",
+    "feature_atol": 0.0001,
+    "accepted_sets_share_min": 0.995,
+    "retrieval_contract": "the model's stored contract is met by the harness configuration",
+    "weight_cosine_min": 0.999,
+    "threshold_max_gap": 0.02,
+    "base_settings": "check-fit refuses unless it runs under the base settings and row code the selection artifact recorded"
+  },
+  "gates": [
+    {
+      "id": "G3",
+      "run": "R31",
+      "set": "public test (1,391 cases), cues on and off",
+      "baseline": "R12a_B0prime_public_test.json",
+      "hard": {
+        "check_regression_modes": [
+          "hybrid",
+          "hybrid_no_cues"
+        ],
+        "max_pooled_f1_drop": 0.02,
+        "max_hit_at_10_drop": 0.03
+      },
+      "soft": {
+        "max_dataset_f1_drop": 0.02,
+        "min_pooled_precision": 0.48
+      }
+    },
+    {
+      "id": "G4",
+      "run": "R32",
+      "set": "CTI-HAL statements (968), cues on and off",
+      "baseline": "R12b_B0prime_cti_hal_mapping.json",
+      "hard": {
+        "check_regression_modes": [
+          "hybrid",
+          "hybrid_no_cues"
+        ],
+        "max_pooled_f1_drop": 0.02,
+        "max_hit_at_10_drop": 0.03
+      },
+      "soft": {
+        "min_point_delta_f1": 0.0
+      }
+    },
+    {
+      "id": "G5",
+      "run": "R33",
+      "set": "ATT&CK folds seed 7 (153 known + 25 removed actors)",
+      "baseline": "R03",
+      "hard": {
+        "named_risk": 0,
+        "false_named_attribution_rate": 0,
+        "removed_actors_named": 0
+      },
+      "soft": {
+        "max_top1_drop": 0.02,
+        "max_named_correct_drop": 3
+      }
+    },
+    {
+      "id": "G6",
+      "run": "R34, R35",
+      "set": "CTI-HAL 55 reports, anonymized and as reported",
+      "baseline": "R04, R05",
+      "hard": {
+        "wrong_names": 0
+      },
+      "soft": {
+        "max_top1_or_top5_drop_reports": 2
+      }
+    },
+    {
+      "id": "G7",
+      "run": "R36, R37",
+      "set": "EvidenceForge dev bundles branch-office and manufacturing, all modes",
+      "baseline": "R06, R07",
+      "hard": {},
+      "soft": {
+        "max_f1_drop_per_mode": 0.1,
+        "max_hit_at_1_drop_per_mode": 0.1,
+        "max_extra_red_herrings_per_bundle": 1
+      }
+    },
+    {
+      "id": "D1",
+      "kind": "checkpoint",
+      "run": "compare_runs.py checkpoint",
+      "writes": "gate verdicts and the combiner refit trigger"
+    },
+    {
+      "id": "combiner",
+      "condition": "only if the refit trigger fires",
+      "hard": {
+        "cv_mixed_top1_within": 0.01,
+        "cv_mixed_mrr_within": 0.01,
+        "g5_g6_still_clean": true
+      }
+    },
+    {
+      "id": "P40",
+      "condition": "only if T1 passed D1",
+      "g3_g4": "offline re-threshold; self-check: re-thresholding at T1's threshold reproduces R31/R32 exactly",
+      "then": "R33p-R37p",
+      "hard": "the same hard criteria as T1",
+      "soft": "the same soft criteria as T1"
+    },
+    {
+      "id": "G8",
+      "run": "R40b, R40, R40p",
+      "set": "EvidenceForge clinic, once, for B0, T1 and P40",
+      "hard": {},
+      "soft": {
+        "max_f1_drop_any_mode": 0.1,
+        "max_extra_red_herrings": 1
+      },
+      "on_soft_violation": "opt-in only; no iteration"
+    },
+    {
+      "id": "G9",
+      "run": "R50-R53",
+      "set": "Elastic real reports, last: strict with open set, names, tradecraft, as reported",
+      "baseline": "existing worktree attribution_elastic_* artifacts, valid only if R12a/R12b were identical",
+      "hard": {
+        "combined_named_risk": 0
+      },
+      "soft": {
+        "technique_recall": "reported; precision is meaningless here"
+      }
+    }
+  ],
+  "hard_failure": "a hard failure stops the candidate; no clinic or Elastic look after one",
+  "no_llm": {
+    "attribution": "parameters.pipeline == 'local', metrics.llm.verifier_calls == 0, cost 0",
+    "evidenceforge": "metadata.pipeline.verify == false"
+  },
+  "success": {
+    "requires_all": [
+      "the dev bar is cleared and replicated",
+      "G3 pooled delta F1 >= +0.01 with a paired 95% CI lower bound above 0 with cues, and delta F1 >= 0 without cues",
+      "G3 and G4 hard gates pass, with CTI-HAL delta F1 >= 0",
+      "G5, G6 and G9 have 0 wrong names"
+    ],
+    "g3_min_delta_f1": 0.01,
+    "g3_ci_lower_above": 0.0,
+    "g3_min_delta_f1_no_cues": 0.0,
+    "g4_min_delta_f1": 0.0,
+    "opt_in_only": [
+      "T1-P40",
+      "any candidate that fails a soft gate",
+      "a refit combiner that was not triggered"
+    ],
+    "migration": "adopted independently (plan section 3)"
+  },
+  "combiner_refit_trigger": {
+    "default": "no refit",
+    "computed_at": "D1",
+    "refit_if_any": [
+      {
+        "id": "a",
+        "rule": "the median accepted count per report shifts by more than 25% against B0, on the folds or on CTI-HAL anonymized",
+        "max_relative_shift": 0.25
+      },
+      {
+        "id": "b",
+        "rule": "the share of CTI-HAL anonymized reports with accepted precision below 0.30 rises by more than 10 points",
+        "precision_below": 0.3,
+        "max_share_rise": 0.1
+      },
+      {
+        "id": "c",
+        "rule": "top-1 falls by more than 0.02 on the folds or by more than 2 CTI-HAL reports while rrf_top1 is at or above B0",
+        "max_top1_drop_folds": 0.02,
+        "max_top1_drop_cti_hal_reports": 2
+      }
+    ],
+    "refit": {
+      "seeds": [
+        11,
+        23,
+        37
+      ],
+      "variants": 5,
+      "outputs": "$OUT/models only"
+    }
+  },
+  "retry": {
+    "allowed": 1,
+    "scope": "the whole programme",
+    "rule": "a new variant pre-registered on dev; the result that triggered it is recorded as having informed the design",
+    "wrong_names_first": "inspect the named leader's channels for a latent input bug (the earlier 'Page' and 'osinfo' cases)"
+  },
+  "reporting": {
+    "counts": "27 variants plus B0r, every one evaluated or listed as identical to the current best; the decomposition configs are report only",
+    "curves": "dev out-of-fold P/R/F1 and accepted count per 0.05 threshold step for every variant (seed 7), descriptive only",
+    "measurement_notes": "parent_aware_* metrics (apt_classifier/evaluation.py) match accepted to expected ids greedily while iterating Python sets, so the same case rows score differently under different PYTHONHASHSEED values (public test expert slice: parent-aware precision 0.7265 or 0.7350 from identical rows, found by C12c, 2026-10-02). They are reported, never a selection or gate criterion (check_regression tolerances are micro_f1 and hit_at_10 only); every run from R23 on uses PYTHONHASHSEED=0 and identity checks compare cases and accepted sets, not parent-aware summaries."
+  },
+  "amendments": []
+}

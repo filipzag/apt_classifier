@@ -22,6 +22,11 @@ def describe_error(exc: BaseException) -> str:
     """Map common operational failures to a sentence an analyst can act on."""
     text = str(exc)
     lowered = text.lower()
+    if "local llm" in lowered:
+        return (
+            "The local LLM (Ollama) did not answer. Check that Ollama is running and the model "
+            "is pulled (`make llm-check`), then retry."
+        )
     if "402" in text or "payment required" in lowered:
         return (
             "OpenRouter refused the request because the account has no credit. "

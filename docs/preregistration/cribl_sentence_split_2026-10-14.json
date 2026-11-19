@@ -1,0 +1,30 @@
+{
+  "schema": "cribl_finetune_prereg/1",
+  "id": "cribl_sentence_split_2026-10-14",
+  "title": "Paragraph rows read whole or sentence by sentence (no training)",
+  "registered": "2026-10-14",
+  "parent": "docs/preregistration/cribl_yesno_2026-10-14.json (E2, M1; docs 21.3.18)",
+  "question": "On the public test's report paragraphs, labelled with every technique they describe, does reading each sentence separately and merging the answers find more of the labelled techniques than reading the paragraph whole, at the same number of answers?",
+  "motivation": "Owner's request (2026-10-14). On the 157 expert test paragraphs (2.7 labelled families, 3.3 techniques each; 83% hold 2+ sentences) the models read whole find about half the labelled families even with three answers; the product splits free text into sentences before mapping.",
+  "harness": "scripts/cribl_finetune/sentence_split_eval.py (split / predict / score)",
+  "data": "public test rows of the expert (157) and derived_procedures (521) splits; split with the product's no-LLM splitter (apt_classifier.evidence.local_extract.local_observations: per line, split_sentences, 3+ words, repeats dropped); a paragraph without such a sentence is read whole",
+  "models": "E2 (data/models/cribl_ft/E2/step_52706, the current reference) and M1 (data/models/cribl_ft/M1/step_52706), unchanged",
+  "merge": "a family's paragraph score is its highest probability in any sentence (top 20 kept per sentence), with that sentence's most probable technique of the family",
+  "comparisons": {
+    "k_answers": "k = 1..5 answers per paragraph for both readings (the k best families of the paragraph read whole, or of the merged list)",
+    "one_per_sentence": "the distinct top family of each sentence (n answers), against the paragraph read whole with its n best families"
+  },
+  "success": {
+    "headline": "expert paragraphs, E2, k = 3: per-paragraph share of labelled families found, split minus whole, paired 95% CI lower bound above 0",
+    "secondary": [
+      "the same for the exact labelled techniques",
+      "the same for M1",
+      "the same on derived_procedures paragraphs",
+      "one answer per sentence (E2, expert): split minus whole"
+    ],
+    "reported": "every k: family recall, precision, hit, all labelled families found, exact recall/precision"
+  },
+  "confirmation_runs": "each model once on the sentences; nothing chosen or rerun because of a result",
+  "adoption": "none: an analysis",
+  "informed_by": "the expert-subset analysis of E1/E2/M1 read whole (shared with the owner); the per-dataset row lengths. No sentence-level prediction exists."
+}

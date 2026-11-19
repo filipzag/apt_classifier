@@ -8,6 +8,10 @@ sentence are dropped by ``load_cases``. The index is embedded with the configure
 embedder and written to ``TECHNIQUE_EXEMPLAR_INDEX_PATH``.
 
     PYTHONPATH=. .venv/bin/python scripts/build_exemplar_index.py
+
+Re-embedding gives a new fingerprint, which disables the acceptance model fitted on the old
+index, so an existing output is replaced only with ``--overwrite``, and a path that resolves
+outside the repository (a worktree's ``data/models`` symlink) only with ``--allow-shared-output``.
 """
 
 from __future__ import annotations
@@ -25,9 +29,10 @@ if str(REPO_ROOT) not in sys.path:
 from apt_classifier.attack.kb import AttackKnowledgeBase  # noqa: E402
 from apt_classifier.config import Settings  # noqa: E402
 from apt_classifier.embeddings import SentenceTransformerEmbedder  # noqa: E402
-from apt_classifier.exemplars import ExemplarIndex  # noqa: E402
+from apt_classifier.exemplars import ExemplarIndex, npz_path  # noqa: E402
 from apt_classifier.vectorstore import procedure_sentence_texts  # noqa: E402
 from scripts.benchmark_mapping import DEFAULT_ROOT, load_cases  # noqa: E402
+from scripts.run_tooling import add_output_guard_arguments, enforce_output_guard  # noqa: E402
 
 DATASETS = ("tram", "expert", "derived_procedures")
 
@@ -37,10 +42,14 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--root", type=Path, default=DEFAULT_ROOT)
     parser.add_argument("--datasets", nargs="+", default=list(DATASETS))
     parser.add_argument("--output", type=Path, help="default: TECHNIQUE_EXEMPLAR_INDEX_PATH")
+    add_output_guard_arguments(parser)
     args = parser.parse_args(argv)
     if "procedures" in args.datasets:
         parser.error("the procedures split duplicates indexed ATT&CK text and is not allowed")
     settings = Settings()
+    # the file numpy actually writes (it appends .npz), so the guard checks the real target
+    output = npz_path(args.output or settings.technique_exemplar_index_path)
+    enforce_output_guard(parser, args, [output], repo_root=REPO_ROOT)
     kb = AttackKnowledgeBase.load(settings.kb_path)
     normalized = Path(args.root)
     missing = [d for d in args.datasets if not (normalized / f"{d}_train.jsonl").is_file()]
@@ -89,7 +98,7 @@ def main(argv: list[str] | None = None) -> int:
             "case_diagnostics": diagnostics,
         },
     )
-    path = index.save(args.output or settings.technique_exemplar_index_path)
+    path = index.save(output)
     print(
         f"exemplar index: {len(index)} sentences, {index.metadata['labels']} techniques, "
         f"fingerprint {index.fingerprint} -> {path}"

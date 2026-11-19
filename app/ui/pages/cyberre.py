@@ -25,7 +25,7 @@ def render(engine: AttributionEngine, settings: Settings, weights: dict[str, flo
         st.info("Run an analysis on the Intake page first.")
         return
     if runtime.local_only(settings):
-        st.info("Unavailable in local mode (no OpenRouter key).")
+        st.info("Unavailable in local mode (no OpenRouter key and no local LLM).")
         return
     observations = [
         o

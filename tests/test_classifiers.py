@@ -65,6 +65,266 @@ def test_negative_evidence_changes_bayes_order(synthetic_kb):
     assert abs(sum(probabilities.values()) - 1.0) < 1e-12
 
 
+def _negative_tie_context(groups: int = 12) -> ClassifierContext:
+    """Every group documents T1 and exactly one of the negated techniques N00..N11, so every
+    Naive Bayes score is mathematically equal."""
+    from types import SimpleNamespace
+
+    negatives = [f"N{index:02d}" for index in range(groups)]
+    kb = SimpleNamespace(
+        groups={f"G{index:02d}": SimpleNamespace() for index in range(groups)},
+        group_techniques={f"G{index:02d}": ["T1", negatives[index]] for index in range(groups)},
+        techniques={tid: SimpleNamespace(parent_id=None) for tid in ["T1", *negatives]},
+    )
+    return ClassifierContext(
+        kb=kb,
+        observed_techniques={"T1": 1.0},
+        technique_observations={"T1": ("o1",)},
+        negative_techniques=set(negatives),
+        semantic_profile_scores={},
+        group_text_scores={},
+        software_ids=set(),
+    )
+
+
+def test_negative_evidence_keeps_equal_groups_tied():
+    """Summing the negative term over the set in iteration order split these exact ties by one
+    ulp, and which groups came first followed PYTHONHASHSEED; counting keeps them tied."""
+    from math import log
+
+    classifier = BernoulliNaiveBayesClassifier()
+    result = classifier.classify(_negative_tie_context())
+    assert len({entry.score for entry in result.entries}) == 1
+    assert {entry.rank for entry in result.entries} == {1}
+    assert [entry.group_id for entry in result.entries] == [f"G{i:02d}" for i in range(12)]
+    expected = (
+        log(1 / 12)
+        + log(classifier.alpha)
+        + classifier.negative_weight * (log(1 - classifier.alpha) + 11 * log(1 - classifier.beta))
+    )
+    assert result.entries[0].score == pytest.approx(expected, abs=1e-12)
+
+
+def test_negative_evidence_does_not_depend_on_the_hash_seed():
+    from tests.child_python import run_child
+
+    script = (
+        "from tests.test_classifiers import BernoulliNaiveBayesClassifier, _negative_tie_context\n"
+        "result = BernoulliNaiveBayesClassifier().classify(_negative_tie_context())\n"
+        "print([(entry.group_id, entry.rank, entry.score.hex()) for entry in result.entries])\n"
+    )
+    outputs = {run_child(script, seed=seed) for seed in ("0", "1", "2", "3")}
+    assert len(outputs) == 1
+
+
+def _hash_order_context() -> ClassifierContext:
+    """A synthetic KB large enough for summation order to matter, with every input the
+    hardened classifiers sum over built from a set (as scripts/ensemble_benchmark.py builds
+    observed_techniques), so its iteration order follows PYTHONHASHSEED."""
+    import random
+    from types import SimpleNamespace
+
+    rng = random.Random(5)
+    parents = [f"T1{index:03d}" for index in range(40)]
+    children = [f"{parent}.00{n}" for parent in parents[:20] for n in (1, 2)]
+    technique_ids = parents + children
+    techniques = {tid: SimpleNamespace(parent_id=None) for tid in parents}
+    techniques.update({tid: SimpleNamespace(parent_id=tid.split(".")[0]) for tid in children})
+    idf = {tid: 1.0 + (index * 0.6180339887498949) % 3.7 for index, tid in enumerate(technique_ids)}
+    groups = [f"G{index:02d}" for index in range(20)]
+    group_techniques = {gid: rng.sample(technique_ids, 25) for gid in groups}
+    software = {f"S{index}": SimpleNamespace(software_type="malware") for index in range(40)}
+    software_groups = {sid: rng.sample(groups, rng.randint(1, 12)) for sid in software}
+    group_software = {
+        gid: [sid for sid, owners in software_groups.items() if gid in owners] for gid in groups
+    }
+    campaigns = {f"C{index}": rng.sample(technique_ids, 18) for index in range(6)}
+    observed_ids = set(rng.sample(technique_ids, 30))
+    inferred_ids = set(rng.sample(technique_ids, 15))
+    kb = SimpleNamespace(
+        groups={gid: SimpleNamespace() for gid in groups},
+        group_techniques=group_techniques,
+        techniques=techniques,
+        idf=idf,
+        software=software,
+        software_groups=software_groups,
+        group_software=group_software,
+        campaign_techniques=campaigns,
+        campaign_groups={cid: rng.sample(groups, 2) for cid in campaigns},
+    )
+    confidence = {tid: 0.35 + (index * 0.37) % 0.6 for index, tid in enumerate(technique_ids)}
+    context = ClassifierContext(
+        kb=kb,
+        observed_techniques={tid: confidence[tid] for tid in observed_ids},
+        technique_observations={tid: ("o",) for tid in observed_ids},
+        negative_techniques=set(rng.sample(technique_ids, 6)),
+        semantic_profile_scores={},
+        group_text_scores={},
+        software_ids=set(rng.sample(sorted(software), 20)),
+    )
+    context.cyberre_techniques = {tid: confidence[tid] for tid in inferred_ids}
+    return context
+
+
+HASH_ORDER_SCRIPT = """
+import builtins, functools, sys
+if sys.argv[1] == "left_fold":
+    # Python 3.11's sum() of floats is a plain left fold (3.12 compensates rounding errors)
+    builtin_sum = builtins.sum
+    def left_fold(values, start=0):
+        return functools.reduce(lambda total, value: total + value, values, start)
+    builtins.sum = left_fold
+from apt_classifier.classifiers.campaign import CampaignClassifier
+from apt_classifier.classifiers.cyberre import CyberREClassifier
+from apt_classifier.classifiers.idf_overlap import IDFOverlapClassifier
+from apt_classifier.classifiers.jaccard import WeightedJaccardClassifier
+from apt_classifier.classifiers.naive_bayes import BernoulliNaiveBayesClassifier, posterior
+from apt_classifier.classifiers.software import SoftwareClassifier
+from tests.test_classifiers import _hash_order_context
+context = _hash_order_context()
+classifiers = (
+    BernoulliNaiveBayesClassifier(), IDFOverlapClassifier(), IDFOverlapClassifier(0.5),
+    WeightedJaccardClassifier(), WeightedJaccardClassifier("dice"), CampaignClassifier(),
+    SoftwareClassifier(), CyberREClassifier(),
+)
+for classifier in classifiers:
+    result = classifier.classify(context)
+    assert result.entries, classifier.name
+    print(classifier.name, [(e.group_id, e.rank, e.score.hex()) for e in result.entries])
+nb = BernoulliNaiveBayesClassifier().classify(context)
+print("posterior", sorted((g, p.hex()) for g, p in posterior(nb).items()))
+"""
+
+
+def test_classifier_scores_do_not_depend_on_hash_or_summation_order():
+    """Every float sum in these classifiers is math.fsum (exactly rounded), so the scores are
+    bit-identical under any PYTHONHASHSEED and do not rely on CPython 3.12's compensated sum().
+    Under a left-fold sum the pre-fsum code varied across these seeds for Naive Bayes, IDF,
+    Jaccard, dice, campaign and software; under 3.12's sum() for Naive Bayes."""
+    from tests.child_python import run_child
+
+    outputs = {
+        run_child(HASH_ORDER_SCRIPT, mode, seed=seed)
+        for seed in ("0", "1", "2", "3")
+        for mode in ("builtin", "left_fold")
+    }
+    assert len(outputs) == 1
+
+
+def test_overlap_classifiers_tie_groups_with_the_same_terms():
+    """GA and GB document different techniques whose IDF values are the same multiset in
+    opposite orders, and every technique is observed: each classifier sees the same terms for
+    both groups in a different order and must score them bit-identically. Under 3.12's sum()
+    only the Naive Bayes case failed before fsum; the left-fold mode of the hash-order test
+    above covers IDF, Jaccard and dice."""
+    from types import SimpleNamespace
+
+    values = [1e-3, 3.3, 0.1, 2.9, 0.7, 1.1]
+    first = [f"T{index}" for index in range(6)]
+    second = [f"T{index}" for index in range(6, 12)]
+    kb = SimpleNamespace(
+        groups={"GA": SimpleNamespace(), "GB": SimpleNamespace()},
+        group_techniques={"GA": first, "GB": second},
+        techniques={tid: SimpleNamespace(parent_id=None) for tid in first + second},
+        idf=dict(zip(first, values, strict=True)) | dict(zip(second, values[::-1], strict=True)),
+    )
+    context = ClassifierContext(
+        kb=kb,
+        observed_techniques={tid: 0.9 for tid in first + second},
+        technique_observations={tid: ("o",) for tid in first + second},
+        negative_techniques=set(),
+        semantic_profile_scores={},
+        group_text_scores={},
+        software_ids=set(),
+    )
+    for classifier in (
+        BernoulliNaiveBayesClassifier(),
+        IDFOverlapClassifier(),
+        WeightedJaccardClassifier(),
+        WeightedJaccardClassifier("dice"),
+    ):
+        entries = classifier.classify(context).entries
+        assert len(entries) == 2 and entries[0].score == entries[1].score, classifier.name
+        assert entries[0].rank == entries[1].rank == 1, classifier.name
+
+
+def test_children_by_parent_is_rebuilt_for_a_new_attack_release():
+    """The parent -> sub-technique map is cached per technique table: a newly loaded knowledge
+    base, an ATT&CK version bump on the same object or a resized table each rebuild it (tables
+    are not edited in place otherwise)."""
+    from types import SimpleNamespace
+
+    from apt_classifier.classifiers.base import children_by_parent
+
+    def kb(version, extra=()):
+        techniques = {"T1": SimpleNamespace(parent_id=None)}
+        techniques.update({tid: SimpleNamespace(parent_id="T1") for tid in ("T1.001", *extra)})
+        return SimpleNamespace(version=version, techniques=techniques)
+
+    release_a = kb("19.2")
+    first = children_by_parent(release_a)
+    assert first == {"T1": frozenset({"T1.001"})}
+    assert children_by_parent(release_a) is first  # served from the cache
+    release_b = kb("20.0", extra=("T1.002",))  # a new release, loaded as a new knowledge base
+    assert children_by_parent(release_b) == {"T1": frozenset({"T1.001", "T1.002"})}
+    release_a.version = "19.3"  # updated in place: same table object, new version
+    release_a.techniques["T1.001"].parent_id = None
+    assert children_by_parent(release_a) == {}
+    release_a.techniques["T2.001"] = SimpleNamespace(parent_id="T2")  # resized table
+    assert children_by_parent(release_a) == {"T2": frozenset({"T2.001"})}
+    assert children_by_parent(SimpleNamespace()) == {}
+
+
+def test_hierarchy_helpers_use_the_documented_children():
+    """The two lookups that read the cached parent -> children map: a group documenting only
+    sub-techniques matches an observed parent through its lowest documented child (0.85), and
+    a negated parent counts against such a group at 0.85."""
+    from types import SimpleNamespace
+
+    from apt_classifier.classifiers.base import hierarchy_matches_for, negative_hierarchy_factor
+
+    kb = SimpleNamespace(
+        version="test",
+        techniques={
+            "T1": SimpleNamespace(parent_id=None),
+            "T1.001": SimpleNamespace(parent_id="T1"),
+            "T1.002": SimpleNamespace(parent_id="T1"),
+            "T2": SimpleNamespace(parent_id=None),
+        },
+        group_techniques={"G1": ["T1.002", "T1.001"], "G2": ["T1"], "G3": ["T2"]},
+        groups={"G1": SimpleNamespace(), "G2": SimpleNamespace(), "G3": SimpleNamespace()},
+    )
+
+    def context(policy="ancestor_compatible"):
+        return ClassifierContext(
+            kb=kb,
+            observed_techniques={"T1": 1.0, "T1.001": 1.0},
+            technique_observations={},
+            negative_techniques=set(),
+            semantic_profile_scores={},
+            group_text_scores={},
+            software_ids=set(),
+            parent_policy=policy,
+        )
+
+    g1 = hierarchy_matches_for(context(), "G1")
+    assert (g1["T1"].group_technique_id, g1["T1"].relationship, g1["T1"].factor) == (
+        "T1.001",
+        "descendant",
+        0.85,
+    )
+    assert g1["T1.001"].relationship == "exact"
+    g2 = hierarchy_matches_for(context(), "G2")
+    assert (g2["T1.001"].relationship, g2["T1.001"].factor) == ("ancestor", 0.95)
+    assert hierarchy_matches_for(context(), "G3") == {}
+    assert set(hierarchy_matches_for(context("exact_only"), "G1")) == {"T1.001"}
+    assert negative_hierarchy_factor(context(), "G1", "T1") == 0.85
+    assert negative_hierarchy_factor(context(), "G1", "T1.001") == 1.0
+    assert negative_hierarchy_factor(context(), "G2", "T1.001") == 0.0
+    assert negative_hierarchy_factor(context(), "G3", "T1") == 0.0
+    assert negative_hierarchy_factor(context("exact_only"), "G1", "T1") == 0.0
+
+
 def test_software_abstains_without_named_software(synthetic_kb):
     ctx = context(synthetic_kb)
     ctx.software_ids = set()

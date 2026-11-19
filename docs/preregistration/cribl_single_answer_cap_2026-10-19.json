@@ -1,0 +1,34 @@
+{
+  "schema": "cribl_finetune_prereg/1",
+  "id": "cribl_single_answer_cap_2026-10-19",
+  "title": "Single-answer cap: at most one calibrated acceptance per observation unless a second one clears its own bar",
+  "registered": "2026-10-19",
+  "parent": "docs/preregistration/cribl_multi_answer_acceptance_2026-10-19.json (rejected) and cribl_product_integration_2026-10-19.json; docs 21.3.18",
+  "question": "With the calibrated gate, acceptances beyond the first on a statement are almost always wrong (schema-4 pair on CTI-HAL: 7 right against 100 wrong extra acceptances; public test 17 against 235). Does capping the gate at one calibrated acceptance per observation, with a second one allowed only above its own probability bar, raise accepted-set F1 through precision without losing more than a little recall?",
+  "change": {
+    "gate": "in _assign_states_for_group, among the candidates the calibrated model accepted on probability alone (not cue-supported, not verifier-supported, not reranker-promoted) only the most probable stays accepted; another stays only when its probability is at least the model's second_min_probability; the rest return to review with the reason recorded. Cue-supported acceptances, verifier verdicts, the reranker, the hierarchy rules and cross-observation corroboration are unchanged",
+    "where_the_bar_comes_from": "the acceptance artifact carries gate = {single_answer, second_min_probability} in its metadata, chosen by the fit on public dev; the runtime follows the model (TECHNIQUE_SINGLE_ANSWER_CAP=model) or switches the cap off for an ablation (off); a model without a gate record runs uncapped, so every shipped artifact behaves as before",
+    "fit": "scripts/fit_acceptance_model.py --single-answer-cap: the out-of-fold runtime threshold rule (choose_threshold_runtime, now cap-aware) is run for second bars {none, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0 (strict)} and every threshold of the usual grid; the pair (threshold, bar) with the best out-of-fold micro-F1 at the precision floor is kept, 'none' included, so the fit itself may decline the cap"
+  },
+  "arms": {
+    "off": "the shipped pipeline (its public and CTI-HAL artifacts of the parent registration, reused)",
+    "off_cap": "a schema-3 refit with --single-answer-cap on public dev (the shipped recipe, --priors-split none, no head), head off",
+    "head": "the schema-4 pair of the parent registration (artifacts reused)",
+    "head_cap": "a schema-4 refit with --single-answer-cap, head on, through the head-aware pair with off_cap's model as the partner"
+  },
+  "headline": "two paired comparisons (1,000 case resamples, seed 7), each kept on its own: off_cap minus off and head_cap minus head, accepted-set micro-F1 on CTI-HAL, interval lower bound above 0",
+  "constraints": [
+    "public test pooled micro-F1 not below the uncapped arm beyond its paired interval",
+    "accepted-set micro-recall on CTI-HAL not more than 0.03 below the uncapped arm",
+    "for an arm that passes: CTI-HAL attribution top-1 not below the uncapped arm and no wrong name; Elastic strict top-1 not below and no wrong name on the attributed posts, open-set names not above the uncapped arm; for off_cap also the ATT&CK folds (seed 7): top-1 not below, no wrong name"
+  ],
+  "secondary": [
+    "precision, statements with more than one acceptance, extra acceptances right / wrong, per dataset",
+    "the dev-chosen bar and threshold per fit, and the out-of-fold F1 of every bar on the grid",
+    "accepted techniques per report and mean technique recall in the attribution runs"
+  ],
+  "selection": "the bar and threshold on public dev only (out-of-fold); one run per arm per test set, nothing rerun because of a result",
+  "adoption": "off_cap: if it passes, its artifact replaces acceptance_model.json as the shipped default (the schema-3 no-exemplar fallback is refit the same way); head_cap: if it passes, its artifact becomes the ACCEPTANCE_MODEL_HEAD_PATH default (the head stays off by default per the parent registration); a failing arm keeps the current artifact and is documented",
+  "expectation": "from the stored test rows of the parent registration a strict cap would read as about +0.02 to +0.03 F1 and +0.07 precision on CTI-HAL; that was read on test, so the registered headline is the paired interval, not that number",
+  "cost": "laptop only; about 1.5 hours including the attribution checks; no API credit"
+}

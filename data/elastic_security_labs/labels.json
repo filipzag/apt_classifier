@@ -1,0 +1,138 @@
+{
+  "description": "Pre-registered labels and protocol for the Elastic Security Labs real-report attribution benchmark (docs 21.3.4c). Only slugs, ATT&CK ids and our own paraphrases are stored here; the post text is downloaded by scripts/prepare_elastic_reports.py into data/benchmarks/elastic/ (gitignored, local evaluation only, (c) Elastic).",
+  "feed": "https://www.elastic.co/security-labs/rss/feed.xml",
+  "attack_version": "19.2",
+  "registered": "2026-10-01",
+  "protocol": {
+    "headline": "reports below, strict anonymization, local pipeline, every kept sentence read as the product's no-LLM mode reads a pasted report",
+    "headline_metrics": ["top1 as k/n with a Wilson 95% interval", "lenient top1/top3 against accept", "top3", "top5", "mrr", "group-macro top1", "named and named-wrong"],
+    "primary_result": "the per-report table",
+    "arms": ["strict (headline)", "names", "tradecraft (strict + ATT&CK malware masked)", "as_reported", "strict with 30 seeded-random sentences, seeds 1-5 (volume diagnostic)"],
+    "open_set": "stage distribution, names given and which groups, apt_like vs commodity, combined named risk with the labelled reports, how often each group leads open-set rankings",
+    "rules": "scripts/report_anonymizer.py and scripts/prepare_elastic_reports.py as committed with this file; labels and rules are not changed after results are seen without a logged reason; nothing is tuned on this set",
+    "not_claimed": "no significance test against CTI-HAL (disjoint groups, different reading regime); strict removes victim geography too"
+  },
+  "selection": "Screened all 302 feed posts (May 2022 - Sep 2026) for attribution to a group in ATT&CK 19.2, then adversarially verified each candidate; kept only Elastic's own attribution of real observed activity with enough behaviour prose. Umbrella/sub-group ambiguity is recorded in accept, fixed before any run.",
+  "reports": [
+    {
+      "slug": "contagious-interview-malware-svg-steganography",
+      "group_id": "G1052",
+      "accept": [],
+      "elastic_confidence": "stated directly as a new campaign of the group; key takeaways say 'aligned with'",
+      "verifier_confidence": "high",
+      "basis": "Elastic's own attribution from code and string overlap with public reporting on the group's malware and shared C2 paths; Lazarus Group is not accepted because ATT&CK 19.2 keeps the two apart and links them nowhere",
+      "attribution_sections": ["DPRK attribution: why this links to Contagious Interview"],
+      "activity_year": 2026
+    },
+    {
+      "slug": "elastic-catches-dprk-passing-out-kandykorn",
+      "group_id": "G0032",
+      "accept": ["G0082"],
+      "elastic_confidence": "attributes to the DPRK and recognizes overlaps with the Lazarus Group",
+      "verifier_confidence": "moderate",
+      "basis": "Elastic's own analysis (techniques, infrastructure, code signing); firm claim is nation level with Lazarus as the named overlap; other vendors place the toolset under BlueNoroff (APT38)",
+      "attribution_sections": ["Campaign intersections"],
+      "activity_year": 2023
+    },
+    {
+      "slug": "DPRK-strikes-using-a-new-variant-of-rustbucket",
+      "group_id": "G0032",
+      "accept": ["G0082"],
+      "elastic_confidence": "high confidence to the Lazarus Group",
+      "verifier_confidence": "moderate",
+      "basis": "Elastic's host, binary and network analysis plus infrastructure overlaps; the malware is framed as BlueNoroff's, which ATT&CK lists under APT38",
+      "attribution_sections": ["RUSTBUCKET and REF9135 analysis > Overview"],
+      "activity_year": 2023
+    },
+    {
+      "slug": "elastic-charms-spectralviper",
+      "group_id": "G0050",
+      "accept": [],
+      "elastic_confidence": "moderate confidence, state-affiliated; overlaps with prior reporting on the group",
+      "verifier_confidence": "moderate",
+      "basis": "Elastic's campaign association through shared tooling with its earlier APT32 case and overlap with other vendors' reporting",
+      "attribution_sections": ["Campaign associations"],
+      "activity_year": 2023
+    },
+    {
+      "slug": "phoreal-malware-targets-the-southeast-asian-financial-sector",
+      "group_id": "G0050",
+      "accept": [],
+      "elastic_confidence": "high confidence that the cluster is the group",
+      "verifier_confidence": "moderate",
+      "basis": "Elastic's assessment rests on the backdoor being used only by this group in public reporting and on the victimology; thin behaviour prose and the same victim environment as spectralviper, kept and shown per report",
+      "attribution_sections": ["Adversary Assessment Justification"],
+      "activity_year": 2022
+    },
+    {
+      "slug": "elastic-security-labs-discovers-lobshot-malware",
+      "group_id": "G0092",
+      "accept": [],
+      "elastic_confidence": "moderate confidence",
+      "verifier_confidence": "moderate",
+      "basis": "Elastic's own link from infrastructure known to belong to the group and a loader tied to the same domains; the claim sits in one preamble paragraph",
+      "attribution_sections": [],
+      "activity_year": 2023
+    },
+    {
+      "slug": "playing-defense-against-gamaredon-group",
+      "group_id": "G0047",
+      "accept": [],
+      "elastic_confidence": "we believe the group is behind the campaign; moderate confidence for the backdoor link",
+      "verifier_confidence": "high",
+      "basis": "Elastic's tracking of the campaign: overlap with public reporting, macro code linked to the group's backdoor, shared C2 hosting; originally posted in early 2020 for 2019-20 activity",
+      "attribution_sections": [],
+      "activity_year": 2019
+    },
+    {
+      "slug": "advanced-techniques-used-in-malaysian-focused-apt-campaign",
+      "group_id": "G0065",
+      "accept": [],
+      "elastic_confidence": "possibly linked; moderate confidence",
+      "verifier_confidence": "moderate",
+      "basis": "Elastic compared implant strings, URL paths and capabilities with a national CERT advisory sample; one lure sample, real activity",
+      "attribution_sections": ["Possible APT40/Leviathan connection"],
+      "activity_year": 2020
+    }
+  ],
+  "open_set": [
+    {"slug": "fragile-web-ref7707", "cluster": "REF7707", "kind": "apt_like", "attribution_sections": [], "basis": "espionage intrusion at a foreign ministry; vendor names for the cluster are outside ATT&CK"},
+    {"slug": "a-peek-behind-the-bpfdoor", "cluster": "Red Menshen (PwC)", "kind": "apt_like", "attribution_sections": [], "basis": "BPFDoor (S1161) has no group in ATT&CK; the actor is not an ATT&CK group"},
+    {"slug": "roningloader", "cluster": "DragonBreath / APT-Q-27", "kind": "apt_like", "attribution_sections": [], "basis": "named intrusion set outside ATT&CK; borderline crime"},
+    {"slug": "illuminating-voidlink", "cluster": "VoidLink operators", "kind": "apt_like", "attribution_sections": [], "basis": "unnamed actor; no ATT&CK group link"},
+    {"slug": "bits-and-bytes-analyzing-bitsloth", "cluster": "REF8747", "kind": "apt_like", "attribution_sections": [], "basis": "explicitly unattributed backdoor intrusion"},
+    {"slug": "unmasking-financial-services-intrusion-ref0657", "cluster": "REF0657", "kind": "apt_like", "attribution_sections": [], "basis": "targeted intrusion, Elastic cluster only"},
+    {"slug": "the-shelby-strategy", "cluster": "REF8685", "kind": "apt_like", "attribution_sections": [], "basis": "Elastic cluster only"},
+    {"slug": "under-the-sadbridge-with-gosar", "cluster": "REF3864", "kind": "commodity", "attribution_sections": [], "basis": "Elastic cluster only; group mention is a comparison"},
+    {"slug": "tollbooth", "cluster": "REF3927", "kind": "commodity", "attribution_sections": ["Addendum"], "basis": "SEO-fraud cluster; the vendor name for it is outside ATT&CK"},
+    {"slug": "badiis-to-the-bone-new-insights-to-global-seo-poisoning-campaign", "cluster": "REF4033 / UAT-8099", "kind": "commodity", "attribution_sections": [], "basis": "SEO-poisoning cluster outside ATT&CK"},
+    {"slug": "cuba-ransomware-campaign-analysis", "cluster": "REF9019 (Cuba ransomware)", "kind": "commodity", "attribution_sections": [], "basis": "the ransomware operators are not an ATT&CK group"},
+    {"slug": "betting-on-bots", "cluster": "REF6138", "kind": "commodity", "attribution_sections": [], "basis": "Elastic cluster only"},
+    {"slug": "invisible-miners-unveiling-ghostengine", "cluster": "REF4578", "kind": "commodity", "attribution_sections": [], "basis": "mining intrusion set, Elastic cluster only"},
+    {"slug": "fake-installers-to-monero", "cluster": "REF1695", "kind": "commodity", "attribution_sections": [], "basis": "single operator, Elastic cluster only"},
+    {"slug": "tclbanker-brazilian-banking-trojan", "cluster": "REF3076", "kind": "commodity", "attribution_sections": [], "basis": "banking trojan; infrastructure overlap with a cluster outside ATT&CK"},
+    {"slug": "malicious-browser-extension-kremlin-banking-malware", "cluster": "REF9334", "kind": "commodity", "attribution_sections": [], "basis": "banking malware, Elastic cluster only"},
+    {"slug": "mexican-banking-fraud-scmbanker-ref6045", "cluster": "REF6045", "kind": "commodity", "attribution_sections": [], "basis": "banking fraud, Elastic cluster only"},
+    {"slug": "oxloader-malware-loader-infostealer", "cluster": "REF8372", "kind": "commodity", "attribution_sections": [], "basis": "loader and infostealer, Elastic cluster only"},
+    {"slug": "revstealer-credential-harvesting-infostealer", "cluster": "REF2859", "kind": "commodity", "attribution_sections": [], "basis": "infostealer, Elastic cluster only"},
+    {"slug": "luna-ransomware-attack-pattern", "cluster": "REF5264", "kind": "commodity", "attribution_sections": [], "basis": "ransomware, Elastic cluster only"},
+    {"slug": "maas-appeal-an-infostealer-rises-from-the-ashes", "cluster": "Sordeal Group", "kind": "commodity", "attribution_sections": ["NOVABLIGHT at a glance"], "basis": "malware-as-a-service operators outside ATT&CK"},
+    {"slug": "doing-time-with-the-yipphb-dropper", "cluster": "REF4526", "kind": "commodity", "attribution_sections": [], "basis": "dropper campaign, Elastic cluster only"}
+  ],
+  "excluded": [
+    {"slug": "operation-bleeding-bear", "reason": "circular label: G1003 follows from WhisperGate (S0689) being G1003-only, the same mapping the software classifier reads; Elastic relays others' naming"},
+    {"slug": "elastic-users-protected-from-suddenicon-supply-chain-attack", "reason": "G1049 has 2 ATT&CK techniques and no software; the AppleJeus software maps to G0032; thin, mostly indicators"},
+    {"slug": "dprk-code-of-conduct", "reason": "nation-level attribution only; the group label comes from another vendor"},
+    {"slug": "dynowiper", "reason": "contested public attribution (Sandworm Team vs the Berserk Bear cluster); Elastic relays it for infrastructure only"},
+    {"slug": "bit-bybit", "reason": "emulation of another vendor's reporting"},
+    {"slug": "teampcp-container-attack-scenario", "reason": "lab re-enactment"},
+    {"slug": "speeding-apt-attack-discovery-confirmation-with-attack-discovery-workflows-and-agent-builder", "reason": "product demo over another vendor's reporting"},
+    {"slug": "okta-and-lapsus-what-you-need-to-know", "reason": "news relay of a self-claim; about 8 behaviour sentences"},
+    {"slug": "blockchain-c2-phantompulse-rat-sinkhole", "reason": "hedged alignment with several DPRK clusters at once"},
+    {"slug": "phantom-in-the-vault", "reason": "same cluster as the multi-cluster hedge above; no attribution of its own"},
+    {"slug": "inital-research-of-jokerspy", "reason": "open set rejected: Elastic's KANDYKORN post ties the malware to DPRK campaigns"},
+    {"slug": "update-to-the-REF2924-intrusion-set-and-related-campaigns", "reason": "partial overlap with a group outside ATT&CK and with Winnti; REF2924 posts excluded from both sets"},
+    {"slug": "introducing-the-ref5961-intrusion-set", "reason": "mixed overlaps (one group inside ATT&CK, one outside); REF5961 posts excluded from both sets"},
+    {"slug": "axios-one-rat-to-rule-them-all", "reason": "open set rejected: the cluster is a DPRK cluster that could map to an ATT&CK umbrella group"}
+  ]
+}

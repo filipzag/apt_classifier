@@ -1,0 +1,37 @@
+{
+  "schema": "cribl_finetune_prereg/1",
+  "id": "cribl_family_attack_2026-10-13",
+  "title": "F2: the family head trained with ATT&CK's own procedure examples added",
+  "registered": "2026-10-13",
+  "parent": "docs/preregistration/cribl_family_head_2026-10-13.json (F1; docs 21.3.18)",
+  "question": "Does adding ATT&CK's procedure examples (16,273 overlap-filtered sentences, 213 families) to F1's training data raise family top-1, above all on CTI-HAL?",
+  "harness": "scripts/cribl_finetune/export_attack_procedures.py (cases_attack_train.jsonl), family_head.py, multi_family.py, runpod/remote_f2.sh",
+  "data": {
+    "train": "F1's rows (cases_train.jsonl 6,308 + cases_annoctr_train.jsonl 1,453) + cases_attack_train.jsonl 16,273 = 24,034 rows, no reweighting",
+    "attack_rows": "every active 'uses' relationship (group, software or campaign to a listed technique) with a description, citations and links stripped; identical texts merged (17,033 texts); dropped when they overlap a held-out text of public dev, public test, CTI-HAL, AnnoCTR dev or AnnoCTR test: 378 exact/near duplicates (token Jaccard >= 0.9), 243 containing a held-out text of 6+ tokens, 132 sharing a 10-token run, 7 repeats. Of the dropped, 613 matched TRAM (dev 290, test 323), 6 CTI-HAL, 1 derived procedures, 1 expert",
+    "per_family": "median 29 sentences, maximum 996 (T1059), 84 families below 20",
+    "dev_and_confirmation": "as F1"
+  },
+  "fixed": {
+    "init": "cribl-ai/cribl-decision-1.0 adapter and a freshly initialised head, as F1 (not F1's checkpoint), so the data is the only change",
+    "training": "as F1 (LoRA lr 1e-4, head lr 1e-3, 16 examples per step and per forward pass, cosine, 3% warmup, seed 7) except 2 epochs (F1 peaked at 2) with a checkpoint every quarter epoch (8 checkpoints + step 0)",
+    "compute": "RunPod RTX 4090 (no CTI-HAL uploaded; the selected checkpoint is scored on CTI-HAL on the laptop)"
+  },
+  "selection": "as F1: the highest mean family top-1 over public dev and AnnoCTR dev; ties the earlier",
+  "success": {
+    "headline": "CTI-HAL family top-1: F2 minus F1 (same 968 statements), paired 95% CI lower bound above 0",
+    "secondary": [
+      "AnnoCTR test family top-1: F2 minus F1, CI lower bound above 0",
+      "public test family top-1: F2 minus F1, CI lower bound above 0, reported overall and without TRAM (TRAM shares the most text with ATT&CK procedures, so an overlap that survived the filter would show there first)"
+    ],
+    "reported": "family micro-F1 top-1 and under the amendment-3 rule of the parent (threshold 0.25, not re-tuned); CTI-HAL family top-1 on statements whose gold family had fewer than 20 rows in F1's training data; F2 against B3, pipeline rank-1 and Jev C1 as for F1"
+  },
+  "stop_rules": [
+    "a checkpoint does not reload",
+    "the loss is not finite",
+    "more than 1% of a split's cases end in error"
+  ],
+  "confirmation_runs": "the selected checkpoint once on CTI-HAL, public test and AnnoCTR test; nothing is chosen, refit or rerun because of a confirmation result",
+  "adoption": "none: an experiment, no product wiring",
+  "informed_by": "F1's dev curve and confirmation results; F1's dev error analysis (about 12% of its dev errors on families with fewer than 20 training rows); the overlap-filter counts above. No F2 model exists."
+}

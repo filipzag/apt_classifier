@@ -329,3 +329,446 @@ def test_loader_falls_back_to_the_no_exemplar_model_when_the_index_is_missing(tm
     assert (
         load_acceptance_model(SimpleNamespace(acceptance_model_enabled=False), kb)[1] == "disabled"
     )
+
+
+# ----- refactor guard: a frozen copy of the original query loop -----
+def _reference_query_vectors(index, vectors, *, parent_of=None, k=64, tau=0.05, dup=0.95):
+    """``ExemplarIndex.query_vectors`` as it was before the backend refactor (2026-10-02),
+    copied verbatim; the refactored code must match it bit for bit."""
+    from apt_classifier.exemplars import ExemplarVotes, _unit
+
+    queries = np.asarray(vectors, dtype=np.float32)
+    if queries.ndim == 1:
+        queries = queries[None, :]
+    if not len(queries):
+        return []
+    queries = _unit(queries)
+    similarities = queries @ index.embeddings.T
+    parents = parent_of or {}
+    k = max(1, int(k))
+    tau = max(1e-4, float(tau))
+    window = min(len(index), k * 2 + 16)
+    results = []
+    for row in similarities:
+        if window < len(row):
+            candidates = np.argpartition(-row, window - 1)[:window]
+        else:
+            candidates = np.arange(len(row))
+        ordered = candidates[np.argsort(-row[candidates], kind="stable")]
+        excluded = int(np.sum(row[ordered] >= dup))
+        chosen = [int(j) for j in ordered if row[j] < dup][:k]
+        if not chosen:
+            results.append(ExemplarVotes(excluded_duplicates=excluded, k=k))
+            continue
+        sims = np.asarray([row[j] for j in chosen], dtype=np.float64)
+        weights = np.exp((sims - sims[0]) / tau)
+        weights = weights / weights.sum()
+        votes, family, maxsim, counts, best_text, best_source = {}, {}, {}, {}, {}, {}
+        for weight, sim, j in zip(weights, sims, chosen, strict=True):
+            for label in index.labels[j]:
+                votes[label] = votes.get(label, 0.0) + float(weight)
+                counts[label] = counts.get(label, 0) + 1
+                family[label] = family.get(label, 0.0) + float(weight)
+                parent = parents.get(label)
+                if parent:
+                    family[parent] = family.get(parent, 0.0) + float(weight)
+                if label not in maxsim or sim > maxsim[label]:
+                    maxsim[label] = float(sim)
+                    best_text[label] = index.texts[j]
+                    best_source[label] = index.sources[j]
+        ranked = sorted(votes, key=lambda technique_id: (-votes[technique_id], technique_id))
+        results.append(
+            ExemplarVotes(
+                top_similarity=float(sims[0]),
+                votes=votes,
+                family=family,
+                max_similarity=maxsim,
+                counts=counts,
+                ranks={technique_id: rank for rank, technique_id in enumerate(ranked, 1)},
+                best_text=best_text,
+                best_source=best_source,
+                neighbours=len(chosen),
+                excluded_duplicates=excluded,
+                k=k,
+            )
+        )
+    return results
+
+
+def _random_library(seed=3, count=400, dim=24):
+    """Random unit vectors with exact duplicates (ties) and near-copies around cosine 0.95."""
+    rng = np.random.default_rng(seed)
+    vectors = rng.normal(size=(count, dim)).astype(np.float32)
+    if count > 41:
+        vectors[10] = vectors[11] = vectors[12]  # an exact-tie group
+        vectors[40] = vectors[41]
+    for base in range(100, min(160, count - 100)):  # near-copies around the 0.95 duplicate cut
+        noise = rng.normal(size=dim).astype(np.float32)
+        noise -= noise.dot(vectors[base]) / vectors[base].dot(vectors[base]) * vectors[base]
+        noise *= np.linalg.norm(vectors[base]) / np.linalg.norm(noise)
+        angle = np.arccos(0.95 + rng.uniform(-0.004, 0.004))
+        vectors[base + 100] = np.cos(angle) * vectors[base] + np.sin(angle) * noise
+    pool = ["T1059", "T1059.001", "T1059.003", "T1003", "T1003.001", "T1105", "T1566.001", "T1053"]
+    labels = tuple(
+        tuple(sorted(set(rng.choice(pool, size=int(rng.integers(1, 4)), replace=True))))
+        for _ in range(count)
+    )
+    index = ExemplarIndex(
+        embeddings=np.asarray(
+            vectors / np.linalg.norm(vectors, axis=1, keepdims=True), dtype=np.float32
+        ),
+        labels=labels,
+        texts=tuple(f"text {row}" for row in range(count)),
+        sources=tuple(("tram", "expert", "derived_procedures")[row % 3] for row in range(count)),
+        metadata={"kind": "technique_exemplar_index", "schema_version": 1},
+    )
+    index.metadata["fingerprint"] = index.compute_fingerprint()
+    queries = np.concatenate(
+        [
+            index.embeddings[:30],  # self queries: similarity 1 is always a duplicate
+            index.embeddings[100:130] * 1.0,  # near-copies sit around the 0.95 cut
+            rng.normal(size=(40, dim)).astype(np.float32),
+            index.embeddings[10:13],  # exact ties
+        ]
+    )
+    return index, queries
+
+
+def _vote_bits(votes):
+    from scripts.exemplar_backend_equivalence import _bits
+
+    return [_bits([getattr(item, name) for name in item.__dataclass_fields__]) for item in votes]
+
+
+@pytest.mark.parametrize(
+    "k,tau,dup",
+    [(64, 0.05, 0.95), (4, 0.05, 0.95), (16, 0.08, 0.9), (256, 0.03, 0.95), (500, 0.05, 1.01)],
+)
+def test_refactored_query_matches_the_frozen_reference_bit_for_bit(k, tau, dup):
+    index, queries = _random_library()
+    parents = {"T1059.001": "T1059", "T1059.003": "T1059", "T1003.001": "T1003"}
+    expected = _reference_query_vectors(index, queries, parent_of=parents, k=k, tau=tau, dup=dup)
+    actual = index.query_vectors(queries, parent_of=parents, k=k, tau=tau, duplicate_similarity=dup)
+    assert _vote_bits(actual) == _vote_bits(expected)
+    # one query at a time as well (a 1-D vector), and the empty batch
+    single = index.query_vectors(
+        queries[0], parent_of=parents, k=k, tau=tau, duplicate_similarity=dup
+    )
+    assert _vote_bits(single) == _vote_bits(
+        _reference_query_vectors(index, queries[0], parent_of=parents, k=k, tau=tau, dup=dup)
+    )
+    assert index.query_vectors(np.zeros((0, queries.shape[1]), dtype=np.float32)) == []
+
+
+def test_allowed_rows_superset_is_identical_and_a_missing_member_is_a_counted_miss():
+    from apt_classifier.exemplars import window_size
+
+    index, queries = _random_library()
+    reference = index.query_vectors(queries, k=32)
+    windows = index.exact_windows(queries, k=32)
+    assert all(len(window) == window_size(len(index), 32) == 80 for window in windows)
+    rng = np.random.default_rng(1)
+    superset = [
+        np.concatenate([window, rng.choice(len(index), size=50)])[::-1] for window in windows
+    ]
+    stats = {"recall_misses": 0}
+    assert _vote_bits(index.query_vectors(queries, k=32, allowed_rows=superset, stats=stats)) == (
+        _vote_bits(reference)
+    )
+    assert stats["recall_misses"] == 0
+    # a candidate search that lost one member of two windows: counted, votes still exact
+    lossy = [window.copy() for window in windows]
+    lossy[0] = lossy[0][1:]
+    lossy[5] = lossy[5][:-1]
+    stats = {"recall_misses": 0}
+    assert _vote_bits(index.query_vectors(queries, k=32, allowed_rows=lossy, stats=stats)) == (
+        _vote_bits(reference)
+    )
+    assert stats["recall_misses"] == 2
+    with pytest.raises(ValueError):
+        index.query_vectors(queries, k=32, allowed_rows=lossy[:3])
+    with pytest.raises(ValueError):
+        index.query_vectors(queries, vote_norm="softmax")
+
+
+def test_label_split_divides_each_neighbours_weight_by_its_label_count():
+    index = _index()
+    query = WordEmbedder().embed(["powershell downloaded a payload after a phishing email"])
+    plain = index.query_vectors(query, parent_of=_parents(), k=4, duplicate_similarity=0.999)[0]
+    split = index.query_vectors(
+        query, parent_of=_parents(), k=4, duplicate_similarity=0.999, vote_norm="label_split"
+    )[0]
+    # the multi-label exemplar (T1059.001 + T1105) gives each label half its weight
+    assert sum(split.votes.values()) == pytest.approx(1.0)
+    assert sum(plain.votes.values()) > 1.0
+    assert split.votes["T1105"] < plain.votes["T1105"]
+    assert split.counts == plain.counts and split.max_similarity == plain.max_similarity
+
+
+def test_npz_index_signature_and_backend_dispatch(tmp_path):
+    index = _index()
+    path = index.save(tmp_path / "ex.npz")
+    assert index.backend == "npz" and index.search == "exact" and index.search_class == "exact"
+    assert index.signature() == {
+        "backend": "npz",
+        "search": "exact",
+        "search_class": "exact",
+        "fingerprint": index.fingerprint,
+        "count": len(index),
+    }
+    base = {
+        "technique_exemplars_enabled": True,
+        "technique_exemplar_index_path": path,
+        "embedding_model": "test-model",
+        "embedding_model_revision": "r1",
+    }
+    # the default backend is the npz, whatever client is passed
+    loaded, status = load_exemplar_index(SimpleNamespace(**base), client=object())
+    assert status == "active" and loaded.backend == "npz"
+    unknown = SimpleNamespace(**base, technique_exemplar_backend="sqlite")
+    assert load_exemplar_index(unknown)[0] is None
+    assert "unknown exemplar backend" in load_exemplar_index(unknown)[1]
+    # no client: strict chroma gives no library, auto falls back to the npz with the reason
+    strict, reason = load_exemplar_index(
+        SimpleNamespace(**base, technique_exemplar_backend="chroma")
+    )
+    assert strict is None and "no Chroma client" in reason
+    auto, status = load_exemplar_index(SimpleNamespace(**base, technique_exemplar_backend="auto"))
+    assert auto is not None and auto.backend == "npz"
+    assert status.startswith("active (npz fallback: no Chroma client")
+
+
+# ----- tuning knobs: vote normalisation, per-sentence votes, the legacy contract -----
+
+
+def test_pool_votes_combines_queries_and_recomputes_ranks():
+    from apt_classifier.exemplars import ExemplarVotes, pool_votes
+
+    whole = ExemplarVotes(
+        top_similarity=0.8,
+        votes={"T1": 0.6, "T2": 0.4},
+        family={"T1": 0.6, "T2": 0.4, "T0": 0.6},
+        max_similarity={"T1": 0.8, "T2": 0.7},
+        counts={"T1": 3, "T2": 2},
+        ranks={"T1": 1, "T2": 2},
+        best_text={"T1": "whole t1", "T2": "whole t2"},
+        best_source={"T1": "tram", "T2": "tram"},
+        neighbours=5,
+        excluded_duplicates=1,
+        k=4,
+    )
+    sentence = ExemplarVotes(
+        top_similarity=0.9,
+        votes={"T2": 0.9, "T3": 0.1},
+        family={"T2": 0.9, "T3": 0.1},
+        max_similarity={"T2": 0.9, "T3": 0.5},
+        counts={"T2": 4, "T3": 1},
+        ranks={"T2": 1, "T3": 2},
+        best_text={"T2": "sentence t2", "T3": "sentence t3"},
+        best_source={"T2": "expert", "T3": "expert"},
+        neighbours=4,
+        excluded_duplicates=0,
+        k=4,
+    )
+    pooled = pool_votes([whole, sentence], "max")
+    assert pooled.votes == {"T1": 0.6, "T2": 0.9, "T3": 0.1}
+    assert pooled.ranked == ["T2", "T1", "T3"]
+    assert pooled.counts == {"T1": 3, "T2": 4, "T3": 1}
+    assert pooled.family["T0"] == 0.6
+    assert pooled.top_similarity == 0.9 and pooled.max_similarity["T2"] == 0.9
+    assert pooled.best_text["T2"] == "sentence t2" and pooled.best_source["T1"] == "tram"
+    assert pooled.neighbours == 5 and pooled.excluded_duplicates == 1 and pooled.k == 4
+    mean = pool_votes([whole, sentence], "mean")
+    assert mean.votes["T1"] == pytest.approx(0.3) and mean.votes["T2"] == pytest.approx(0.65)
+    assert mean.counts["T2"] == pytest.approx(3.0)
+    assert mean.ranked == ["T2", "T1", "T3"]
+    assert pool_votes([whole], "max") is whole
+    with pytest.raises(ValueError):
+        pool_votes([whole, sentence], "off")
+
+
+def test_exemplar_kwargs_carry_the_new_knobs_with_shipped_defaults():
+    kwargs = exemplar_kwargs(SimpleNamespace(), None)
+    assert kwargs["exemplar_vote_norm"] == "none" and kwargs["exemplar_segment_votes"] == "off"
+    tuned = exemplar_kwargs(
+        SimpleNamespace(
+            technique_exemplar_vote_norm="label_split", technique_exemplar_segment_votes="max"
+        ),
+        None,
+    )
+    assert tuned["exemplar_vote_norm"] == "label_split"
+    assert tuned["exemplar_segment_votes"] == "max"
+
+
+class _RecordingIndex:
+    """Wraps an index and records each query_vectors call (count of vectors, keyword names)."""
+
+    def __init__(self, index):
+        self.index = index
+        self.calls = []
+
+    @property
+    def fingerprint(self):
+        return self.index.fingerprint
+
+    def query_vectors(self, vectors, **kwargs):
+        self.calls.append((len(vectors), sorted(kwargs)))
+        return self.index.query_vectors(vectors, **kwargs)
+
+
+LONG_OBSERVATION = (
+    "During the intrusion the operators relied on a long chain of tools across several hosts "
+    "over many days. First they ran powershell to download a second stage from their server. "
+    "Later they dumped credentials from lsass memory with mimikatz and created a scheduled "
+    "task for persistence on the domain controller."
+)
+
+
+def _segment_setup():
+    kb, store, _ = _two_hit_setup()
+    for technique_id, name in (
+        ("T1105", "Ingress Tool Transfer"),
+        ("T1053.005", "Scheduled Task"),
+        ("T1566.001", "Spearphishing Attachment"),
+        ("T1059", "Command and Scripting Interpreter"),
+    ):
+        kb.techniques[technique_id] = Technique(id=technique_id, name=name)
+    store.embedder = WordEmbedder()
+    ledger = EvidenceLedger(
+        observations=[Observation(text=LONG_OBSERVATION, provenance=Provenance(source="free_text"))]
+    )
+    return kb, store, ledger
+
+
+def test_segment_votes_query_each_sentence_and_off_keeps_the_shipped_query():
+    kb, store, ledger = _segment_setup()
+    settings = SimpleNamespace(
+        technique_exemplar_k=4,
+        technique_exemplar_tau=0.05,
+        technique_exemplar_duplicate_similarity=0.999,
+        technique_exemplar_new_candidates=2,
+    )
+    off_index = _RecordingIndex(_index())
+    off = retrieve_techniques(
+        ledger, store, kb, retrieval_mode="dense", **exemplar_kwargs(settings, off_index)
+    )
+    # one query for the whole text, and no vote_norm argument at the default
+    assert off_index.calls == [(1, ["duplicate_similarity", "k", "parent_of", "tau"])]
+    assert "exemplar_segment_votes" not in off.diagnostics
+    pooled_index = _RecordingIndex(_index())
+    pooled = retrieve_techniques(
+        ledger,
+        store,
+        kb,
+        retrieval_mode="dense",
+        **{**exemplar_kwargs(settings, pooled_index), "exemplar_segment_votes": "max"},
+    )
+    assert len(pooled_index.calls) == 2 and pooled_index.calls[1][0] >= 2
+    assert pooled.diagnostics["exemplar_segment_votes"] == "max"
+
+    # the scheduled-task sentence now votes for its technique on its own, and the exemplar-only
+    # candidates follow the pooled ranking
+    def vote(result, technique_id):
+        candidate = next(c for c in result.candidates if c.technique_id == technique_id)
+        return candidate.evidence_for(EVIDENCE_SOURCE).metadata["features"]["ex_vote"]
+
+    def exemplar_only(result):
+        return [
+            c.technique_id
+            for c in result.candidates
+            if c.evidence_for(EVIDENCE_SOURCE).metadata["exemplar_only"]
+        ]
+
+    assert vote(pooled, "T1053.005") > vote(off, "T1053.005")
+    assert exemplar_only(off) == ["T1105", "T1059"]
+    assert exemplar_only(pooled) == ["T1059", "T1105"]
+    # label_split is passed through to the library
+    split_index = _RecordingIndex(_index())
+    retrieve_techniques(
+        ledger,
+        store,
+        kb,
+        retrieval_mode="dense",
+        **{**exemplar_kwargs(settings, split_index), "exemplar_vote_norm": "label_split"},
+    )
+    assert "vote_norm" in split_index.calls[0][1]
+
+
+def test_shipped_acceptance_model_gives_identical_results_on_the_legacy_path():
+    """The shipped artifact (read only) has no stored contract: with the default settings, and
+    with any knob that existed before contracts, retrieval_kwargs runs it exactly as the old
+    explicit arguments ran the unconstrained model."""
+    import copy
+    from pathlib import Path
+
+    from apt_classifier.config import Settings
+    from apt_classifier.presets import apply_preset
+    from apt_classifier.retrieve import LexicalTechniqueIndex, lexical_fields, retrieval_kwargs
+    from tests.test_retrieve import old_serving_kwargs
+
+    path = Path(__file__).resolve().parents[1] / "data/models/acceptance/acceptance_model.json"
+    if not path.is_file():
+        pytest.skip("shipped acceptance artifact is not present")
+    shipped = AcceptanceModel.load(path)
+    if shipped.contract_origin != "legacy":
+        # the shipped artifact carried no contract until the ATT&CK 20.0 refit (2026-10-21); the
+        # legacy path it exercised is covered by the synthetic legacy artifacts of this module
+        pytest.skip("the shipped acceptance artifact records its contract")
+    unconstrained = copy.deepcopy(shipped)
+    unconstrained.contract = None
+    kb, store, _ = _segment_setup()
+    index = _index()
+    index.metadata["fingerprint"] = shipped.exemplar_fingerprint  # stands in for the library
+    settings = apply_preset(Settings(_env_file=None))
+    lexical = LexicalTechniqueIndex.from_kb(kb, fields=lexical_fields(settings))
+    for text in (
+        "powershell downloaded a payload and read lsass",
+        LONG_OBSERVATION,
+        "Routine maintenance used powershell to download updates",
+    ):
+        ledger = EvidenceLedger(
+            observations=[Observation(text=text, provenance=Provenance(source="free_text"))]
+        )
+        new = retrieve_techniques(
+            ledger,
+            store,
+            kb,
+            **retrieval_kwargs(settings, exemplar_index=index, lexical_index=lexical),
+            acceptance_model=shipped,
+        )
+        old = retrieve_techniques(
+            copy.deepcopy(ledger),
+            store,
+            kb,
+            **old_serving_kwargs(settings, index, lexical),
+            acceptance_model=unconstrained,
+        )
+        assert new.diagnostics["acceptance_model_active"] is True
+        assert "acceptance_model_disabled" not in new.diagnostics
+        assert new.to_dict() == old.to_dict()
+    # a knob that existed before contracts runs it as before (unconstrained), one new with
+    # contracts refuses it
+    kwargs = retrieval_kwargs(settings, exemplar_index=index, lexical_index=lexical)
+    older = retrieve_techniques(
+        ledger, store, kb, **{**kwargs, "exemplar_k": 128}, acceptance_model=shipped
+    )
+    before = retrieve_techniques(
+        copy.deepcopy(ledger),
+        store,
+        kb,
+        **{**old_serving_kwargs(settings, index, lexical), "exemplar_k": 128},
+        acceptance_model=unconstrained,
+    )
+    assert "acceptance_model_disabled" not in older.diagnostics
+    assert older.to_dict() == before.to_dict()
+    tuned = retrieve_techniques(
+        ledger,
+        store,
+        kb,
+        **{**kwargs, "exemplar_vote_norm": "label_split"},
+        acceptance_model=shipped,
+    )
+    assert (
+        "exemplar_vote_norm 'label_split' (fitted with 'none')"
+        in (tuned.diagnostics["acceptance_model_disabled"])
+    )

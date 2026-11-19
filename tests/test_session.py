@@ -708,3 +708,389 @@ def test_group_mlp_at_weight_zero_leaves_the_pipeline_unchanged(tmp_path):
         FakeLLM(),
     )
     assert missing.group_mlp is None and "not found" in missing.group_mlp_status
+
+
+def test_auto_exemplar_backend_without_a_store_client_uses_the_npz_offline(tmp_path):
+    """A store without a Chroma client (every test fake) never reaches the network: ``auto``
+    falls back to the npz library with a visible reason, strict ``chroma`` loads none."""
+    from apt_classifier.exemplars import ExemplarIndex
+
+    class Embedder:
+        def embed(self, texts, batch_size=None):
+            return [[1.0, float("powershell" in text.lower()), 0.5] for text in texts]
+
+    settings = Settings()
+    index = ExemplarIndex.build(
+        [
+            ("powershell ran a script", ["T1059.001"], "tram"),
+            ("lsass was read", ["T1003.001"], "tram"),
+        ],
+        Embedder(),
+        embedding_model=settings.embedding_model,
+        embedding_revision=settings.embedding_model_revision,
+        attack_version="test",
+    )
+    path = index.save(tmp_path / "exemplars.npz")
+    store = FakeStore()
+    assert not hasattr(store, "client")
+    engine = AttributionEngine(
+        _settings(technique_exemplar_backend="auto", technique_exemplar_index_path=path),
+        _kb(),
+        store,
+        FakeLLM(),
+    )
+    assert engine.exemplar_index is not None and engine.exemplar_index.backend == "npz"
+    assert engine.exemplar_index.fingerprint == index.fingerprint
+    assert engine.exemplar_status.startswith("active (npz fallback: no Chroma client")
+    strict = AttributionEngine(
+        _settings(technique_exemplar_backend="chroma", technique_exemplar_index_path=path),
+        _kb(),
+        store,
+        FakeLLM(),
+    )
+    assert strict.exemplar_index is None
+    assert strict.exemplar_status.startswith("chroma exemplar store unavailable")
+    # the analysis still runs (the acceptance model falls back without exemplars)
+    state = strict.analyze(_ledger("PowerShell executed an encoded command."))
+    assert "T1059.001" in state.context.observed_techniques
+
+
+# ----- software interview answers (software_questions.py, docs 21.3.15 C) -----
+
+
+def _software_engine(tmp_path=None, *, combiner: bool = False, **overrides):
+    from tests.test_software_questions import software_engine, software_kb, software_settings
+
+    if not combiner:
+        return software_engine(**overrides)
+    plain = software_engine(**overrides)
+    path = _rrf_rel_combiner(plain, 8.0).save(tmp_path / "combiner.json")
+    engine = AttributionEngine(
+        software_settings(
+            attribution_combiner_enabled=True, attribution_combiner_path=path, **overrides
+        ),
+        software_kb(),
+        FakeStore(),
+        None,
+    )
+    assert engine.combiner is not None
+    return engine
+
+
+def _software_answer(software_id, status, question="Did you find it?"):
+    return QuestionAnswer(
+        question=question, kind="software", software_id=software_id, status=status
+    )
+
+
+def _snapshot(state):
+    discrimination = state.context.discrimination
+    return (
+        [(e.group_id, e.score, e.rank) for e in state.fusion.entries],
+        dict((state.context.combiner or {}).get("probabilities") or {}),
+        discrimination.to_dict() if discrimination is not None else None,
+        set(state.context.negative_techniques),
+        set(state.context.software_ids),
+    )
+
+
+@pytest.mark.parametrize("with_combiner", [False, True], ids=["rrf", "combiner"])
+def test_a_not_found_answer_leaves_scoring_untouched(tmp_path, with_combiner):
+    """A "not found" reaches only the naming gate: fusion, combiner probabilities, the gate's
+    discrimination and the technique negatives are exactly as before."""
+    from tests.test_software_questions import LSASS, POWERSHELL
+
+    engine = _software_engine(tmp_path, combiner=with_combiner)
+    state = engine.analyze(_ledger(POWERSHELL, LSASS))
+    before = _snapshot(state)
+    state.ledger.add_question_answer(_software_answer("S0103", EvidenceStatus.NEGATIVE))
+    engine.rescore(state)
+    assert _snapshot(state) == before
+    assert state.context.negative_software_ids == {"S0103"}
+    # "not checked" records nothing at all
+    state.ledger.add_question_answer(_software_answer("S0101", EvidenceStatus.UNKNOWN))
+    engine.rescore(state)
+    assert _snapshot(state) == before and state.context.negative_software_ids == {"S0103"}
+
+
+def test_a_found_answer_counts_like_software_named_in_the_text_and_restart_clears_it():
+    from tests.test_software_questions import LSASS, POWERSHELL
+
+    engine = _software_engine()
+    state = engine.analyze(_ledger(POWERSHELL, LSASS))
+    assert state.context.document_software_ids == set() and state.context.software_ids == set()
+    question = engine.next_question(state)
+    assert question is not None and question.kind == "software"
+    engine.answer_question(state, "found")
+    answer = state.ledger.question_answers[-1]
+    assert answer.kind == "software" and answer.software_id == question.software_id
+    assert answer.technique_id is None
+    assert answer.provenance.source == "analyst_interview"
+    assert state.context.software_ids == {question.software_id}
+    assert state.context.interview_found_software == {question.software_id}
+    assert state.context.decisive_software["software_ids"] == [question.software_id]
+    # the next software question never repeats it
+    follow_up = engine.next_question(state)
+    assert follow_up is None or follow_up.software_id != question.software_id
+    state.current_question = follow_up
+    if follow_up is not None and follow_up.kind == "software":
+        engine.answer_question(state, "not found")
+        assert state.context.negative_software_ids == {follow_up.software_id}
+    engine.restart_interview(state)
+    assert state.context.software_ids == set() and state.context.negative_software_ids == set()
+    assert state.context.interview_found_software == set()
+    # a software question rejects "not visible"
+    question = engine.next_question(state)
+    with pytest.raises(ValueError, match="found, not found or not checked"):
+        engine.answer_question(state, EvidenceStatus.NOT_VISIBLE)
+    assert question is not None and not state.ledger.question_answers
+
+
+def test_software_questions_follow_the_settings_and_stop_when_named():
+    from tests.test_software_questions import LSASS, POWERSHELL
+
+    off = _software_engine(interview_software_questions=False)
+    state = off.analyze(_ledger(POWERSHELL, LSASS))
+    assert off.software_question(state) is None
+    question = off.next_question(state)
+    assert question is not None and question.kind == "technique"
+    engine = _software_engine(interview_software_max_questions=1)
+    state = engine.analyze(_ledger(POWERSHELL, LSASS))
+    engine.next_question(state)
+    engine.answer_question(state, "not checked")
+    assert engine.software_question(state) is None  # cap reached
+    # a case already named (the text names Charlie's own malware) is not asked
+    named = _software_engine()
+    state = named.analyze(_ledger(f"{POWERSHELL} The Greenfin implant was loaded.", LSASS))
+    assert state.attribution_decision.stage.value == "known_group_hypothesis"
+    assert named.software_question(state) is None
+    asking = _software_engine(interview_software_when_named=True)
+    state = asking.analyze(_ledger(f"{POWERSHELL} The Greenfin implant was loaded.", LSASS))
+    assert asking.software_question(state) is not None
+
+
+def test_a_saved_case_with_software_answers_reloads_to_the_identical_decision():
+    from apt_classifier.evidence.models import EvidenceLedger
+    from tests.test_software_questions import LSASS, POWERSHELL
+
+    engine = _software_engine()
+    text = f"{POWERSHELL} The Greenfin implant was loaded."
+    state = engine.analyze(_ledger(text, LSASS))
+    assert state.attribution_decision.stage.value == "known_group_hypothesis"
+    # "not found" for Charlie's two other malware entries blocks the name ...
+    for software_id in ("S0104", "S0108"):
+        state.ledger.add_question_answer(
+            _software_answer(software_id, EvidenceStatus.NEGATIVE, f"Did you find {software_id}?")
+        )
+    engine.rescore(state)
+    blocked = state.attribution_decision
+    assert blocked.stage.value == "known_group_shortlist"
+    assert blocked.separation_factors["negative_software"]["applied"] == ["S0104", "S0108"]
+    # ... and stays blocked when the case is reopened from disk
+    reopened = engine.analyze(EvidenceLedger.from_dict(state.ledger.to_dict()))
+    assert reopened.attribution_decision.to_dict() == blocked.to_dict()
+    assert reopened.context.negative_software_ids == {"S0104", "S0108"}
+    # a "found" survives the reload too, guard included
+    other = engine.analyze(_ledger(POWERSHELL, LSASS))
+    engine.next_question(other)
+    engine.answer_question(other, "found")
+    reloaded = engine.analyze(EvidenceLedger.from_dict(other.ledger.to_dict()))
+    assert reloaded.attribution_decision.to_dict() == other.attribution_decision.to_dict()
+    assert reloaded.context.software_ids == other.context.software_ids
+    assert reloaded.context.interview_software_guard == other.context.interview_software_guard
+
+
+def test_a_found_for_one_group_never_names_another():
+    """Alpha's malware found while Charlie leads: Alpha takes the lead but its separation without
+    the answer is negative, so nothing is named; Charlie is never named on Alpha's malware."""
+    from tests.test_software_questions import LSASS, POWERSHELL
+
+    engine = _software_engine()
+    state = engine.analyze(_ledger(POWERSHELL, LSASS))
+    for software_id in ("S0101", "S0102"):
+        trial = engine.analyze(_ledger(POWERSHELL, LSASS))
+        trial.ledger.add_question_answer(_software_answer(software_id, EvidenceStatus.POSITIVE))
+        engine.rescore(trial)
+        decision = trial.attribution_decision
+        owner = engine.kb.software[software_id].group_ids[0]
+        if decision.stage.value == "known_group_hypothesis":
+            assert decision.leading_group_id == owner
+        guard = trial.context.interview_software_guard
+        assert guard["found"] == [software_id] and guard["document_software_ids"] == []
+    assert state.attribution_decision.stage.value != "known_group_hypothesis"
+
+
+def test_old_ledgers_load_and_question_ids_do_not_change():
+    import hashlib
+
+    from apt_classifier.evidence.models import EvidenceLedger
+
+    legacy = {
+        "observations": [],
+        "question_answers": [
+            {"question": "Was LSASS read?", "technique_id": "T1003.001", "status": "negative"}
+        ],
+    }
+    ledger = EvidenceLedger.from_dict(legacy)
+    answer = ledger.question_answers[0]
+    material = "\x1f".join(("t1003.001", "was lsass read?"))
+    expected = f"question-{hashlib.sha256(material.encode()).hexdigest()[:16]}"
+    assert answer.question_id == expected and answer.kind == "technique"
+    assert answer.software_id is None
+    software = _software_answer("s0101", EvidenceStatus.POSITIVE, question="Did you find X?")
+    assert software.software_id == "S0101" and software.question_id.startswith("question-")
+    assert software.question_id != QuestionAnswer(question="Did you find X?").question_id
+    roundtrip = EvidenceLedger.from_dict({**legacy, "question_answers": [software.to_dict()]})
+    assert roundtrip.question_answers[0] == software
+
+
+def test_store_members_at_weight_zero_leave_the_pipeline_unchanged(tmp_path):
+    """Off (the default) the knowledge store's members are not loaded and add no weight key, so
+    the fusion and the combiner fingerprint are unchanged; with a weight the store text votes in
+    learned_profile, binds the fingerprint and reads only the posts dated before the case."""
+    from apt_classifier.knowledge_store.members import (
+        STORE_SOFTWARE_NAME,
+        STORE_TEXT_NAME,
+        statement_keys,
+        write_artifact,
+    )
+
+    statements = [
+        "The adversary dumped LSASS memory with Mimikatz on the domain controller.",
+        "The adversary dumped LSASS memory again after moving over SMB shares.",
+        "Mimikatz output was staged in a temporary folder on the domain controller.",
+    ]
+    write_artifact(
+        tmp_path / "store_members.json.gz",
+        {
+            "metadata": {"attack_version": "test", "introduced_share": 0.25},
+            "posts": {"v/1": ["v", "2024-06-01", 0, sorted(statement_keys(statements))]},
+            "duplicates": {},
+            "text": [{"key": "v/1", "group": "G2", "text": t} for t in statements],
+            "links": [],
+            "names": [],
+            "software": {},
+            "masking_names": [],
+        },
+    )
+    kb = _kb()
+    store_dir = str(tmp_path)
+    off = AttributionEngine(_settings(knowledge_store_dir=store_dir), kb, FakeStore(), FakeLLM())
+    plain = AttributionEngine(_settings(), kb, FakeStore(), FakeLLM())
+    assert off.store_members is None and off.store_members_status == "disabled (weight 0)"
+    assert STORE_TEXT_NAME not in off.default_weights()
+    assert off.combiner_fingerprint == plain.combiner_fingerprint
+    assert all(c.name not in (STORE_TEXT_NAME, STORE_SOFTWARE_NAME) for c in off.classifiers)
+
+    on = AttributionEngine(
+        _settings(knowledge_store_dir=store_dir, store_text_weight=1.0),
+        kb,
+        FakeStore(),
+        FakeLLM(),
+    )
+    assert on.store_members_status == "active"
+    assert on.default_weights()[STORE_TEXT_NAME] == 1.0
+    assert STORE_SOFTWARE_NAME not in on.default_weights()
+    assert _CLASSIFIER_FAMILIES[STORE_TEXT_NAME] == "learned_profile"
+    assert on.combiner_fingerprint != plain.combiner_fingerprint
+
+    def store_text(state):
+        return next(r for r in state.classifier_results if r.classifier == STORE_TEXT_NAME)
+
+    ledger = _ledger("Mimikatz dumped LSASS memory on the domain controller")
+    assert store_text(on.analyze(ledger)).applicable
+    on.set_store_case(as_of="2024-06-01")  # the post is not available before the case
+    assert not store_text(on.analyze(ledger)).applicable
+    on.clear_store_case()
+    assert store_text(on.analyze(ledger)).applicable
+
+
+def test_the_weight_grid_refuses_a_case_as_the_engine_would(tmp_path):
+    """The store members' development grid fuses a case's classifier results again per weight
+    combination: weight 0 gives what an engine without the member gives, and the run's own
+    weights give the run's own ranking and decision."""
+    from apt_classifier.knowledge_store.members import (
+        STORE_TEXT_NAME,
+        statement_keys,
+        write_artifact,
+    )
+    from scripts.attribution_benchmark import grid_outcomes, parse_weight_grid
+
+    statements = [
+        "The adversary dumped LSASS memory with Mimikatz on the domain controller.",
+        "The adversary dumped LSASS memory again after moving over SMB shares.",
+        "Mimikatz output was staged in a temporary folder on the domain controller.",
+    ]
+    write_artifact(
+        tmp_path / "store_members.json.gz",
+        {
+            "metadata": {"attack_version": "test", "introduced_share": 0.25},
+            "posts": {"v/1": ["v", "2024-06-01", 0, sorted(statement_keys(statements))]},
+            "duplicates": {},
+            "text": [{"key": "v/1", "group": "G2", "text": t} for t in statements],
+            "links": [],
+            "names": [],
+            "software": {},
+            "masking_names": [],
+        },
+    )
+    kb = _kb()
+    ledger = _ledger("Mimikatz dumped LSASS memory on the domain controller", "PowerShell ran")
+    on = AttributionEngine(
+        _settings(knowledge_store_dir=str(tmp_path), store_text_weight=2.0),
+        kb,
+        FakeStore(),
+        FakeLLM(),
+    )
+    plain = AttributionEngine(_settings(), kb, FakeStore(), FakeLLM())
+    state = on.analyze(ledger)
+    base = plain.analyze(ledger)
+    grid = parse_weight_grid([f"{STORE_TEXT_NAME}=0,2"])
+    assert grid == [{STORE_TEXT_NAME: 0.0}, {STORE_TEXT_NAME: 2.0}]
+    cells = grid_outcomes(on, state, grid, {"G2"})
+    off, own = cells[f"{STORE_TEXT_NAME}=0"], cells[f"{STORE_TEXT_NAME}=2"]
+    assert off["top5"] == [e.group_id for e in base.fusion.entries][:5]
+    assert off["stage"] == base.attribution_decision.stage.value
+    assert off["leading"] == base.attribution_decision.leading_group_id
+    assert own["top5"] == [e.group_id for e in state.fusion.entries][:5]
+    assert own["stage"] == state.attribution_decision.stage.value
+    with pytest.raises(ValueError):
+        parse_weight_grid(["store_text"])
+
+
+def test_text_group_at_weight_zero_leaves_the_pipeline_unchanged(tmp_path):
+    """Off (the default) the free-text model is not loaded and adds no weight key, so the fusion
+    and the combiner fingerprint are unchanged; with a weight it votes in learned_profile."""
+    from apt_classifier.text_group import TEXT_GROUP_NAME, fit_text_group
+
+    kb = _kb()
+    kb.groups["G2"].technique_behaviors = {
+        "T1003.001": ["Bravo dumped LSASS memory with Mimikatz."]
+    }
+    model = fit_text_group(kb, None, {"min_df": 1})
+    path = model.save(tmp_path / "text.json.gz")
+    off = AttributionEngine(
+        _settings(text_group_path=path, text_group_weight=0.0), kb, FakeStore(), FakeLLM()
+    )
+    plain = AttributionEngine(
+        _settings(text_group_enabled=False, text_group_path=path, text_group_weight=0.0),
+        kb,
+        FakeStore(),
+        FakeLLM(),
+    )
+    assert off.text_group is None and off.text_group_status == "disabled (weight 0)"
+    assert TEXT_GROUP_NAME not in off.default_weights()
+    assert off.combiner_fingerprint == plain.combiner_fingerprint
+    assert all(c.name != TEXT_GROUP_NAME for c in off.classifiers)
+
+    on = AttributionEngine(
+        _settings(text_group_path=path, text_group_weight=1.0), kb, FakeStore(), FakeLLM()
+    )
+    assert on.text_group is not None and on.text_group_status == "active"
+    assert on.default_weights()[TEXT_GROUP_NAME] == 1.0
+    assert _CLASSIFIER_FAMILIES[TEXT_GROUP_NAME] == "learned_profile"
+    assert on.combiner_fingerprint != plain.combiner_fingerprint
+    state = on.analyze(_ledger("Mimikatz dumped LSASS memory"))
+    assert any(r.classifier == TEXT_GROUP_NAME for r in state.classifier_results)
+    on.set_text_group(None)
+    assert on.text_group_status == "disabled"

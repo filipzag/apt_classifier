@@ -1,0 +1,52 @@
+{
+  "schema": "cribl_finetune_prereg/1",
+  "id": "cribl_family_margin_2026-10-13",
+  "title": "F3: the family head with ATT&CK definitions as training rows and a margin against the closest rival family",
+  "registered": "2026-10-13",
+  "parent": "docs/preregistration/cribl_family_attack_2026-10-13.json (F2; docs 21.3.18)",
+  "question": "Do ATT&CK's own technique definitions as training rows plus a loss term that makes the gold family beat its strongest rival by a margin reduce F2's look-alike confusions and raise family top-1?",
+  "motivation": "F2's dev errors (260): the gold family was 2nd in 38%, the top-2 gap below 0.3 in 147; most frequent confusions Phishing for Information/Phishing, Data Encrypted for Impact/Archive Collected Data, Deobfuscate/Obfuscate, Command and Scripting Interpreter/Ingress Tool Transfer, OS Credential Dumping/Credentials from Password Stores",
+  "harness": "export_attack_procedures.py --descriptions (cases_attack_descriptions.jsonl), losses.rival_margin, family_head.py --margin, runpod/remote_f3.sh",
+  "changes_from_f2": {
+    "definitions": "one row per listed technique, 'Name: description' (cleaned, cut at a sentence end within 1,500 characters), labelled with the technique (its family is the target); the same overlap filter against every dev and test set: 697 texts, 4 dropped (shared 10-token run), 693 kept, 221 families",
+    "margin": "loss per example = cross-entropy over the gold families + 1.0 * max(0, 1.0 - (log P(gold families) - log P(strongest non-gold family))); lambda 1 and m 1 nats fixed, not tuned"
+  },
+  "fixed": "as F2 otherwise: Cribl adapter + fresh head, F2's 24,034 rows + 693 definition rows = 24,727 rows, 2 epochs, checkpoint every quarter epoch, LoRA lr 1e-4, head lr 1e-3, 16 per step and per forward pass, seed 7; RunPod RTX 4090, CTI-HAL scored on the laptop",
+  "selection": "as F1/F2: highest mean family top-1 over public dev and AnnoCTR dev; ties the earlier",
+  "success": {
+    "headline": "CTI-HAL family top-1: F3 minus F2 (same 968 statements), paired 95% CI lower bound above 0",
+    "secondary": [
+      "AnnoCTR test family top-1: F3 minus F2, CI lower bound above 0",
+      "public test family top-1: F3 minus F2, CI lower bound above 0"
+    ],
+    "reported": "family micro-F1 top-1 and up to 3 families (threshold 0.25, not re-tuned); family top-1 on the look-alike subset = cases whose gold family is one of T1598, T1566, T1486, T1560, T1140, T1027, T1059, T1105, T1003, T1555 (fixed from F2's dev confusions before training); ECE; every checkpoint's dev curve"
+  },
+  "stop_rules": [
+    "a checkpoint does not reload",
+    "the loss is not finite",
+    "more than 1% of a split's cases end in error"
+  ],
+  "confirmation_runs": "the selected checkpoint once on CTI-HAL, public test and AnnoCTR test; nothing is chosen, refit or rerun because of a confirmation result",
+  "adoption": "none: an experiment, no product wiring",
+  "informed_by": "F2's dev predictions and error analysis, F2's confirmation results (docs 21.3.18), a laptop pilot (100 train rows, 30 dev cases; mechanics only). No F3 model exists.",
+  "amendments": [
+    {
+      "id": 1,
+      "date": "2026-10-13",
+      "before": "any F3 training",
+      "change": "compute is a RunPod secure RTX A6000 (48 GB, $0.59/h) instead of an RTX 4090",
+      "reason": "no secure or community RTX 4090 was free",
+      "deviation": "GPU floating-point differences against F2 (RTX 4090); same code, data, seed and settings",
+      "informed_by": "nothing from F3 scores (none exist)"
+    },
+    {
+      "id": 2,
+      "date": "2026-10-13",
+      "before": "the restarted F3 training",
+      "change": "the first F3 run (RTX A6000, pod 7eosiv0hp8umf4) was stopped by RunPod at 19:19 UTC after 30,919 of 49,454 training examples (5 of 8 checkpoints); it is discarded and F3 is retrained from scratch on a RunPod secure RTX 4090, the GPU of the original registration and of F2",
+      "reason": "the pod was stopped by the platform, not by the experiment; a mid-run resume would lose the optimiser state",
+      "deviation": "none against the original registration (amendment 1's GPU change no longer applies); the discarded run's dev scores (checkpoints 0 to 30,919) were seen and are reported as such, nothing was chosen from them",
+      "informed_by": "the discarded run's dev curve only (no test or CTI-HAL score exists)"
+    }
+  ]
+}

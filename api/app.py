@@ -20,7 +20,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from api import serializers
-from api.auth import current_user, install_auth
+from api.auth import current_user, install_auth, require_admin
 from apt_classifier.config import Settings, get_settings
 from apt_classifier.report import EXPORT_KINDS
 from apt_classifier.service import (
@@ -83,6 +83,8 @@ class ElasticImportIn(BaseModel):
 
 def describe_error(exc: BaseException) -> str:
     text = str(exc) or type(exc).__name__
+    if "Local LLM" in text:
+        return f"The local LLM (Ollama) failed; check `make llm-check`. {text[:240]}"
     if "402" in text or "Payment Required" in text:
         return "OpenRouter refused the request: the account has no credit left (402)."
     if "401" in text and "openrouter" in text.lower():
@@ -171,6 +173,7 @@ def create_app(
             svc.engine.attribution_thresholds,
             svc.summary_for(state),
             top3=svc.top3_summary(state),
+            model_opinion=svc.model_opinion(case_id, state),
         )
 
     @app.get("/api/cases")
@@ -310,6 +313,23 @@ def create_app(
         svc.restart_interview(case_id)
         return svc.interview(case_id)
 
+    @app.get("/api/cases/{case_id}/interview/pilot-log")
+    def pilot_log(case_id: str, svc: CaseService = Depends(get_service)) -> list[dict[str, Any]]:
+        # software-question pilot records (docs 21.3.15 C): no owner, user, e-mail or note text
+        return svc.pilot_log(case_id)
+
+    @app.get("/api/pilot/software-questions.jsonl")
+    def pilot_log_all(
+        svc: CaseService = Depends(get_service), _: User = Depends(require_admin)
+    ) -> Response:
+        rows = svc.pilot_log_all()
+        content = "".join(json.dumps(row, sort_keys=True, default=str) + "\n" for row in rows)
+        return Response(
+            content,
+            media_type="application/x-ndjson",
+            headers={"Content-Disposition": 'attachment; filename="software-questions.jsonl"'},
+        )
+
     @app.post("/api/cases/{case_id}/elastic/search")
     def elastic_search(
         case_id: str, body: ElasticSearchIn, svc: CaseService = Depends(get_service)
@@ -342,6 +362,13 @@ def create_app(
     @app.post("/api/cases/{case_id}/review")
     def run_review(case_id: str, svc: CaseService = Depends(get_service)) -> dict[str, Any]:
         svc.run_review(case_id)
+        return _case(svc, case_id)
+
+    @app.post("/api/cases/{case_id}/model-opinion")
+    def ask_model_opinion(case_id: str, svc: CaseService = Depends(get_service)) -> dict[str, Any]:
+        # one paid request to a cloud model, only when the analyst asks; the answer is shown
+        # beside the product's own and changes nothing else in the case
+        svc.ask_model_opinion(case_id)
         return _case(svc, case_id)
 
     @app.post("/api/cases/{case_id}/cyberre")

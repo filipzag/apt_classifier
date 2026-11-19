@@ -1,0 +1,311 @@
+{
+  "schema": "attribution_prereg/1",
+  "id": "store_text_lead_rule_2026-11-10",
+  "status": "registered on the product owner's go (2026-11-10: \"Write up + register\"); nothing has run on the decisive set; the decisive run needs its own go",
+  "title": "Store text as a ranking-only lead: on reports the product does not name, does a clear first choice of the dated store's text member put the right ATT&CK group first more often on the decisive set?",
+  "registered": "2026-11-10",
+  "request": "the product owner asked for a review of step 5b's result and method and for a decision on next steps (2026-11-10), then chose \"Write up + register\": write the review up, register the lead rule for the decisive set, and ask again before the decisive run",
+  "background": "store text (the dated store's text member: one word document per ATT&CK group from the posts a report may read) is the strongest single member on the fresh reports at the behaviour reading (20 of 44 and 7 of 12 first alone; the product 10 and 4), yet three routes for it through the fusion or a combiner failed: the weight choice (amendment 2 of knowledge_store_decisive_2026-11-04), its own refitted combiner (amendment 4) and a combiner trained on dated store posts (store_training_lists_2026-11-09). The review of 2026-11-10 found why: the combiner only reorders the fused top 20, and what marks a good store-text answer, its lead over its own second choice, is not among its features. A rule outside the fusion that uses exactly that lead paid on the development sets. It changes no name, so it cannot add a wrong name, which is what stopped the second attempt",
+  "question": "On the known reports of the decisive set at the behaviour reading, each report reading only store posts available before its own date, does the product with the rule put the right ATT&CK group first more often than the product alone?",
+  "role": "the first and only use of the decisive set (vendor reports published 2025-01-01..2026-02-28, frozen 2026-11-04, never read) for store text: once this test has run, the set is spent for store-text questions and any later idea waits for the confirmation set. Descriptive only (48 known reports, below the registered 60). Evaluation only, local only, never tuned on",
+  "made_before": "anything ran on the decisive set and before any post of the decisive window was sampled or inspected. The rule, its threshold and the scoring script were fixed on store posts published before 2025 and on the two fresh sets (posts from 2026-03-01), all development data for this programme",
+  "rule": {
+    "statement": "on a report the product does not name, store text's first choice leads the ranking when store text's margin is at least the threshold; otherwise the product's leader stays",
+    "not_named": "the product's result is neither a single group nor a documented cluster (its stage is neither known_group_hypothesis nor known_cluster_hypothesis)",
+    "margin": "store text's first score minus its second; its scores are shares that sum to 1 over the groups it scores. No margin, and so no lead, when it scores fewer than two groups, which includes a report without a date (it reads no post)",
+    "names": "a name the product gives is never changed and the rule never names: a named report is left exactly as the product has it",
+    "leader": "the leading group may be one the product did not shortlist; equal store-text scores are ordered by group id",
+    "top_five": "the product's first five with a lead moved to the front",
+    "right": "the leader is the report's label or one of the alternatives its set accepts",
+    "product_leader": "the product's first choice. Where the product reports no leader (too little evidence: fewer than two accepted techniques) its leader is the first group of its ranking, as the benchmark counts it; none if it ranked nothing"
+  },
+  "threshold": {
+    "value": 0.0131,
+    "derivation": "the smallest margin in the top half of the store-text margins of the store training posts published before 2024-01-01 that have a margin (known and open-set posts together, whole store, behaviour reading): 214 posts, the 107th largest margin, 0.0131 to four decimals (the next larger is 0.0132, the next smaller 0.0125). The same cut at the strict reading is 0.0128; one threshold serves both readings. Of an odd number of margins the middle one counts as top half",
+    "how_the_share_was_chosen": "in the review of 2026-11-10, after looking at the 2024 store posts and both fresh sets: every share from the top 80% to the top 40% gained there and the top half was taken as the plain middle. Those sets are in-sample for the share; the decisive set played no part",
+    "fixed": "the constant THRESHOLD in the script is what counts. The script's threshold command only reprints the derivation; if a rerun gave another fourth decimal, 0.0131 would stay and the difference would be reported"
+  },
+  "store_text_alone": {
+    "member": "apt_classifier/knowledge_store/members.py as committed (StoreMembers.text_scores through StoreState.set_case): not fused, no combiner; the store members' weights stay 0",
+    "what_a_report_reads": "the pinned copy of the store for its date (every decisive report is dated before 2026-03-01 and reads the before_2025 copy: actor names through ATT&CK 16.1 and MISP 3735fd37), the posts available strictly before the report's date (the day its own post became available, else its publication day), without its own post, that post's copies and posts sharing half of its statements",
+    "text": "the report's statements as the benchmark's own functions load, cut and mask them at the reading of the product run (behaviour: also masked with every software name the store knows, 1,685 names), joined by spaces",
+    "two_stores": "the whole store (primary) and the store without any post of the report's own publisher (Kaspersky's two sources count as one). The second shows how much of a lead is the publisher's writing rather than the actor",
+    "store_files": {
+      "whole store (masking names)": "da1da80adca9c75b1331c947",
+      "before_2025 (the decisive set and the store training posts)": "26f77c2002c00de385d34dd1",
+      "before_2026_03 (the fresh sets)": "e71cacfadf733da7d10f5219"
+    },
+    "every_group": "store text is read over every group it scores, not only the groups the product shortlists (the product's own member, were it switched on, would keep the shortlisted groups only)"
+  },
+  "product_arm": "the baseline arm of knowledge_store_decisive_2026-11-04, unchanged: the product's defaults at the commit that registers this file, local pipeline (no API key, local LLM off, technique head service on), store members off; scripts/attribution_benchmark.py --report-set fresh --cti-hal data/benchmarks/decisive/reports.jsonl --open-set data/benchmarks/decisive/open_set.jsonl --report-observations 0, once with --anonymize behavior --mask-store-names and once with --anonymize strict",
+  "scoring": {
+    "script": "scripts/store_text_lead.py (sha256 under code): store-text on the two frozen files, then score --frozen docs/preregistration/knowledge_store_decisive_2026-11-04.json for each reading's product run, then verdict on the two score files",
+    "refused": "the score step refuses a product run with a store member voting or without an active combiner, a cut or sampled run, another ATT&CK release, report files other than the store-text file's (by sha256), a behaviour run masked with another number of store names, masking that differs between the two runs (the hash of the masking rules and the masking totals the benchmark records) and files that do not hold the same reports with the same labels and statement counts. For the registered run (--frozen) it also refuses any registration but knowledge_store_decisive_2026-11-04, report files other than the frozen ones, a threshold other than the registered one, a pipeline other than the local one or with other settings overrides, a product run without the technique head, a store-text file written by another version of the script or without its masking record, store files other than the registered whole-store and before_2025 files, and a report that read another copy of the store. The verdict step refuses score files of different report sets, stores, thresholds or script versions",
+    "runs": "one product run per reading and one store-text run. A run that stops for a technical reason (a crash, a lost GPU, low memory) is repeated unchanged and reported; nothing is repeated because of its result",
+    "no_engine_change": "the script applies the rule to the product run's output; no engine code, setting or model changes for this test",
+    "pre_flight": "before any file of the decisive set is read, the run script runs the registered script end to end on fresh2 (development) and stops unless its score files equal the registered development ones and the masking of the two runs was compared. A failed pre-flight is settled by an amendment before the decisive set is touched",
+    "run_script": "data/knowledge_store/lead_rule/run_decisive.sh --go (local): the registered script's hash, the GPU, the technique head service before and after each product run and 8 GB of free memory are checked; then the pre-flight, the product run at both readings, store text alone, score --frozen and verdict. A finished step is not repeated"
+  },
+  "readings": {
+    "primary": "behaviour reading, whole store, known reports: right group first, the product with the rule against the product, paired: reports gained and lost, the bootstrap 95% interval of the difference (10,000 report resamples, seed 7) and the exact two-sided McNemar test. The interval is taken over the known reports in the order of the report file (the 251st and 9,751st of the 10,000 sorted differences)",
+    "secondary": "the same with the own publisher hidden; both at the strict reading; the right group in the top five; the per-group average of first places; how many leads are right and wrong; leads on open-set reports (no ATT&CK group is right there, so a lead replaces one wrong leader by another: counted, not scored); and the product's names, which the rule leaves unchanged, as a check"
+  },
+  "decision_guide": {
+    "supported": "the rule counts as supported when both hold: (1) at the behaviour reading with the whole store the gains outnumber the losses beyond chance, by the exact one-sided sign test on the changed reports at p <= 0.05 (for example +5 -0, +7 -1 or +9 -2); (2) with the own publisher hidden, and at the strict reading with either store, the rule gains at least as many reports as it loses. The script's verdict command applies exactly this. The one-sided sign test decides, not the two-sided McNemar value reported beside it (+5 -0: sign test 0.031, McNemar 0.0625)",
+    "if_supported": "the rule is wired into the engine behind a setting, default off: no fusion or combiner input changes (the combiner fingerprint stays), a lead never names and never raises a confidence label. The result stays descriptive (48 known reports), so a default change waits for the confirmation set or the product owner's decision, after the usual gate (folds, CTI-HAL, Elastic) on the wired rule. The wired rule must read store text over every group it scores, as scored here",
+    "if_not_supported": "store text is closed for this store: no further rule, fusion or combiner attempt is scored on the decisive set, and the question waits for the confirmation set",
+    "power": "48 known reports show only a large effect: supported needs a net gain of about five reports. On the first fresh set the rule gained 9 and lost 1 of 44 at the behaviour reading. An effect half that size would most likely come out as not supported; more gains than losses without reaching the level is reported as inconclusive, not as evidence against the rule"
+  },
+  "development_evidence": {
+    "status": "development data, read after the fact and in-sample for the share behind the threshold. Product side: the default-product runs of 2026-11-05 (data/knowledge_store/step5/check/fresh*_baseline.json), which the score step reproduces exactly (fresh: 10 and 19 of 44 first, names 0 and 8 with 1 wrong; fresh2: 4 and 5 of 12 first, names 0 and 3)",
+    "how": "fresh2 ran through the script end to end (2026-11-10, its first version, sha256 0ac66adc...7ccc; the later changes leave how a row is computed untouched and add the record of the masking). For fresh, the store-text scores are those of the review's run of the same member code (rounded to five decimals), put into the script's file format; on fresh2 the review's scores equal the script's own on all 42 rows with both stores (same first choice and order, largest margin difference 0.00001). Every score and verdict file was made again with the registered version of the script: the same numbers. The script's own store-text step on fresh and on the store training posts was stopped by the session's low-memory guard (the laptop had under 1 GB free; the step needs about 1.1 GB) and was not repeated, at the product owner's instruction to keep heavy CPU and memory work off the laptop; it is a check of the script, not of the rule, and the pre-flight repeats it on fresh2 before the decisive run",
+    "right_group_first": {
+      "fresh_behaviour": {
+        "known": 44,
+        "product": 10,
+        "whole_store": {
+          "first": 18,
+          "gained": 9,
+          "lost": 1,
+          "interval_95": [
+            0.0682,
+            0.3182
+          ],
+          "mcnemar_p": 0.0215,
+          "sign_test_p": 0.0107,
+          "per_group": [
+            0.1686,
+            0.2407
+          ],
+          "top_five": [
+            20,
+            25
+          ],
+          "leads": 17,
+          "leads_right": 14,
+          "open_set_leads": "10 of 54"
+        },
+        "own_publisher_hidden": {
+          "first": 16,
+          "gained": 7,
+          "lost": 1,
+          "interval_95": [
+            0.0227,
+            0.2727
+          ],
+          "mcnemar_p": 0.0703,
+          "sign_test_p": 0.0352,
+          "per_group": [
+            0.1686,
+            0.1927
+          ],
+          "top_five": [
+            20,
+            24
+          ],
+          "leads": 13,
+          "leads_right": 10,
+          "open_set_leads": "8 of 54"
+        }
+      },
+      "fresh_strict": {
+        "known": 44,
+        "product": 19,
+        "product_names": "8 on known reports (7 right, 1 wrong), 2 on the open set; the rule reads the other 36 known reports",
+        "whole_store": {
+          "first": 28,
+          "gained": 9,
+          "lost": 0,
+          "interval_95": [
+            0.0909,
+            0.3182
+          ],
+          "mcnemar_p": 0.0039,
+          "sign_test_p": 0.002,
+          "per_group": [
+            0.4286,
+            0.594
+          ],
+          "top_five": [
+            22,
+            30
+          ],
+          "leads": 17,
+          "leads_right": 14,
+          "open_set_leads": "10 of 54"
+        },
+        "own_publisher_hidden": {
+          "first": 24,
+          "gained": 6,
+          "lost": 1,
+          "interval_95": [
+            0.0,
+            0.2273
+          ],
+          "mcnemar_p": 0.125,
+          "sign_test_p": 0.0625,
+          "per_group": [
+            0.4286,
+            0.4927
+          ],
+          "top_five": [
+            22,
+            27
+          ],
+          "leads": 12,
+          "leads_right": 9,
+          "open_set_leads": "8 of 54"
+        }
+      },
+      "fresh2_behaviour": {
+        "known": 12,
+        "product": 4,
+        "whole_store": {
+          "first": 7,
+          "gained": 3,
+          "lost": 0,
+          "interval_95": [
+            0.0,
+            0.5
+          ],
+          "mcnemar_p": 0.25,
+          "sign_test_p": 0.125,
+          "per_group": [
+            0.4,
+            0.5667
+          ],
+          "top_five": [
+            8,
+            9
+          ],
+          "leads": 5,
+          "leads_right": 5,
+          "open_set_leads": "4 of 9"
+        },
+        "own_publisher_hidden": {
+          "first": 5,
+          "gained": 1,
+          "lost": 0,
+          "interval_95": [
+            0.0,
+            0.25
+          ],
+          "mcnemar_p": 1.0,
+          "sign_test_p": 0.5,
+          "per_group": [
+            0.4,
+            0.5
+          ],
+          "top_five": [
+            8,
+            8
+          ],
+          "leads": 4,
+          "leads_right": 4,
+          "open_set_leads": "2 of 9"
+        }
+      },
+      "fresh2_strict": {
+        "known": 12,
+        "product": 5,
+        "product_names": "3 on known reports (3 right), none on the open set; the rule reads the other 9 known reports",
+        "whole_store": {
+          "first": 8,
+          "gained": 3,
+          "lost": 0,
+          "interval_95": [
+            0.0,
+            0.5
+          ],
+          "mcnemar_p": 0.25,
+          "sign_test_p": 0.125,
+          "per_group": [
+            0.4333,
+            0.6
+          ],
+          "top_five": [
+            7,
+            8
+          ],
+          "leads": 5,
+          "leads_right": 5,
+          "open_set_leads": "4 of 9"
+        },
+        "own_publisher_hidden": {
+          "first": 6,
+          "gained": 1,
+          "lost": 0,
+          "interval_95": [
+            0.0,
+            0.25
+          ],
+          "mcnemar_p": 1.0,
+          "sign_test_p": 0.5,
+          "per_group": [
+            0.4333,
+            0.5333
+          ],
+          "top_five": [
+            7,
+            7
+          ],
+          "leads": 3,
+          "leads_right": 3,
+          "open_set_leads": "2 of 9"
+        }
+      }
+    },
+    "decision_guide_on_these_sets": "fresh: supported (in-sample). fresh2: not supported, because 12 reports cannot reach the level (+3 -0 gives p 0.125); the other three checks hold",
+    "threshold_check": "the script's threshold function on the review's store-text scores of the store training posts: 214 posts before 2024-01-01 with a margin, 0.0131 at the behaviour reading and 0.0128 at strict",
+    "where_the_gains_are": "fresh, behaviour reading, whole store: APT28 three reports, Mustang Panda two, TeamPCP two, The Gentlemen one, Sandworm Team one; the one loss is a VOID MANTICORE report the product had right, where store text led Scattered Spider",
+    "local_files": "data/knowledge_store/lead_rule/ (local only, never committed): fresh2_store_text.json from the script's first version; fresh2_*_score.json and fresh2_verdict.json from the registered version; review_scratch/ (the review's store-text scores and the scripts that made them), dev_from_review.py and its outputs for fresh and the threshold; mask_check.py; run_decisive.sh",
+    "masking_check": "the score step's comparison of the two runs' masking was tried on real files: loading and masking fresh2 and fresh as the store-text step does gives the masking totals, rules hash, number of store names and per-report statement counts the product runs of 2026-11-05 recorded (data/knowledge_store/lead_rule/mask_check.py; both sets at both readings, 2026-11-10)",
+    "local_files_sha256": {
+      "data/knowledge_store/lead_rule/fresh2_store_text.json": "6f01db45b186c402a7a1daa338804bf1fd519a90281930a234060805df4ce0ec",
+      "data/knowledge_store/lead_rule/fresh2_behavior_score.json": "ca94c970eef1cf8ab862a81c6ddac7254e031ff9f696878b344b88f46febacb3",
+      "data/knowledge_store/lead_rule/fresh2_strict_score.json": "e4a9e11d7c4da25071cd48a116d52e8722cfe9d81ab397245aa8c2d9a174bb33",
+      "data/knowledge_store/lead_rule/fresh2_verdict.json": "c4de4ff586a2e6d069c37b0a775aefd6192d3070c1d7bf888390615e5b8286d0",
+      "data/knowledge_store/lead_rule/fresh_behavior_score_from_review.json": "79985b2ac58c30f9b7060f680b21eaeff7b77fbe59dbb67118e531e8116c8aba",
+      "data/knowledge_store/lead_rule/fresh_strict_score_from_review.json": "552bacccad75c3957f08fe669ed4d589d7fef0296d0eda01bf2dec801635d365",
+      "data/knowledge_store/lead_rule/dev_from_review.json": "f2161ea0f7d5ee8834864fa7910c9c662450414e8a629ae44d7d22163d76b804",
+      "data/knowledge_store/lead_rule/dev_from_review.py": "8132a537b1420a57877fa6d5f89722181c617a668bd42adbc2fa61ddc006adfc",
+      "data/knowledge_store/lead_rule/review_scratch/store_text_fresh.json": "45ef78778324e762eb45d5bea1ec23cf658ed46cc946f81c0507a08ff8bff1fd",
+      "data/knowledge_store/lead_rule/review_scratch/other_publishers_fresh.json": "5c42b60045431748255d2f79323e38a3a7fdebaadfb905c4ca88ee3e5a6e821e",
+      "data/knowledge_store/lead_rule/review_scratch/store_text_alone.json": "4f1412d58ce37a6c3abd38fe52a29fe928cb97cb4d5e007d2432c034020e77a8",
+      "data/knowledge_store/lead_rule/review_scratch/other_publishers_train.json": "f6321bfb4410e428d48a54862eb35e38bcb65c4a2a34ccc55fdaff7c116c8206"
+    }
+  },
+  "caveats": [
+    "every decisive report reads the before_2025 copy with its older actor-name lists (ATT&CK 16.1, MISP 3735fd37), while the fresh reports read lists from February 2026: expect a smaller gain than on fresh",
+    "the threshold comes from posts before 2024, which meet a thinner store. The margin is a difference of shares, so it tends to shrink as store text scores more groups; the rule may fire less or more often on the decisive set than on the development sets",
+    "part of the gain with the whole store comes from the report's own publisher: on the two fresh sets together 12 gains with the whole store and 8 with the publisher hidden at the behaviour reading. Both are reported; the whole store is how the product would read a report",
+    "the gains sit on a few heavily reported groups, so the per-group average rises less than the count (fresh, behaviour: 0.17 to 0.24)",
+    "a lead can be wrong: on fresh at the behaviour reading 3 of 17 leads on known reports were wrong, one of them replacing a right product leader, and the rule led on 10 of 54 open-set reports, where no group is right. A lead is shown as the first candidate, never as a name",
+    "the behaviour masking leaves the publisher's and some product, victim and tool names in the statements (seen in the review: proofpoint, litellm, covenant, notdoor), so store text can match words that are not behaviour",
+    "the 2024 store posts have no default-product run, so the rule's effect on them is known only against a combiner fitted for step 5b (15 to 22 of 60 at the behaviour reading, an approximation)",
+    "a report from a publisher the store does not hold reads the same store in both arms (Fortinet's blog forbids crawling, so the store holds none of its posts)",
+    "the benefit in the product needs a store that is kept current; the refresh is run by hand, not scheduled",
+    "labels are vendor attribution under the name-count rule after the registered label review",
+    "a product report without a leader (too little evidence) is read by the first group of the product's ranking; none occurred on the development sets, so this path is covered by tests only"
+  ],
+  "code": {
+    "script": "scripts/store_text_lead.py",
+    "script_sha256": "1d44da2dfc13195b24e0cdc55e3dd0b1dcf01b8863d88724cf2ea6693302c248",
+    "tests": "tests/test_store_text_lead.py (59 tests); one of them pins the script's hash to this file, so an edit before the decisive run needs an amendment",
+    "review": "before the hash was taken, five independent reviewers read the script (the rule, the statistics, the input checks, equivalence with the benchmark's loading, masking and store case, the tests) and a second reviewer checked every finding. No error in the rule or the statistics: the fresh2 score files were recomputed independently, and the sign test, McNemar and the bootstrap interval were checked by exact arithmetic. 15 gaps were confirmed and all closed: a product report without a leader is now read by the first group of its ranking (as the benchmark counts it); the registered run refuses a product run without the technique head or an active combiner, a store-text file from another version of the script or from other store files, a report that read another copy of the store, and masking that differs between the two runs; the verdict refuses score files that do not belong together and compares the sign test exactly; seven test gaps were closed (the margin, the masked text, the copy rule, the date pin, the loading and masking calls, --frozen on the command line, the 0.05 level)",
+    "registered_on": "worktree on a18222d (apt-attribution-methods-0b93ee), committed with this file",
+    "not_changed": "apt_classifier/ engine code, settings defaults, the decisive set and its builder"
+  },
+  "cost": {
+    "credit": "no OpenRouter credit",
+    "product_run": "117 reports at two readings, about 21 s each: about 1.4 hours of laptop GPU with the technique head service running; it needs about 8 GB of free memory",
+    "store_text": "about 20 minutes of one CPU core and about 1.1 GB of memory (117 reports at about 10 s). This step has no GPU path: it is word counting in the product's own member code, and a GPU process would need more memory, not less",
+    "scoring": "seconds"
+  },
+  "steps_each_needs_a_go": [
+    "register this file and amendment 5 of knowledge_store_decisive_2026-11-04: done 2026-11-10",
+    "the decisive run (run_decisive.sh --go: pre-flight on fresh2, the product run at both readings, store text alone, score and verdict): not started; needs the product owner's go and a laptop with free memory",
+    "wiring the rule into the engine behind a setting, default off: only if supported; needs a go",
+    "any default change: the confirmation set or the product owner's decision"
+  ]
+}

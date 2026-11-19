@@ -1,4 +1,4 @@
-import { CircleDashed, CircleDot, Layers, ShieldCheck } from 'lucide-react'
+import { CircleDashed, CircleDot, Layers, Link2, ShieldCheck } from 'lucide-react'
 
 import type { Stage } from '../api/types'
 import { cn } from '../lib/utils'
@@ -36,12 +36,22 @@ export const STAGE_META: Record<
     summary: 'One documented group clears the evidence bar.',
     advice: 'Check the documented-overlap note and run the independent review before reporting.',
   },
+  known_cluster_hypothesis: {
+    label: 'Named documented-overlap cluster',
+    short: 'Named cluster',
+    tone: 'emerald',
+    summary:
+      'Two groups ATT&CK documents as overlapping together clear the evidence bar; the evidence does not separate them.',
+    advice: 'Report the cluster, not either member, and run the independent review first.',
+  },
 }
 
 export function stageIcon(stage: Stage | null | undefined, className = 'size-4') {
   switch (stage) {
     case 'known_group_hypothesis':
       return <ShieldCheck className={className} aria-hidden />
+    case 'known_cluster_hypothesis':
+      return <Link2 className={className} aria-hidden />
     case 'known_group_shortlist':
       return <Layers className={className} aria-hidden />
     case 'unresolved_activity_cluster':

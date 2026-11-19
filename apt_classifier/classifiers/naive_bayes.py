@@ -1,4 +1,4 @@
-from math import exp
+from math import exp, fsum
 
 from apt_classifier.classifiers.base import (
     ClassifierContext,
@@ -25,23 +25,30 @@ class BernoulliNaiveBayesClassifier:
 
     def classify(self, context: ClassifierContext) -> ClassifierResult:
         evidence = ranking_techniques(context)
-        applicable = bool(evidence or context.negative_techniques)
+        negatives = context.negative_techniques
+        applicable = bool(evidence or negatives)
+        documented_penalty = self.negative_weight * safe_log(1.0 - self.alpha)
+        undocumented_penalty = self.negative_weight * safe_log(1.0 - self.beta)
         scores: dict[str, float] = {}
         for group_id in group_ids(context):
             known = group_techniques(context, group_id)
             matches = hierarchy_matches(context, group_id)
-            score = safe_log(prior_for(context, group_id))
+            terms = [safe_log(prior_for(context, group_id))]
             for technique_id, confidence in evidence.items():
                 match = matches.get(technique_id)
                 if match is not None:
                     theta = self.beta + (self.alpha - self.beta) * match.factor
                 else:
                     theta = self.beta
-                score += float(confidence) * safe_log(theta)
-            for technique_id in context.negative_techniques:
-                theta = self.alpha if technique_id in known else self.beta
-                score += self.negative_weight * safe_log(1.0 - theta)
-            scores[group_id] = score
+                terms.append(float(confidence) * safe_log(theta))
+            if negatives:
+                # negated techniques are counted, not visited in set iteration order
+                documented = sum(1 for technique_id in negatives if technique_id in known)
+                terms.append(documented * documented_penalty)
+                terms.append((len(negatives) - documented) * undocumented_penalty)
+            # fsum is exactly rounded: the score never depends on the order of the terms (dict or
+            # set iteration, PYTHONHASHSEED), and groups with the same terms tie exactly
+            scores[group_id] = fsum(terms)
         return build_result(self.name, context, scores, applicable=applicable)
 
 
@@ -53,5 +60,5 @@ def posterior(result: ClassifierResult, temperature: float = 1.0) -> dict[str, f
     scaled = {entry.group_id: entry.score / temperature for entry in result.entries}
     maximum = max(scaled.values())
     weights = {group_id: exp(score - maximum) for group_id, score in scaled.items()}
-    total = sum(weights.values())
+    total = fsum(weights.values())
     return {group_id: value / total for group_id, value in weights.items()}

@@ -1,0 +1,24 @@
+{
+  "description": "Registered label review (prereg fresh_reports_head_to_head_2026-10-28, label_review; extended to every known report on 2026-10-29 after the name-dictionary bugs): reports whose rule label disagrees with the vendor's own attribution, or that attribute to no single actor, are excluded, never relabelled. Decided from the post text before any system ran on the set.",
+  "reviewed": "2026-10-29",
+  "exclude": {
+    "sentinelone-d81f6b5582f8": "fast16: tied to the Shadow Brokers leak, which implies an ATT&CK group (Equation); no clean 'not a known group' answer",
+    "talos-03fe9294fdac": "IR trends roundup: several actors (Sinobi, Storm-2603, UAT-11764)",
+    "zscaler-72aa9ac99bea": "'Alibaba' is a MISP synonym of Cleaver; the post is about an Alibaba AI-agent incident, not Cleaver",
+    "recordedfuture-f402788bbfff": "'Alibaba' MISP synonym; North Korean internet behaviour study, not Cleaver",
+    "cisa-4ac577507d97": "'Alibaba' MISP synonym; Chinese AI distillation advisory, not Cleaver",
+    "proofpoint-2c3cd87827a0": "roundup of several actors around the Iran conflict (TA453, TA473, others)",
+    "hunt-72f38e3e16c4": "DinDoor: attribution split between MuddyWater and TAG-150 (shared platform)",
+    "securelist-bf012f0f562c": "container-attack overview; TeamPCP only an example",
+    "proofpoint-b9f94f96502b": "the vendor tracks UNK_DeadDrop as a cluster distinct from Contagious Interview",
+    "recordedfuture-311720d68b8c": "roundup of ransomware groups (Conti, ALPHV, LockBit, BlackByte)",
+    "recordedfuture-4d32b8df5132": "roundup of extortion groups (Lapsus$, RansomHouse, ...)",
+    "unit42-5ef78c2731f3": "npm threat-landscape overview, a living document with content from before the window",
+    "securelist-f392484e6422": "'Mirage' (a Ke3chang alias) inside 'Mirage Kitten', which the vendor equates with UNC1549, not Ke3chang",
+    "securelist-b08967e08084": "'Mirage' inside 'Mirage Kitten' (UNC1549), not Ke3chang",
+    "silentpush-0626864059e6": "Amgen breach: the vendor states no confirmed attribution",
+    "proofpoint-568ad33096e6": "several state-aligned actors use the BlueMoon exploit kit",
+    "volexity-54f1dc82c13b": "several Chinese actors chain the same zero-days",
+    "talos-73645a02bd83": "Japan ransomware roundup: The Gentlemen and Qilin"
+  }
+}

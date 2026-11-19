@@ -247,8 +247,21 @@ def summarize_attribution(payload: dict[str, Any]) -> dict[str, Any]:
         "leader_probability_auc",
         "top3",
         "cluster_top3",
+        "same_activity_top1",
+        "same_activity_top3",
         "top1_given_top3",
         "pairwise_12",
+        "named_cluster_correct",
+        "named_cluster_wrong",
+        "named_cluster_recovered",
+        "cluster_coverage",
+        "named_risk_single",
+        "top1_count",
+        "top1_wilson95",
+        "lenient_top1",
+        "lenient_top3",
+        "group_macro_top1",
+        "open_set",
         "llm",
     )
     return {
@@ -273,6 +286,40 @@ def cti_hal_headline_warning(payload: dict[str, Any] | None) -> str | None:
     )
 
 
+def elastic_headline_warning(payload: dict[str, Any] | None) -> str | None:
+    """The Elastic Security Labs headline is the strict anonymization level (docs 21.3.4c)."""
+    if payload is None:
+        return None
+    parameters = payload.get("parameters") or {}
+    if (
+        parameters.get("anonymization") == "strict"
+        and parameters.get("report_observations") is None
+        and parameters.get("report_sample_seed") is None
+        and parameters.get("sample") is None
+        and parameters.get("limit") is None
+    ):
+        return None
+    return (
+        "elastic_attribution is not the headline run (strict level, every report, every "
+        "sentence; docs 21.3.4c); regenerate it with `make benchmark-elastic`"
+    )
+
+
+def fold_leak_control_warning(payload: dict[str, Any] | None) -> str | None:
+    """ATT&CK fold runs hide each fold's held-out sentences from the dense store and, since
+    2026-10-03, from the BM25 index (``parameters.leak_control == "dense+lexical"``); an
+    unmarked fold artifact predates that and its fold numbers are optimistic (docs 21.3.5)."""
+    if payload is None or payload.get("benchmark") != "attribution_text_heldout":
+        return None
+    if (payload.get("parameters") or {}).get("leak_control") == "dense+lexical":
+        return None
+    return (
+        "attribution_text_heldout was measured before held-out sentences were hidden from the "
+        "BM25 index (no parameters.leak_control); its fold numbers are optimistic, regenerate it "
+        "with `make benchmark-attribution` (docs 21.3.5)"
+    )
+
+
 def compose(
     *,
     public: dict[str, Any] | None,
@@ -291,6 +338,10 @@ def compose(
     cti_hal_attribution_production_path: Path | None = None,
     cti_hal_attribution_as_reported: dict[str, Any] | None = None,
     cti_hal_attribution_as_reported_path: Path | None = None,
+    elastic_attribution: dict[str, Any] | None = None,
+    elastic_attribution_path: Path | None = None,
+    elastic_attribution_as_reported: dict[str, Any] | None = None,
+    elastic_attribution_as_reported_path: Path | None = None,
 ) -> dict[str, Any]:
     report: dict[str, Any] = {
         "generated_at": datetime.now(UTC).isoformat(),
@@ -328,6 +379,15 @@ def compose(
             if cti_hal_attribution_as_reported_path is not None
             and cti_hal_attribution_as_reported is not None
             else None,
+            "elastic_attribution": _source_record(elastic_attribution_path, elastic_attribution)
+            if elastic_attribution_path is not None
+            else None,
+            "elastic_attribution_as_reported": _source_record(
+                elastic_attribution_as_reported_path, elastic_attribution_as_reported
+            )
+            if elastic_attribution_as_reported_path is not None
+            and elastic_attribution_as_reported is not None
+            else None,
         },
         "gates": gates,
         "public_heldout": summarize_public(public) if public else None,
@@ -354,11 +414,28 @@ def compose(
         "cti_hal_attribution_production": summarize_attribution(cti_hal_attribution_production)
         if cti_hal_attribution_production
         else None,
+        # Elastic Security Labs posts, every prose sentence, strict anonymization (attribution
+        # prose, cluster names, places and sponsors removed) with the open set inside; the
+        # as-reported run sits beside it (docs 21.3.4c). Local evaluation only.
+        "elastic_attribution": summarize_attribution(elastic_attribution)
+        if elastic_attribution
+        else None,
+        "elastic_attribution_as_reported": summarize_attribution(elastic_attribution_as_reported)
+        if elastic_attribution_as_reported
+        else None,
         "superseded": "data/audits/superseded/README.md",
     }
-    warning = cti_hal_headline_warning(cti_hal_attribution)
-    if warning:
-        report["warnings"] = [warning]
+    warnings = [
+        warning
+        for warning in (
+            cti_hal_headline_warning(cti_hal_attribution),
+            elastic_headline_warning(elastic_attribution),
+            fold_leak_control_warning(attribution),
+        )
+        if warning
+    ]
+    if warnings:
+        report["warnings"] = warnings
     return report
 
 
@@ -395,6 +472,14 @@ def main(argv: list[str] | None = None) -> int:
         "--cti-hal-attribution-as-reported",
         type=Path,
         default=AUDITS / "attribution_cti_hal_as_reported.json",
+    )
+    parser.add_argument(
+        "--elastic-attribution", type=Path, default=AUDITS / "attribution_elastic_current.json"
+    )
+    parser.add_argument(
+        "--elastic-attribution-as-reported",
+        type=Path,
+        default=AUDITS / "attribution_elastic_as_reported.json",
     )
     parser.add_argument("--output", type=Path, default=AUDITS / "verification_results_current.json")
     parser.add_argument("--run", action="store_true", help="regenerate public + curated first")
@@ -472,6 +557,10 @@ def main(argv: list[str] | None = None) -> int:
         cti_hal_attribution_production_path=args.cti_hal_attribution_production,
         cti_hal_attribution_as_reported=_load(args.cti_hal_attribution_as_reported),
         cti_hal_attribution_as_reported_path=args.cti_hal_attribution_as_reported,
+        elastic_attribution=_load(args.elastic_attribution),
+        elastic_attribution_path=args.elastic_attribution,
+        elastic_attribution_as_reported=_load(args.elastic_attribution_as_reported),
+        elastic_attribution_as_reported_path=args.elastic_attribution_as_reported,
     )
     if runs:
         report["benchmark_runs"] = runs

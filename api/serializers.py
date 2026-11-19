@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from apt_classifier.overlap_cluster import recorded_cluster_scope
 from apt_classifier.platforms import HOST_PLATFORMS, ledger_platforms
 from apt_classifier.report import STAGE_INFO, group_name
 
@@ -158,6 +159,50 @@ def ranking(kb: Any, state: Any, limit: int = 20) -> list[dict[str, Any]]:
     return rows
 
 
+def _related_groups(kb: Any, item: Any, *, scope: str = "documented") -> list[dict[str, Any]]:
+    """The leader's ATT&CK-related groups with the link kind: "same_activity" for links that
+    may be read as one cluster under the scope (overlap_cluster.split_related), else the kind."""
+    from apt_classifier.overlap_cluster import split_related
+
+    related = dict(getattr(item, "related_leading_groups", {}) or {})
+    leader = getattr(item, "leading_group_id", None)
+    if not related or not leader:
+        return []
+    same, other = split_related(
+        kb,
+        str(leader),
+        related,
+        scope=scope,
+        named_cluster=tuple(getattr(item, "named_cluster", ()) or ()),
+    )
+    return [
+        {"group_id": gid, "name": _name(kb, gid), "reason": reason, "link": "same_activity"}
+        for gid, reason in same
+    ] + [
+        {"group_id": gid, "name": _name(kb, gid), "reason": reason, "link": kind}
+        for gid, reason, kind in other
+    ]
+
+
+def _named_cluster(kb: Any, item: Any) -> dict[str, Any] | None:
+    members = tuple(getattr(item, "named_cluster", ()) or ())
+    if item.stage.value != "known_cluster_hypothesis" or not members:
+        return None
+    from apt_classifier.overlap_cluster import cluster_label
+
+    runner = getattr(item, "cluster_runner_up_id", None)
+    return {
+        "members": [{"group_id": gid, "name": _name(kb, gid)} for gid in members],
+        "label": cluster_label(kb, members),
+        "reason": str(getattr(item, "cluster_reason", "") or ""),
+        "separation": float(getattr(item, "cluster_separation", 0.0) or 0.0),
+        "discriminative": float(getattr(item, "cluster_discriminative", 0.0) or 0.0),
+        "probability": getattr(item, "cluster_probability", None),
+        "runner_up_group_id": runner,
+        "runner_up_name": _name(kb, runner) if runner else None,
+    }
+
+
 def decision(kb: Any, state: Any, thresholds: Any) -> dict[str, Any] | None:
     item = getattr(state, "attribution_decision", None)
     if item is None:
@@ -172,6 +217,14 @@ def decision(kb: Any, state: Any, thresholds: Any) -> dict[str, Any] | None:
         "summary": info.get("summary", ""),
         "advice": info.get("advice", ""),
         "named": item.stage.value == "known_group_hypothesis",
+        "named_kind": (
+            "group"
+            if item.stage.value == "known_group_hypothesis"
+            else "cluster"
+            if item.stage.value == "known_cluster_hypothesis"
+            else None
+        ),
+        "named_cluster": _named_cluster(kb, item),
         "leading_group_id": item.leading_group_id,
         "leading_group_name": item.leading_group_name
         or (_name(kb, item.leading_group_id) if item.leading_group_id else ""),
@@ -188,10 +241,13 @@ def decision(kb: Any, state: Any, thresholds: Any) -> dict[str, Any] | None:
             else None
         ),
         "runner_up_related": bool(getattr(item, "runner_up_related", False)),
-        "related_groups": [
-            {"group_id": gid, "name": _name(kb, gid), "reason": reason}
-            for gid, reason in (getattr(item, "related_leading_groups", {}) or {}).items()
-        ],
+        "related_groups": _related_groups(
+            kb,
+            item,
+            scope=recorded_cluster_scope(
+                state, str(getattr(thresholds, "cluster_scope", "documented") or "documented")
+            ),
+        ),
         "rationale": item.rationale,
         "cluster_id": item.cluster_id,
         "gate_mode": str(getattr(item, "gate_mode", "maturity")),
@@ -506,6 +562,7 @@ def case_payload(
     thresholds: Any,
     summary: dict[str, Any],
     top3: dict[str, Any] | None = None,
+    model_opinion: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     context = state.ledger.strategic_context
     return {
@@ -554,6 +611,9 @@ def case_payload(
             "has_question": state.current_question is not None,
         },
         "review": review(kb, state),
+        # a cloud model's second opinion as the service built it (display only); always
+        # present, null when none was asked
+        "model_opinion": model_opinion,
         "cyberre": cyberre(state),
         "intel": intel(state),
         "group_label": group_name(kb, state.fusion.entries[0].group_id)

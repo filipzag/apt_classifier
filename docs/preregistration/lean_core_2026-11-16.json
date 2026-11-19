@@ -1,0 +1,56 @@
+{
+  "id": "lean_core_2026-11-16",
+  "status": "registered 2026-11-16; nothing run on the test set (it does not exist yet)",
+  "question": "Does the lean core (one TF-IDF ranker over earlier dated store posts, plus naming only when it and the frontier model agree) beat today's product on reports published after 2026-11-03?",
+  "requested_by": "product owner, 2026-11-16 ('ok do it' after the from-scratch review; plan cheerful-meandering-puddle.md)",
+  "nature": "test; registered before the test set is built",
+  "frozen": {
+    "code_sha256": {
+      "vestige_core/corpus.py": "f50017ddfadecbf6502056d11611cbd3f8b74126a743e459f6e27ff53b7bac4b",
+      "vestige_core/decide.py": "4eb87b53a28cce6b111a709e6e856f61a47afd1e506efa0e125d0d4f013d359a",
+      "vestige_core/evaluate.py": "df8058a218e72b979e64d0b05569c6f16e7cb504f6ebc6c36de7cbb587997e3d",
+      "vestige_core/rank.py": "9a0eca9412df9845b0c47964fbb830d43a259a8231e734c3a8f9f7cc96c31a65",
+      "vestige_core/sets.py": "63a9f7c10fb9d88707f6ae68a708d63904e7a29ad84e69a7797dafa361d2b22b",
+      "vestige_core/util.py": "a0479c9fb9be2ce1b2560d12aba49ad68c04cb31f8bec0460eed07d7c420054f",
+      "scripts/core_race.py": "e3a2983cff3d5d82ac83bd68c6809c5a88551e72d97852d8ea200b67a434be40",
+      "scripts/core_corpus.py": "e66a4dbcc6dfd5995c843e6e7340f107e2fc3fb015f08d6dbb3a530028f6d523"
+    },
+    "ranker": "store text's TF-IDF (1-2-grams, min_df 2, IDF over actor documents, log1p, L2, cosine, z-score, softmax), computed incrementally; no prominence prior (--no-prior); store posts masked at the report's level (--corpus matched); actors = the ATT&CK groups the store labels",
+    "reading_of_the_store": "posts available strictly before the report's date, its own post and copies hidden (StoreMembers.hidden_for), the store pin of its date (pins.pin_for); whole store as the store holds it when the test runs",
+    "naming_rule": "name A only when the core's first choice is A and GPT-5.6 Sol (openai/gpt-5.6-sol, effort medium, the registered prompt of scripts/fresh_llm_attribution.py, id-first matching) decides 'name' with A as its first matched candidate; margin 0",
+    "readings": {"primary": "behavior", "secondary": ["strict", "behavior with the report's own publisher hidden"]}
+  },
+  "development_results": {
+    "note": "all in-sample or development; the sets were used before. data/core/dev_*.json",
+    "first_choice_known": {
+      "fresh behavior (44)": {"core": 23, "product": 10, "model": 18, "core_vs_product": "+17 -4, sign p 0.007"},
+      "fresh strict (44)": {"core": 24, "product": 19, "model": 24},
+      "fresh2 behavior (12)": {"core": 8, "product": 4, "model": 7},
+      "fresh behavior, own publisher hidden": {"core": 16},
+      "store_train behavior (191)": {"core": 61, "core_with_prior": 47}
+    },
+    "names": {
+      "fresh behavior": {"core_and_model": "12 named, 0 wrong; 2 open-set names", "model": "32 named, 14 wrong; 11 open-set", "product": "0 named; 1 open-set"},
+      "fresh strict": {"core_and_model": "16 named, 0 wrong; 1 open-set", "model": "32 named, 8 wrong; 14 open-set", "product": "8 named, 1 wrong; 2 open-set"},
+      "fresh2 behavior": {"core_and_model": "6 named, 1 wrong; 1 open-set", "model": "9 named, 2 wrong; 4 open-set", "product": "0 named"}
+    },
+    "dropped": [
+      "the prominence prior (store_train 47 -> 61 without it, fresh 21 -> 23)",
+      "a margin threshold alone as the naming rule: the smallest margin keeping wrong names <= 2% on store_train (0.27) names 9 of 322 posts with 4 wrong, and almost nothing on fresh"
+    ],
+    "exactness": "with the store's own masking and the prior the ranker reproduces store text on fresh2 exactly (84 report-reading-arm cases, max difference 0.0; scripts/core_reproduce.py)"
+  },
+  "test_set": {
+    "window": "posts published from 2026-11-03 (the confirmation window, shared with model_second_opinion_2026-11-11.json; both registered before any scoring)",
+    "build": "make store-update (approved 2026-11-16), make store-extract, scripts/prepare_fresh_reports.py --from-store with the window, then the label review in amendments.json, then freeze hashes here",
+    "size": "run when it holds at least 30 known reports (descriptive); a decision needs 60 known reports",
+    "arms": ["core", "core + model (the naming rule)", "today's product (GPU run, technique head on)", "the model alone"]
+  },
+  "decision_rule": "With at least 60 known reports, the core wins when, at the behaviour reading, its right-first count is at least the product's and the naming rule gives no more wrong names (known reports named wrongly plus open-set reports named) than the product. Below 60 known reports every reading is descriptive. A win allows only the display-only core answer behind CORE_ANSWER_ENABLED=false; no default changes without the product owner.",
+  "budget": "OpenRouter at most $10 in total for this programme (about $0.055 a report and reading)",
+  "limits": [
+    "the store's labels come from a name-count rule, so some test labels can be wrong until the label review",
+    "store text is strongest where the same publisher wrote about the actor before; the own-publisher-hidden reading is reported beside the primary one",
+    "the decisive set (2025-01..2026-02) is spent and is not used"
+  ]
+}

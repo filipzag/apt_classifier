@@ -1,0 +1,31 @@
+{
+  "schema": "cribl_finetune_prereg/1",
+  "id": "cribl_head_first_2026-10-20",
+  "title": "Head-first acceptance: accept a technique outright when the technique head is sure of it",
+  "registered": "2026-10-20",
+  "parent": "docs/preregistration/cribl_product_integration_2026-10-19.json (the head-aware pair, on by default since 2026-10-20); docs 21.3.18",
+  "question": "With the head on, the pipeline sits at the head's own ceiling on exact ids but 2 to 6 points under it at the family level and on AthenaBench, because the calibrated gate sometimes holds the head's right answer back. Does accepting a candidate outright when the head's probability for it clears a bar, keeping the calibrated gate for everything else, close that gap without a precision cost that outweighs it?",
+  "change": {
+    "rule": "in _assign_states_for_group, a candidate whose technique_head evidence carries th_technique_p (P(family) x P(technique | family)) at or above the artifact's head_first_min_probability is accepted on that alone, with the reason recorded; the benign- and sparse-context guards, verifier verdicts, the reranker and the hierarchy rules apply as before, and observations the head did not score are unchanged",
+    "where_the_bar_comes_from": "the acceptance artifact's gate record, chosen by the fit on public dev: scripts/fit_acceptance_model.py --head-first runs the out-of-fold runtime threshold rule (now head-first-aware) for bars {none, 0.5, 0.6, 0.7, 0.8, 0.9, 0.95} jointly with the usual threshold grid and keeps the pair with the best out-of-fold micro-F1 at the precision floor; 'none' competes, so the fit may decline the rule. TECHNIQUE_HEAD_FIRST=model follows the artifact, off ignores it, a number forces a bar for an ablation",
+    "note": "the 0.8 figure quoted in the discussion came from CTI-HAL rows and is not used; the bar is chosen on dev only"
+  },
+  "arms": {
+    "head": "the current default (the schema-4 head-aware pair; artifacts of the re-evaluation of 2026-10-20 reused)",
+    "head_first": "a schema-4 refit with --head-first on public dev, through the head-aware pair"
+  },
+  "headline": "CTI-HAL accepted-set micro-F1, head_first minus head, paired case bootstrap (1,000, seed 7), lower bound above 0",
+  "constraints": [
+    "public test pooled micro-F1 not below the head arm beyond its paired interval",
+    "parent-aware F1 not below the head arm on either set",
+    "CTI-HAL attribution top-1 not below the head arm and no wrong name; Elastic strict top-1 not below, no wrong name on the attributed posts, open-set names 0"
+  ],
+  "secondary": [
+    "the dev-chosen bar and threshold and the out-of-fold grid",
+    "how many acceptances the rule adds and how many of those are right, per set",
+    "AnnoCTR, CTI-Rationale, AthenaBench ATE, CTIBench ATE and CyberThreat-Eval head_first against head (report only)"
+  ],
+  "selection": "the bar and threshold on public dev only; one run per arm per set",
+  "adoption": "if the headline and constraints hold, the head-first artifact becomes the ACCEPTANCE_MODEL_HEAD_PATH default; otherwise the current pair stays and the result is documented",
+  "cost": "laptop only, about 1.5 hours; no API credit"
+}

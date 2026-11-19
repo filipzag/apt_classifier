@@ -417,3 +417,22 @@ def test_select_question_locally_uses_top_priority_lead_and_default_phrasing():
     assert chosen.technique_id == "T1003"
     assert chosen.question == "Did you find T1003?"
     assert chosen.investigation_steps == ["look"]
+
+
+def test_software_answers_parse_three_ways_before_found_or_no():
+    from apt_classifier.evidence.models import EvidenceStatus
+    from apt_classifier.questions import parse_interview_answer
+
+    for text in ("found", "Found", "found it on two hosts"):
+        assert parse_interview_answer(text) is EvidenceStatus.POSITIVE, text
+    # the canonical UI values and their spoken forms; "not found" never reads as found or no
+    for text in ("not_found", "not found", "Not found anywhere", "NOT-FOUND", "nothing found"):
+        assert parse_interview_answer(text) is EvidenceStatus.NEGATIVE, text
+    for text in ("not_checked", "not checked", "Not Checked", "unchecked", "didn't check"):
+        assert parse_interview_answer(text) is EvidenceStatus.UNKNOWN, text
+    # the technique answers are unchanged
+    assert parse_interview_answer("no") is EvidenceStatus.NEGATIVE
+    assert parse_interview_answer("not visible") is EvidenceStatus.NOT_VISIBLE
+    assert parse_interview_answer("yes") is EvidenceStatus.POSITIVE
+    assert parse_interview_answer("not sure") is EvidenceStatus.UNKNOWN
+    assert parse_interview_answer("foundation") is None

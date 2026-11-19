@@ -1,0 +1,34 @@
+{
+  "schema": "cribl_finetune_prereg/1",
+  "id": "cribl_head_agreement_2026-10-19",
+  "title": "Agreement filter: keep only the techniques that both the technique head and the rest of the pipeline pick",
+  "registered": "2026-10-19",
+  "parent": "docs/preregistration/cribl_product_integration_2026-10-19.json; cribl_single_answer_cap_2026-10-19.json; docs 21.3.18",
+  "question": "Product owner's request (2026-10-19): accept a technique only when the pipeline's gate accepts it and the fine-tuned head also picks it. Does that intersection raise precision enough to pay for the recall it drops, on technique extraction and downstream on attribution?",
+  "change": {
+    "filter": "a post-gate rule in _assign_states_for_group (TECHNIQUE_HEAD_AGREEMENT): every candidate the gate accepted (on probability or on a cue; verifier verdicts are left alone) of an observation the head scored stays accepted only when the head agrees; the others return to review with the reason recorded. Observations the head did not score (logs, failed requests) are untouched",
+    "levels": "technique: the candidate is the head's most probable technique (rank 1 of its joint technique list); family: the candidate's family is the head's most probable family; top3: the candidate's family is among the head's three most probable families",
+    "no refit": "the acceptance models and their thresholds are unchanged; the filter sits after the gate"
+  },
+  "arms": {
+    "pipeline_agree_family": "the registered arm: the shipped acceptance model with the head's evidence present only for the filter (head on, the shipped model as the gate, as in the parent's proposer arm), family agreement",
+    "pipeline_agree_technique": "the same with technique agreement (secondary)",
+    "pipeline_agree_top3": "the same with top-3 agreement (secondary)",
+    "head_agree_family": "the head-aware pair (schema 4) with family agreement (secondary): the head votes twice, once as evidence and once as the filter"
+  },
+  "baselines": "the parent registration's arms off (the shipped pipeline) and head (the schema-4 pair), artifacts reused",
+  "headline": "CTI-HAL accepted-set micro-F1, pipeline_agree_family minus off, paired case bootstrap (1,000, seed 7): the interval's lower bound above 0, with precision reported beside it; an arm whose F1 falls is reported as a precision/recall trade, not adopted",
+  "constraints": [
+    "public test pooled micro-F1 not below off beyond its paired interval",
+    "for the registered arm: CTI-HAL attribution top-1 not below off and no wrong name; Elastic strict top-1 not below off, no wrong name on the attributed posts, open-set names not above off"
+  ],
+  "secondary": [
+    "precision, recall, parent-aware F1 per arm and per dataset; how many acceptances the filter removes and how many of those were right",
+    "mean technique recall and accepted techniques per report in the attribution runs; named correct, coverage, wrong names",
+    "head_agree_family against head (paired) on both sets"
+  ],
+  "selection": "none: the three agreement levels are fixed here, one run per arm per set, nothing chosen on test",
+  "adoption": "only the registered arm can be adopted, as an opt-in setting next to the head (the head stays off by default per the parent); otherwise the result is documented",
+  "expectation": "precision up and recall down on extraction; F1 most likely down for technique agreement, near flat for family agreement, up only if the pipeline's wrong acceptances are concentrated where the head disagrees; attribution top-1 unlikely to move on 55 reports",
+  "cost": "laptop only; about 1.5 hours including the attribution checks; no API credit"
+}

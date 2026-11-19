@@ -304,7 +304,7 @@ Streamlit-only revision is preserved on the `streamlit-stable` branch.
   CyberRE, live-intel matches, and the "next step" hint. Group ids always carry the ATT&CK name.
 - Endpoints: `GET /api/health`, `/api/system`, `/api/sample`, `/api/techniques?q=`; `GET|POST /api/cases`,
   `GET|PATCH|DELETE /api/cases/{id}`; `POST …/decisions`, `…/weights`, `…/platforms`; `GET …/interview`,
-  `POST …/interview/answer`, `…/interview/restart`; `POST …/review`, `…/cyberre`;
+  `POST …/interview/answer`, `…/interview/restart`; `POST …/review`, `…/cyberre`, `…/model-opinion`;
   `POST …/elastic/search`, `…/elastic/import`; `GET …/dossier/{group}`, `…/distinguish`, `…/top3`, `…/canvas`, `…/diamond`,
   `…/intel`, `…/export/{markdown|json|navigator|attack-flow}`.
 - Web app: routes `/` (cases), `/new` (intake), `/cases/:id` (assessment), `…/evidence`,
@@ -864,6 +864,47 @@ exactly. The index is pinned to the embedding model and revision and integrity-c
 fingerprint. Results are in 21.3.10: real reports and the public held-out set gain markedly, while
 ATT&CK-phrased fold sentences and narrated telemetry pay a precision cost.
 
+**The fine-tuned technique head (on by default since 2026-10-20; 2026-10-19).** The 4B technique
+model of 21.3.18 (Qwen3.5-4B-Base in 4-bit with a LoRA and two cosine heads: one row per ATT&CK
+family, one per technique, read at the decision slot of a one-sentence prompt) can score every
+observation. It needs transformers 5, which the product's `.venv` cannot hold next to
+ATTACK-BERT, so it runs as a local HTTP service (`make technique-head-serve`,
+`scripts/cribl_finetune/serve.py` on `http://localhost:8102`, about 3.5 GB of GPU memory) and
+`apt_classifier/technique_head.py` is the product's client. With `TECHNIQUE_HEAD_ENABLED=true`
+(the default since 2026-10-20, pinned to the registered checkpoint; the pipeline runs exactly as
+without it while the service is down), `retrieve_techniques` posts each observation's sentences to the service once (a long observation
+is scored sentence by sentence and pooled by the largest probability) and does two things with the
+answer: every candidate gets `technique_head` evidence, i.e. the head's probability for the
+candidate's family and for the candidate itself, both inverse ranks, the head's confidence in its
+own top family, whether the candidate is one of the head's proposals and whether it exists only
+because of the head (**feature schema 4** of the acceptance model: schema 3 followed by these seven
+`th_*` features; a schema-3 artifact keeps reading its own prefix); and up to
+`TECHNIQUE_HEAD_NEW_CANDIDATES` (3) of the head's proposals that retrieval did not produce (its best
+technique in each of the `TECHNIQUE_HEAD_TOP_FAMILIES` (3) most probable families) are appended
+after the pool with fused score 0, exactly like exemplar-only candidates, platform scope applied.
+Nothing retrieved is displaced and the calibrated threshold is never overridden. Prose only, for
+now (product owner, 2026-10-19): observations that come from logs (the telemetry sources of the
+verifier's interpreter rule in 16.4a: Windows/Sysmon events, eCAR, Elastic records, the
+EvidenceForge renders) are not sent to the head and get no head evidence or proposals
+(`diagnostics["technique_head_skipped_logs"]`); the head was trained on report prose. Fail closed: the
+client is `None` (the pipeline runs as without it, the status strip says why) when the service does
+not answer, serves another ATT&CK version or a checkpoint other than the pinned
+`TECHNIQUE_HEAD_EXPECTED_FINGERPRINT` (the SHA-256 of the adapter and head files the service
+reports at `/health`); an acceptance model fitted with the head active records that fingerprint in
+its metadata and retrieval contract and refuses to run on another head or without one; a request
+the service fails mid-run leaves its observations without head evidence and is counted in
+`diagnostics["technique_head_errors"]`, and the benchmarks refuse to write such a run under
+`--require-technique-head`. **Two models behind one gate.** The schema-4 model
+(`ACCEPTANCE_MODEL_HEAD_PATH`, `acceptance_model_technique_head.json`) is fitted on rows that
+always carry head evidence, so it must never judge a candidate without it (every `th_*` feature at
+0 is a value it has not seen: on the EvidenceForge clinic bundle that cost 0.12 F1 on eCAR
+windows). While the head is active the loader therefore pairs it with the shipped model in
+`acceptance.HeadAwareAcceptance`: the head model judges the candidates of observations the head
+scored, the shipped model (`ACCEPTANCE_MODEL_PATH`) the rest (log-derived observations, failed
+requests); the pair is refused when the two were fitted on different exemplar libraries or
+retrieval settings, and with the service stopped the head path is never read, so the shipped gate
+runs unchanged. The pre-registered gate and its result are in 21.3.18 ("Product integration").
+
 **Per-sentence judgement for long observations (optional, off by default).** With
 `TECHNIQUE_SEGMENT_ACCEPTANCE=true` each sentence of a long observation also gets its *own*
 candidate pool, fused ranks, margins and benign/sparse checks (`_build_segmented_candidates`, evidence metadata
@@ -1092,7 +1133,7 @@ Presets are applied using Pydantic's `model_copy(update=...)` on the `Settings` 
 
 ## 9. Classifiers
 
-The registry currently creates ten deterministic classifiers, the opt-in CyberRE-LLM classifier (it votes only after an analyst runs CyberRE) and the two random-forest members of 9.13. The PyTorch group network (`group_mlp`, 9.13) is added only when `GROUP_MLP_WEIGHT` > 0 (default 0). The LLM zero-shot opinion was removed from the ensemble on 2026-09-30 (9.11):
+The registry currently creates ten deterministic classifiers, the opt-in CyberRE-LLM classifier (it votes only after an analyst runs CyberRE) and the two random-forest members of 9.13. The PyTorch group network (`group_mlp`, 9.13) is added only when `GROUP_MLP_WEIGHT` > 0 (default 0), and the free-text model (`text_group`, 9.13) only when `TEXT_GROUP_WEIGHT` > 0 (default 1.0 since 2026-10-27 with the behaviour-text member, 21.3.25). The LLM zero-shot opinion was removed from the ensemble on 2026-09-30 (9.11):
 
 ```text
 bernoulli_naive_bayes
@@ -1112,7 +1153,7 @@ source_country
 
 ### 9.1 Bernoulli Naive Bayes
 
-**What it does:** Treats each ATT&CK technique as a binary feature and computes a Bayesian log-likelihood score for every group, given the observed and negatively answered techniques. Documented techniques get likelihood `alpha` (default `0.60`); undocumented techniques get `beta` (default `0.05`); explicit negative answers penalize groups that document the negated technique at `negative_evidence_weight` (default `0.30`). A softmax over the log-scores produces the `bayes_posterior` used for interview context and display.
+**What it does:** Treats each ATT&CK technique as a binary feature and computes a Bayesian log-likelihood score for every group, given the observed and negatively answered techniques. Documented techniques get likelihood `alpha` (default `0.60`); undocumented techniques get `beta` (default `0.05`); explicit negative answers penalize groups that document the negated technique at `negative_evidence_weight` (default `0.30`). The negative term is computed from two counts per group, the negated techniques it documents and those it does not, so it never depends on set iteration order and groups with equal counts receive a bit-identical negative term (their totals tie whenever their positive-evidence sums do). Until 2026-10-03 it was summed over the set in iteration order, which follows `PYTHONHASHSEED`. That could split an exact tie by one unit in the last place, differently in each process, and only cases with negative interview answers were affected (no benchmark sets them). A softmax over the log-scores produces the `bayes_posterior` used for interview context and display.
 
 **Why it is used:** It provides a principled probabilistic baseline that combines positive and negative evidence in a single framework. Unlike pure overlap metrics, it can exploit the analyst's "no, that did not happen" answers to disconfirm candidates. It is deliberately only one ensemble voice — not the final decision — because its uniform prior and ATT&CK presence-only likelihoods favor broadly documented groups and cannot model technique rarity or operational specificity.
 
@@ -1251,10 +1292,10 @@ to analysts: on its own it is weaker than the origin aggregated from the ranked 
 
 The group forest votes at weight 0. The source-country vote is on by default since 2026-10-01
 (`SOURCE_COUNTRY_WEIGHT=1.0`), together with the combiner refitted with it as a feature (feature
-schema 2, `data/models/combiner/attribution_combiner.json`). To turn it off, set
+schema 2, `data/models/combiner/attribution_combiner_0930_fsum.json`). To turn it off, set
 `SOURCE_COUNTRY_WEIGHT=0` with
-`ATTRIBUTION_COMBINER_PATH=data/models/combiner/attribution_combiner_no_country.json`, the previous
-schema-1 combiner. In the attribution benchmark's unknown-actor arm, the voting forest is refitted on the knowledge base without the removed actor,
+`ATTRIBUTION_COMBINER_PATH=data/models/combiner/attribution_combiner_no_country_fsum.json`, a combiner
+fitted without the country vote (the 2026-10-03 refit in 21.3.9). In the attribution benchmark's unknown-actor arm, the voting forest is refitted on the knowledge base without the removed actor,
 because masking the actor's output would still leak its profile into the other votes. The combiner
 fit's unknown lists do the same.
 
@@ -1267,10 +1308,79 @@ campaigns as five averaged networks (MRR 0.71 against 0.69) and takes about 20 s
 member joins the `learned_profile` family only when `GROUP_MLP_WEIGHT` > 0. At the default 0 it is
 not loaded, so the fusion and the combiner fingerprint are unchanged. In the unknown-actor arm the
 benchmark refits it without the removed actor. Measured on 2026-10-01 at weight 1.0 with its own
-combiner (`attribution_combiner_group_mlp.json`), before the anonymizer fix of 21.3.14: anonymized
+combiner (`attribution_combiner_group_mlp.json`, on earlier classifier code; refit 2026-10-03 as
+`attribution_combiner_group_mlp_fsum.json`), before the anonymizer fix of 21.3.14: anonymized
 CTI-HAL top-1 went from 0.455 to 0.473 and as reported stayed at 0.564, but on the ATT&CK folds
 top-1 fell from 0.830 to 0.817 with one wrong name (Silence named as Kimsuky). It fails the naming
 gate and is not adopted.
+
+**Free-text model (2026-10-03).** `apt_classifier/text_group.py` reads the case narrative (the joined
+positive observations) instead of the mapped techniques. Each ATT&CK group gets one TF-IDF word
+1-2-gram document built from ATT&CK text only: its procedure examples, its description sentences, the
+procedure examples of every malware/tool it uses and of its attributed campaigns (the last two from the
+raw STIX bundle). Group names become "the adversary" (also before a hyphen) and campaign names "the
+operation"; both are stop words. A case is scored by cosine to every document, z-scored, plus 0.5 x the
+log prominence prior, and reported as a softmax over the groups that share a term. `make fit-text-group`
+writes `data/models/text_group/text_group.json.gz` (the records and parameters, fingerprinted with the
+ATT&CK version); the TF-IDF is refitted at load (about 1 s). It was chosen in a separate study
+(`scripts/text_group_study/`, 21.3.16) over five ATTACK-BERT embedding models, which blur the exact
+malware names and phrases this model keeps. The `text_group` member votes in the `learned_profile` family
+only when `TEXT_GROUP_WEIGHT` > 0, and it is listed in `attribution.NOT_INDEPENDENT_EVIDENCE`: it ranks,
+but never counts toward the naming gate's independent evidence families, because it re-reads the text the
+technique, software and behaviour members already score. At weight > 0 the combiner fingerprint also binds
+the text model and `text_group.py`. The benchmarks refuse to run when it fails to load, hide each known
+fold's held-out sentences from it (`TextGroupModel.without`: the group's procedure examples for the
+held-out techniques, and any record crediting the group or no group whose text or sentence matches a
+held-out sentence, refitted exactly) and refit it without the removed actor.
+
+**Behaviour-text model (2026-10-21).** `apt_classifier/behavior_text.py` keeps the free-text model's
+corpus but scores the case **statement by statement** instead of as one narrative: every corpus record
+is a sentence in its own TF-IDF row (IDF over sentences), each positive observation is compared with every
+sentence, and the `top_k` nearest sentences (default 10) vote for their groups with the cosine, one vote
+per group per statement (the best). A group's case score is the mean of its votes over its five best
+statements (`BEHAVIOR_TEXT_AGGREGATE=top5`; `mean` averages over every statement with absent = 0),
+z-scored across the groups, plus `BEHAVIOR_TEXT_PRIOR` x the log prominence prior (default 0), and
+reported as a softmax over the groups that at least one statement reached. A group therefore wins by
+matching several of the report's statements with procedure text of its own, not by the size of its
+corpus. The parameters were chosen on the vendor set with the member alone (`scripts/fit_behavior_text.py`,
+`make fit-behavior-text`: top_k 10, top5, prior 0: MRR 0.809, top-1 0.676 over 34 reports; the mean
+variant had top-1 0.706 and a lower MRR). The `behavior_text` member votes in the `learned_profile` family
+only when `BEHAVIOR_TEXT_WEIGHT` > 0 (default 1.0 since 2026-10-27, 21.3.25), reads the text model's artifact (`TEXT_GROUP_PATH`),
+is listed in `attribution.NOT_INDEPENDENT_EVIDENCE` and binds the combiner fingerprint at weight > 0
+exactly as the text model does; the benchmarks hide a fold's held-out sentences and the removed actor from
+it through `BehaviorTextModel.without` (the text model's refit, re-indexed). The statements reach the
+member as a runtime attribute of the classifier context (`context.statements`, set in
+`retrieve.build_classifier_context`), not as a dataclass field: `classifiers/base.py` is hashed into the
+combiner fingerprint, so a new field there would invalidate the production combiner. Gate trial
+2026-10-21: 21.3.19.
+
+**Technique-conditioned procedure model (2026-10-21).** `apt_classifier/procedure_match.py` reads the
+case **per accepted technique**: the statements that support a technique are compared only with the
+corpus sentences documented under that technique (`PROCEDURE_MATCH_FAMILY=parent`: also its parent and
+its sub-techniques, never its siblings), with the sentence index of the behaviour model. A group is
+reached through three routes: its own (or its campaign's) procedure sentence under the technique
+(vote = cosine); a malware or tool's procedure sentence under the technique, vote = cosine x the
+software member's rarity weight normalised to [0, 1] x `1 + PROCEDURE_MATCH_SEEN_BONUS` when the report
+names that software, for every group ATT&CK links the software to (`PROCEDURE_MATCH_SOFTWARE_ROUTE`); and
+the text-free link, the report names a software that ATT&CK documents for the accepted technique, vote =
+`PROCEDURE_MATCH_LINK_WEIGHT` x rarity for every group that uses it. A group's vote per technique is the
+best route; its case score the mean of its votes over the accepted techniques (`mean`; `top5` over its
+five best), z-scored, plus `PROCEDURE_MATCH_PRIOR` x the log prominence prior, softmax over the groups
+reached. The statements reach it as `context.technique_statements` (per accepted technique, set at
+runtime in `retrieve.build_classifier_context`). Dev choice (`scripts/fit_procedure_match.py`: the vendor
+set and the ATT&CK campaigns run through the head-on pipeline once, then 64 variants with the member
+alone, each report scored against a corpus that hides the report's own statements, since a campaign's
+statements are the corpus's campaign sentences): floor 0.30, exact technique, software-sentence route
+off, link on, mean: MRR 0.820, top-1 0.782 over 55 reports (vendor 0.794 / MRR 0.845, campaigns 0.762 /
+0.779). The text routes alone reach MRR 0.64 (top-1 0.55); the named-software link lifts it to 0.82,
+the parent family changes little (0.815 at floor 0.15) and the software sentences add nothing on top of
+the link. The `procedure_match` member votes in the `learned_profile`
+family only when `PROCEDURE_MATCH_WEIGHT` > 0 (default 1.0 since its gate passed on 2026-10-21), is listed in `attribution.NOT_INDEPENDENT_EVIDENCE`, binds
+the combiner fingerprint at weight > 0 and is hidden per fold like the two text members. With it the
+combiner's feature schema became 3: every optional member (`combiner.OPTIONAL_CLASSIFIERS`: the group
+network, the text, behaviour and procedure models) has its own present / inverse-rank / relative-score
+columns and regime interactions, zero when it does not vote, appended after the schema-2 columns so an
+older artifact keeps loading on its own columns. Gate trial 2026-10-21: 21.3.20.
 
 ---
 
@@ -1446,6 +1556,25 @@ fusion only and is reproducible across processes.
   the attribution benchmark reports `cluster_top1` and `named_risk_cluster_aware`, which
   count a related group at rank 1 as correct. Carbanak/FIN7 (description cross-references) and Sandworm Team/APT38 (rarely
   shared software) are the pairs that occur on the benchmarks.
+  Since 2026-10-02 names are matched in descriptions as proper nouns (`name_pattern`):
+  - a name written in capitals (BITTER, ZINC, APT41) matches only as written;
+  - any other name keeps its capital first letter, while the rest may differ in case ("Winnti
+    group"). A name that starts lowercase may also start a sentence ("MenuPass").
+
+  Before, the match ignored case, which linked Tonto Team to BITTER through "Operation Bitter
+  Biscuit" in Tonto Team's description. Three independent passes checked every place on ATT&CK
+  19.2 where a description names another group: 51 places, or 100 name-and-alias hits, because
+  ATT&CK repeats each group's name as its first alias. The passes found that link to be the only
+  pair without a real reference, so the change removes exactly that pair: 86 related pairs
+  remain, 36 of them by description, and every other match is written exactly as the name is.
+  Two other places name the Carbanak *malware*, but the same descriptions also name the Carbanak
+  group.
+  In the published artifacts the pair appears only in `leader_related_groups` of the two seed-7
+  folds where Tonto Team or BITTER is both the truth and the leader. That is a display field, and
+  no row has the truth and the leader or the top three across the pair, so no metric moves. A
+  rerun would clear that field and change the source fingerprint. A rule that skips every match
+  after "Operation" was not used, because ATT&CK operation names can be the group's own
+  ("Operation Lotus Blossom").
 - "Independent evidence families" counts only families whose classifier ranks the
   leading group within the top 10 (`SUPPORT_RANK_LIMIT`); classifiers that rank every
   group (Naive Bayes, group description) do not count as support by mere presence.
@@ -1456,6 +1585,33 @@ fusion only and is reproducible across processes.
 - No separate calibration artifact exists. With the learned combiner active (the default, 10.9)
   `is_calibrated` is true and `calibrated_probability` is the combiner's leader probability;
   without it `is_calibrated` is false and the UI shows qualitative maturity only.
+- **Naming probability floor (2026-10-25).** `ATTRIBUTION_HYPOTHESIS_MIN_PROBABILITY`
+  (`MaturityThresholds.hypothesis_min_probability`; 0 = off; 0.50 from 2026-10-26 with the
+  real-report combiner, default 0.20 since 2026-10-27 with the procedure-core combiner, each chosen
+  for its combiner on the design seeds, 21.3.22 and 21.3.25) adds one condition to the
+  single naming gate: the combiner's probability for the leader must reach the floor, else the
+  decision says "combiner probability p below the naming floor f" and the leader fails the single
+  gate. The documented-cluster step then decides as for any single-gate failure (a cluster has its
+  own combined-probability bar of 0.8, 10.11), so a held FIN7 can still be named as FIN7 / Carbanak.
+  Without an active combiner there is no probability and no floor. The ranking never changes, and a
+  run made without the floor records everything the rule reads, so
+  `scripts/probability_floor_replay.py` replays it exactly over recorded runs (`--on` checks a run
+  made with it row for row; `--choose` applies the registered design rule). Gate trial: 21.3.22.
+  Removed actors named with high probability are out of its reach, and the combiner's null option
+  does not separate them from correct names either (21.3.23).
+- **Independent inputs (2026-10-27).** Two rules, both on by default, each a setting (21.3.27):
+  - `ATTRIBUTION_TECHNIQUE_LIST_ONE_FAMILY` (`MaturityThresholds.technique_list_one_family`): the
+    technique-overlap, campaign, learned-profile and country families all read the accepted
+    technique list (`attribution.TECHNIQUE_LIST_FAMILIES`), so the independent-family check counts
+    them once. A name then needs a second kind of input: named software, a behaviour match, the
+    narrative against the group descriptions, or the analyst's stated context. Below two families
+    the leader goes to the unresolved stage before any other step. Only the gate changes; the
+    family map that the fusion and the combiner use does not.
+  - `ATTRIBUTION_HYPOTHESIS_ABOVE_NULL` (`hypothesis_above_null`): a single name also needs the
+    combiner's leader probability above its null ("none of these") probability. A held leader falls
+    through to the documented-cluster step, as under the floor.
+  - `scripts/naming_rules_replay.py` replays both exactly over recorded runs (`--on` checks runs
+    made with them row for row).
 - The UI treats "no named group" as a first-class outcome: for every stage below
   `KNOWN_GROUP_HYPOTHESIS` the Assessment view states that no documented group meets the
   evidence bar, labels the leader as the *closest documented group (not an attribution)*,
@@ -1573,8 +1729,8 @@ the real reports against 60% and 51% for the fused ranking, so the combiner is t
 Feature schema 2 (2026-09-30) adds the random-forest `source_country` vote (9.13) to the
 per-classifier features, and the fit's unknown-actor lists refit the country forest without the
 removed actor. An artifact lists the features it was fitted on and is scored on those columns, so
-the schema-2 default artifact (`attribution_combiner.json`, fitted with the country vote at 1.0)
-and the schema-1 opt-out artifact (`attribution_combiner_no_country.json`) both load; a
+a schema-2 artifact (fitted with the country vote at 1.0) and a schema-1 artifact (the original
+no-country combiner) both load; a
 newer schema, unknown feature names or mismatched vectors are still refused.
 
 - **Model.** A conditional logit (listwise softmax) over the top-N fused candidates (N = 20):
@@ -1619,6 +1775,27 @@ newer schema, unknown feature names or mismatched vectors are still refused.
 - **Adoption rule.** Group-CV out-of-fold top-1 and MRR at or above RRF on the same lists; the
   seed-7 folds and CTI-HAL (run once on the frozen artifact) with no wrong named group, at most
   1/25 removed actors named and no top-1/MRR regression. Results in 21.3.9.
+- **Real-report lists (2026-10-25).** Every combiner until then learned from ATT&CK fold lists only,
+  where the case is ATT&CK's own phrasing of a group's procedures. `--real-reports SET=PATH` adds one
+  list per development report under each of the two test sets' readings (`--real-conditions`, default
+  names level with the first 30 statements and strict level with every statement) and, with
+  `--real-unknown`, one removed-actor list per report. The sets are the vendor reports, the ATT&CK
+  campaign reports and FBI/CISA advisories (`scripts/prepare_advisory_reports.py`); each row carries
+  `hidden_texts`, the ATT&CK procedure examples that cite or copy the report
+  (`scripts/refresh_hidden_texts.py` on the current ATT&CK), which with the report's own statements are
+  hidden from the dense, BM25 and group-behaviour indexes (under any group) and from the text-based
+  members, and a campaign report hides its campaign object. Training repeats every real list
+  `w` times; `--real-weights` is a grid, chosen by group-level cross-validation as the best
+  out-of-fold real-report MRR among the points within 0.01 of the folds-only clean top-1. CTI-HAL and
+  Elastic are refused as training sets. The lists are cached per set and condition
+  (`--real-cache`, `--reuse-real-cache`). The refit `attribution_combiner_real_reports.json` (w 10, l2 1)
+  passed its registered gate but was not adopted alone: rerun on the design seeds it named one wrong
+  group (21.3.21). From 2026-10-26 it was the default together with the naming probability floor of
+  0.50 (10.6, 21.3.22) and its own labels (`confidence_labels_real_reports.json`). Since 2026-10-27
+  the default is the same recipe refitted with the free-text and behaviour-text members voting
+  (`attribution_combiner_procedure_core.json`, w 10, l2 10), with the floor 0.20 and strong-only
+  labels (`confidence_labels_procedure_core.json`); procedure text as the core, 21.3.25, which also
+  gives the rollback settings.
 
 ### 10.10 Distinguishing the top three (2026-10-01)
 
@@ -1672,7 +1849,7 @@ wins that only one side documents. A state banner leads, first match wins:
 | state | condition |
 |---|---|
 | named | the decision named the leader |
-| overlap | the leader and another top-three group are documented-related and their profiles nest (containment >= 0.8) or their pair separation is below 0.5 |
+| overlap | the leader and another top-three group are a documented twin under the cluster scope (`twin_link`, 10.11: by default a same-activity link or nesting profiles, and nesting or a pair separation below 0.5) |
 | split | another top-three member leads the leader's D by at least 1.25 (the summary adds when one channel favours the leader) |
 | thin | the largest D among the three is at most 1.5 |
 | not separated | the leader is ahead but below the naming bar |
@@ -1703,6 +1880,158 @@ it is first or second) and `leader_guard_fired`, and `fingerprint_inputs` record
 discrimination weights. A run refuses to start or to write when the learned combiner is enabled
 but did not load. A fingerprint mismatch would otherwise fall back to the RRF order silently
 (fold top-1 0.83 -> about 0.60); `--allow-inactive-combiner` measures that fallback on purpose.
+
+### 10.11 Documented clusters, confidence labels and software questions (2026-10-02)
+
+Three additions to the top three, each pre-registered and checked on the fresh fold seeds 43 and
+47 (21.3.15). Confidence labels are on by default and software questions ship off as a pilot.
+Cluster naming passed with its first rule. It was then narrowed to same-activity links, and the
+narrowed rule passed its own pre-registered check on the unused seeds 59 and 61. It is on by
+default since 2026-10-02 (21.3.15 A′).
+
+**Documented-overlap clusters** (`apt_classifier/overlap_cluster.py`, stage
+`known_cluster_hypothesis`, `ATTRIBUTION_CLUSTER_NAMING`, `ATTRIBUTION_CLUSTER_SCOPE=documented`).
+Some ATT&CK groups describe the same activity under two names: Carbanak and FIN7, APT38 and
+Lazarus Group. The evidence cannot separate them, so the single-name gate holds back even when the
+pair as a whole is clearly ahead. The cluster step names the pair, for example "FIN7 / Carbanak
+(documented overlap)":
+
+- **Twin.** A gate-window member that ATT&CK links to the leader as the same activity, and that
+  either nests (profile containment >= 0.8) or does not separate from the leader (|pair
+  separation| < 0.5). "Same activity" (`twin_link`, scope `documented`) has two routes. In the
+  first, ATT&CK's own descriptions document the pair as the same or overlapping activity, as
+  recorded in the reviewed table `attack/same_activity.py`. In the second, the profiles nest, the
+  review has no verdict against the pair (distinct, unclear or false match), and no unreviewed
+  description link could call them distinct.
+- **Not twins.** Two groups that only share one rarely used malware family are different actors
+  and are never named together: Sandworm Team and APT38 both used KillDisk, Wizard Spider and
+  TA505 both used TrickBot. A plain mention is not enough either, because many descriptions name
+  another group to say it is different. Examples: Ember Bear and Saint Bear are "distinct
+  clusters", APT28 and Sandworm Team are different GRU units, and ShinyHunters and Scattered
+  Spider are members of one broader collective. Such pairs still appear in the Top-three view
+  ("shares rare malware", "ATT&CK-linked") and in an "ATT&CK-linked groups" note on the
+  Assessment page, but never as one cluster.
+- **Selection.** The twin with the largest gate-window mass among the qualifying members wins;
+  pairs only.
+- **The reviewed table (ATT&CK 19.2, 2026-10-02).** At review time 87 group pairs were related:
+  37 through a description reference and 50 only through shared rare malware. Since the
+  proper-noun matching (10.6), the false match below is gone, leaving 86 and 36. Five independent
+  classification passes read the sentences behind the 37 description links and the alias lists,
+  and a judge decided the 3 pairs they split on. 33 of the 37 were unanimous. The labels:
+  - 13 same activity, which are the only ones that count: FIN7 / Carbanak, Carbanak / Cobalt
+    Group, Deep Panda / APT19, Molerats / WIRTE, Lotus Blossom / Thrip, Lazarus Group with APT37,
+    APT38, Kimsuky, Andariel and AppleJeus, Winnti Group / APT41, menuPass / MirrorFace, Mustang
+    Panda / LuminousMoth;
+  - 18 distinct;
+  - 5 unclear;
+  - 1 false match: "Bitter" inside the name Operation Bitter Biscuit.
+
+  Any verdict against a pair also blocks the nesting route. For example, APT30 / Naikon nest
+  fully but "do not appear to be exact matches". A false match is no ATT&CK link at all, and it
+  is not shown as one; the proper-noun matching no longer produces it.
+
+  The table fails closed. A description link on a newer ATT&CK version is neither the same
+  activity nor a nesting twin until it is reviewed (`unreviewed_description_pairs`). A listed
+  pair counts only while ATT&CK still links it.
+- **Other scopes.** Scope `full` is the first, pre-registered rule (any relation, shared malware
+  included), and `nested` allows nesting pairs only.
+- **Evidence.** The gate-window discrimination is recomputed with the pair merged into one unit
+  (`unit_totals`), so evidence that only the two members share now counts as exclusive.
+  Hierarchy factors take the larger member, behaviour the better member per observation, and
+  software counts when either member documents it. Singleton units reproduce the gate's own
+  totals to within 0.0003.
+- **Naming.** It runs only when the single name failed, or when a single name has a nested twin
+  in the window. The leader must pass the lower stage checks and the leader-consistency guard
+  must not have fired. Three bars apply: cluster separation >= 0.5, cluster mass >= 3.5 (>= 3.0
+  for a nested pair), and the members' combiner probabilities summing to >= 0.8. A single name
+  whose nested twin is in the window becomes the cluster when it clears, and is held at shortlist
+  otherwise.
+- **Evidence-volume guard (2026-10-19).** The three bars were set and validated on cases with 3
+  to 23 accepted techniques. A commodity malware write-up that enumerates one family's whole
+  capability list (50 to 95 accepted techniques) clears them on mass alone: two giant profiles
+  contain most of any long list, the merged mass reaches 20 and the combined probability
+  saturates. With `ATTRIBUTION_CLUSTER_MAX_TECHNIQUES` (30) a cluster on more accepted techniques
+  than that is held at shortlist unless decisive software supports the leader
+  (`decisive_software.factor > 1`, group-exclusive malware named in the report); the held
+  candidate records `volume_guard` with the count and the bar. The guard is a hold, never a
+  name; the single-name gate is untouched (it named no open-set post). The bar comes from the
+  design sets (vendor reports and the design fold seeds, where correct names carry at most 20
+  techniques) and is inert on every design and test set except the Elastic open set, where it
+  removes both wrongly named commodity posts (21.3.18, "Cluster gate").
+- **Scoring.** A benchmark counts a cluster name as correct when the truth is one of its
+  members and as wrong otherwise (`AttributionPrediction.named_members`).
+  `named_risk_single` is the single-name risk; `named_cluster_recovered` counts clusters whose
+  leader alone was wrong.
+- **Display.** The decision records `named_cluster` and the cluster's separation, mass,
+  probability, reason ("ATT&CK link: ...") and runner-up. The candidate also records its link kind:
+  `same_activity`, `nesting`, `description` (a mention that is not the same activity) or
+  `shared_software`. Under the default scope only the first two can be named. Report, API,
+  Streamlit and React show the pair
+  with a "documented overlap" label. The Top-three view calls a pair "documented overlap · one
+  cluster" under the same rule and scope as the gate.
+
+The step needs the learned combiner and is off in maturity mode. The settings live outside the
+combiner fingerprint, so no refit is needed.
+
+**Calibrated confidence labels** (`apt_classifier/confidence_labels.py`,
+`CONFIDENCE_LABELS_ENABLED=true`). Display only: they never change the stage, the ranking or an
+export, and the engine never imports the module. Three logistic regressions read what the
+decision already records:
+
+- inputs: the combiner probabilities of places 1-3, its "none of these" probability, the gate
+  separation, the number of accepted techniques and whether named software supports the leader;
+- outputs: P(leader right), P(truth in the top two) and P(truth in the top three).
+
+The Top-three view shows one of three labels:
+
+- "strong single answer" when P(leader right) >= 0.88;
+- "one of these 2" or "one of these 3" when the smallest set reaching 0.865 has two or three
+  members;
+- "open" otherwise, and always at insufficient evidence.
+
+A named cluster is labelled as a two-group set, never "strong single answer". A name from the
+gate always takes the headline.
+
+The model is fitted on the design seeds 41 and 53 (`make fit-confidence-labels`), with removed
+actors counted as wrong leaders and the thresholds picked on out-of-fold predictions with
+one-sided Clopper-Pearson bounds. The artifact is pinned to the ATT&CK version and the exact
+combiner artifact; when either differs the labels are hidden. Refit after `make fit-combiner`.
+On real reports the labels run overconfident: on anonymized CTI-HAL 21 of 24 "strong" leaders
+were right, against 184 of 192 on the fresh folds. The view says so ("Calibrated on ATT&CK test
+folds; real reports run overconfident"). The thresholds above are the first artifact's; each refit
+picks its own. When no "one of these" threshold meets its bound the fit stops, unless
+`--strong-only` keeps the strong label alone: the artifact's set threshold is null and the view
+shows only "strong single answer" or "open" (a cluster the gate named is still shown as its pair).
+The procedure-core combiner's labels (default since 2026-10-27) are strong-only, threshold 0.76
+(21.3.25).
+
+**Software questions (pilot, off by default)** (`apt_classifier/software_questions.py`,
+`INTERVIEW_SOFTWARE_QUESTIONS=false`). While a case is not named, the interview first asks about
+malware that ATT&CK documents for exactly one of the decision's top three. Its users must all sit
+inside the gate window, and by default it has only one user (`INTERVIEW_SOFTWARE_MAX_USERS=1`).
+The question reads: "Did you find <malware> (<S-id>) or its known artefacts?". The wording never
+names a group, and malware named like a group is skipped. Limits: at most 3 questions per case and
+one per group, ranked by how much a "found" would change the separation.
+
+The analyst answers:
+
+- **Found** adds the software as evidence.
+- **Not found** can only lower the leader's separation (by 0.3 x rarity x exclusivity).
+- **Not checked** records nothing.
+
+Two rules keep a name from resting on the interview alone. First, the leader's or cluster's
+separation without the interview software must be >= 0. Second, the "not found" filter runs last
+in the gate and can only move a hypothesis or cluster back to shortlist.
+
+Each answer stores a pilot record (`metadata["pilot"]`: before/after stage and separation and the
+settings in force; no owner, user, e-mail, address or note text). The record is readable per case
+(`GET /api/cases/{id}/interview/pilot-log`) and as an admin-only aggregate
+(`GET /api/pilot/software-questions.jsonl`).
+
+In the pre-registered simulation the questions add many correct names when analysts answer
+reliably. They also add about 2.4 wrong or removed-actor names per fold seed when 5% of "found"
+answers are wrong, more than the bar of 1.0 (21.3.15 C). Turning them on is a product-owner
+decision for a supervised pilot.
 
 ## 11. Origin and intrusion-type assessment
 
@@ -1861,6 +2190,446 @@ The matching layer does not alter RRF, Bayes posterior, or classifier output. It
 ### 12.5 Live-intel privacy and bias boundary
 
 Live feed data is not passed into the isolated AI reviewer by default. This prevents recency, source promotion, and unverified victim claims from becoming hidden review priors. The analyst can independently add corroborated evidence through the normal Intake workflow.
+
+### 12.6 Dated knowledge store, step 1: the collector (2026-11-03)
+
+Design: `docs/KNOWLEDGE_STORE_DESIGN.md` (21.3.29 found that the product loses on knowledge newer
+than ATT&CK; the open lists do not hold it). Step 1 reads the posts and stores them; it extracts no
+facts, and no ensemble member reads the store yet.
+
+- **Sources:** the 33 sources the product owner approved for the fresh sets
+  (`apt_classifier/knowledge_store/sources.py`, moved out of `scripts/prepare_fresh_reports.py`,
+  which now imports it). Listing, dating (`listing.py`) and page reading (`parse.py`) moved
+  unchanged out of the three report-set builders, which re-export the old names, so a test
+  report and a stored post are dated and read by one rule.
+- **Requests** (`fetch.py`): the store names itself (`VestigeKnowledgeStore/1.0`); robots.txt is
+  honoured, including crawl delays (missing allows and unreachable disallows, as in RFC 9309; a
+  refused robots.txt, 401/403, is read as "keep out", stricter than the RFC); one request per
+  second per site, sites in parallel; a 401/403/451 or 429 stops the
+  site for the run and it is left alone for 30 days (a rate limit for 1). Since 2026-11-04, five
+  bot-protection holding pages in a row ("202 Accepted", Check Point's answer) stop a site like a
+  refusal. Nothing is retried with
+  other headers. Refreshes are conditional (ETag, Last-Modified).
+- **Storage** (`store.py`): SQLite at `data/knowledge_store/store.sqlite` plus gzipped pages under
+  `raw/`; gitignored, local only (the text belongs to each publisher). The fresh-set downloads are
+  imported rather than requested again.
+- **Dates:** `published` is the fresh-set builder's rule. Every consumer reads through
+  `KnowledgeStore.view(as_of)`, which returns only posts with `available_from` before the date.
+  `available_from` is the publication date except:
+  - living documents count from the day they were fetched;
+  - posts a sitemap shows modified more than 30 days later count from that lastmod (a lastmod
+    shared by five or more posts of a source is a re-dating stamp);
+  - month-only URL dates count from the month's last day.
+- **Duplicates:** copies sharing at least half their statements point to the copy that was
+  available first. The ATT&CK-cited flag marks posts ATT&CK 20.0 cites; fold benchmarks will need
+  it to hide held-out sources.
+- **Commands:** `make store-backfill` (list from 2022-01-01, seed, fetch, parse, status; hours,
+  background), `make store-update` (daily), `make store-status`.
+- **Imported posts:** posts imported from the report sets (the older builders sent a browser
+  name and did not read robots.txt) are left out of every view when their site refuses the
+  reader or robots.txt does not allow them (`policy`, run after every fetch). Posts the store
+  fetched itself stay.
+- **First backfill (2026-11-03):** 12,776 posts listed, 11,103 stored, 10,725 dated and usable
+  (1,276 to 1,834 a year for 2022–2026). AhnLab ASEC, Silent Push and Fortinet are out (they
+  refuse the reader or forbid it in robots.txt). ESET is limited to its latest 100 posts.
+  Check Point, SentinelOne and Zscaler rate-limited the reader (1,669 posts waiting; the next
+  run reads them at 10 seconds between requests). The store takes 0.44 GB gzipped plus a 71 MB
+  database.
+
+### 12.7 Dated knowledge store, step 2: names and uses links (2026-11-03)
+
+`make store-extract` (`apt_classifier/knowledge_store/extract.py`, CPU, about 3 minutes with 6
+workers) reads every stored post that is not excluded or a duplicate. Rules only; no model and no
+OpenRouter credit.
+
+- **What a post is about:** the fresh-set builder's registered label rule (`label_report`) and its
+  actor dictionary (ATT&CK names and aliases, MISP synonyms, vendor cluster codes), injected so
+  the store and the test sets name actors alike.
+- **Software names:**
+  - ATT&CK names follow the app's matching rules, plus stricter ones:
+    - a malware name with inner capitals (PS1, OSInfo, MEDUSA) never matches all-lowercase text
+      (the 2026-10-02 rule);
+    - a name that is an ordinary word (Royal, Epic) matches only in its own spelling;
+    - a command word (route) matches only as `route.exe`;
+    - a short tool name (Reg, Arp, cmd) matches only as a command;
+    - a place (Cuba) or a group alias that is also a software alias (Sofacy, Snake) matches only
+      before a malware noun;
+    - nothing matches before a trademark sign.
+  - MISP's tool, RAT, backdoor, botnet, stealer and ransomware lists.
+  - Names a post introduces ("the HOOKEDGE backdoor", "a loader we named X"). Such a name counts,
+    as of a date, only when at least a quarter of the earlier posts that mention it introduce it
+    as malware. Technology words fall below that: MITRE was introduced as malware in 4 of the 397
+    posts that mention it, WhatsApp in 1 of 173, Golang in 22 of 104. Real names mostly score
+    between a third and all: FudModule 7 of 7, SparrowDoor 7 of 11.
+- **Uses links:**
+  - *Sentence rule:* one actor, a software and a use verb in one sentence.
+  - *Report rule:* in a single-actor post, software named at least twice, and at least one
+    sentence says it is used without another actor or a comparison. The link takes that sentence's
+    hedge.
+  - A sentence with a comparison ("similar to", "the same … as", "ties to"), a lure ("spoofing",
+    "masquerading as"), a leak or publication ("released by the Shadow Brokers") or several actors
+    gives *unclear* links. An unclear link counts only once the local model confirms it (below).
+  - Hedges are confirmed, stated, likely and possible; possible links never count towards naming.
+- **Claims:** "also known as", "part of" and "overlaps with" between two different actors are
+  stored as claims; nothing merges actors yet.
+- **Reading:** `KnowledgeStore.links_view(as_of)` aggregates links per actor and software from
+  posts available before the date. A link counts towards naming (`corroborated`) when two
+  publishers state it without a "possible" hedge (Securelist and Kaspersky ICS count as one).
+- **Result (extractor version 4, 10,934 posts):**
+  - 596 posts are single-actor about an ATT&CK group and 367 about another actor.
+  - There are 3,945 active links (2,921 from sentences, 1,024 from single-actor posts) and 2,379
+    unclear links.
+  - The active links form 1,688 actor-software pairs; 227 of them are confirmed by two
+    publishers, and 732 pairs exist only as unclear links.
+  - 2,027 malware names were introduced by posts; 1,638 pass the share rule.
+- **Quality check by hand:** two random samples of 200 active, non-"possible" links (100 per
+  rule), drawn only from posts outside the decisive-test window (2025-01-01 to 2026-02-28):
+  - First sample (version 2): 169 of 200 right (84.5%): sentence rule 87, report rule 82.
+  - The general error classes were then fixed: comparisons, lures, tactic ids read as Proofpoint
+    codes, short tool names, actor names before a malware noun, report links without a use
+    sentence.
+  - Second, fresh sample (version 3): 170 of 200 right (85%), 85 per rule. The remaining errors are
+    a long tail: leaks, partner groups, ransomware brands, wrong post labels, partial actor names
+    ("Mirage" in "Mirage Kitten").
+  - Links in pairs confirmed by two publishers, which are the ones that can name a group: 53 of 57
+    and 56 of 60, together 109 of 117 (93%), against the design's target of 90%.
+  - Version 4 only adds the leak and "plausible" rules. These can only move links to unclear; with
+    them the Shadow Brokers keeps no confirmed pair.
+- **Early stop (registered in `data/knowledge_store/early_stop_registered.json` before any result
+  was read):** the 8 malware links the model's reasons used on the 11 fresh reports it got and
+  the product missed (21.3.29).
+  - The store, as of each report's date, holds 4 of them: HEADLACE for APT28 (Recorded Future,
+    2024), which covers both HOOKEDGE reports; NotDoor and MiniDoor for APT28 (Zscaler,
+    StrikeReady); and Darkcomp for MuddyWater (Symantec, March 2026). Fewer than 3 meant stop, so
+    the result is **go**.
+  - One of the four is confirmed by two publishers (NotDoor). TomBerBil for ToddyCat (Kaspersky,
+    2024) is there but unclear.
+  - Missing:
+    - the Ptero tools for Gamaredon;
+    - TOSHIS and EntryShell for Tropic Trooper (first named in the report itself);
+    - COLDCOPY for Star Blizzard (Google mentioned it in October 2025 but never as malware, so the
+      share rule does not count it).
+  - Disclosure: the check reads the store up to dates after the decisive window, so its output
+    showed two posts inside that window (Zscaler and StrikeReady on NotDoor, February 2026;
+    Google on COLDCOPY, October 2025). No rule was changed after that.
+- **Local-model check (`make store-check`, `apt_classifier/knowledge_store/check.py`):**
+  - Each unclear link is one question to the local model (Qwen3.5 4B, Ollama 0.35 on port 11435).
+    The question gives the post title, the actor and the software as the text names them, the
+    sentences that decide the link and the claim that the actor itself used the software. A
+    sentence link shows its sentence and the one before. A report link shows up to six sentences
+    that name the software.
+  - The model writes a reason first, then supported, unsupported or uncertain. P(supported) comes
+    from the token probabilities, as in the technique verifier.
+  - A link counts once P(supported) reaches 0.98, the verifier's cut-off, fixed before the first
+    run. Verdicts are kept per model and prompt version (`link_checks`), so a new extraction keeps
+    them; `links_view(model=None)` leaves them out.
+  - **GPU only.** The model is loaded before the first question and must sit entirely in GPU
+    memory. Whenever it does not (a model that did not fit, or a server that lost the GPU after
+    a driver update), the check stops without using that answer.
+  - The model is reloaded every 50 answers, because the server's host memory grew to 9 GB after
+    about 330 answers and the laptop swapped.
+  - The run stops by itself after three answers in a row over 15 seconds. On 2026-11-03 the
+    laptop capped the GPU at 15 W of its 55 W and held it at 210 MHz, so an answer took 25 to 56
+    seconds instead of 1.5. The desktop is drawn on the same GPU and lagged.
+  - The model is unloaded when the run ends. The run is resumable.
+  - **Trial:** 30 random unclear links from posts outside the decisive window, before the run.
+    The model confirmed 10, and 9 of them were right; the tenth read Netcat, a feature of the
+    actor's backdoor, as a tool the actor used. Every rejection was right. Misses cost coverage,
+    not accuracy (MagicRAT for Lazarus, Carbon for Turla, ShadowPad for RedEcho).
+  - **Runs (2026-11-03):** all 2,379 unclear links are answered and 980 are confirmed (41%).
+    - The laptop answered 793 in two sittings. Each ended when the laptop throttled its GPU,
+      after 8 to 13 minutes of load, for about 2.5 hours.
+    - The other 1,586 ran on a rented GPU (Runpod Secure Cloud, RTX PRO 4500, image
+      `ollama/ollama:0.35.0`) at 0.9 seconds an answer. The pod ran 52 minutes and cost about
+      $0.62.
+    - It ran the exact local model file, uploaded and checked by its hash, because the Ollama
+      library's `qwen3.5:4b` has since been repackaged.
+    - Ollama listened only inside the pod and was reached through an SSH tunnel with a one-off
+      key. The pod and the key were deleted afterwards.
+    - The session script is kept with the store
+      (`data/knowledge_store/audit_scripts/pod_session.py`).
+  - **The two GPUs do not decide alike near the cut-off.**
+    - With the same model file, settings and questions, the laptop and the rented GPU decided
+      14 of 230 laptop-answered links differently (6%, 95% interval 4-10%). Six were confirmed
+      only on the laptop and eight only on the rented GPU.
+    - A repeat on the laptop itself differed on 1 of 30.
+    - The first 30-link comparison required 27 matches and got 26. The product owner chose to
+      continue and to measure the rate on 200 more.
+    - Rounding differences between the GPUs send the model's reasoning down another path.
+    - The store keeps each link's first answer, so which links count near the cut-off depends
+      on where they were answered.
+  - **Hand-check:** 100 model-confirmed links that count, from posts outside the decisive
+    window (seed 41019).
+    - 92 are right (95% interval 85-96%): 39 of 41 sentence links, 53 of 59 report links, and
+      all 42 links in two-publisher pairs. The rule links reached 85%, so the model's links are
+      as good or better.
+    - Two of the eight errors are the model's reading. It took Netcat, a feature of the actor's
+      backdoor, for a tool. It credited Tavdig to Storm-1837, although Secret Blizzard used
+      Storm-1837's backdoor to deploy it.
+    - The other six arise before the model. Four are name collisions: Karma for VOID MANTICORE,
+      Mirage Kitten for Ke3chang, the GOST cipher for the GOST tool, and a SPECTRE implant for
+      the Spectre ransomware.
+    - One post about RansomHub affiliates was taken to be about Scattered Spider. One suspected
+      attribution was stored as stated.
+  - **Swapped names (the design's memory test, on the same 100 links):**
+    - Replacing the actor's name with another well-known group in both the text and the claim
+      left the verdict "supported" on 93: 84 stayed above the cut-off and 9 fell just below it.
+      Two of the 7 reversals happened because the text still named the real actor. The answers
+      follow the text, not the model's memory.
+    - When only the claim names another group and the text is unchanged, the model still
+      confirmed 4 of 41 sentence links but 29 of 59 report links.
+    - The report-link question states that the report is about the actor (the report rule's
+      finding). The model trusts that statement instead of checking the name, so a report link
+      is only as right as the report rule's choice of subject.
+  - **Effect:**
+    - Active pairs rose from 1,688 to 1,900, and pairs named by two publishers from 227 to 280.
+    - The early stop was rerun on the registered links, reporting only whether each held. Five
+      of 8 held before each report's date (4 on rules alone), 3 of them by two publishers (1 on
+      rules alone).
+- **Not done yet:**
+  - Procedure text for the members (design step 5). The decisive test is registered and frozen
+    (12.8).
+  - Weak points to fix later: the name collisions above, and report-link questions that state
+    the subject instead of letting the model check it.
+
+### 12.8 Dated knowledge store, step 4: the decisive test, registered and frozen (2026-11-04)
+
+Registration: `docs/preregistration/knowledge_store_decisive_2026-11-04.json`. It was written
+before any system ran on a report of the set and before the store's members exist (design step
+5). The set is a test set: evaluation only, never tuned on, local only (the text belongs to each
+vendor).
+
+- **Question:** on vendor reports published from 2025-01-01 to 2026-02-28 that ATT&CK 20.0 does
+  not cite and no other set holds, does the product with the store's two members put the right
+  ATT&CK group first more often than without them, with no new wrong name? Each report reads only
+  posts available before its own date.
+- **Readings:**
+  - **Primary: behaviour** (the product owner's choice). Actor, malware, tool and operation names
+    are hidden, and for both arms every software name the store knows is masked too.
+  - Secondary: strict (actor names hidden, malware names kept). It informs but never decides.
+- **Adoption** (a default change still needs the product owner). Both must hold:
+  - at the behaviour reading the store arm puts the right group first more often, with the
+    bootstrap interval of the difference above 0 (10,000 report resamples, seed 7; an exact
+    McNemar test is reported too);
+  - no new wrong name on the set (known and open set, both readings), on the ATT&CK folds of
+    fresh seeds 131, 137 and 139, on CTI-HAL or on Elastic.
+- **Step 5's rule, fixed now** (the label reviewer also builds the members):
+  - Each member's weight is chosen from 0, 0.5, 1 and 2 on the development sets: both fresh sets
+    and the vendor, campaign and advisory sets, with the store sliced at each report's date.
+  - The pair that puts the right group first on the most known development reports at the
+    behaviour reading wins. Ties are broken by the strict reading, then by the smaller total
+    weight. A pair that adds a wrong name on a development set is not eligible.
+  - Then the combiner (the procedure-core recipe), the naming floor (design seeds 41/53) and the
+    confidence labels are refitted.
+  - If no pair puts more development reports first than weights 0, the decisive run is not made,
+    and that is the result.
+- **Names from before the window:** in the decisive run a store fact counts for an ATT&CK group
+  only through a name that pointed to that group before 2025:
+  - the group's ATT&CK 20.0 name;
+  - its names and aliases in ATT&CK 16.1 (2024-11-12, `data/raw/enterprise-attack-16.1.json`);
+  - a synonym in the MISP actor list at commit 3735fd37 (2024-12-24,
+    `data/raw/misp_galaxy_3735fd37/`; 793 actors against 1,113 in October 2026).
+
+  Software names are not pinned. Development reports from 2026-03-01 on use ATT&CK 18.1 and the
+  last MISP commit before that date.
+- **Building the set** (`data/benchmarks/decisive/build.sh`, local):
+  - `scripts/prepare_fresh_reports.py --list --from-store` (new, with a test) takes the
+    candidates and their saved pages from the store, with the store's dates. The fresh sets'
+    build then applies the same labels, masking, cap of 8 reports per actor and twin check.
+  - Left out: posts ATT&CK 20.0 cites, the URLs of the 12 other set files, copies of earlier
+    store posts, retellings of another set's reports, and posts available only after the window
+    (modified more than 30 days after publication).
+  - Left out as shown before registration: a scan of every session transcript and store result
+    file found 47 of the window's 2,010 stored posts, mostly from building the fresh sets and the
+    attribution research. Five more support links that the store's early-stop output showed by
+    publisher and date (among them the Zscaler and Google posts disclosed in 12.7). All 52 are
+    out.
+  - Not left out: URLs the fresh listings had only considered. Those listings took undated
+    sources whole and dated their posts without computing a label. Leaving them out would have
+    cost 563 of 1,977 posts (28%).
+- **Sources:**
+  - The 796 Zscaler posts that its rate limit had held back were fetched on 2026-11-04. Zscaler's
+    sitemap stamps 744 posts with an April 2025 date, but only 6 of the 796 were published in the
+    window (5 of them cited by ATT&CK), so none joined the set.
+  - SentinelOne rate-limited the reader again at its first request, and Check Point answered 218
+    of 231 requests with its bot-protection page. Both are left alone, never worked around.
+  - Their unfetched posts are not in the set: 88 of SentinelOne's and 103 of Check Point's that
+    their listings date to the window. Leaving out SentinelOne's was the product owner's choice;
+    Check Point's are treated the same way. The fetcher now stops a site after five
+    bot-protection pages in a row (12.6).
+- **Label review:** before any system ran, all 154 known and open-set reports were read against
+  the vendor's own attribution: the title, the label with its name counts, and the sentences that
+  name an actor. 34 were excluded, never relabelled (16 known, 18 open set;
+  `data/benchmarks/decisive/amendments.json`):
+  - roundups and posts about several actors;
+  - name collisions: "Poseidon" was the Poseidon Stealer, and "Alibaba" (a cloud registry) is a
+    MISP synonym of Cleaver;
+  - posts that tie the activity to a group only by an overlap, a resemblance or a low-confidence
+    suspicion, or that report an actor's claim without attributing it;
+  - open-set posts about a service, loader or framework that several actors use, or whose actor
+    the vendor ties to an ATT&CK group. For example, TA444 is BlueNoroff, which ATT&CK lists as an
+    alias of APT38; the label rule's name matching is case-sensitive and missed it.
+- **Frozen (2026-11-04):**
+  - 48 known reports on 25 groups and 69 open-set reports, published 2025-01-06 to 2026-02-26,
+    from 1,802 candidate posts. Most posts name no actor (1,154) or no leading one (316), and
+    181 are too short.
+  - Scattered Spider has 6 reports and Mustang Panda 4; no other group has more than 3.
+  - The rebuild after the last download added no report, so nothing was read again. One excluded
+    report left the candidates as a post behind an early-stop link.
+  - The registration's `frozen` entry holds the hashes of every set file and of the builder. The
+    code is the uncommitted worktree on top of commit 7c0f532.
+- **Fewer than 60 known reports:** under the design's rule (2026-11-03, before any count) every
+  reading of this set is descriptive only, and nothing is adopted on it.
+- **Not done yet:** step 5 (the two members, development runs, combiner, floor and labels; 12.9)
+  and step 6 (the decisive run and the gate).
+
+### 12.9 Dated knowledge store, step 5: the two members (2026-11-04)
+
+Code: `apt_classifier/knowledge_store/members.py` and `pins.py`. `scripts/knowledge_store.py
+members [--pin]` writes the artifacts. Both members are off by default (`STORE_TEXT_WEIGHT`,
+`STORE_SOFTWARE_WEIGHT` = 0): nothing loads and the combiner fingerprint is unchanged. Amendment 1
+of the decisive test's registration records every choice below, written before any development
+run.
+
+- **Store text:** one document per ATT&CK group, built from the statements of the posts the store
+  labels to that group (606 posts and 63,726 statements in the current store), with actor names
+  masked. It uses the free-text member's TF-IDF. Each case rebuilds the documents from the posts
+  available before its date, which equals a fresh fit on those statements. Like the other text
+  members it never counts as independent evidence.
+- **Store software:** the software member's rarity rule over the store's uses links that ATT&CK
+  lacks. Links that count: active rule links and unclear links the local model confirmed (4,956 in
+  the current store). A software's users are ATT&CK's groups plus every actor the store links to
+  it, so a malware many actors use weighs little. Software in a case: the ATT&CK software the
+  pipeline found, plus MISP and store names written in the text. It ranks on every link one
+  publisher states without "possible". For the naming gate it supports a group only through a
+  link two publishers state, and it shares the software family with the ATT&CK member.
+- **What a case never reads:** its own post, the post's copies, or any post sharing at least half
+  of its statements. Statements are compared without names, so a vendor's retelling of another
+  vendor's report is caught too.
+- **Names from before each report (the pins):** a dated report reads a copy of the store whose
+  actors were named with older lists:
+  - before 2026-03-01: ATT&CK 16.1 and MISP 3735fd37 (the decisive set and most development
+    reports);
+  - from 2026-03-01: ATT&CK 18.1 and MISP 03b461ff (2026-02-16; both fresh sets and three vendor
+    reports);
+  - undated cases and the app read the store with the current lists.
+
+  | Copy | Known posts | Counted links | Unclear links without a model answer |
+  |---|---:|---:|---:|
+  | current lists | 606 | 4,956 | 16 |
+  | before 2025 | 588 | 4,621 | 270 |
+  | before 2026-03 | 599 | 4,842 | 85 |
+
+  An unclear link without the model's answer never counts. The older lists name some actors
+  differently, so the model's earlier answer, which is stored per actor, does not apply to them.
+- **Which reports read what:**
+  - Fresh, vendor, decisive and Elastic reports read the store before their published date. The
+    store is not empty before 2022: the sources' sitemaps also list older posts, and it holds
+    3,741 pages dated before 2022, 123 of them labelled to a group (amendment 1 said otherwise;
+    amendment 2 corrects it).
+  - Campaigns and advisories have no date: they read nothing.
+  - ATT&CK fold cases read the whole store, without the posts ATT&CK cites for the held-out
+    sentences (and without the removed actor in the unknown arm).
+  - CTI-HAL reads the whole store without its own posts (`--store-undated whole`), for the safety
+    check only.
+- **Behaviour reading:** `--mask-store-names` also masks every malware name the store's posts
+  introduce, in both arms. ATT&CK's tools stay, as at the fresh sets' behaviour reading.
+- **Weight choice, as run:**
+  - One run per development set and reading, with both members loaded. `--weight-grid` fuses each
+    case again for all 16 weight pairs: the classifiers do not read the weights, so only fusion and
+    the gate run again. A test checks that this equals separate runs.
+  - The learned combiner is off for every pair, because the current one cannot load once a member
+    votes. Without the combiner, the naming floor does not act during the choice.
+  - `data/knowledge_store/step5/choose_weights.py` applies the registered rule. A pair is not
+    eligible if it gives a wrong name that weights 0 do not.
+- **After the choice:**
+  - The combiner is refitted on the procedure-core recipe, then the design seeds, the floor and
+    the labels are redone (`run_refit.sh`).
+  - A development check follows (`run_check.sh`): if the store arm gives a wrong name the baseline
+    does not, it is not frozen and the decisive run is not made.
+- **Engine and benchmarks:**
+  - `engine.set_store_case` tells the members which case they read (date, own posts, removed
+    actor).
+  - Combiner feature schema 4 adds the two members' columns; older artifacts load on their own
+    columns.
+  - The naming gate has a limited-support rule for store software (`attribution.LIMITED_SUPPORT`).
+- **Store refresh:** the store was read again on 2026-11-04 with the 814 pages fetched that day.
+  The copy from before is kept in `data/knowledge_store/step5/`.
+- **Tests:**
+  - `tests/test_knowledge_store_members.py`: date slices, hiding, rarity, the share rule for names,
+    pins and the gate limit;
+  - the builder end to end;
+  - session tests: weight 0 changes nothing, and the grid equals the engine.
+- **Caveat, ATT&CK folds:** the store's posts describe the same intrusions as ATT&CK's procedure
+  examples, and only the cited posts are hidden. On the folds the store text can therefore match a
+  held-out sentence through another vendor's write-up, and the combiner may learn to trust it more
+  than real reports support. The refit reports each member's top-1 alone on the folds and on the
+  vendor set.
+- **Result (2026-11-04, amendment 2): no decisive run.** The six grid runs took 1 h 50 min on
+  the laptop GPU. The development sets hold 90 known reports at each reading and 63 open-set
+  reports.
+
+  | Weights (store text, store software) | First at behaviour | First at strict | Eligible |
+  |---|---:|---:|---|
+  | 0, 0 | 22/90 | 41/90 | yes |
+  | 0.5, 0 | 20/90 | 41/90 | yes |
+  | 1 or 2, 0 | 19/90 | 39-41/90 | no: one open-set name |
+  | 0, 2 (best with store software) | 23/90 | 46/90 | no: two wrong names |
+
+  - Every store software weight above 0 adds a wrong name: Mustang Panda for a Tropic Trooper
+    report at the behaviour reading, and two more at the strict reading.
+  - So no eligible pair beats weights 0, and as registered the decisive run is not made. The
+    combiner refit, floor, labels and development check were not run. Both members stay off.
+- **Why (development numbers; nothing is chosen on them):**
+  - Alone, store text ranks the right group first more often than any other member on both fresh
+    sets: 20/44 and 7/12 at the behaviour reading, against 13/44 and 5/12 for the ATT&CK text
+    member and 8/44 and 4/12 for the whole product with the combiner off.
+  - Fused without the combiner, it changes no first choice on either fresh set at any weight.
+    Where it is right alone, the right group moves up only a few places (for example 59th to
+    47th).
+  - On the vendor set it is the weakest text member (7/34 against 22-26/34): these reports are the
+    sources of ATT&CK's procedure text. Both first choices it costs there are on reports from
+    before 2022, where the store holds only old sitemap posts. Had it not voted on them, store text
+    0.5 would have tied weights 0, and the tie goes to weights 0.
+- **Second attempt (amendment 3, product owner's request, registered before it ran):** store text
+  alone (weight 1, store software off), judged through its own refitted combiner
+  (`attribution_combiner_store_core.json`, the procedure-core recipe with every list generated
+  afresh). The go rule had two parts. First, summed over the three sets at the behaviour reading,
+  the store arm must put the right group first more often than the product's defaults. Second, it
+  must give no wrong name the defaults do not give.
+- **Result (2026-11-05, amendment 4): no decisive run.** The attempt took 8 hours on the laptop
+  GPU, with no API credit.
+  - Combiner: real weight 10, l2 10, cross-validated clean fold top-1 0.912. It gives store text
+    small weights (score −0.06, rank 0.21) next to the other text members (score 0.50-0.67). On the
+    ATT&CK folds, its main training data, store text alone is weak: 31/155 and 28/155 first on the
+    design seeds, against 86-102 for the ATT&CK text member.
+  - Design seeds 41/53: 140 and 138 of 155 first, with 35 and 36 names and none wrong. The floor
+    rule chose 0, since there was nothing to hold. The labels are strong-only (0.635).
+  - Development check (first / named / wrong; the vendor numbers are in-sample for both arms'
+    combiners):
+
+    | Set, reading | Store arm | Defaults |
+    |---|---|---|
+    | fresh, behaviour | 10/44, 0, 0 | 10/44, 0, 0 |
+    | fresh, strict | 18/44, 8, 2 | 19/44, 8, 1 |
+    | fresh2, behaviour | 5/12, 0, 0 | 4/12, 0, 0 |
+    | fresh2, strict | 5/12, 3, 0 | 5/12, 3, 0 |
+    | vendor, behaviour | 23/34, 2, 0 | 23/34, 2, 0 |
+    | vendor, strict | 29/34, 6, 0 | 30/34, 6, 0 |
+
+  - The first part holds (38 vs 37 at behaviour, one fresh2 report), but at strict the store arm
+    is behind (52 vs 54).
+  - The second part fails, on a Silent Push report labelled The Gentlemen. Both arms lead with
+    Storm-1811 (combiner p 0.85-0.92, through the Black Basta tooling). The defaults hold it at
+    separation 0.30, below the bar of 0.5. Store text changes the runner-up, the separation
+    rises to 0.58, and the gate names the wrong group.
+  - The store arm also drops one correct name and one open-set name at the strict reading.
+  - So the store arm is not frozen and the decisive run is not made. Both members stay off, and the
+    defaults are unchanged. The combiner and labels stay as trial artifacts.
+- **What this leaves:** store text is strong on new reports when it votes alone, but neither fusion
+  nor a combiner trained mostly on ATT&CK folds turns that into more first choices without a wrong
+  name. Real reports dated after the store's posts would be the training data such a combiner
+  needs, and the development sets are too small to provide them.
 
 ---
 
@@ -2079,6 +2848,10 @@ When the analyst selects Interview after analysis:
 
 There is no normal per-question “Generate next question” click.
 
+With `INTERVIEW_SOFTWARE_QUESTIONS=true` (off by default, a pilot), up to three software questions
+come first while the case is not named. Each asks about malware that only one of the top three
+documents, with found / not found / not checked answers (10.11).
+
 ### 15.5 Answer semantics
 
 The parser accepts variants such as:
@@ -2260,9 +3033,194 @@ Technique matches and actor-specific behavior references are retained in compact
 
 For Anthropic schema-constrained calls, configured `max/xhigh` effort is mapped to medium structured-output reasoning so hidden reasoning cannot consume the entire visible JSON budget.
 
+### 16.4a Local LLM (Ollama), hybrid routing
+
+Added 2026-10-02 and on by default (`LOCAL_LLM_ENABLED=true`, product owner's decision): the
+local model is used only when the Ollama server at `LOCAL_LLM_URL` answers with
+`LOCAL_LLM_FALLBACK_MODEL` pulled. `OpenRouterClient` routes by model id: ids prefixed `local/`
+(for example `TECHNIQUE_VERIFIER_MODEL=local/qwen3.5:4b`) go to Ollama; every other id goes to
+OpenRouter. Without an OpenRouter key a remote id is answered by `LOCAL_LLM_FALLBACK_MODEL`, so
+with a key nothing changes unless a model id starts with `local/`, and without one the
+technique verifier, the prose normaliser, interview phrasing and the review run locally instead
+of being switched off. Benchmarks are unaffected: their local pipeline builds no LLM client and
+their production pipeline is run with a key. The system endpoint reports `llm_provider`
+(`openrouter`/`local`/`hybrid`/`none`), the model answering each task (`llm_models`) and
+`prose_normalisation` (`extract`/`sentences`/`split`).
+
+- **Setting it up:** a current Ollama (0.16 cannot load Qwen3.5; 0.35 works), `make llm-pull`
+  (pulls `qwen3.5:4b` and registers `qwen3.5:4b-text`, see below), `make llm-check`, then restart
+  the app, which checks for the model at start-up.
+  A server on another address (for example a user-level install without sudo on port 11435) is
+  set with `LOCAL_LLM_URL`. With an OpenRouter key, `EXTRACT_MODEL=local/qwen3.5:4b` moves the
+  prose normaliser and interview phrasing to the local model and
+  `TECHNIQUE_VERIFIER_MODEL=local/qwen3.5:4b` the verifier. Step by step: README, "Optional local
+  LLM (Ollama)".
+- **Model choice (research 2026-10-02):** Qwen3.5 (Apache-2.0, March 2026; vendor IFEval 91.5 for
+  the 9B, 89.8 for the 4B). Its hybrid attention (Gated DeltaNet:full = 3:1) keeps the KV cache for
+  whole reports small. The default `LOCAL_LLM_FALLBACK_MODEL` is the **4B**, the only size that
+  fits the 8 GB RTX 4060 Laptop next to the app's own GPU models and a benchmark, as
+  `qwen3.5:4b-text`: Ollama's build bundles the vision encoder in the model file and loads it onto
+  the GPU although Vestige sends text only, so `scripts/ollama_text_only.py` (run by
+  `make llm-pull`) registers a copy without the `v.*` tensors and `qwen35.vision.*` keys, every
+  other byte and the Modelfile unchanged. Measured 2026-10-03: identical verifier answers on
+  recorded inputs, GPU memory at a 32k context 4,547 -> 3,807 MiB. The 9B (Ollama build 6.1 GiB with its vision projector) loads only when nothing else
+  holds GPU memory. Mixture-of-experts models (Qwen3.6-35B-A3B, Gemma 4 26B-A4B) need 17-22 GB.
+- **GPU only (`LOCAL_LLM_GPU_ONLY=true`):** every request sends `num_gpu=999`, so Ollama either puts
+  every layer on the GPU or refuses to load (measured: a CUDA out-of-memory error, no CPU spill);
+  the client reports this once, without retries, as "does not fit in the free GPU memory".
+  Without it Ollama silently ran 45% of the 9B on the CPU (one verifier call 13 minutes) and slowed
+  the whole machine. `LOCAL_LLM_NUM_THREAD=2` bounds the CPU threads, `LOCAL_LLM_KEEP_ALIVE=5m`
+  frees the GPU memory soon after the last call, and `LOCAL_LLM_TIMEOUT=300` ends a stuck call.
+- **Context size:** `LOCAL_LLM_NUM_CTX=32768` (whole reports). The cache grows with it, so in
+  GPU-only mode a model that does not load can often be made to fit by lowering it.
+- **Laptop power cap:** the laptop's power and thermal management can lower the GPU limit from
+  55 W to 15 W and hold it in P8 (210 MHz) even under load; the 4B then generates 0.4 tokens/s
+  instead of 50. `make llm-check` prints the GPU state and warns when the limit is below half its
+  default.
+- **Native API:** the client calls Ollama's `/api/chat`, not its OpenAI-compatible `/v1`, because
+  only the native API sets `num_ctx` per request; Ollama's default context silently truncates a
+  whole report. `format` carries the JSON schema (grammar-constrained decoding), the same parser
+  and single retry as OpenRouter apply, and the cost is recorded as 0.
+- **Sampling:** Qwen's recommended values (non-thinking 0.7/0.8/20, thinking 1.0/0.95/20).
+  `presence_penalty` is not sent, so the model's own Ollama default applies: 1.5 for qwen3.5:4b,
+  and every measurement in this section ran with it (an earlier version of this note said the
+  penalty was off; Ollama merges the model's defaults into each request). Thinking is on only
+  for the efforts in `LOCAL_LLM_THINK_EFFORTS` (`high,xhigh,max`, i.e. the review), with
+  `LOCAL_LLM_THINK_TOKENS` added to the output budget. Seeds are always sent (0 when the caller
+  passes none), so benchmark runs repeat.
+- **Technique verifier, measured 2026-10-02 (4B, thinking off):** with the production prompt the
+  4B agreed with almost everything (branch-office: 19 supported, 0 correct; clinic micro-F1 below
+  no verifier in every mode). Local models therefore get their own prompt
+  (`cyberre._verifier_prompt`): it names the usual false positive (a shared word, tool or
+  category) and puts `required_behavior` and `support_span` before `verdict` in the schema, so
+  the verdict follows from the evidence. Developed on the branch-office and manufacturing bundles
+  (F1 up or equal in all six mode comparisons; one-candidate-per-call and thinking were slower
+  and not better; thinking took 2.5-4 min per call), then confirmed once on the held-out clinic
+  bundle, micro-F1 no verifier -> 4B -> GPT-5.6: narrative 0.357 -> 0.378 -> 0.526, windows
+  0.600 -> 0.571 -> 0.571, ecar 0.545 -> 0.571 -> 0.615. Most remaining false accepts are
+  interpreter techniques (T1059.x) for commands whose labelled purpose is something else.
+- **Verifier confidence and interpreter rule, measured 2026-10-03 (4B text-only, thinking off):**
+  the product owner chose the cheap levers over trying other models (a researched shortlist of
+  Qwen3.5-9B at 3 bits, Granite 4.2 3B and Qwen3-4B-Instruct-2507 was not run).
+  - *Confidence.* Local verifier calls request the top-20 token alternatives; at each verdict
+    `_verdict_confidences` renormalises P("supported") over the tokens that can start an allowed
+    verdict (Ollama reports the distribution before the JSON grammar, where "No" or "false" lead)
+    and stores it in `TechniqueVerification.confidence`. A local "supported" below
+    `LOCAL_LLM_VERIFIER_MIN_CONFIDENCE` (0.98) becomes "uncertain" and stays for the analyst;
+    OpenRouter verdicts carry no probability and are never gated. The threshold was fitted by a
+    rule written before the results were read (best mean F1 over the six dev bundle/modes, ties
+    to the lower threshold, at least as many wrong as correct accepts removed). It is fragile: the
+    model is confident even when wrong (wrong accepts at 0.89-0.999), and the fit gave 0.999 for
+    the plain prompt but 0.98 with the rule, where 0.999 would cost F1.
+  - *Interpreter rule.* For log-derived observations (provenance `winlog*`, `ecar*`, `sysmon*`,
+    `elasticsearch*`, `evidenceforge_*`) the local prompt adds: map what a wrapped command is
+    for, and support T1059.x only when the interpreter itself is the point (a script, an
+    encoded or obfuscated command, a chain of commands). Dev bundles (branch-office +
+    manufacturing, 1,108 candidates): correct accepts 6 -> 13, wrong 11 -> 15, F1 up in all six
+    bundle/modes (mean 0.516 -> 0.638; 0.652 with the threshold); it worked by supporting the
+    purpose technique, not by dropping T1059 (4 wrong T1059 accepts either way). On report prose
+    it backfired (80 CTI-HAL statements with a T1059 candidate, 1,330 candidates): wrong accepts
+    10 -> 24 with 7 correct either way, so prose, alerts and interview answers keep the plain
+    prompt. The threshold helped on prose too (plain prompt: precision 0.41 -> 0.46 at 0.98).
+    The 4B verifier recovers few labelled techniques from prose (7 of 78).
+  - *Held-out clinic, run once with the final setup*, micro-F1 no verifier -> 4B before -> 4B
+    final -> GPT-5.6: narrative 0.357 -> 0.378 -> **0.556** -> 0.526, windows 0.600 -> 0.571 ->
+    **0.462** -> 0.571, ecar 0.545 -> 0.571 -> **0.643** -> 0.615; mean 0.501 -> 0.507 -> 0.554 ->
+    0.571. Narrative and ecar now match or beat GPT-5.6; windows regressed (three wrong accepts,
+    none correct, on a small mode).
+- **Prose normaliser, measured 2026-10-02 (CTI-HAL statements joined into prose, deterministic
+  mapping, no verifier):** the 4B rewriting whole reports with the production extraction prompt
+  lowered technique F1 from 0.431 to 0.370 on 14 reports because it leaves actions out. Splitting
+  first and letting the 4B rewrite each sentence 1:1 (thinking off) gained on those 14 reports
+  (0.431 -> 0.503), not on the other 41 (0.470 -> 0.460), and over all 55 F1 0.459 -> 0.472
+  (precision 0.552 -> 0.564, recall 0.393 -> 0.405; 22 reports better, 20 worse). The product
+  owner adopted it as the local prose normaliser: `prose_normalisation` sends prose to OpenRouter's
+  whole-report extraction when OpenRouter answers the extract model, to
+  `evidence/standardise.py` when a local model does, and to the plain split without an LLM. The
+  split decides coverage: an omitted sentence, a rewrite under three words ("None.") and a failed
+  call keep the split sentence; a rewritten observation keeps its line provenance and the
+  original sentence in `provenance.metadata["original_sentence"]`; at most 60 sentences go into
+  one call. Alerts stay on the plain split (not measured), and the case diagnostics record
+  `normalization: local_llm_sentences` with rewritten/kept/failed counts.
+- **Availability:** `llm_available` needs an OpenRouter key or the local server answering
+  `/api/tags` with the fallback model pulled (cached 30 s per URL), so an old Ollama without the
+  model leaves the app in local mode. The API decides once at start-up. `make api-local` /
+  `make run-local` force no-LLM mode, and the test suite switches the local LLM off in
+  `tests/conftest.py`.
+
 ### 16.5 Review limitations
 
 The review can critique evidence and ranking but cannot add reliable evidence. A reviewer’s confidence is not an attribution probability. The deterministic RRF ranking remains authoritative; reconciliation stores any alternative ordering under `advisory_ranking` and records differences under `rank_changes` without applying them. The report retains the counter-case, limitations, disconfirmation tests, and fame-bias measurements.
+
+### 16.6 Model second opinion (2026-11-11, opt-in, display only)
+
+A cloud model's own answer to "which ATT&CK group did this?", shown beside the product's answer
+on the Assessment page. It is off by default (`MODEL_OPINION_ENABLED=false`) and is asked only
+when the analyst presses the button: one OpenRouter request, about $0.05-0.06 (measured on the
+fresh-report runs of 21.3.28-21.3.31, maximum $0.11), repeated once (and paid again) when the
+answer cannot be read. Module `apt_classifier/model_opinion.py`;
+settings `MODEL_OPINION_ENABLED`, `MODEL_OPINION_MODEL` (`openai/gpt-5.6-sol`),
+`MODEL_OPINION_EFFORT` (`medium`); route `POST /api/cases/{id}/model-opinion`; payload key
+`model_opinion` (always present, null when nothing was asked); status under `model_opinion` in
+`/api/system`.
+
+What it never does. The answer does not reach classifier results, the fusion, the combiner (its
+fingerprint is unchanged), the naming gate, a confidence label, the case file or an export. No
+engine module imports the module (only `service.py` does), and nothing is asked during an
+analysis, a rescore or a case open. This is not the LLM zero-shot vote removed on 2026-09-30
+(9.11): that one voted in the fusion on every analysis.
+
+The call.
+
+- The question, the answer schema, the model and the effort are those of the offline test
+  (`scripts/fresh_llm_attribution.py`); a test keeps the prompt and schema equal to that script's.
+- The model reads the case's positive observations in ledger order, the statements the product's
+  own members read, at most 400 of them.
+- Before the call every ATT&CK group name and alias is replaced by "the adversary", with the
+  short forms reports write ("Lazarus", "Sandworm") and spellings with or without a space or
+  hyphen ("APT 28", "Fancy-Bear"), and group ids G0001-G1099 are removed. That is less than the
+  tested text had hidden: vendor names ATT&CK does not list, most malware names, camel-case names
+  written as two words ("Muddy Water") and a report's own attribution sentences stay, and so does
+  a group name written as one lower-case word; a capitalised ordinary word that is also an ATT&CK
+  name ("Google Play") is hidden too. With a cloud key the case statements are the extractor's rewritten
+  actions, not report sentences. The offline numbers therefore do not carry over to a product
+  case as they stand.
+- It needs an OpenRouter key and refuses a `local/` model id, so the local fallback model can
+  never answer in the cloud model's name.
+- The model answers for one case at a time; a second request for the same case while the first is
+  under way is refused. The call holds no engine lock, so other analyses carry on.
+
+Reading the answer.
+
+- Each candidate is matched to ATT&CK by its name only (case and punctuation ignored; a name two
+  groups share matches neither). The model's own group id is ignored: it writes real actors that
+  ATT&CK does not list under invented ids (21.3.28).
+- The block shows the model's first choice as written, its stated probability, its decision
+  (name / no single group / not in ATT&CK), up to two more candidates, its reasoning, and how the
+  first choice relates to the product's answer: the same group, one of a named pair, a group
+  ATT&CK documents as overlapping activity, among the product's first five, or different.
+- "Confident name" is the rule of 21.3.31 and nothing more: the model decides to name its first
+  candidate, that candidate is an ATT&CK group and the model states at least 0.99 for it. The
+  cut-off was chosen for GPT-5.6 Sol's own numbers at effort medium, so the mark is not used for
+  another model or effort.
+- The stated probability is the model's own number. It is not calibrated and is not comparable
+  with the combiner's probability.
+
+Limits. The answer is kept in memory only: it is lost on a restart, kept across a re-analysis
+(marked "the case text changed" when it has) and dropped with the case. Each click is a new,
+unseeded sample, so asking again can give a different answer. When the model's first answer cannot
+be read, the client asks once more; both attempts are charged, and the cost shown is the last
+one's. The evidence for the confident mark is small: 17 of 17 and 8 of 8 right on the
+development set, 6 of 6 on 12 new reports.
+
+Its test is registered in `docs/preregistration/model_second_opinion_2026-11-11.json`: on the
+confirmation set (vendor posts from 2026-11-03 on, `docs/KNOWLEDGE_STORE_DESIGN.md`), the
+model's confident names against the product's names, and the model's first choice where it
+states at least 0.5 (else the product's leader) against the model's first choice alone. It is
+read once at 30 known reports (descriptive) and once at 60, at the behaviour reading of 21.3.31
+and for the call the button makes. The result may only change the display: a wrong confident
+name that the product does not also give, at either look, removes the mark. Nothing has run; the
+set does not exist yet.
 
 ---
 
@@ -2378,7 +3336,21 @@ RERANKER_ENABLED=false
 RERANKER_MODEL=
 RERANKER_MODEL_REVISION=
 RERANKER_MAX_CANDIDATES=20
+TECHNIQUE_HEAD_ENABLED=true
+TECHNIQUE_HEAD_URL=http://localhost:8102
+TECHNIQUE_HEAD_EXPECTED_FINGERPRINT=5b5d015d8766dd27cdeceaf0ea1aaa0ea7c613f397d2bf0fecb07eea41fcea01
+TECHNIQUE_HEAD_TOP_FAMILIES=3
+TECHNIQUE_HEAD_NEW_CANDIDATES=3
+TECHNIQUE_HEAD_TIMEOUT=120
+ACCEPTANCE_MODEL_HEAD_PATH=data/models/acceptance/acceptance_model_technique_head.json
 ```
+
+The `TECHNIQUE_HEAD_*` settings drive the fine-tuned technique head's local service (8.2,
+21.3.18): the URL of `make technique-head-serve`, the checkpoint fingerprint the client requires
+(empty accepts any), how many of the head's top families propose a candidate and how many
+proposals may join the pool. `ACCEPTANCE_MODEL_HEAD_PATH` is the acceptance model fitted with the
+head's features; it is read only while the head is active and then judges the observations the
+head scored, `ACCEPTANCE_MODEL_PATH` the rest.
 
 ### 18.3 Interview and fusion
 
@@ -2697,7 +3669,16 @@ settings and no LLM verifier.
 - `--ablate-cues` runs every mode twice, with and without the regex cue tables.
 - `scripts/check_regression.py` (`make check-regression`) fails when pooled micro-F1 drops
   by more than 0.02 or hit@10 by more than 0.03 against
-  `data/audits/public_heldout_baseline.json`.
+  `data/audits/public_heldout_baseline.json`. It displays parent-aware F1 but never gates
+  on it.
+- Parent-aware precision, recall and F1 give one-to-one credit when an accepted id equals
+  an expected id or is its parent or sub-technique, counted as a maximum matching between
+  the accepted and expected sets of each case. Before the fix on 2026-10-02 (artifacts up to
+  and including that day's runs) the pairing was first-fit over Python sets, so the same
+  predictions could score differently under another `PYTHONHASHSEED`. On the current public artifact only the `expert` slice with cues moved
+  (parent-aware precision 0.7265 to 0.7350, F1 0.2665 to 0.2696, pooled F1 0.4505 to
+  0.4511). The maximum matching always gives the top of that range, which is also the value
+  the published artifacts hold, so no published number changes.
 
 Label characteristics: `tram` rows are single sentences (median 15 words, about 1.1
 labels per case), `expert` rows are report paragraphs (median 62 words, about 3.3 labels
@@ -2817,6 +3798,152 @@ because both sides read the same text. On 2026-10-01 a leak in the anonymization
 name that ended a sentence survived. The headline on the same code moved from top-3 31 to 29,
 top-5 0.636 to 0.600 and MRR 0.530 to 0.512, with top-1 unchanged at 0.455 (21.3.14).
 
+#### 21.3.4c Elastic Security Labs real-report benchmark
+
+A second real-report source, independent of CTI-HAL and untouched by any tuning: Elastic
+Security Labs posts in which Elastic attributes observed activity to one ATT&CK 19.2 group.
+Unlike CTI-HAL's annotated snippets, each post is read **the way the product's no-LLM mode reads
+a pasted report**: every prose sentence through `local_observations`, no curation. This set is the
+only clean real-report holdout; nothing may be tuned on it.
+
+**Provenance and licence.** The Security Labs RSS feed carries all 302 posts (May 2022 to
+September 2026) with their full HTML, so no scraping is needed (a sitemap check found one missing
+post, on log4j). `scripts/prepare_elastic_reports.py` (`make prepare-elastic`) downloads it once to
+`data/benchmarks/elastic/feed.xml`. The post text is (c) Elastic: the derived files stay under the
+gitignored `data/benchmarks/elastic/` for local evaluation and are not redistributed. Only slugs,
+ATT&CK ids and our own paraphrases are committed (`data/elastic_security_labs/labels.json`).
+
+**Selection (pre-registered 2026-10-01, commit 520ca28).** All 302 posts were screened for
+attribution to an ATT&CK group, 25 candidates were adversarially verified and a completeness pass
+looked for misses. Eight posts remain (six groups): Elastic's own attribution of real observed
+activity with enough behaviour prose. Contagious Interview (G1052); KANDYKORN and RUSTBUCKET
+(Lazarus Group G0032, APT38 G0082 also accepted, since other vendors file both under BlueNoroff);
+SPECTRALVIPER and PHOREAL (APT32 G0050); LOBSHOT (TA505 G0092); Gamaredon Group (G0047); and the
+Malaysian lure (Leviathan G0065). Fourteen posts are excluded with reasons in the labels file, for
+example operation-bleeding-bear (the label follows from WhisperGate being Ember Bear-only, the
+same mapping the software classifier reads), dynowiper (contested attribution), emulations and
+product demos. An **open set** of 22 posts on actors that are in no ATT&CK group (Elastic REF
+clusters and vendor names outside ATT&CK; 7 APT-like, 15 commodity) was checked by two
+independent refuters each; the correct answer there is "no named group", and any name is
+unsupported rather than proven wrong. Labels, accept sets, rules, metrics and arms were committed
+with the sha256 of the prepared files before the first run.
+
+**Reading rule (label-blind, the same for every post).** `<pre>` code and code pasted between
+paragraphs, markdown pipe tables and fences, image and "Figure N" lines and headings themselves
+are dropped, as are whole non-narrative sections matched by exact heading (MITRE ATT&CK lists,
+detection and hunting rules, YARA, observations and indicators, references, appendix, diamond
+model). The 8 posts give 848 statements (44 to 191 each), the open set 3,619 (67 to 407).
+Report-level technique labels come from every `attack.mitre.org/techniques/...` link in a post,
+with revoked ids followed to their successors (six of the eight posts carry links). Leak audit: no
+statement equals an ATT&CK procedure sentence or an exemplar sentence, and no ATT&CK object cites
+any of the eight posts.
+
+**Anonymization levels** (`scripts/report_anonymizer.py`, `--anonymize LEVEL`):
+
+- `names`: every ATT&CK group name and alias -> "the adversary" (the CTI-HAL headline level,
+  byte-identical to before).
+- `strict` (**headline**): additionally the report's own attribution prose (a sentence that
+  refers to an actor *and* argues attribution, a paragraph with two such sentences, a section
+  about attribution: heading rule plus curated headings fixed in the labels), vendor cluster
+  names (REF/UNC/Storm numbers, family-suffix names, a short list such as DangerousPassword),
+  ATT&CK object ids, and a case-sensitive country / nationality / sponsor / region / language
+  gazetteer (origin compounds such as "DPRK-aligned" are deleted, nouns become "an undisclosed
+  country"). ALL-CAPS codenames (CUBA, KREMLIN) and software names (Cuba, S0625) are protected,
+  ordinary-word aliases ("Play", "Chromium") are replaced only in their ATT&CK spelling. Victim
+  geography goes too: strict is a no-victimology regime. On the eight posts it removed 88
+  attribution statements (51 in attribution sections, 34 sentences, 3 paragraph neighbours),
+  9 group names, 23 cluster names and 30 place or sponsor words (12 origin, 18 victim or other),
+  leaving 760 statements; the residual audit (boundary-free search for every alias, short form,
+  place and cluster id left) finds nothing on them, and on the open set lists only the Chromium
+  browser, defanged domains and a malware marker string.
+- `tradecraft`: strict plus every ATT&CK *malware* name -> "the malware" (tools stay).
+
+**Results (2026-10-01, local pipeline, no credit; `make benchmark-elastic`).**
+
+| Elastic, 8 reports, 6 groups | Top-1 (k/8) [Wilson 95%] | Top-3 | Top-5 | MRR | Group-macro top-1 | Named (wrong) |
+|---|---|---|---|---|---|---|
+| **strict (headline)** | **4/8 = 0.50** [0.22, 0.78] | 0.50 | 0.63 | 0.54 | 0.50 | 1 (0) |
+| names | 5/8 = 0.63 [0.31, 0.86] | 0.63 | 0.75 | 0.66 | 0.67 | 1 (0) |
+| tradecraft | 1/8 = 0.13 [0.02, 0.47] | 0.25 | 0.25 | 0.21 | 0.17 | 0 (0) |
+| as reported | 5/8 = 0.63 [0.31, 0.86] | 0.63 | 0.75 | 0.66 | 0.67 | 0 (0) |
+| strict, 30 random sentences (seeds 1-5, mean) | 0.40 | 0.48 | 0.53 | 0.46 | | 0-2 per seed (0) |
+
+Lenient scoring (APT38 accepted on the two Lazarus reports) changes nothing: both miss either
+way. Cluster-aware top-1 equals top-1. On the 22 open-set posts **no group was named** (all
+reached a shortlist), so the combined named risk over labelled and open-set reports is 0; no
+group leads the open-set rankings often (Kimsuky three times, five groups twice, Lazarus once,
+the other labelled groups never), so the hits below are not a default leader showing up
+everywhere. Since documented-cluster naming became the default (10.11), a cluster name counts as a
+name given on an open-set report too (open-set `named`, `named_clusters`, combined named risk);
+on a labelled report it is wrong when the truth is not a member. Lenient correct names still count
+single-group names only.
+
+| Report | Truth | Rank strict / names / tradecraft / as reported | Strict stage, leader | Group-only ATT&CK malware left at strict |
+|---|---|---|---|---|
+| contagious-interview | G1052 | 1 / 1 / 7 / 1 | shortlist, G1052 | BeaverTail S1246 |
+| kandykorn | G0032 | 4 / 4 / 3 / 4 | shortlist, APT3 | none (APT3's OSInfo matched the field name "osinfo") |
+| rustbucket | G0032 | 52 / 36 / 52 / 36 | shortlist, Mustang Panda | none |
+| spectralviper | G0050 | 1 / 1 / 11 / 1 | shortlist, G0050 | PHOREAL S0158 |
+| phoreal | G0050 | 1 / 1 / 18 / 1 | named, G0050 | PHOREAL S0158 |
+| lobshot | G0092 | 52 / 1 / 52 / 1 | shortlist, Gamaredon | none (Get2 sat in the dropped attribution paragraph) |
+| gamaredon | G0047 | 1 / 1 / 1 / 1 | shortlist, G0047 | Pteranodon S0147 |
+| malaysian (APT40) | G0065 | 108 / 107 / 108 / 108 | shortlist, Patchwork | none |
+
+What the numbers say. (1) **The hits are mostly malware lookups.** Three of the four strict hits
+rest on malware only the truth group uses in ATT&CK, and masking it (tradecraft) leaves one hit:
+Gamaredon, the only report recognised from behaviour (actor-behaviour channel 0.83 against 0.39
+for the next group). Top-1 is 0.80 on the five reports where any ATT&CK software is detected and
+0.00 on the three without. (2) **Elastic's
+attribution prose carries evidence, not only claims:** removing it costs LOBSHOT, whose only
+mention of the TA505-only Get2 loader is in the attribution paragraph (rank 1 -> 52). Group names
+alone moved almost nothing: names and as-reported rank the truth the same on seven of the eight
+reports (the Malaysian lure 107 against 108). (3) **The
+naming promise holds**: one name in eight labelled reports, correct, and none in 22 open-set
+reports, at every arm and seed. (4) **Reading the whole report helps**: 30 random sentences give
+top-1 0.40 on average against 0.50 for all of them. (5) Two failure causes are visible: a false
+software match ("osinfo" as a record field matched ATT&CK's OSInfo, an APT3-only malware, and the
+decisive-malware boost put APT3 first on KANDYKORN; the same class as the "Page" alias in 5.5),
+and reports whose behaviour is generic for their group (RUSTBUCKET and the Malaysian lure have no
+group-specific malware or procedures in ATT&CK that the text matches).
+
+**Registered run, review and corrected run.** The first run used the rules as committed with the
+labels. A read-only code review afterwards (three lenses, each finding reproduced by an
+independent skeptic) confirmed 18 defects; six changed what the model read: acronym compounds and
+prefixes kept ("CIS-region", "pro-DPRK"), "The DPRK continues" lost its subject, the cue "known as"
+dropped technique sentences ("a technique known as reflective binary loading"), "U.S." and spaced
+"state sponsored" were missed, and three heading families (`Techniques (sub-techniques)`,
+`Detection rules for X`, an escaped `ATT\&CK`) kept ATT&CK names and rule names in three
+open-set posts. Latent gaps were closed too (plural demonyms, cluster names after "/", group
+names in dash compounds), and the artifact now records the rule and input hashes. The fixes
+implement the registered rules as written; no label, threshold or metric changed. The corrected
+run (the artifacts above) gives the same strict, names and as-reported ranks on every report and
+the same open-set result as the registered run; tradecraft MRR moves 0.23 -> 0.21 (KANDYKORN rank
+2 -> 3) and the volume diagnostic 0.33 -> 0.40 (two more statements change the samples). Still
+open: the newest post renders its tables as runs of `<p>` cells, which are read as prose (one
+open-set post, about 56 statements), and cities other than capitals are not masked.
+
+Caveats: n = 8 (one report moves top-1 by 0.125; no significance claim is made, and none against
+CTI-HAL, whose groups and reading regime differ); several labels are moderate-confidence or rest
+on overlap with other vendors' reporting; spectralviper and phoreal share a victim environment and
+the two Lazarus posts cross-reference each other; the Elastic technique lists are short author
+lists (mean accepted-technique recall 0.76 over the six labelled posts, precision 0.06 to 0.39).
+
+Running the open set exposed a product bug: retrieval sent every sentence of a report to ChromaDB
+in one query, and the server refuses about 32k result rows (queries x results) in one call, so a
+pasted report of several hundred sentences crashed analysis in local mode. `vectorstore._query`
+now batches the queries under 16k rows per call; each query is independent, so the hits are
+identical and shorter reports still make a single call.
+
+Artifacts (`make benchmark-elastic`): `attribution_elastic_current.json` (strict headline with the
+open set under `open_set` and `metrics.open_set`), `_names.json`, `_tradecraft.json`,
+`_as_reported.json`; the volume diagnostic is `attribution_benchmark.py --report-set elastic
+--cti-hal data/benchmarks/elastic/reports.jsonl --anonymize strict --report-observations 30
+--report-sample-seed S`. `default_output` names the headline level of each report set
+`*_current` (CTI-HAL: names; Elastic: strict). `collect_verification.py` reports
+`elastic_attribution` and `elastic_attribution_as_reported` and warns when the Elastic headline
+is not strict. `make benchmark-elastic-production` (technique verifier) is built but not run: at
+about $0.02 and 11 s per sentence it would cost roughly $15-20 and 2.5 h for the eight posts.
+
 #### 21.3.5 Attribution benchmark (text in, group out)
 
 `scripts/attribution_benchmark.py` (`make benchmark-attribution`) is the attribution gate.
@@ -2835,7 +3962,23 @@ group-balanced random subset of real reports (to fit a credit budget); the run a
 LLM call of the first fold fails and stops, keeping the measured folds and recording
 `truncated_at`, if the API goes away mid-run. A per-fold store proxy
 hides the group's own evidence (technique-index hits identical to a held-out sentence and
-the group's actor-behaviour documents for the held-out techniques). An *unknown-actor* arm
+the group's actor-behaviour documents for the held-out techniques), and since 2026-10-03 the
+BM25 lexical index is rebuilt per fold without the documents whose text is a held-out
+sentence (`fold_lexical_index`; document frequencies and average length recomputed). Before
+that, only the dense index was filtered and a held-out sentence was the top BM25 hit for
+1,268 of 1,272 seed-7 fold observations; fold artifacts, design/confirmation seeds and the
+combiner lists made before then carry that leak (`parameters.leak_control` is `dense+lexical`
+from then on, and the combiner records `lists_leak_control`). Not hidden: the fold group's
+one-word variants of a held sentence filed under other techniques (about 1.4% of queries have
+one in the BM25 top 3) and, with `TECHNIQUE_INCLUDE_SYNTHETIC` on, synthetic paraphrases of
+procedure examples. Measured on 2026-10-03 with the shipped combiner
+(`data/audits/bm25_fold_hiding_2026-10-03/`): seed 7 technique recall 0.723 -> 0.604, top-1 0.830 ->
+0.824, MRR 0.880 -> 0.867, named 32 -> 26 (0 wrong either way, 0/25 removed actors named); seed 41
+recall 0.740 -> 0.600, top-1 0.863 -> 0.824, named 37 -> 33. 153 (seed 7) and 190 (seed 41) correctly
+accepted techniques existed only through the leak. A combiner refitted on leak-closed lists did not
+beat the shipped one (seed 7 top-1 0.804, seed 41 0.817; CTI-HAL as reported 0.564 -> 0.545), so the
+shipped combiner stays; the refit is kept as `attribution_combiner_bm25_clean_rejected.json`. Fold
+numbers quoted elsewhere in this document before 2026-10-03 were measured with the leak. An *unknown-actor* arm
 removes sampled groups from the knowledge base and hides all their documents, so the
 correct answer is "no named group"; `unknown_recall`, `false_named_attribution_rate`,
 `named_coverage` and `named_risk` come from `evaluation.evaluate_attribution_predictions`.
@@ -2844,7 +3987,8 @@ stages, accepted techniques and the technique recall of the mapping step.
 
 Interpretation: group technique lists, technique-profile centroids and descriptions still
 contain the held-out techniques, so this is self-consistency over the ATT&CK answer key
-with the text leak removed, not field attribution accuracy. It and the CTI-HAL
+with the text leak removed (fully only since 2026-10-03, see above), not field attribution
+accuracy. It and the CTI-HAL
 real-report run (21.3.4b) measure the stage machinery; only this one has an unknown-actor arm.
 
 `scripts/ensemble_benchmark.py` is the older technique-ID version (perfect mapping
@@ -3161,7 +4305,7 @@ longer re-ranking (real 0.789 → 0.719) because it scores the gate's rank-1 can
 
 #### 21.3.9 Learned attribution combiner (2026-09-30)
 
-Artifact `data/models/combiner/attribution_combiner.json` (fit on seeds 11/23/37, 2,609 known
+Original artifact `data/models/combiner/attribution_combiner.json` (fit on seeds 11/23/37, 2,609 known
 lists of which 458 clean and 2,151 randomised, 153 unknown-actor lists; L2 0.3 chosen on the
 mixed out-of-fold MRR). Group-level five-fold cross-validation, out of fold, against the RRF order
 of the same lists:
@@ -3202,6 +4346,72 @@ out-of-fold mixed top-1 0.727 vs RRF 0.404 on its own lists, but on the seed-7 f
 better, 4 worse), 36 and 15 names all correct. Making the training regime harsher did not close the
 transfer gap; the gap sits in technique recall on real text, which the labelled-sentence
 exemplars (21.3.10) then targeted.
+
+**Relabel for the counted Naive Bayes negative term (2026-10-03).** The pipeline fingerprint
+hashes every classifier source file, so counting the Naive Bayes negative term (9.1) moved it.
+Training lists never carry negative answers, so the combiner's inputs did not change. A refit
+from the cached lists (`--reuse-cache`) reproduced bitwise-identical weights, and with it the
+seed-7 ATT&CK folds (153 known and 25 removed-actor rows) and both CTI-HAL runs (55 + 55 reports)
+matched the pre-fix runs row for row. The default, no-country and group-network artifacts are
+therefore relabelled copies (`*_nb_count.json`, with a `metadata.fingerprint_refreshed` entry)
+written next to the originals. The originals keep loading on checkouts without the change, which
+share `data/models`. The Top-three confidence labels (on `frontend-next`) pin the combiner's
+fingerprint and file hash, so after a merge they need `make fit-confidence-labels` on attribution
+artifacts rerun with the relabelled combiner.
+
+**Refit for exactly rounded classifier sums (2026-10-03).** Every order-dependent float sum in the
+classifiers (Naive Bayes, IDF cosine, Jaccard, campaign, software, CyberRE) is now `math.fsum`,
+so no score depends on set iteration order or on the Python version's `sum()`, and the ATT&CK
+parent-child map is built once per
+technique table (a scoring pass 0.41 s -> 0.15 s, outputs bit-identical). Naive Bayes scores move
+by a few units in the last place, so the combiner was refitted (`make fit-combiner`, seeds
+11/23/37, today's pipeline), not relabelled: `attribution_combiner_fsum.json` with its lists in
+`training_lists_fsum.jsonl.gz`, both next to the earlier files. The code change alone is
+outcome-neutral: with the previous weights stamped for the new code, the seed-7 ATT&CK folds and
+both CTI-HAL runs had 0 rank changes. The refit's differences therefore come from retraining on
+today's lists, which have drifted since 2026-09-30 (only 757 of 2,594 shared lists keep their
+shortlist order; RRF mixed top-1 on them 0.425 -> 0.420).
+
+| Set | Before (2026-09-30 weights) | Refit |
+|---|---|---|
+| ATT&CK folds, seed 7 | top-1 0.830, top-5 0.961, MRR 0.880, 32 named, all correct, 0/25 removed named | top-1 0.817 (-2 folds), top-5 0.961, MRR 0.871, 32 named, all correct, 0/25 removed named |
+| CTI-HAL anonymized | top-1 0.455, top-5 0.600, MRR 0.512, 10 named, all correct | top-1 0.473 (+1 report), top-5 0.600, MRR 0.521, 10 named, all correct |
+| CTI-HAL as reported | top-1 0.564, top-5 0.727, MRR 0.636, 15 named, all correct | unchanged |
+| Elastic strict (open set) | top-1 4/8, 1 named, open set 0 named | unchanged |
+| Cross-validation, mixed | top-1 0.722, MRR 0.812 (2,565 lists, L2 0.3) | top-1 0.711, MRR 0.804 (2,536 lists, L2 3.0) |
+
+Cross-validation top-1 is 0.0014 short of the "within 0.01" bar used for combiner refits; on
+today's lists the 2026-09-30 weights score top-1 0.730 and the refit 0.731, so the gap is the
+list set, not the fit. Adopted by the product owner on 2026-10-03 with that caveat.
+
+The two opt-in combiners were refitted the same way (`--set source_country_weight=0`,
+`--set group_mlp_weight=1.0`) as `attribution_combiner_no_country_fsum.json` and
+`attribution_combiner_group_mlp_fsum.json`; without a refit those settings would run with no
+combiner at all. Against the previous code with its previous artifact, with the same setting:
+
+| Setting | ATT&CK folds, seed 7 | CTI-HAL anonymized | CTI-HAL as reported |
+|---|---|---|---|
+| `SOURCE_COUNTRY_WEIGHT=0` (CV mixed top-1 0.709) | top-1 128 -> 124 of 153, 33 -> 32 named, all correct, 0/25 removed named | top-1 24 -> 26 of 55, 8 -> 10 named, all correct | top-1 30 -> 31, 13 -> 14 named, all correct |
+| `GROUP_MLP_WEIGHT=1.0` (CV mixed top-1 0.722) | top-1 125 -> 124, still one wrong name (Silence named as Kimsuky, as before) | unchanged top-1 26, 10 named, all correct | top-1 31 -> 31, 15 named, all correct |
+
+The no-country fold drop (4 folds) exceeds the 0.02 bar used for the default; its previous artifact
+was the schema-1 combiner fitted before the country vote existed. The group-network setting keeps
+the wrong name that failed its naming gate on 2026-10-01 and stays opt-in only. The free-text
+group model's trial combiner (`attribution_combiner_text_group.json`, 21.3.16) was fitted for the
+earlier classifier code and needs the same refit before `TEXT_GROUP_WEIGHT` > 0 is used.
+
+**Leak-free check and decision (2026-10-04).** After the merge with the BM25 fold hiding (21.3.5) the
+refit was checked on the leak-free fold benchmark. Against the previous code with the 2026-09-30
+combiner it lost 5 folds (seed 7 top-1 126 -> 121 of 153, MRR 0.867 -> 0.848, 26 named, all correct),
+more than the 2 measured before the hiding, and gained one CTI-HAL anonymized report (25 -> 26; as
+reported unchanged). The 2026-09-30 weights stamped for the merged code reproduced the previous code
+exactly (0 rank changes on those folds and both CTI-HAL runs), so the product owner chose them:
+the default is `attribution_combiner_0930_fsum.json` (a `metadata.fingerprint_refreshed` entry records
+the stamp) and the refit stays on disk unused. The confidence labels were re-pinned to it
+(`confidence_labels_fsum.json`, `provenance.repinned`): a fresh fit on the leak-free design seeds 41/53
+was refused by its own rule, because only 6 rows reached the "set" label (0 misses, upper bound
+0.39 against the 0.20 bar; the adopted fit had 24). The no-country and group-network refits above
+remain the opt-in artifacts.
 
 #### 21.3.10 Labelled-sentence exemplars: technique recall on real text (2026-09-30)
 
@@ -3539,6 +4749,2981 @@ group's. Two or three carry only generic evidence. The rest need evidence ATT&CK
 the group: malware not in ATT&CK, such as Bateleur, TONEDEAF and TinyMet, or tools documented for
 other groups.
 
+#### 21.3.15 Clusters, confidence labels, software questions and window recall: pre-registration (2026-10-02)
+
+Product-owner decisions of 2026-10-02:
+
+- name a documented-overlap pair as a cluster, counted as correct when the truth is in it and as
+  wrong otherwise;
+- show calibrated confidence labels;
+- build interview questions about malware that only one top-three group uses, recording found /
+  not found / not checked;
+- work on real-report recall.
+
+This entry fixes every parameter and acceptance bar **before** the fresh fold seeds 43 and 47 are
+opened. Their stage-off baselines were run on 2026-10-01 on frontend-next and have not been read
+beyond row counts and combiner status.
+
+**What was already seen.** The designs used seeds 41 and 53. The cluster and window designs also
+replayed seed 7 and CTI-HAL, so those sets are disclosed as already seen for those two tracks and
+are run once at the end as reports, not as tests. The Elastic set (8 anonymized reports,
+data/benchmarks/elastic, local evaluation only) is a report-only check. Nothing is ever fitted or
+tuned on seeds 7, 41, 43, 47, 53, 59 or 61, or on CTI-HAL. The combiner trains only on seeds
+11/23/37.
+
+**Order.** Instrumentation, then cluster naming (A), then confidence labels (B), software questions
+(C) and window recall (D). Each is measured on its own.
+
+**A. Documented-cluster naming**
+
+- **Settings.** `ATTRIBUTION_CLUSTER_NAMING`, default off.
+- **Members.** Pairs only: the gate-window leader plus one twin.
+- **Twin.** A gate-window member that ATT&CK relates to the leader (`attack/related.py`: a
+  description reference, or non-tool software used by at most three groups) and that also either
+  nests (profile containment >= 0.8) or does not separate from the leader (|pair separation| <
+  0.5). If several qualify, the twin with the largest gate-window mass is chosen.
+- **Cluster evidence.** Discrimination is recomputed over the gate window with the pair merged
+  into one unit.
+- **A cluster is named when all of these hold:**
+  - the leader passes the lower stage checks;
+  - the leader-consistency guard did not fire;
+  - cluster separation >= 0.5;
+  - cluster mass >= 3.5, or >= 3.0 for a nested pair;
+  - the members' combiner probabilities sum to >= 0.8.
+- **Nested twin.** A single name whose nested twin is in the window becomes the cluster, or is held
+  at shortlist when the cluster fails.
+- **Bars** on seeds 43+47 pooled:
+  - A1: zero wrong cluster names on known rows and zero removed actors named through a cluster. One
+    failure means it is not adopted, with no retuning.
+  - A2: single names identical to the off run, apart from correct nested upgrades.
+  - A3: at least 2 correct cluster names.
+  - A4: the on run equals the offline replay on every row.
+  - A5: if 2 or more removed actors clear two of the three cluster bars, only the nested scope may
+    ship.
+
+**B. Confidence labels (display only)**
+
+- **Settings.** `CONFIDENCE_LABELS_ENABLED`, default off.
+- **Model.** Logistic calibrators for "leader correct" and "truth in the top 2 / top 3". Inputs:
+  logit combiner P, gate separation, logit null P, log accepted count, leader software vote.
+- **Fit.** Seeds 41+53, removed actors counted as wrong leaders, GroupKFold(5) by group.
+- **Thresholds.** Strong at >= 0.88 (one-sided 95% Clopper-Pearson upper bound on the leader error
+  <= 5%). "One of these 2/3" at >= 0.865. Insufficient evidence is open; that rule was chosen after
+  seeing seed 7.
+- **When a cluster is named,** the label describes the cluster as a two-group set and never says
+  "strong single answer".
+- **Bars** on seeds 43+47 (known + removed):
+  - B1: strong leader error <= 5.0% pooled and <= 8% per seed.
+  - B2: ECE of the calibrated leader probability <= 0.06 pooled.
+  - B3: "one of these" covers the truth in >= 80% of its rows pooled.
+  - B4: decisions, rankings and exports are identical with the labels on and off.
+
+**C. Software questions (pilot-ready)**
+
+- **Settings.** `INTERVIEW_SOFTWARE_QUESTIONS`, default off.
+- **Questions.** For each top-three group, malware that only it documents in ATT&CK and whose only
+  user is inside the gate window. At most 3 questions per case, asked only while the case is not
+  named.
+- **Answers.** Found adds the software as evidence. Not found may only lower the leader's
+  separation. Not checked records nothing.
+- **Guard.** A name must not rest on interview answers alone: the leader's separation without them
+  must be >= 0.
+- **Order in the gate.** Single gate, then the cluster step on the evidence before any "not found"
+  answer, then the "not found" filter. The filter can only move hypothesis or cluster to
+  shortlist.
+- **Bars** per fresh seed, with the simulated answer model q in {0.1, 0.3, 1.0} and a wrong-"found"
+  rate in {0, 0.05}:
+  - C1: at a false rate of 0, no wrong name and no removed actor named.
+  - C2: at least 8 names gained at q = 0.3 and at least 30 at q = 1.0.
+  - C3: no correct name lost.
+  - C4: all answers "not found" leaves the named count unchanged.
+  - C5: at a 5% false rate, at most 1.0 wrong or removed-actor names per seed. This needs product
+    owner sign-off.
+  - C6: replay and pipeline agree within ±2 names.
+  - C7: monotone: a "not found" never adds or changes a name.
+  - C8: C1 and C5 still hold with A on.
+
+**D. Window recall (refit per experiment, defaults unchanged)**
+
+- **D2: combiner window 40.** Refit with `--top-n 40` on seeds 11/23/37.
+  - Fold bars per fresh seed: top-1 and top-3 >= baseline - 1, named correct >= baseline - 2, no
+    wrong name, removed actors named <= baseline.
+  - Cross-validation bar on the lists common to both windows: randomised top-1 >= 0.682, top-5 >=
+    0.905, AUC >= 0.85.
+  - Reported once: CTI-HAL anonymized strict top-3 >= 31/55, truth in the window >= 40/55, no wrong
+    name; as reported top-3 >= 37 and >= 15 names, all correct.
+- **D1: strict-twin admission.** Description reference or malware with exactly two users; combiner
+  schema 3; an admitted ineligible group is never named alone.
+  - Same fold bars, plus no removed actor's twin named.
+  - Reported once: CTI-HAL anonymized strict top-3 >= 29, truth in the window >= 42/55,
+    cluster-aware top-3 >= baseline + 3, no wrong name.
+
+**Expectation stated up front.** Strict top-3 on anonymized CTI-HAL is expected to move by about +0
+to +3 of 55. Five Carbanak reports cannot be ranked above FIN7 on technique evidence, and three more
+lose the Carbanak malware to anonymization. Most of the visible gain will come from counting
+documented clusters, a choice the product owner has made explicitly.
+
+**Results (2026-10-02).** Every track was measured once on seeds 43 and 47 with 153 known folds
+and 25 removed actors each, on the same combiner artifact (pipeline fingerprint
+`fb4404a2819581fefb7b14b5`). Source fingerprints match the committed code. B is adopted.
+A passed but was then narrowed by the product owner (amendment A′ below), and it stays off until
+A′ passes. C ships off as a pilot. D1 and D2 are not adopted.
+
+| track | verdict | what the fresh seeds showed |
+|---|---|---|
+| A clusters | passed; narrowed (A′), off until re-confirmed | 4 correct cluster names, 0 wrong, 0 removed actors; single names identical |
+| B confidence labels | adopted (default on) | "strong" wrong 8 of 192 (4.2%), calibration error 0.041, "one of these" 14 of 14 |
+| C software questions | pilot, default off | many correct names when answers are reliable; about 2.4 extra wrong names per seed at 5% wrong "found" |
+| D1 twin admission | not adopted | seed 43 top-1 137 -> 134, seed 47 top-3 144 -> 142 |
+| D2 window 40 | not adopted | cross-validated randomised top-1 0.630, bar 0.682 |
+
+**A. Clusters: all bars pass.**
+
+| seed | top-1 | top-3 | single names (correct) | cluster names (correct) | removed actors named |
+|---|---|---|---|---|---|
+| 43 off | 137/153 | 145 | 39 (39) | 0 | 1/25 |
+| 43 on | 137/153 | 145 | 39 (39) | 2 (2) | 1/25 |
+| 47 off | 126/153 | 144 | 36 (36) | 0 | 0/25 |
+| 47 on | 126/153 | 144 | 36 (36) | 2 (2) | 0/25 |
+
+- A1: no wrong cluster names and no removed actor named through a cluster.
+- A2: the single names are identical in both arms.
+- A3: four correct cluster names, against a bar of 2:
+  - seed 43, Aquatic Panda / APT41, truth APT41, separation 0.736. This one recovers a case
+    whose single leader was wrong.
+  - seed 43, GOLD SOUTHFIELD / FIN7, truth GOLD SOUTHFIELD, separation 0.727.
+  - seed 47, LuminousMoth / Mustang Panda, truth LuminousMoth, separation 0.727.
+  - seed 47, ShinyHunters / Scattered Spider, truth ShinyHunters, separation 0.512.
+- A4: the on-runs equal the offline replay (`scripts/cluster_replay.py`) on every row.
+- A5: no removed actor cleared two of the three cluster bars, so the full scope ships.
+
+The removed actor named on seed 43 (OilRig, named as FIN6, separation 0.591) is named with
+clusters off too. It is a single name from the existing gate, not from this track; the same kind
+of error appeared on design seed 41 (Storm-0501 named as Threat Group-3390). It is listed under
+open questions below.
+
+**B. Confidence labels: all bars pass.** The frozen artifact was evaluated on seeds 43 and 47
+(known plus removed actors, 356 rows, `confidence_labels_confirm.json`):
+
+| set | strong (right) | one of these (right) | open | leader calibration error |
+|---|---|---|---|---|
+| seed 43 | 99 (96) | 10 (10) | 69 | 0.050 |
+| seed 47 | 93 (88) | 4 (4) | 81 | 0.063 |
+| pooled | 192 (184) | 14 (14) | 150 | 0.041 |
+
+The bars:
+
+- B1: "strong" wrong 4.2% pooled (upper 95% bound 7.4%), 3.0% and 5.4% per seed, against 5% and
+  8%.
+- B2: calibration error 0.041, against 0.06.
+- B3: "one of these" covers 14 of 14, against 80%.
+- B4: decisions, rankings and exports are identical with the labels on and off
+  (`tests/test_confidence_labels.py`).
+
+Half of the 8 "strong" errors are removed actors.
+
+On real reports the labels run overconfident, so the view says so:
+
+| set | strong (right) | leader calibration error |
+|---|---|---|
+| CTI-HAL anonymized | 24 (21) | 0.19 |
+| CTI-HAL as reported | 30 (23) | 0.24 |
+
+**C. Software questions: pilot only, off by default.** The answers to every question were
+enumerated through the real pipeline: found with probability q when the truth documents the
+malware, and a wrong "found" at rate fp otherwise. Expected names per seed:
+
+| seed | baseline names | q = 0.3, fp = 0 | q = 1.0, fp = 0 | wrong or removed added at fp = 0.05 (q = 0.3) |
+|---|---|---|---|---|
+| 43 | 40 | 54.3 (+15.3) | 90 (+51) | 2.37 |
+| 47 | 36 | 47.4 (+11.4) | 74 (+38) | 2.35 |
+
+These bars pass:
+
+- C1: no wrong name and no removed actor named when every "found" is true.
+- C2: gains of 15.3/51 and 11.4/38, against bars of 8 and 30.
+- C3: no correct name lost.
+- C4: all "not found" changes no name.
+- C7: no "not found" adds or changes a name.
+
+These fail:
+
+- **C5** (at most 1.0 extra wrong or removed-actor name per seed at a 5% wrong-"found" rate): 2.37
+  and 2.35 per seed. One false "found" on malware that only one group uses is enough to name
+  that group.
+- **C6:** the fixed-window offline replay undercounts the pipeline's gains by 6 to 9 names at
+  q = 1. That is a limit of the replay method, not of the feature: the pipeline re-runs retrieval
+  and the window after an answer, and the replay cannot.
+- **C8** (C1 and C5 with clusters on, full scope): C1 holds on both seeds. C5 fails as it does
+  with clusters off: 2.47 and 2.35 at q = 0.3.
+
+The feature therefore ships off. A supervised pilot needs the product owner to accept the C5 risk
+or to require a second confirmation for "found".
+
+**D. Window recall: neither variant adopted.**
+
+- **D2, a 40-candidate combiner window.** Refitted on seeds 11/23/37. Randomised top-1 was 0.630
+  over all lists, and at most 0.656 on the lists common to both windows, against a bar of 0.682.
+  The fold benchmarks were not run, as the protocol allows once the cross-validation bar fails.
+- **D1, strict-twin admission** (branch `twin-admission`, combiner schema 3, refitted on
+  11/23/37):
+
+  | seed | top-1 | top-3 | names |
+  |---|---|---|---|
+  | 43 off | 137 | 145 | 39 |
+  | 43 on | 134 | 145 | 38 |
+  | 47 off | 126 | 144 | 36 |
+  | 47 on | 127 | 142 | 36 |
+
+  Seed 43 top-1 and seed 47 top-3 fall by more than the bar of 1. There were no wrong names and no
+  removed actor's twin was named. Only an unrelated fix from the branch was taken: the
+  related-group memo now keys on the user limit (38653e4).
+
+The 53% strict top-3 on anonymized real reports is therefore not fixable by widening the window
+without losing folds. In most misses the true group is outside the first 20 candidates. The gain
+that does reach the analyst is the cluster count, which 21.3.14 measured at a strict 0.527 against
+a cluster-aware 0.655.
+
+**Report-only runs with the full scope (2026-10-02).** These used seed 7 and both CTI-HAL
+variants, the same combiner and the code at 793e640. Every row equals the published clusters-off
+artifact except the rows that became a cluster:
+
+| set | top-1 | strict / cluster-aware top-3 | single names | cluster names (truth inside) | removed actors named |
+|---|---|---|---|---|---|
+| seed 7 folds | 127/153 | 142 / 142 | 32 (32) | 3 (3) | 0/25 |
+| CTI-HAL anonymized | 25/55 | 29 / 36 | 10 (10) | 5 (5) | n/a |
+| CTI-HAL as reported | 31/55 | 37 / 41 | 13 (13) | 10 (10) | n/a |
+
+The seed-7 clusters were APT38 / Lazarus Group, GOLD SOUTHFIELD / FIN7 and ShinyHunters /
+Scattered Spider. All five anonymized CTI-HAL clusters were pairs linked only through one rare
+malware family:
+
+- FIN6 / Wizard Spider twice (Ryuk);
+- Cobalt Group / FIN6 (More_eggs);
+- Sandworm Team / APT38 (KillDisk);
+- Wizard Spider / TA505 (TrickBot).
+
+As reported, 6 of the 10 were FIN7 / Carbanak. Two of those were correct single FIN7 names before
+(the nested-twin rule). The other 4 were the shared-malware pairs above.
+
+**Amendment A′: same-activity links only (product-owner decision, 2026-10-02).** Every cluster above
+contains the true group, but a pair such as "Sandworm Team / APT38" reads as one actor, and the two
+are different actors that both used one wiper. The product owner decided that a cluster is named
+only for a same-activity link. This amendment is written down before the unused fold seeds 59 and
+61 are opened.
+
+- **Rule.** The twin must satisfy the first rule (an ATT&CK relation, and nesting or |pair
+  separation| < 0.5). It must also qualify through one of two routes:
+  - the reviewed table documents the pair as the same or overlapping activity (13 pairs on ATT&CK
+    19.2, 10.11);
+  - the profiles nest (containment >= 0.8), the review has no verdict against the pair (distinct,
+    unclear or false match), and no unreviewed description link exists for it.
+
+  Neither a shared rare malware family nor a description mention is enough on its own.
+- **How the rule was fixed.** A first draft counted any description mention. The review workflow
+  of the draft found that many mentions say the groups are different (Ember Bear / Saint Bear
+  "distinct clusters", Magic Hound / APT42 "distinct entities"), and one is a false match (Tonto
+  Team / BITTER). The 37 description links were therefore classified from ATT&CK's own sentences
+  before any fresh seed was opened. The classification read only the knowledge base, never a
+  benchmark row.
+- **Unchanged.** The bars (cluster separation 0.5, mass 3.5 or 3.0 nested, combined combiner
+  probability 0.8), the guard, the nested-twin hold and the scoring stay as they were.
+- **Selection.** The heaviest qualifying member under the narrowed rule wins, so a different,
+  lighter twin than before can be chosen.
+- **Settings.** `ATTRIBUTION_CLUSTER_SCOPE=documented` is the default; `full` keeps the first rule.
+  `ATTRIBUTION_CLUSTER_NAMING` defaults off until A′ passes.
+- **Already seen.** The narrowing was chosen after seeds 43/47, seed 7 and CTI-HAL were read, so
+  those sets are reported, not tests. From the recorded rows, the narrowed rule keeps at most:
+  - seeds 43/47: 1 of 4 clusters (LuminousMoth / Mustang Panda);
+  - seed 7: 1 of 3 (APT38 / Lazarus Group);
+  - CTI-HAL anonymized: 0 of 5;
+  - CTI-HAL as reported: 6 of 10 (FIN7 / Carbanak).
+
+  These are upper bounds where a lighter twin could replace a dropped one.
+- **Confirmation on seeds 59 and 61.** Each seed has 153 known folds and 25 removed actors. Each
+  gets an off run (default, cluster naming off) and an on run (`--set
+  attribution_cluster_naming=true`), all on the same combiner artifact. Bars, pooled:
+  - A′1: zero wrong cluster names and zero removed actors named through a cluster. A failure keeps
+    cluster naming off, with no retuning.
+  - A′2: the single names are identical in both arms apart from correct nested upgrades and nested
+    holds.
+  - A′3: every named cluster's link is `same_activity` or `nesting`, never `shared_software` or a
+    plain `description` mention.
+  - A′4: the on run equals `scripts/cluster_replay.py` over the off run on every row.
+  - Reported without a bar: the number of correct cluster names, which may be 0 because the rule
+    was narrowed for meaning, not for count; removed actors that clear two of the three cluster
+    bars.
+- **If A′1, A′2, A′3 and A′4 pass,** cluster naming defaults on with the documented scope. Seed 7
+  and both CTI-HAL variants are then run once more, report-only.
+
+**A′ results (2026-10-02, seeds 59 and 61, code fe511df, one combiner artifact): all four bars pass.**
+
+| seed | top-1 | single names (correct) | cluster names (correct) | removed actors named through a cluster |
+|---|---|---|---|---|
+| 59 off | 132/153 | 34 (34) | 0 | 0/25 |
+| 59 on | 132/153 | 34 (34) | 1 (1) | 0/25 |
+| 61 off | 125/153 | 33 (33) | 0 | 0/25 |
+| 61 on | 125/153 | 33 (33) | 0 | 0/25 |
+
+- A′1: no wrong cluster name and no removed actor named through a cluster.
+- A′2: single names identical in both arms (34/34 and 33/33).
+- A′3: the one cluster, LuminousMoth / Mustang Panda (truth LuminousMoth), is a `same_activity`
+  link. Only 3 of 178 seed-59 rows had a cluster candidate at all.
+- A′4: the on runs equal `scripts/cluster_replay.py` over the off runs on every row.
+- No removed actor cleared two of the three cluster bars.
+- Every row ran with the combiner active, and off and on share one source fingerprint.
+
+Cluster naming is now on by default with the documented scope. The value is small and honest: a
+few correct pair names where the single gate holds back.
+
+**Report-only reruns with the adopted defaults (code 2da2c4e).** These are the published
+artifacts now. Every row equals the clusters-off artifact except the rows listed:
+
+| set | top-1 | strict / related-aware / same-activity-aware top-3 | single names | cluster names (truth inside) |
+|---|---|---|---|---|
+| seed 7 folds | 127/153 | 142 / 142 / 142 | 32 (32) | 1 (1): APT38 / Lazarus Group |
+| CTI-HAL anonymized | 25/55 | 29 / 36 / 32 | 10 (10) | 0 |
+| CTI-HAL as reported | 31/55 | 37 / 41 / 38 | 13 (13) | 6 (6): FIN7 / Carbanak |
+
+As reported, three Carbanak reports where FIN7 led now name FIN7 / Carbanak. Two correct single
+FIN7 names became FIN7 / Carbanak through the nested-twin rule: Carbanak's profile lies inside
+FIN7's, and ATT&CK documents the link. No removed actor is named on seed 7.
+
+The related-aware top-3 counts any ATT&CK relation, shared rare malware included, as 21.3.14 did.
+The same-activity-aware top-3 counts only the links the cluster rule accepts, and it is the honest
+measure of "the right actor or its documented alias is in the top three": 32/55 (0.582) on the
+anonymized headline, against a strict 29/55 (0.527).
+
+**The single-name gate names removed actors on some seeds (not part of this work).** Every fold
+seed run in this programme used clusters off for its single names. Across seven seeds, the
+existing gate named 4 of 175 removed actors as a known group:
+
+| seed | removed actors named | named as | separation |
+|---|---|---|---|
+| 7 | 0/25 | | |
+| 41 | 1/25 | Storm-0501 as Threat Group-3390 | 0.600 |
+| 43 | 1/25 | OilRig as FIN6 | 0.591 |
+| 47 | 0/25 | | |
+| 53 | 0/25 | | |
+| 59 | 2/25 | Blue Mockingbird as APT41; Gamaredon Group as TA2541 | 0.511; 0.508 |
+| 61 | 0/25 | | |
+
+All four sit just above the 0.5 separation bar. The published "0/25 removed actors named" is
+seed 7 alone; across seeds the rate is about 2% (4/175, Clopper-Pearson 95% 0.6-5.7%). Raising
+the bar is a gate decision for the product owner. It needs a pre-registered check on seeds that
+have not been used, because the four examples were found on these.
+
+**Open questions for the product owner.**
+
+- The C5 risk for a software-question pilot.
+- The removed-actor single names on seeds 41 and 43 from the existing gate.
+- Whether the gate's safety margin should be revisited (decision 2 of the research programme).
+
+#### 21.3.16 Free-text group model: study and gate trial (2026-10-02/03)
+
+**Study.** Training text was ATT&CK only (17,396 anonymised records); model selection used the 23
+single-group ATT&CK campaigns (near-copies of their sentences removed from training); CTI-HAL (names) and
+Elastic (strict) were scored once. Six families were tuned (sentence kNN, sentence classifier, pooled
+MLP, attention MIL, prototypes on ATTACK-BERT embeddings; TF-IDF words). The TF-IDF group document won on
+the campaigns and on the test sets. Standalone on CTI-HAL it reached top-1 0.491 / MRR 0.584 (pipeline
+0.455 / 0.512, not significant); combined with the group network (9.13) MRR 0.628. Audits found no name
+leak, but 12 of its 27 CTI-HAL hits rest on ATT&CK wording that cites the same vendor reports CTI-HAL
+quotes; malware-name lookups drive 9. `scripts/text_group_study/README.md` has the protocol and numbers.
+
+**Gate trial** (pre-registered, `data/audits/text_group_gate_trial_2026-10-03/`): weight 1.0 with a
+combiner refitted on seeds 11/23/37 (`data/models/combiner/attribution_combiner_text_group.json`)
+against weight 0 with the shipped combiner, from one frozen code copy; the baselines reproduced the
+published artifacts (folds 153/153 rows; CTI-HAL metrics).
+
+| Set | Before | After | Wrong names |
+| --- | --- | --- | --- |
+| ATT&CK folds seed 7: top-1 / top-5 / MRR / named | 0.830 / 0.961 / 0.880 / 32 | 0.824 / 0.935 / 0.880 / 29 | 0 -> 0; removed actors 0/25 -> 0/25 |
+| CTI-HAL anonymized: top-1 / top-3 / top-5 / MRR | 0.455 / 0.527 / 0.600 / 0.512 | 0.491 / 0.618 / 0.655 / 0.572 | 0 -> 0 (10 named) |
+| CTI-HAL as reported: top-1 / top-3 / top-5 / MRR | 0.564 / 0.673 / 0.727 / 0.636 | 0.564 / 0.745 / 0.764 / 0.666 | 0 -> 0 (13 named) |
+| Elastic strict (diagnostic): top-1 / top-3 / MRR | 4/8 / 0.500 / 0.537 | 4/8 / 0.625 / 0.553 | 0 -> 0; open set 0/22 named |
+| Elastic tradecraft (diagnostic): top-1 / MRR | 1/8 / 0.209 | 2/8 / 0.346 | 0 -> 0 |
+
+The technique-mapping gate is unchanged by construction (retrieval never reads the setting). The fold
+rule "top-1 not below baseline" fails by one case, so the default stays 0. Checks: the fold change is
+noise (5 gained / 6 lost, exact p = 1.0; top-5 1/5, p = 0.22) and survives closing the BM25 leak of the
+fold benchmark (the lexical index is not hidden by `FoldStore`; with it hidden both arms drop, trial
+0.817 vs 0.824). All six losses are thinly documented groups: the fully blinded text model votes for a
+rival while the technique-list members still see the held-out techniques in the group lists. On CTI-HAL
+the MRR gain is 24 better / 2 worse (p = 1e-5; group sign-flip one-sided p = 0.031, the minimum for six
+groups); about 28% of it depends on same-source ATT&CK records, 42% partly. The Elastic gains (4/0 strict,
+7/0 tradecraft) do not: ATT&CK cites none of the eight posts.
+
+#### 21.3.17 Exemplars in Chroma and retrieval tuning without the LLM verifier (2026-10-02)
+
+Pre-registered in `docs/preregistration/chroma_exemplars_2026-10-02.json` (it names this section
+21.3.15; the number moved when the Top-three and free-text sections were merged first). Goal:
+move the labelled-sentence exemplars (21.3.10) into Chroma, tune what is retrieved and how the
+votes combine, and see how much of the LLM verifier's recall local acceptance can recover.
+
+**Migration (adopted as tooling, default unchanged).** `scripts/sync_exemplars_to_chroma.py`
+copies the 6,360 public-train exemplar vectors into the collection
+`technique_exemplars-0f8d2e19a59967c63b03ea71-s1-m32-efc400`. Chroma re-normalises float32
+vectors on insert (5,208 of 6,360 rows bitwise identical, largest component change 1.5e-8), so the
+Chroma copy is its own library (fingerprint `d8fbb0565e9addeaa3cb048c`) verified within a 1e-6
+tolerance, and an acceptance model must be fitted on the library it serves with
+(`TECHNIQUE_EXEMPLAR_BACKEND=npz|chroma|auto`, the model stores the library fingerprint and fails
+closed otherwise). With the shipped model on the Chroma library, every accepted set and candidate
+row on public dev and test, CTI-HAL and both EvidenceForge development bundles was unchanged
+(largest feature difference 9.4e-7). Copies of `attack_techniques` and `attack_groups` with
+other HNSW settings exist for measurement; the live collections were never modified. The default
+backend stays `npz`.
+
+**Tuning (not adopted).** `scripts/tune_retrieval.py` swept 27 variants in 9 families on public dev
+only (grouped 5-fold CV, seeds 7/11/13, paired cluster bootstrap): exemplar bandwidth (k, tau),
+exemplar-only candidates, vote normalisation, per-segment votes, exact vs approximate dense search,
+dense depth, relative margin, candidate pool and L2. Every family's best variant was within +/-0.003
+micro-F1 of the reference with a 95% interval spanning zero, and none replicated on seeds 41/53.
+Search settings are not the bottleneck: about 80% of the expected techniques reach the candidate
+pool, but only about 40% are accepted.
+
+**Gates for the aligned refit (T1: Chroma library, fit settings equal to serving).** Public test
+micro-F1 0.417 -> 0.414 with cues (precision +1.7 points, recall -1.1) and 0.411 -> 0.408 without;
+CTI-HAL statements 0.378 -> 0.380. ATT&CK folds seed 7 top-1 0.830 -> 0.837, all names correct
+(fold harness before the 2026-10-03 BM25 fix, 21.3.5). On the CTI-HAL reports as written T1 named one Carbanak
+report as FIN7, a hard failure, so the clinic bundle and Elastic were not run and T1 is not adopted.
+
+**Against the verifier** (the 10 CTI-HAL reports of the 2026-09-28 production run, same sentences):
+
+| | Precision | Recall | F1 |
+|---|---|---|---|
+| production, LLM verifier | 0.40 | 0.51 | 0.45 |
+| local, shipped model | 0.48 | 0.38 | 0.43 |
+| local, T1 | 0.51 | 0.38 | 0.44 |
+
+Removing the verifier needs a better decision on which pooled candidates to accept, not better
+search.
+
+#### 21.3.18 Fine-tuning cribl-decision on the Jev C1 technique question and a family head (2026-10-11/13)
+
+An experiment, not wired into the product. `cribl-ai/cribl-decision-1.0` is an open LoRA (r 16) on
+`Qwen/Qwen3.5-4B-Base`, a sibling of TypeSafe Jev. It was asked the Jev C1 question: one report
+sentence, the pipeline's top-10 candidates plus `none_of_these`, three option orders. Answers came from
+a lettered readout (fp32 hidden state × `lm_head` letter rows) in the chat format chosen on dev. The
+question text is byte-identical to Jev's (cache hashes 1977/1977 dev, 2904/2904 CTI-HAL) and the metric
+code replays Jev C1 exactly.
+
+**Arms.**
+- **B0**: the published adapter.
+- **B1**: that adapter trained further.
+- **B2**: a fresh LoRA on the plain base.
+
+**Training.** B1 and B2 were trained with 4-bit QLoRA for 2 epochs on 6,308 public train sentences
+(tram/expert/derived). Train candidates came from the pipeline with the exemplar index off, because the
+index holds the train sentences. Settings: lr 1e-4, effective batch 16. Checkpoints were taken every
+half epoch and selected on dev only.
+
+**Pre-registration.** `docs/preregistration/cribl_finetune_2026-10-11.json` has amendments 1–5.
+B2's second epoch and all pod scoring ran on a rented RTX 4090. For the pod's CTI-HAL runs, the owner
+allowed a one-off upload, deleted with the pod.
+
+**Registered rule (the answer with the highest probability, `none_of_these` = no pick = miss).** The
+trained arms learned to abstain: 27.6% of training targets were `none_of_these`, against 16.2% on dev.
+They said it on 22–23% of dev, 33% of test and 35% of CTI-HAL statements, and only about 40% of those
+had no correct candidate. Every registered success criterion on test and CTI-HAL failed except CTI-HAL
+calibration.
+
+**Never-abstain rule (amendment 4).** The pick is the most probable of the ten techniques, and
+P(`none_of_these`) stays as a flag. `rescore.py` applies it offline to the stored predictions. It was
+chosen on dev after the test result was seen, then confirmed once on CTI-HAL, which no arm had been
+scored on before.
+
+| Exact match (parent-aware) | dev 659 | public test 1,391 | CTI-HAL 968 |
+|---|---|---|---|
+| Pipeline rank-1 | 0.589 (0.669) | 0.501 (0.567) | 0.383 (0.475) |
+| Jev C1, as reported / never-abstain | 0.514 / 0.520 | n/a | 0.460 / 0.478 (0.596) |
+| B0, registered / never-abstain | 0.480 / 0.486 | 0.416 / 0.420 | 0.409 / 0.415 |
+| B1 step_9462, registered | 0.618 | 0.466 | 0.347 |
+| **B1 step_9462, never-abstain** | **0.687 (0.744)** | **0.562 (0.614)** | **0.431 (0.528)** |
+| B2 step_12616, never-abstain | 0.680 | 0.552 | 0.428 |
+
+**Amendment 4 outcome on CTI-HAL.**
+- **Against the pipeline**: B1 minus pipeline rank-1 is +0.048, 95% CI [+0.019, +0.075]. This part of
+  the headline passes. On test (not confirmatory) it is +0.061, CI [+0.038, +0.085].
+- **Against Jev C1**: B1 is −0.029 versus Jev as reported, CI [−0.059, −0.003], and −0.048 versus Jev
+  under the same rule. **The headline fails.**
+- **Calibration**: the ECE of P(pick) is 0.256, against Jev's 0.283 under the same rule. This criterion
+  passes.
+- **Cribl's adapter against a fresh LoRA**: B1 is +0.003 above B2 on CTI-HAL, CI [−0.011, +0.019]. Not
+  shown.
+- **The `none_of_these` flag** separates "gold not among the candidates" with AUROC 0.80 on test and
+  0.73 on CTI-HAL.
+
+**Conclusion.** Under the never-abstain rule, a small local judge trained on public sentences beats the
+pipeline's rank-1 on all three sets. The gain shrinks from public data to real reports (+0.10 dev,
++0.06 test, +0.05 CTI-HAL), and it stays below hosted Jev C1 on CTI-HAL. Cribl's starting adapter adds
+nothing measurable over a fresh LoRA.
+
+**Cost.** Training took 6.7 h for B1 on the laptop. B2 took 3.1 h on the laptop plus 35 min on the pod.
+Peak GPU memory was 4.1 GB. The pod sessions cost about $1.60 in total.
+
+Predictions and metrics are in `data/audits/cribl_ft/`: `<arm>_<split>.json(l)` and, for the
+never-abstain rule, `*_forced.json`. Adapters are in `data/models/cribl_ft/`. CTI-HAL rows are local
+only.
+
+**B3: real-report sentences (2026-10-13, prereg `cribl_annoctr_2026-10-13.json`, amendments 1–4).**
+B3 continues B1 step_9462 on 1,772 AnnoCTR training sentences (CC-BY-SA 4.0; Lange et al.,
+LREC-COLING 2024), each paired with a public replay sentence. AnnoCTR links real vendor-report
+sentences to ATT&CK techniques, almost only at parent level, so its rows use family targets.
+
+Training ran for 4 epochs on a community A100, a run the owner judged needed more than the planned 2
+epochs. Checkpoints were taken every half epoch. The 2-epoch checkpoint was chosen on AnnoCTR dev
+(right family 0.580, against B1's 0.370), and dev levelled off after it.
+
+Results, never-abstain rule:
+
+| | CTI-HAL exact (right family) | AnnoCTR test right family (exact) | public test exact |
+|---|---|---|---|
+| Pipeline rank-1 | 0.383 (0.475) | 0.358 (0.227) | 0.501 |
+| Jev C1 as reported / never-abstain | 0.460 (0.567) / 0.478 (0.596) | n/a | n/a |
+| B1 | 0.431 (0.528) | 0.429 (0.285) | 0.562 |
+| **B3** | **0.441 (0.576)** | **0.580 (0.290)** | 0.537 |
+
+**Pre-registered outcome.**
+- **Headline: fails.** On CTI-HAL exact, B3 minus B1 is +0.010, CI [−0.013, +0.036].
+- **AnnoCTR test, right family: passes.** B3 minus B1 is +0.151, CI [+0.125, +0.178]. The gain is
+  largest on implicit mentions (0.375 → 0.551; explicit 0.523 → 0.630).
+- **CTI-HAL against Jev C1: fails.** B3's exact 0.441 is below 0.460. The gap narrowed, to −0.019 with
+  CI [−0.048, +0.007].
+- **Public test, forgetting check: fails.** B3 minus B1 is −0.025, against the −0.02 limit (TRAM −0.049,
+  expert −0.076).
+
+**Reading.** Real-report training teaches the technique family but not the sub-technique. On CTI-HAL,
+B3 gains +0.049 in right-family accuracy over B1 (CI [+0.025, +0.074]) and reaches Jev as reported
+(+0.009, CI [−0.015, +0.035]). Exact-id accuracy barely moves, because AnnoCTR's parent-level labels
+carry no signal for choosing between sub-techniques.
+
+Calibration improved: CTI-HAL ECE 0.181, against 0.256 for B1. The `none_of_these` flag's AUROC rose
+from 0.73 to 0.74 on CTI-HAL and from 0.68 to 0.78 on AnnoCTR test.
+
+**Cost.** Training took 2.4 h on the A100, and the pods cost about $5.20 in total. That includes about
+$1 of aborted starts: an A40 run stopped for the epoch change, and a CPU-bound H100 NVL that needed
+Triton 3.7.1 for flash-linear-attention on Hopper.
+
+**AnnoCTR text fix (2026-10-13, after B3).** `prepare_annoctr.py` built each sentence from AnnoCTR's
+`context_left + mention + context_right`. Those fields are stripped, so the mention was glued to its
+neighbours ("installsransomware", "theBATfile"), and the retriever never saw the word that names the
+technique. The script now uses `_context_left`/`_context_right`, which keep the spaces. It also strips
+markdown links that carry a title, and images. A sentence with several annotated mention spans is now
+one case: train 1,500, dev 336 and test 738 scorable sentences, against 1,884, 443 and 959 before.
+The candidate files were rebuilt with `--max-candidate-rows 40`. B3's own inputs are kept in
+`data/audits/cribl_ft/b3_inputs/`.
+
+On AnnoCTR dev, the gold family is now among the pipeline's top 10 for 0.875 of sentences, against
+0.722 before. B3 scores 0.693 right-family on the clean dev set, against 0.580 on the glued one, B1
+scores 0.527 and pipeline rank-1 0.470. Offering 10 distinct families instead of 10 techniques adds
+only 0.006–0.016, because the retrieval pool holds just 16–19 techniques.
+
+**Family head without retrieval (2026-10-13, prereg `cribl_family_head_2026-10-13.json`, amendments
+1–2).** The C1 arms can only pick among the pipeline's 10 candidates, so a family the retriever misses
+is lost: 15% of CTI-HAL statements and 12% of public test cases. `family_head.py` asks the model a
+family question with no options. The prompt holds only the sentence. The decision-slot state then
+goes through a scaled-cosine head with one row per family: 222 rows, one for each active parent
+technique of the C1 catalogue (`catalog.json`). Each row starts as the mean decision-slot state of
+that family's own ATT&CK texts (the parent and its sub-techniques, label and cut description), so
+the untrained head, F0, is a nearest-description classifier. F0's test rows were scored on the laptop
+from a locally rebuilt step 0 (`--epochs 0`, batch 8). Its dev scores are within 0.008 of the pod's
+step 0: public dev 0.443 against 0.451, AnnoCTR dev equal.
+
+F1 trains Cribl's adapter and the head together with cross-entropy over the gold families.
+- Data: public train (6,308 cases) plus clean AnnoCTR train (1,453).
+- Optimiser: LoRA learning rate 1e-4, head 1e-3, 16 examples per step, 3 epochs.
+- Checkpoint: selected on the mean family top-1 over public dev and AnnoCTR dev.
+
+Two amendments changed the compute, not the method:
+1. Amendment 1 moved training to a RunPod secure RTX 4090. CTI-HAL was not uploaded; the selected
+   checkpoint was downloaded and scored on CTI-HAL on the laptop.
+2. Amendment 2 batches 16 prompts per forward pass. Batch 1 was CPU-bound on the pod: the GPU was
+   11–14% busy and each example took 0.95 s. Batched, training took 0.11 s per example, 43 minutes in
+   total.
+
+| Dev family top-1 | step 0 (F0) | ½ | 1 | 1½ | **2** | 2½ | 3 epochs |
+|---|---|---|---|---|---|---|---|
+| public dev | 0.451 | 0.677 | 0.715 | 0.728 | **0.734** | 0.748 | 0.741 |
+| AnnoCTR dev | 0.220 | 0.658 | 0.705 | 0.688 | **0.720** | 0.696 | 0.696 |
+
+Family top-1 on the confirmation sets. The family question has no candidates, so every row is scored.
+The C1 arms are under never-abstain.
+
+| Family top-1 (top-5) | CTI-HAL (968) | public test (1,391) | AnnoCTR test, clean (738) |
+|---|---|---|---|
+| Pipeline rank-1 | 0.475 | 0.567 | 0.497 |
+| Jev C1 as reported / never-abstain | 0.567 / 0.596 | n/a | n/a |
+| B1 (C1) | 0.528 | 0.614 | 0.509 |
+| B3 (C1) | 0.576 | 0.609 | 0.688 |
+| F0, untrained head | 0.360 (0.660) | 0.365 (0.634) | 0.335 (0.611) |
+| **F1, family head** | **0.612 (0.882)** | **0.609 (0.854)** | **0.717 (0.900)** |
+
+Against the pre-registered criteria (paired bootstrap, 1000 samples, seed 7):
+- **Headline, CTI-HAL F1 minus B3: passes.** +0.035, CI [+0.007, +0.060].
+- **CTI-HAL F1 minus pipeline rank-1: passes.** +0.136, CI [+0.106, +0.169].
+- **AnnoCTR test F1 minus B3: fails narrowly.** +0.028, CI [−0.003, +0.058]. F1 minus B1 is +0.207.
+- **Public test F1 minus B1: fails.** −0.005, CI [−0.027, +0.017]: a tie. By source, TRAM is −0.017,
+  expert −0.013 and derived procedures +0.013, all with intervals spanning 0.
+- **CTI-HAL F1 top-5 at least the pipeline's top-10 family rate: passes.** 0.882, against 0.852.
+
+Not registered:
+- F1 also beats Jev C1 as reported on CTI-HAL, +0.044, CI [+0.017, +0.073].
+- It ties Jev under never-abstain, +0.015, CI [−0.013, +0.045].
+
+**Reading.** Without any retrieval, the 4B model names the family better than every
+retrieve-then-pick arm on CTI-HAL and on real-report text. It ties them on the public test.
+
+Part of the gain comes from statements the retriever missed. On the 143 CTI-HAL statements whose
+family is not among the pipeline's top 10, F1 is right for 15.4%; a C1 arm cannot score on those. On
+the 825 where the family is offered, F1 scores 0.691, against B3's 0.676.
+
+On AnnoCTR test, F1 is ahead most clearly on explicit mentions: 0.863 against B3's 0.798. On
+implicit mentions it scores 0.615 against 0.599.
+
+F1's confidence is well calibrated: the ECE of P(pick) against a family hit is 0.045–0.057. F1 names only the family:
+sub-techniques need a second step within the predicted family, which is not built yet.
+
+**Several families per sentence (amendment 3, reported only).** `multi_family.py` names the top
+family plus any other top-3 family with probability ≥ 0.25. The threshold was chosen on dev, where
+mean F1 rose from 0.670 to 0.677. Family micro-F1 on the confirmation sets, one family → up to three:
+
+| Set | One family | Up to three |
+|---|---|---|
+| CTI-HAL | 0.588 (P 0.612, R 0.567) | 0.598 (P 0.590, R 0.606) |
+| public test | 0.523 | 0.532 |
+| AnnoCTR test | 0.662 | 0.659 |
+
+The rule names about 1.1 families per case. The head's probabilities concentrate on its first
+answer, so most of the F1 gap is wrong first answers rather than missing second families.
+
+**With ATT&CK's procedure examples (F2, 2026-10-13, prereg `cribl_family_attack_2026-10-13.json`).**
+`export_attack_procedures.py` turns ATT&CK's active `uses` relationships into 17,033 distinct
+sentences. It drops any that overlap a held-out text of public dev or test, CTI-HAL, or AnnoCTR dev
+or test, which leaves 16,273 sentences covering 213 families:
+- 378 near duplicates;
+- 243 sentences that contain a held-out text of 6 or more tokens;
+- 132 sentences that share a 10-token run with one;
+- 7 repeats.
+
+Of the dropped, 613 matched TRAM dev or test sentences and 6 matched CTI-HAL statements. F2 is F1's
+recipe from the same starting point, with these rows added: 24,034 rows, 2 epochs, a checkpoint
+every quarter epoch. It ran on a RunPod secure RTX 4090 at 0.08 s per example, 62 minutes in all.
+The checkpoint at 1.5 epochs was selected, with dev mean 0.743 against F1's 0.727.
+
+| Family top-1 | CTI-HAL | public test | AnnoCTR test |
+|---|---|---|---|
+| F1 | 0.612 | 0.609 | 0.717 |
+| **F2** | **0.626** | **0.618** | **0.729** |
+| F2 minus F1, paired 95% CI | +0.014 [−0.006, +0.036] | +0.009 [−0.008, +0.025] | +0.012 [−0.008, +0.033] |
+
+- **Headline (CTI-HAL F2 > F1): fails.** The same holds for both secondary criteria; every delta is
+  positive, but no interval excludes 0.
+- **Contamination check: no sign of leakage.** On the public test, the gain without TRAM is +0.010
+  (CI [−0.015, +0.034]), against +0.008 on TRAM itself.
+- **Where it helps: rare families.** On the 69 CTI-HAL statements whose gold family had fewer than
+  20 rows in F1's data, family top-1 rises from 0.232 to 0.333. On the other 899 it moves from 0.641
+  to 0.648.
+- **Against the other methods (not registered).** On CTI-HAL, F2 is +0.050 over B3 and +0.059 over
+  Jev C1 as reported. It is +0.030 over Jev under never-abstain, CI [+0.002, +0.057].
+- **Family micro-F1, one family → up to three.** CTI-HAL 0.602 → 0.607; public test 0.531 →
+  0.537; AnnoCTR test 0.673 → 0.684.
+- **Calibration is worse.** CTI-HAL ECE is 0.099, against F1's 0.057.
+
+The pod cost about $1.20 (80 minutes at $0.89/h).
+
+Quirk fixed after the run: the half-epoch boundary of the last epoch fell 3 examples before the end
+(23,280 of 23,283). Two near-identical final checkpoints were saved and scored; the selection was
+not affected. Checkpoints now sit at `round(k × rows / 2)`.
+
+**Cost.** The pod cost about $1.20: 81 minutes at $0.89/h, including about 20 idle minutes while the
+batching fix was made. No OpenRouter credit was used.
+
+**ATT&CK definitions and a rival margin (F3, 2026-10-13, prereg `cribl_family_margin_2026-10-13.json`).**
+F3 targets F2's look-alike confusions. In F2's 260 dev errors the gold family was second in 38%, and
+the top two were within 0.3 in 147. F3 is F2's recipe with two changes:
+- **Definitions.** `export_attack_procedures.py --descriptions` adds one row per listed technique,
+  "Name: description" cut at a sentence end within 1,500 characters. The same overlap filter drops 4
+  rows (a shared 10-token run), leaving 693 rows over 221 families.
+- **Rival margin.** `--margin 1 1` adds `1.0 × max(0, 1 − (log P(gold families) − log P(strongest
+  non-gold family)))` to each example's cross-entropy (`losses.rival_margin`; λ and m fixed, not tuned).
+
+The first run, on an RTX A6000, was stopped by RunPod after 30,919 of 49,454 examples (amendment 2).
+It was discarded. Its dev curve (public dev / AnnoCTR dev family top-1, checkpoints 6,192 to 30,919:
+0.693/0.646, 0.707/0.682, 0.718/0.723, 0.725/0.720, 0.739/0.723) was seen, and nothing was chosen
+from it.
+
+F3 was retrained from scratch on a secure RTX 4090, the GPU of F2. Its untrained checkpoint
+reproduces F2's to the last digit. Training took 75 minutes (0.09 s per example). The selected
+checkpoint is the last one, at 2 epochs, with dev mean 0.739 against F2's 0.743:
+
+| Checkpoint (epochs) | 0.25 | 0.5 | 0.75 | 1 | 1.25 | 1.5 | 1.75 | **2** |
+|---|---|---|---|---|---|---|---|---|
+| public dev | 0.687 | 0.709 | 0.721 | 0.721 | 0.716 | 0.728 | 0.730 | **0.734** |
+| AnnoCTR dev | 0.625 | 0.685 | 0.735 | 0.735 | 0.744 | 0.747 | 0.738 | **0.744** |
+
+| Family top-1 | CTI-HAL | public test | AnnoCTR test |
+|---|---|---|---|
+| F2 | 0.626 | 0.618 | 0.729 |
+| **F3** | **0.620** | **0.618** | **0.732** |
+| F3 minus F2, paired 95% CI | −0.006 [−0.024, +0.011] | −0.001 [−0.015, +0.014] | +0.003 [−0.015, +0.019] |
+
+- **Headline (CTI-HAL F3 > F2): fails.** Both secondary criteria fail too. F3 equals F2 within
+  ±0.6 points on all three sets.
+- **Look-alike subset (gold family in T1598, T1566, T1486, T1560, T1140, T1027, T1059, T1105,
+  T1003, T1555): no gain.**
+  - CTI-HAL 0.748 → 0.735, −0.013 [−0.037, +0.010].
+  - Public test 0.620 → 0.594, −0.027 [−0.051, −0.002].
+  - AnnoCTR test 0.803 → 0.798, −0.005 [−0.029, +0.019].
+- **Pair mix-ups are unchanged.** On CTI-HAL, Command and Scripting Interpreter ↔ Ingress Tool
+  Transfer stays at 16 and Deobfuscate ↔ Obfuscate at 5. Many of these are label ambiguity, not model
+  error: statements that describe downloading and running a script carry only one of the two ids, and
+  sometimes the less obvious one. A single-answer margin cannot win both. Cases whose gold family was
+  second dropped slightly: CTI-HAL 143 → 137, public test 184 → 182, AnnoCTR test 71 → 66. Total
+  errors did not drop.
+- **Family micro-F1, one family → up to three (threshold 0.25, not re-tuned).**
+  - CTI-HAL 0.596 → 0.602 (F2 0.602 → 0.607).
+  - Public test 0.530 → 0.538.
+  - AnnoCTR test 0.675 → 0.679.
+- **Calibration is mixed.** ECE is 0.041 on CTI-HAL (F2 0.099), 0.088 on the public test (F2 0.071)
+  and 0.118 on AnnoCTR test (F2 0.046).
+- **Against the other methods (not registered).** On CTI-HAL, F3 is +0.043 over B3 [+0.017, +0.070],
+  +0.053 over Jev C1 as reported, and +0.024 over Jev under never-abstain [−0.004, +0.052].
+
+F2 remains the best family classifier. Definitions and the margin neither help nor hurt measurably.
+The look-alike errors left are mostly pairs where the data itself names one of two valid families.
+The up-to-three rule already credits these.
+
+**Cost.** About $2.20 in all: about $0.95 for the stopped A6000 run (93 minutes at $0.59/h) and about
+$1.25 for the RTX 4090 rerun (85 minutes at $0.89/h). No OpenRouter credit was used.
+
+**Exact techniques without retrieval (E1, 2026-10-14, prereg `cribl_technique_head_2026-10-14.json`).**
+E1 is F2 with a second head. `family_head.py --technique-head` adds a cosine head over the 697
+listed techniques, each row starting from the technique's own text. The head is read as
+P(technique | family), a softmax within the family's parent and sub-techniques (`hierarchy.py`):
+- **Parent as an option.** A family's parent is its own option: the "family only" answer.
+- **The exact answer.** The most probable technique by P(family) × P(technique | family) among the
+  three most probable families. The owner chose three families over a hard limit to one: on F2's
+  dev, the top family is right on 0.73–0.76 and the top three on 0.87–0.91.
+- **Training.** As F2: same 24,034 rows, 2 epochs, Cribl adapter, seed 7. It adds a within-family
+  cross-entropy on the 22,581 rows with exact labels. AnnoCTR rows are left out of it, because their
+  links are parent-level by convention.
+- **Selection.** Mean of public dev exact top-1 and AnnoCTR dev family top-1. The final checkpoint was
+  selected: dev exact 0.653, AnnoCTR dev family 0.753.
+
+| Checkpoint (epochs) | 0 | 0.25 | 0.5 | 0.75 | 1 | 1.25 | 1.5 | 1.75 | **2** |
+|---|---|---|---|---|---|---|---|---|---|
+| public dev exact | 0.322 | 0.528 | 0.589 | 0.584 | 0.627 | 0.639 | 0.648 | 0.654 | **0.653** |
+| public dev family | 0.451 | 0.669 | 0.719 | 0.713 | 0.727 | 0.727 | 0.730 | 0.731 | **0.728** |
+| AnnoCTR dev family | 0.220 | 0.619 | 0.690 | 0.729 | 0.705 | 0.732 | 0.738 | 0.747 | **0.753** |
+
+| Exact top-1 | CTI-HAL | public test |
+|---|---|---|
+| pipeline rank-1 | 0.383 | 0.501 |
+| B1 (never-abstain) | 0.431 | 0.562 |
+| B3 (never-abstain) | 0.441 | 0.537 |
+| Jev C1 as reported / never-abstain | 0.460 / 0.478 | n/a |
+| **E1** | **0.504** | **0.560** |
+
+- **Headline (CTI-HAL exact, E1 > B3): passes.** +0.063, CI [+0.034, +0.094].
+- **Secondary.**
+  - CTI-HAL against Jev C1 as reported: passes, +0.044 [+0.011, +0.077].
+  - Public test against B1: fails, −0.002 [−0.027, +0.022]. B1 was trained and selected on the same
+    public sentences. E1 leads on derived procedures (+0.050 [+0.010, +0.088]) and trails on TRAM
+    (−0.034 [−0.069, 0.000]).
+- **Not registered.**
+  - Against Jev under never-abstain: +0.026 [−0.008, +0.060].
+  - Against the pipeline: +0.121 [+0.089, +0.153] on CTI-HAL and +0.059 on the public test.
+  - The retrieve-then-pick models and Jev cannot name a technique outside the pipeline's top 10,
+    which holds the exact gold on 74% of CTI-HAL.
+- **The three-family rule.**
+  - CTI-HAL: 0.504 with the top family only 0.496 and with every family 0.504.
+  - Public test: 0.560, 0.551 and 0.559.
+  - Exact top-3/5 on CTI-HAL: 0.723 / 0.803.
+- **By label kind (CTI-HAL).** 0.578 on the 431 statements labelled with a sub-technique, 0.445 on
+  the 537 labelled with a family only. Of the 131 misses where the family is right, 111 are a
+  granularity mismatch rather than a wrong sibling:
+  - a sub-technique where the label names only the family (50);
+  - the family where the label names a sub-technique (61).
+
+  Only 20 are wrong siblings. The other 349 misses are wrong families.
+- **Family accuracy is not lost.** Family top-1 against F2: CTI-HAL 0.631 (+0.005 [−0.011,
+  +0.023]), public test 0.625 (+0.007), AnnoCTR test 0.730 (+0.001). On AnnoCTR test it is 0.042
+  over B3 [+0.014, +0.075].
+- **Calibration of the exact answer.** ECE is 0.101 on CTI-HAL and 0.053 on the public test.
+  AnnoCTR's 0.154 is not meaningful, because its labels are parent-level.
+
+E1 is the first model here to name the exact technique more often than Jev on CTI-HAL. It also
+reads the sentence without the pipeline's retrieval. Its remaining errors are mostly the wrong family
+(73%) or a granularity mismatch with the label (23%).
+
+**Cost.** The pod cost about $1.10 (73 minutes at $0.89/h). Training took 62 minutes at 0.08 s per
+example. CTI-HAL was scored on the laptop. No OpenRouter credit was used.
+
+**More and cleaner training data for the family (E2, 2026-10-14, prereg
+`cribl_family_data_2026-10-14.json`).** E2 is E1's recipe with the training rows changed. 178
+CTI-HAL statements have the right family outside E1's top three, and no answer rule can reach them.
+The question was whether more real-report text and cleaner rows move them.
+- **Joint government advisories** (`prepare_advisories.py`).
+  - Source: the FBI IC3 copies of the joint cybersecurity advisories from 2021 to 2026; 213 of 218
+    PDFs were downloaded. CISA's own pages refuse automated clients, so they were not used.
+  - Rows: each sentence carrying the authors' bracketed ATT&CK tag, labelled with that tag. Tags,
+    tactic headings and update markers are removed.
+  - Advisories kept: 59. Of the rest, 141 have fewer than five tags (guidance notes, FBI-only
+    alerts). 12 name a CTI-HAL group, an alias or the group's own software. 1 overlaps a held-out
+    text.
+  - Yield: 765 rows over 155 families, far fewer than the 2–5k first estimated.
+- **Atomic Red Team** (`prepare_atomic.py`, MIT): 1,874 test descriptions ("name. description",
+  without commands), labelled with the test's technique, 151 families.
+- **Cleaning** (`clean_cases.py`, training rows only; dev and test unchanged). It drops fragments,
+  figure captions, markdown table rows, text naming a technique id and hash tables:
+  - public train: 38 of 6,308 dropped;
+  - AnnoCTR train: 282 of 1,453 dropped;
+  - ATT&CK procedures: none dropped.
+- **Training.** 26,353 rows (E1: 24,034), 2 epochs, selection as E1. The final checkpoint was
+  selected: dev exact 0.660, AnnoCTR dev family 0.741. Training took 71 minutes.
+
+| Checkpoint (epochs) | 0 | 0.25 | 0.5 | 0.75 | 1 | 1.25 | 1.5 | 1.75 | **2** |
+|---|---|---|---|---|---|---|---|---|---|
+| public dev family | 0.449 | 0.693 | 0.713 | 0.728 | 0.733 | 0.725 | 0.730 | 0.733 | **0.734** |
+| AnnoCTR dev family | 0.223 | 0.604 | 0.604 | 0.690 | 0.688 | 0.735 | 0.723 | 0.735 | **0.741** |
+| public dev exact | 0.320 | 0.528 | 0.557 | 0.622 | 0.602 | 0.636 | 0.657 | 0.656 | **0.660** |
+
+| E2 − E1 (paired, 95% CI) | E1 | E2 | difference |
+|---|---|---|---|
+| CTI-HAL family top-1 (headline) | 0.631 | 0.642 | +0.010 [−0.007, +0.029] |
+| CTI-HAL exact top-1 | 0.504 | 0.514 | +0.010 [−0.007, +0.030] |
+| AnnoCTR test family top-1 | 0.730 | 0.717 | −0.014 [−0.035, +0.005] |
+| public test family top-1 | 0.625 | 0.633 | +0.008 [−0.005, +0.022] |
+
+- **Headline: fails.** The CI includes 0. Every secondary also fails.
+- **Reported.**
+  - CTI-HAL right family in the top three: 0.824 (E1 0.816). It is outside the top three on 170
+    statements (E1: 178). E2 alone is right on 39 statements and E1 alone on 29.
+  - CTI-HAL exact top-3/5: 0.743 / 0.809 (E1 0.723 / 0.803).
+  - The expert test subset, the text closest to advisories: family 0.682 vs 0.669
+    (+0.013 [−0.032, +0.057]).
+  - Exact misses on CTI-HAL: 347 wrong family, 131 right family.
+- **Not registered.** CTI-HAL exact against Jev C1 under never-abstain: +0.036 [+0.003, +0.067],
+  the first CI above 0 against that rule (E1: +0.026 [−0.008, +0.060]). The difference from E1 is
+  itself not significant, so this is not evidence that the new data helped.
+
+About 2,300 rows of new sources moved no result beyond noise. The advisories were too few: most
+IC3 items carry no tags. Atomic tests describe lab procedures more than report prose. Cleaning
+removed broken rows without a measurable effect. E1 stays the reference; E2 is no worse anywhere
+and is slightly ahead on CTI-HAL.
+
+**Cost.** The pod cost about $1.20 (82 minutes at $0.89/h). CTI-HAL was scored on the laptop. The
+downloads were free. No OpenRouter credit was used.
+
+**A yes/no probability per family and up to three answers (M1, 2026-10-14, prereg
+`cribl_yesno_2026-10-14.json`).** The owner asked for up to three families or techniques per
+sentence when the model is confident enough. A sentence often describes two or three techniques
+but carries one label.
+- **Why the one-answer model resists this.** It shares one unit of probability among the families,
+  and training pushes it onto the single label. On E2's dev the second family scores 0.05 (median),
+  and a second labelled family only 0.03.
+- **What M1 changes.** M1 gives every family its own sigmoid: "is this family in the sentence?".
+  - Loss: `losses.yes_no` scores the labelled families as "yes" and every other family as a "no"
+    with weight 0.1, so a missing label is weak evidence.
+  - Starting bias: minus the median second-highest logit over 64 training sentences.
+  - Everything else is E2's: data, recipe, the technique head and the selection rule. The final
+    checkpoint was selected.
+- **Answers and scoring** (`multi_answer.py`).
+  - Answers: the top family, plus the second and third when they reach a threshold. Each answer
+    family names its most probable technique.
+  - The threshold is set per model from its own probabilities, without labels, to give 1.3 answers
+    per sentence. Both models are therefore compared with the same number of answers.
+  - A hit is a labelled family (or technique) among the answers.
+
+| Checkpoint (epochs), M1 | 0 | 0.25 | 0.5 | 0.75 | 1 | 1.25 | 1.5 | 1.75 | **2** |
+|---|---|---|---|---|---|---|---|---|---|
+| public dev family top-1 | 0.451 | 0.663 | 0.680 | 0.695 | 0.718 | 0.712 | 0.712 | 0.721 | **0.724** |
+| AnnoCTR dev family top-1 | 0.220 | 0.548 | 0.607 | 0.685 | 0.673 | 0.714 | 0.690 | 0.717 | **0.717** |
+| public dev exact hit, 1.3 answers | 0.326 | 0.524 | 0.563 | 0.616 | 0.643 | 0.654 | 0.675 | 0.680 | **0.689** |
+| (E2, same rule) | 0.341 | 0.564 | 0.607 | 0.657 | 0.649 | 0.680 | 0.713 | 0.712 | 0.715 |
+
+| CTI-HAL, M1 − E2 (paired, 95% CI) | E2 | M1 | difference |
+|---|---|---|---|
+| family hit, 1.3 answers (headline) | 0.716 | 0.691 | −0.025 [−0.044, −0.007] |
+| exact hit, 1.3 answers | 0.568 | 0.549 | −0.020 [−0.039, −0.001] |
+| family top-1, one answer (non-inferiority −0.02) | 0.642 | 0.623 | −0.019 [−0.037, −0.001] |
+| public test family hit, 1.3 answers | 0.702 | 0.688 | −0.014 [−0.028, +0.001] |
+| AnnoCTR test family hit, 1.3 answers | 0.790 | 0.778 | −0.012 [−0.033, +0.008] |
+
+- **Every registered criterion fails.** Scored against the labels, M1 is slightly worse than E2 at
+  every budget (1.1: −0.025; 1.5: −0.018).
+- **The number of answers follows the sentence a little more.**
+  - On the 66 CTI-HAL statements with several labelled families, M1 gives 1.38 answers against 1.29
+    on the others; E2 gives 1.32 and 1.30.
+  - All labelled families are found on 12% of those statements (E2: 8%).
+- **At a fixed threshold of 0.5** (the "clears a confidence threshold" reading), M1 gives 1.81
+  answers per sentence. Family hit is 0.758, against 0.773 for E2 with the same number of answers.
+  M1's probabilities are not calibrated as single-answer confidences: one-answer ECE is 0.29, by
+  design of the weak "no".
+- **Blind check** (reported, not a gate).
+  - Method: 99 extra answers on CTI-HAL at 1.3 (50 per model, one merged). Each was shown with the
+    sentence and technique name only, with model and label hidden. Claude judged each "supported by
+    the sentence" or not; one AI reader.
+  - Results: supported for 64% of M1's extra answers (32/50) and 46% of E2's (23/50). Among extras
+    that are not a labelled family, 61% (23/38) for M1 and 34% (12/35) for E2. With 50 per model the
+    difference is uncertain: roughly ±0.19 at 95%, unpaired.
+  - Labelled-family extras were judged supported only 73–75% of the time. Some labels or judgments
+    disagree.
+
+By the labels, a yes/no head does not beat the one-answer head with a threshold. By a blind reading,
+its extra answers are more often real techniques the annotator did not write down. The data cannot
+settle this without more independent judgments of every answer, including the first. E2 stays the
+reference for single answers. M1 is kept as the candidate for multi-answer output.
+
+**Cost.** The pod cost about $1.25 (83 minutes at $0.89/h). CTI-HAL and the blind check ran on the
+laptop. No OpenRouter credit was used.
+
+**Expert-labelled paragraphs and reading them sentence by sentence (2026-10-14, prereg
+`cribl_sentence_split_2026-10-14.json`, no training).**
+- **The expert set read whole.** The public test's `expert` rows are 157 report paragraphs (median
+  62 words). They carry 2.7 labelled families and 3.3 techniques each, so extra answers can be
+  graded there.
+  - One answer: no model is clearly ahead. Family / exact: B1 0.688 / 0.675, E2 0.682 / 0.650,
+    E1 0.669 / 0.643, M1 0.656 / 0.605, pipeline 0.631 / 0.592.
+  - Same number of answers per paragraph: E2 and M1 are level at every count. With two answers,
+    56% and 55% of answers are labelled families.
+  - So M1's advantage in the blind check does not show on complete labels.
+  - Recall is the limit: three answers find about half of a paragraph's labelled families.
+- **The split.** Every row had been read whole (83% of expert rows hold 2+ sentences, 48% of
+  derived ones). `sentence_split_eval.py` splits the expert and derived_procedures paragraphs with
+  the product's no-LLM splitter (`local_observations`), giving 521 and 1,621 sentences.
+  - Merging: the model reads each sentence. A family's paragraph score is its highest probability
+    in any sentence.
+  - Grading: per paragraph against the paragraph's labels, with the same number of answers for
+    both readings.
+
+| E2, labelled families found (paired CI, split − whole) | whole | split | difference |
+|---|---|---|---|
+| expert, 3 answers (headline) | 0.488 | 0.465 | −0.042 [−0.084, +0.001] |
+| expert, 1 / 2 / 5 answers | 0.251 / 0.409 / 0.615 | 0.237 / 0.380 / 0.613 | all CIs span 0 |
+| expert, one answer per sentence (2.5 per paragraph) | 0.460 | 0.437 | −0.035 [−0.074, +0.005] |
+| derived_procedures, 3 answers | 0.633 | 0.604 | −0.023 [−0.051, +0.003] |
+| derived_procedures, one answer per sentence | 0.564 | 0.520 | −0.041 [−0.067, −0.014] |
+
+- **Headline fails.** Splitting finds no more labelled techniques at the same number of answers.
+  - Expert: it is level or slightly below. At three answers, 33 labelled families are found only by
+    the split and 43 only by the whole paragraph.
+  - Derived procedures: it is 2–5 points below, and significantly so at most counts and for the
+    exact technique.
+  - M1 behaves the same: expert −0.014 to +0.012, derived −0.017 to −0.074.
+- **Why.** The models were trained on such paragraphs too (half of the expert and derived training
+  rows hold several sentences), and a paragraph's labels describe the whole of it. A split sentence
+  loses its references: "Because of this, we conclude that DeathStalker is a cyber-mercenary
+  organization." Splitting does surface more distinct techniques when every sentence answers. At an
+  equal answer count, though, the whole-paragraph ranking already holds them.
+
+**Multi-label rows weighted 4x (M2, 2026-10-14, prereg `cribl_multilabel_2026-10-14.json`).**
+- **Why.** Training never limited the model to one technique. A row with several labels shares the
+  target among them under softmax, and every one is a "yes" under the yes/no loss. But only 4.4% of
+  training rows (1,167 of 26,353) carry two or more families. Expert training rows carry several in
+  19% of cases; the expert test paragraphs in 70%.
+- **What.** M2 is M1 (yes/no head, E2's data) with the whole loss of those 1,167 rows multiplied by
+  4, about 16% of the gradient instead of 4%. The final checkpoint was selected.
+
+| Checkpoint (epochs), M2 | 0 | 0.25 | 0.5 | 0.75 | 1 | 1.25 | 1.5 | 1.75 | **2** |
+|---|---|---|---|---|---|---|---|---|---|
+| public dev family top-1 | 0.451 | 0.666 | 0.675 | 0.697 | 0.718 | 0.718 | 0.721 | 0.716 | **0.715** |
+| AnnoCTR dev family top-1 | 0.220 | 0.577 | 0.586 | 0.685 | 0.649 | 0.696 | 0.685 | 0.711 | **0.708** |
+| public dev exact hit, 1.3 answers | 0.326 | 0.522 | 0.552 | 0.590 | 0.612 | 0.610 | 0.631 | 0.636 | **0.642** |
+
+| Share of labelled families found per text (paired CI) | E2 | M1 | M2 | M2 − E2 |
+|---|---|---|---|---|
+| expert paragraphs, 2 answers (headline) | 0.495 | 0.480 | 0.496 | +0.000 [−0.042, +0.050] |
+| expert paragraphs, 1.3 answers | 0.382 | 0.361 | 0.393 | +0.011 [−0.028, +0.052] |
+| expert paragraphs, 3 answers | 0.574 | 0.584 | 0.591 | +0.016 [−0.022, +0.061] |
+| public test (all), 1.3 answers | — | — | — | −0.018 [−0.032, −0.004] |
+| CTI-HAL family hit, 1.3 answers (non-inferiority −0.02) | 0.716 | 0.691 | 0.699 | −0.017 [−0.035, +0.001] |
+
+- **Headline fails.** On the expert paragraphs M2 finds as many labelled families as E2 at every
+  answer count.
+- **Against M1, the weighting helps a little where several labels are common.**
+  - Expert family recall: +0.016 at 2 answers [−0.020, +0.055] and +0.032 at 1.3 [−0.003, +0.071].
+  - Exact recall at 1.3: +0.038 [+0.005, +0.073].
+  - One-answer expert family top-1 recovers to 0.688 (M1 0.656, E2 0.682).
+- **It costs on one-label text.**
+  - Public test exact top-1 is 0.531, against E2's 0.561: −0.030 [−0.050, −0.012].
+  - AnnoCTR test exact is 0.421, against 0.451.
+  - CTI-HAL's non-inferiority bound fails.
+- **The number of answers still does not follow the paragraph.** At 2 answers, paragraphs with
+  several labelled families get 1.94 answers against 2.15 for one-label ones (E2: 1.96 vs 2.09).
+- **Fixed threshold of 0.5.** 2.20 answers per paragraph and family F1 0.472 (E2 at 2 answers:
+  0.478).
+
+The 1,167 multi-label rows are too few and too varied for a 4x weight to teach the model how many
+techniques a text holds. They shift it a little toward multi-label text and away from one-label
+text. More multi-label training data, not a reweighting, is what this needs. E2 stays the reference.
+
+**Cost.** The pod cost about $1.30 (87 minutes at $0.89/h). CTI-HAL was scored on the laptop. No
+OpenRouter credit was used.
+
+**More multi-label data: CTI-Rationale paragraphs (E3, 2026-10-15, prereg `cribl_cti_rationale_2026-10-15.json`).**
+- **Search.** Released ATT&CK-labelled text with several techniques per unit is scarce.
+  - Text2TTP (QCRI, GPL-3.0): its public `sentences.csv` holds only the hand-labelled (2,017) and TRAM
+    (1,522) rows; the CISA and WeLiveSecurity parts of the paper are not released. After the overlap
+    and CTI-HAL-group checks, 25 new sentences carry two or more families, so it was not used.
+  - The DFIR Report sentence set (arXiv 2606.18166, 40% multi-label) and CTI2TTP-Bench / TRAM-Clean
+    (arXiv 2605.25836) are not released.
+  - CTI-Rationale (Hugging Face `EbruResul/CTI-Rationale`, gated, accepted by the owner) is used:
+    1,394 paragraphs of 100 reports from 8 publishers, two analysts each with adjudicated gold rows,
+    ATT&CK v18.1; annotations CC BY 4.0, paragraph text the publishers' (local training only).
+- **Data** (`prepare_cti_rationale.py`). The dataset's report split is kept: train + validation
+  reports become 1,011 training paragraphs (174 with 2+ families, 121 families), test reports a
+  209-paragraph test set (33 with 2+ families).
+  - 10 reports are dropped whole. 8 name a CTI-HAL group, an alias or its own software (SUNBURST,
+    NOBELIUM, Ryuk, Conti, Industroyer, NotPetya and others). 2 are attributed to one without naming
+    it, found by reading the kept report list: CISA's Infamous Chisel report (Sandworm) and Mandiant's
+    CEELOADER report (APT29).
+  - Paragraphs overlapping held-out, Elastic or vendor-set text are dropped (19 train, 3 test), as are
+    8 repeats of existing training rows and 16 test paragraphs overlapping any training text.
+- **What.** E3 is E2's recipe with these rows added (both losses): 27,364 rows, 1,341 with 2+ families
+  (E2: 1,167). The pre-registered rule selected step 41,060 (1.5 epochs).
+
+| Checkpoint (epochs), E3 | 0 | 0.25 | 0.5 | 0.75 | 1 | 1.25 | **1.5** | 1.75 | 2 |
+|---|---|---|---|---|---|---|---|---|---|
+| public dev family top-1 | 0.449 | 0.709 | 0.718 | 0.722 | 0.715 | 0.728 | **0.731** | 0.734 | 0.737 |
+| AnnoCTR dev family top-1 | 0.223 | 0.643 | 0.667 | 0.699 | 0.676 | 0.699 | **0.729** | 0.714 | 0.714 |
+| public dev exact top-1 | 0.320 | 0.543 | 0.566 | 0.595 | 0.602 | 0.631 | **0.637** | 0.648 | 0.648 |
+
+| Paired, E3 − E2 | E2 | E3 | E3 − E2 [95% CI] |
+|---|---|---|---|
+| expert paragraphs (157), 2 answers: share of labelled families found (headline) | 0.495 | 0.482 | −0.013 [−0.046, +0.019] |
+| expert paragraphs, 1.3 / 3 answers | 0.382 / 0.574 | 0.393 / 0.583 | +0.011 [−0.012, +0.033] / +0.008 [−0.021, +0.041] |
+| CTI-Rationale test (209), 1.3 answers: share found (in-domain) | 0.559 | 0.586 | +0.027 [−0.013, +0.070] |
+| CTI-Rationale test, one answer: family top-1 | 0.517 | 0.560 | +0.043 [+0.005, +0.086] |
+| CTI-Rationale test, 33 multi-family paragraphs, 2 answers: share found | 0.518 | 0.528 | +0.010 [−0.058, +0.066] |
+| CTI-HAL family top-1 (non-inferiority −0.02) | 0.642 | 0.636 | −0.005 [−0.023, +0.011] |
+| CTI-HAL exact top-1 / family top-3 | 0.514 / 0.824 | 0.513 / 0.841 | −0.001 [−0.018, +0.014] / — |
+| public test family / exact top-1 | 0.633 / 0.561 | 0.625 / 0.559 | −0.008 [−0.020, +0.005] / −0.003 [−0.017, +0.012] |
+| AnnoCTR test family / exact top-1 | 0.717 / 0.451 | 0.726 / 0.440 | +0.009 [−0.008, +0.027] / −0.011 [−0.030, +0.008] |
+
+- **Headline fails.** On the expert paragraphs E3 finds as many labelled families as E2 at every
+  answer count.
+- **The new rows help on their own kind of text, not elsewhere.** On the CTI-Rationale test reports
+  (same publishers and annotators) the one-answer family top-1 rises 4.3 points (exact, top family
+  only, 0.421 → 0.464), and at two answers E3 gives multi-family paragraphs more answers than
+  one-family ones (2.30 vs 1.94; E2 2.03 vs 1.99). On expert paragraphs the answer count still does not
+  follow the label count (1.98 vs 2.04; E2 1.96 vs 2.09).
+- **CTI-HAL.** No real change (−0.5 point), but the non-inferiority bound misses by 0.003.
+
+About 170 more multi-label rows do not teach the model how many techniques an expert paragraph
+holds. They help only on text like their own. E2 stays the reference.
+
+**Cost.** The pod cost about $1.32 (89 minutes at $0.89/h). E2 on the CTI-Rationale test and E3 on
+CTI-HAL were scored on the laptop. No OpenRouter credit was used.
+
+**Parent-level scoring, a recipe sweep and a second base model (2026-10-15, prereg
+`cribl_recipe_base_2026-10-15.json`).** The owner's three questions after the data runs: score
+without the annotators' parent-or-sub-technique habit; vary the one recipe ever used; try a second
+base model.
+
+- **Parent-level accuracy** (`relabel_parents.py`, `parent_rescore.py`): the answered technique's
+  parent is among the gold ids' parents. Every evaluation split has a parent-relabelled copy
+  (`cases_<split>_parents.jsonl`); `family_head.py evaluate` accepts them and reports
+  `parent_level` beside exact. On CTI-HAL E2 scores family 0.642, parent level 0.639, exact 0.514:
+  the exact answer's family is right as often as the first family, so "exact" was 12 points lower
+  only through granularity (111 statements) and about 20 wrong siblings. No earlier run beats E2 at
+  parent level either (E1 0.639, E3 0.637, F2 0.626; the yes/no heads M1/M2 0.597/0.593, their exact
+  pick often leaving the first family). Training labels were not relabelled.
+- **Selection set widened.** `prepare_cti_rationale.py` now keeps the dataset's 15 validation
+  reports as `cases_cti_rationale_validation.jsonl` (221 paragraphs; E3 had merged them into its
+  training rows, `--merge-validation`). The sweep selects on the mean parent-level accuracy over
+  public dev, AnnoCTR dev and these paragraphs (`--selection parent`), checkpoints every half epoch.
+- **Runs**, all on E2's 26,353 training rows (names in docs only):
+  - R1: E2's recipe for 3 epochs (selected: 2 epochs).
+  - R2: 3 epochs, LoRA lr 2e-4 (selected: 2.5 epochs; the best selection score, 0.710).
+  - R3: 3 epochs, a fresh LoRA of rank 64 / alpha 128 (`--lora-r`; selected: 2 epochs).
+  - G1: `google/gemma-4-E4B@411aa17b` (Apache 2.0, 4.5B effective / 8B with embeddings) with a
+    fresh LoRA r 16 on the attention projections (`--base gemma-4-e4b`, `decision_model.BASES`;
+    the family prompt in Gemma's turn format, same body), E2's recipe for 2 epochs (selected: the
+    last). 132 LoRA modules, 724 4-bit linear layers, both embedding tables left in bf16; 17 GB peak
+    on the pod. Untrained, the nearest-description head scores 0.04 on dev (Qwen 0.45): Gemma's
+    decision-slot states carry little before training, and the gap closes within half an epoch.
+  - Each run ~100 min on a secure RTX 4090; the four pods about $6.85 in all. CTI-HAL was scored on
+    the laptop, Gemma included: on an 8 GB GPU `decision_model` keeps Gemma's 5.2 GB per-layer
+    embedding table in system RAM and looks rows up on the CPU (`BaseSpec.cpu_modules`,
+    `keep_on_cpu`; 4.4 GB of GPU memory, 0.23 s per statement).
+
+| Parent level, run − E2 (paired 95% CI) | CTI-HAL (968) | public test (1,391) | AnnoCTR test (738) | CTI-Rationale test (209) |
+|---|---|---|---|---|
+| E2 (reference) | 0.639 | 0.636 | 0.714 | 0.517 |
+| R1, 3 epochs | 0.630 (−0.009 [−0.026, +0.007]) | 0.635 (−0.001) | 0.729 (+0.015 [−0.005, +0.035]) | 0.531 (+0.014) |
+| **R2, lr 2e-4 (best on dev, headline)** | **0.605 (−0.034 [−0.057, −0.011])** | 0.649 (+0.013 [−0.005, +0.030]) | 0.702 (−0.012) | 0.531 (+0.014) |
+| R3, rank 64 | 0.624 (−0.015 [−0.037, +0.006]) | 0.636 (+0.000) | 0.725 (+0.011) | 0.517 (+0.000) |
+| **G1, Gemma 4 E4B (headline)** | **0.636 (−0.003 [−0.025, +0.020])** | 0.627 (−0.009 [−0.028, +0.011]) | 0.701 (−0.014) | 0.512 (−0.005) |
+
+- **Both headlines fail.** The best-on-dev recipe (R2) is 3.4 points *worse* on CTI-HAL, and the
+  interval excludes 0; Gemma ties E2 (−0.3).
+- **Strict exact on CTI-HAL:** E2 0.514, R1 0.503, R2 0.469 (−0.045 [−0.067, −0.022]), R3 0.483
+  (−0.031 [−0.054, −0.008]), G1 0.527 (+0.012 [−0.011, +0.037]). Family top-3: E2 0.824, G1 0.827,
+  R2 0.811, R3 0.803.
+- **Where the higher learning rate "won":** public dev exact rose to 0.71 (E2 0.66), and that
+  carried to the public test's TRAM split (parent level +0.036 [+0.013, +0.059]; exact +0.032
+  [+0.012, +0.051] pooled), not to real reports: derived procedures −0.013, expert −0.006, CTI-HAL
+  −0.034. Rank 64 behaves the same (TRAM +0.035, derived −0.036 [−0.067, −0.004]). Both are worse
+  calibrated (CTI-HAL family ECE 0.144 and 0.100 against E2's 0.067; Gemma 0.060). The wider
+  selection set did not catch this: the three dev sets agreed on R2.
+- **Non-inferiority on public test family (−0.02):** R2 and R3 pass; R1 (−0.010 [−0.023, +0.003])
+  and G1 (−0.016 [−0.033, +0.004]) miss the bound by a fraction of a point.
+- **Rare families** (gold family under 100 training rows; CTI-HAL 89 statements, public test 209):
+  no run moves them (CTI-HAL E2 0.393, R1 0.382, R2 0.382, R3 0.416, G1 0.404, every interval
+  spanning 0).
+- **Longer training alone** (R1) changes nothing: the selection rule stopped at 2 epochs, exactly
+  E2's recipe, and the three dev curves are flat from 1.5 epochs on.
+
+Reading: at parent level the model sits at about 64% on CTI-HAL under every recipe and both base
+models, which is the agreement rate of CTI-HAL's own annotators. A faster learning rate or more
+LoRA capacity buys TRAM-style sentences at the cost of real-report statements and calibration.
+Gemma 4 E4B reaches the same point from a fresh LoRA with no Cribl adapter, so the adapter and the
+base family are not what limits this; the labels are. E2 stays the reference.
+
+**Cost.** Four pods, about $6.85 (R1 111 min, R2 124 min, R3 118 min, G1 110 min at $0.89/h). The
+laptop scored CTI-HAL for all four and ran the two pilots. No OpenRouter credit was used.
+
+**Amendment 1: a security-pretrained 8B base (S1, 2026-10-15).** After the four results above the
+owner asked for one larger base. S1 is `fdtn-ai/Foundation-Sec-8B@9e6bb1f7` (Cisco: Llama 3.1 8B
+continued on 5.1B tokens of security text; Apache 2.0; text-only, so `decision_model` loads it
+through the causal-LM class; the family prompt in Llama 3's header format, same body), a fresh LoRA
+r 16 on the attention projections (128 modules, 13.6M parameters), E2's recipe for 2 epochs with
+the widened selection set. Registered as amendment 1 with the same bar before training. Training
+took 74 min at 0.084 s per example (13.7 GB peak), the same speed as the 4B models; the pod cost
+about $1.35. On the laptop the 1 GB token table and the unused 1 GB output head stay in RAM
+(`cpu_modules`), leaving 7.0 GB of GPU use for scoring at batch 4.
+
+| Parent level, S1 − E2 (paired 95% CI) | CTI-HAL | public test | AnnoCTR test | CTI-Rationale test |
+|---|---|---|---|---|
+| E2 (reference) | 0.639 | 0.636 | 0.714 | 0.517 |
+| **S1, Foundation-Sec-8B (headline)** | **0.627 (−0.012 [−0.034, +0.009])** | 0.647 (+0.011 [−0.006, +0.028]) | 0.736 (+0.022 [−0.003, +0.045]) | 0.565 (+0.048 [−0.010, +0.105]) |
+| strict exact, S1 − E2 | 0.503 (−0.011) | 0.580 (+0.019 [0.000, +0.037]) | 0.466 (+0.015) | 0.469 (+0.048) |
+
+- **Headline fails.** On CTI-HAL the 8B security model is 1.2 points below E2 at parent level and
+  1.1 below on exact; family top-3 0.822 against 0.824; the 89 rare-family statements are at the
+  same 0.393. Its calibration matches E2's (family ECE 0.064).
+- **Elsewhere it is the first run slightly ahead of E2 on every set**, each within noise: public
+  test exact +1.9 (TRAM +4.3 [+1.5, +6.9], derived procedures −1.2, expert +0.6), AnnoCTR +2.2,
+  CTI-Rationale +4.8. The untrained head starts at 0.21 on dev (Qwen 0.45, Gemma 0.04) and the dev
+  curves end above every Qwen run (public dev parent level 0.762, exact 0.709).
+- **Sub-techniques:** within the right family S1 picks the exact id 80% of the time (487 of 607),
+  as E2 does (498 of 619), with 13 wrong siblings against 18.
+
+Reading: twice the parameters and 5 billion tokens of security pretraining buy a better fit to the
+public sentences and nothing on CTI-HAL. Three base models of two sizes now sit at 63–64% there.
+E2 stays the reference; S1 is the strongest alternative when the public sets matter and the memory
+is available.
+
+**Cost.** One pod, about $1.35 (91 minutes at $0.89/h). CTI-HAL was scored on the laptop. No
+OpenRouter credit was used.
+
+**A group head: the threat group from the extracted techniques (A1/A2, 2026-10-15, prereg
+`cribl_group_head_2026-10-15.json`).** The owner asked for a model built the same way (base LLM,
+fresh LoRA, cosine head) that reads only the techniques previously extracted from a report and names
+the group. `export_group_cases.py` builds a 153-group catalogue (groups with 5+ documented
+techniques, each its own family, rows initialised from "Name (Gxxxx): description") and the case
+files; `family_head.py --task group` trains it with the family-head code unchanged (the prompt
+asks for the group; the state is the technique list, "Txxxx Parent name: name" entries joined by
+"; ", no prose, no actor or tool names). Training rows: 45,900 synthetic draws from the ATT&CK
+profiles, mirroring the group network's generator without software and context (3–20 true
+techniques, false positives by popularity at precision 0.4–0.95, a sub-technique swapped for its
+parent with p 0.2). Selection on the 20 single-group ATT&CK campaigns and the 34 vendor reports
+(those carry no technique labels: their input is what E2 names on their statements). Baselines on
+the same inputs (`group_baseline.py`): the product's group network with the software block empty,
+and a Jaccard match to the documented profiles. A1 = Qwen3.5-4B-Base, A2 = Foundation-Sec-8B,
+fresh LoRA r 16, one epoch, a checkpoint every quarter; the technique lists are five times longer
+than sentences, so a run took ~2.7 h (0.18–0.20 s per example) and the two pods about $5.05
+instead of the planned $2.10.
+
+| Group top-1 (top-5), 153 groups ranked | CTI-HAL extracted (55, headline) | CTI-HAL gold (55) | CTI-HAL accepted (54) | Elastic (6) | campaigns dev (20) | vendor dev (34) |
+|---|---|---|---|---|---|---|
+| group network, techniques only | **0.127** (0.273) | **0.182** (0.364) | **0.111** (0.333) | 0 (0.167) | 0.300 (0.500) | 0.294 (0.382) |
+| Jaccard to profile | 0.018 (0.018) | 0.000 (0.036) | 0.000 (0.019) | 0 (0) | 0.150 (0.200) | 0.294 (0.471) |
+| A1, Qwen3.5-4B group head | 0.018 (0.073) | 0.073 (0.091) | 0.000 (0.074) | 0 (0.333) | 0.150 (0.250) | 0.265 (0.471) |
+| A2, Foundation-Sec-8B group head | 0.036 (0.145) | 0.018 (0.145) | 0.037 (0.093) | 0 (0) | 0.100 (0.250) | 0.235 (0.412) |
+
+- **Both headlines fail**, and not narrowly: A1 is −0.109 [−0.200, −0.036] against the group
+  network on the extracted input, A2 −0.091 [−0.182, 0.000]. The right group's median rank is
+  40–48 of 153 for the heads against 17–23 for the network. Sandworm is found (A2 gold: ranks 1–7
+  on all five reports); the financially motivated groups, whose technique sets are generic, are not.
+- **On the dev sets the heads come close** (vendor: A1 0.265 vs 0.294) and were still rising
+  (A1 vendor 0.15 → 0.26 → 0.24 across the quarter-epoch checkpoints), so one epoch over one draw
+  of the synthetic rows is too little for 153 classes; the network sees 400 draws per group
+  redrawn every 4 of its 20 epochs, and adds a prominence prior at prediction, which favours the
+  well-known CTI-HAL groups.
+- **The product's full attribution stage** (techniques plus software, the combiner) reaches 0.455
+  on the same reports, quoted for context: the group signal is in the named tools, not in the
+  technique mix, for every model here.
+
+Reading: a language model reading a bag of technique names is a worse group classifier than a
+small network over the same bag, at 50 times the compute. The technique list is not a fingerprint,
+and the LLM's strength (reading prose) is unused on it. If the group question is to be pursued, the
+input should be the report text (the free-text group study, docs 21.3.16, is the comparison), not
+the extracted list. The product's attribution stage is unchanged.
+
+**Cost.** Two pods, about $5.05 (A1 175 min, A2 165 min at $0.89/h). The vendor extraction, the
+baselines and all test scoring ran on the laptop. No OpenRouter credit was used.
+
+**Refitting the group network for extracted inputs (2026-10-16, prereg
+`cribl_group_mlp_refit_2026-10-16.json`).** The owner asked whether the network itself can be made
+better. Two changes through the fitter's own options (`refit_group_mlp.py`):
+- **Measured draws.** How E2 actually extracts, measured on the 85 CTI-Rationale train and
+  validation reports: about 10 techniques per report (mean 10.1), precision 0.62 exact and 0.71 at
+  parent level (10th–90th percentile 0.50–1.00), recall 0.50; of the wrong ones 67% are unrelated
+  techniques, 24% a parent or sub-technique of a labelled one, 9% a sibling. The derived draw
+  range is 3–11 true techniques at precision 0.50–1.00 (the hand-set range: 3–20 at 0.40–0.95).
+- **Real cases.** The 34 vendor reports with the techniques E2 names on them, repeated
+  `real_weight` times per draw (0, 3, 10, 30).
+- Grid of 8 fits (~40 s each on the laptop GPU), selected on the 20 single-group ATT&CK campaigns
+  with techniques only (MRR): the vendor reports help on dev (MRR 0.413 → 0.487 at weight 30,
+  top-1 0.30 → 0.40); the measured draws do not (0.411 at weight 0). Selected: current draws with
+  the vendor reports at weight 30, written to `data/models/mlp/group_mlp_extracted.npz` (the
+  product's artifact is untouched).
+
+| Group top-1 (top-5), software block empty | CTI-HAL extracted (55, headline) | CTI-HAL gold (55) | CTI-HAL accepted (54) | Elastic (6) |
+|---|---|---|---|---|
+| current artifact | 0.127 (0.273) | 0.182 (0.364) | 0.111 (0.333) | 0 (0.167) |
+| refit (vendor reports, weight 30) | 0.127 (0.345) | 0.145 (0.309) | 0.130 (0.370) | 0 (0.333) |
+| refit − current, top-1 (paired CI) | +0.000 [−0.091, +0.109] | −0.036 [−0.109, +0.036] | +0.019 [−0.037, +0.074] | 0 |
+
+- **Headline fails:** the same 7 of 55 reports right at top-1. Top-5 rises on the extracted input
+  (+0.073, CI [−0.018, +0.164]) and MRR from 0.224 to 0.232, within noise.
+- The dev gain (ATT&CK campaigns) did not carry to CTI-HAL: the vendor reports cover 34 groups
+  with one report each and none of the 6 test groups' habits.
+
+Reading: the network's limit is its input, not its training. From technique sets alone, 13–18% is
+where three different models (this network, its refit, the LLM heads) land on these reports, and
+the group signal the product uses comes from the named tools. No adoption; the attribution stage is
+unchanged.
+
+**Cost.** None: eight fits and all scoring on the laptop.
+
+**An actor head: the group from the report's sentences (T1, 2026-10-16, prereg
+`cribl_actor_head_2026-10-16.json`).** The owner's pick after the technique-list results: let the
+LLM read the statements, since the group signal is in how a technique is done. `export_actor_cases.py`
+builds the training texts from `text_group.build_corpus` (ATT&CK's per-group procedure examples and
+descriptions, single-group software and campaign procedure examples; group names → "the adversary",
+campaign names → "the operation"; 12,675 sentences over the 153 catalogue groups, 892 with 2–3
+groups) minus 49 that overlap a CTI-HAL, Elastic or vendor statement, and the report sets as one row
+per anonymised statement (CTI-HAL 922, Elastic 848, vendor 3,821; 850 of the vendor ones as the
+selection set). `family_head.py --task actor` trains the same head (Qwen3.5-4B-Base, fresh LoRA
+r 16, 2 epochs, 21 min, ~$0.45); `group_text_eval.py` averages each group's probability over a
+report's statements and scores the product's TF-IDF text-group model on the same statements.
+
+| Group top-1 (top-3 / top-5), 153 groups | CTI-HAL (55, headline) | Elastic (8) | vendor (34, dev) |
+|---|---|---|---|
+| TF-IDF text-group model (`text_group.py`) | **0.491** (0.618 / 0.691) | 0.125 (0.500 / 0.625) | 0.853 (0.882 / 0.912) |
+| T1, actor head, per-report mean probability | 0.255 (0.436 / 0.491) | 0.375 (0.500 / 0.625) | 0.353 (0.441 / 0.500) |
+| group network, E2's extracted techniques | 0.127 (0.236 / 0.273) | 0 (0.167 / 0.167) | — |
+| T1 − TF-IDF, paired 95% CI | top-1 −0.236 [−0.382, −0.109]; MRR −0.211 [−0.323, −0.102] | +0.25 [−0.25, +0.75] | −0.50 [−0.68, −0.29] |
+| T1 − group network | top-1 +0.127 [0.000, +0.255]; top-5 +0.218 [+0.073, +0.382] | | |
+
+- **Headline fails:** the TF-IDF model is 24 points ahead on CTI-HAL (median gold rank 2 against
+  7). Per group (T1 / TF-IDF right of n): Carbanak 0/2 of 10, Sandworm 4/4 of 5, FIN6 3/6 of 11,
+  FIN7 2/8 of 18, OilRig 2/4 of 8, Wizard Spider 3/3 of 3.
+- **Reading text beats reading technique lists:** the same head doubles the group network's
+  top-1 on the same reports (+12.7 points, CI touching 0) and nearly doubles its top-5.
+- **One caveat for the TF-IDF side:** its corpus is unfiltered, and ATT&CK paraphrases some of
+  these reports; on the vendor reports, which ATT&CK cites heavily, it scores 85% where the
+  overlap-filtered head scores 35%. The CTI-HAL gap is too wide to be that alone. On Elastic
+  (reports after the ATT&CK snapshot) the head leads 3 to 1 of 8.
+- Statement-level top-1 is 11–13% everywhere: most single sentences carry no group identity;
+  the report-level average does the work.
+
+Reading: given the same anonymised text, a bag of words matched against the groups' documented
+procedures still beats a 4B model with a cosine head trained on 12,675 sentences. The LLM's gain
+over technique lists is real, but it does not reach the simple text model, which is already in the
+product (weight 0, docs 21.3.16). No adoption.
+
+**Cost.** One pod, about $0.45 (30 minutes at $0.89/h). Scoring on the laptop. No OpenRouter credit.
+
+**A second base: Gemma 4 E4B (T2, 2026-10-29, amendment 1 of the same prereg).** The owner asked
+whether a Gemma-based actor classifier does better. T2 is T1's recipe and data with only the base
+changed to Gemma 4 E4B (the G1 base of the recipe sweep), registered after T1's result. Training
+took 22 minutes on one RTX 4090 (10.8 GB peak). The dev curve stayed below T1's at every
+checkpoint (statement top-1 0.076 vs 0.134 at the end), and the last checkpoint was selected.
+
+| Group top-1 (top-3 / top-5), 153 groups | CTI-HAL (55, headline) | Elastic (8) | vendor (34, dev) |
+|---|---|---|---|
+| TF-IDF text-group model | **0.491** (0.618 / 0.691) | 0.125 (0.500 / 0.625) | **0.853** (0.882 / 0.912) |
+| T1, Qwen3.5-4B | 0.255 (0.436 / 0.491) | **0.375** (0.500 / 0.625) | 0.353 (0.441 / 0.500) |
+| T2, Gemma 4 E4B | 0.200 (0.291 / 0.345) | 0.250 (0.375 / 0.500) | 0.118 (0.176 / 0.353) |
+| T2 − TF-IDF, paired 95% CI | top-1 −0.291 [−0.418, −0.164]; MRR −0.294 [−0.411, −0.189] | +0.125 [−0.25, +0.50] | −0.735 [−0.882, −0.559] |
+| T2 − T1, paired 95% CI | top-1 −0.055 [−0.127, 0.000]; top-5 −0.145 [−0.255, −0.055]; MRR −0.083 [−0.132, −0.038] | −0.125 [−0.375, 0] | −0.235 [−0.382, −0.118] |
+
+- **Headline fails:** TF-IDF is 29 points ahead on CTI-HAL. Gemma is also below Qwen on every
+  set, significantly on CTI-HAL top-5/MRR and the vendor set. Per group on CTI-HAL (T2 / T1 /
+  TF-IDF right): Carbanak 0/0/2 of 10, FIN6 2/3/6 of 11, FIN7 2/2/8 of 18, OilRig 1/2/4 of 8,
+  Sandworm 3/4/4 of 5, Wizard Spider 3/3/3 of 3.
+- Statement-level top-1 7–14%, below T1's 11–13% on CTI-HAL and vendor.
+- Unlike the technique task (G1 tied E2), the second base does not catch up here. The actor
+  head stays an experiment and the TF-IDF model stays the text member.
+- A fix came out of this run: when `BaseSpec.loader` was added for Foundation-Sec-8B, Gemma's
+  CPU-table argument shifted into `loader`, so the `gemma-4-e4b` base had not loaded since
+  2026-10-15. It is now a keyword argument and pinned by a test.
+
+**Cost.** One pod, about $1.55 (1.7 h at $0.89/h; about 1 h went on setup, because PyPI downloads
+crawl from the EUR-IS-1 data center). Scoring on the laptop. No OpenRouter credit. Model
+`data/models/cribl_ft/T2/step_25350`, comparison `data/audits/cribl_ft/T2_actor_head_comparison.json`.
+
+**CTIBench and AthenaBench (2026-10-19, prereg `cribl_external_bench_2026-10-19.json`, evaluation
+only).** The owner asked for the public CTI benchmarks. Both are non-commercial (CTIBench CC BY-NC-SA
+4.0; AthenaBench's academic research licence): local evaluation, nothing trained on them, raw files
+under `data/benchmarks/` (gitignored). Only their extraction and attribution tasks fit models that
+do not generate text; the knowledge, CVE→CWE, CVSS and mitigation tasks were not run.
+`external_bench.py` prepares the cases, runs the heads and scores under the benchmarks' rules.
+
+*Technique extraction.* CTI-ATE (CTIBench): 60 ATT&CK software descriptions (47 Enterprise, 13
+Mobile), 6.6 parent techniques each, F1. E2 reads the sentences the product's splitter makes (398)
+and answers one technique per sentence (or up to three at 1.3 per sentence); the union at parent
+level is scored. AthenaBench ATE: 500 GPT-written scenarios, one answer each, accuracy at parent
+level (the benchmark's rule; 352 answers are sub-techniques).
+
+| Technique extraction | E2 (this work) | published models (same metric) |
+|---|---|---|
+| CTI-ATE, all 60 texts, F1 (micro / mean per text) | 0.575 / 0.583; up to 3 per sentence 0.578 / 0.599 | ChatGPT-4 0.639, Llama3-70B 0.472, Gemini-1.5 0.461, ChatGPT-3.5 0.311, Llama3-8B 0.156 (macro-F1 as the paper labels it) |
+| CTI-ATE, the 47 Enterprise texts | 0.746 / 0.745; up to 3: 0.755 / 0.765 | not reported separately |
+| AthenaBench ATE, accuracy (top-1 at parent level) | **0.736** (top-3 0.910, top-5 0.942; exact id 0.600) | Gemini-2.5-Pro 76.2, GPT-5 76.0, GPT-4o 51.6, Gemini-2.5-Flash 51.6, GPT-4 35.8, Llama-Primus 33.8, Llama 3.3-70B 30.4, Qwen3-14B 19.4, Qwen3-8B 11.8, Qwen3-4B 5.6 |
+
+- On AthenaBench the 4B head sits 2.5 points under the two frontier models and far above every open
+  model the authors ran, including its own base family (Qwen3-4B 5.6%, which had to generate an id
+  from a prompt). Scenarios whose answer is a sub-technique score 0.719, parent-only ones 0.777.
+- On CTI-ATE the catalogue is Enterprise only, so the 13 Mobile texts score 0 and pull the
+  all-rows F1 to 0.58, second to ChatGPT-4's 0.64; on the Enterprise rows it reaches 0.75. These
+  texts are ATT&CK's software descriptions and E2 trained on ATT&CK's procedure sentences about the
+  same software, so the CTI-ATE numbers are flattering; the AthenaBench ones are not.
+
+*Threat-actor attribution.* CTI-TAA: 50 anonymised reports (answers from the authors' key);
+AthenaBench TAA: 100 bullet profiles. Both models here name an ATT&CK group: the actor head
+(mean probability over the report's sentences or bullets) and the product's TF-IDF text-group
+model (whole text). Scored with AthenaBench's rule and lists: correct when alias-connected to the
+answer, plausible when connected through related groups, combined 1 / 0.5 / 0.
+
+| Attribution | actor head (T1) | TF-IDF text-group model | published |
+|---|---|---|---|
+| CTI-TAA (50; 48 answers map to an ATT&CK group): correct / plausible / combined | 0.38 / 0.96 / 0.67 | 0.38 / 0.98 / 0.68 | correct / plausible: ChatGPT-4 52 / 86, Llama3-70B 52 / 80, ChatGPT-3.5 44 / 62, Gemini-1.5 38 / 74, Llama3-8B 28 / 36 |
+| AthenaBench TAA (100; 75 map to an ATT&CK group): correct / plausible / combined | 0.16 / 0.84 / 0.50 | 0.23 / 0.79 / 0.51 | accuracy: GPT-5 39, GPT-4o 35, GPT-4 31, Gemini-2.5-Pro 31, Llama 3.1-8B 24, Qwen3-14B 17, Qwen3-4B 15 |
+
+- Correct attributions match Gemini-1.5 on CTI-TAA and sit below the frontier models on both;
+  a quarter of AthenaBench's answers are actors ATT&CK does not list (TraderTraitor, WageMole,
+  Cleaver), which no model here can name. The two models agree on 13 of 50 and 18 of 100 picks
+  and are right together on 12 and 11; either is right on 26 and 28. The actor head leans on a few
+  prominent groups (Lazarus on 17 of 50 CTI-TAA reports).
+- "Plausible" follows the authors' transitive related-group walk, which connects most known
+  actors; the CTIBench paper's plausible numbers came from the authors' own notebook and may be
+  stricter, so compare the correct column.
+
+**Cost.** None: all scoring on the laptop (about 12 minutes).
+
+**Product integration: the technique head as mapping evidence (2026-10-19).** Pre-registered
+in `docs/preregistration/cribl_product_integration_2026-10-19.json` before any run; the wiring
+is described in 8.2. The reference head (E2, `data/models/cribl_ft/E2/step_52706`, checkpoint
+fingerprint `5b5d015d…`) runs as a local service (`make technique-head-serve`); with
+`TECHNIQUE_HEAD_ENABLED=true` every prose observation is scored once, each candidate gets the
+head's probabilities as evidence (acceptance feature schema 4) and up to three head proposals that
+retrieval missed join the pool with fused score 0. Log-derived observations are not scored (prose
+only, for now). Three arms, each one run per test set, the acceptance model of the registered arm
+refitted once on public dev with the head active (`acceptance_model_technique_head.json`, schema
+4, threshold 0.23, dev F1 0.488 against 0.468 for the shipped model; it records the head's
+fingerprint and runs only on that head). Accepted-set metrics, one statement per case:
+
+| Arm | Public test (1,391): P / R / F1 / parent-aware F1 / hit@1 | CTI-HAL (968): P / R / F1 / parent-aware F1 / hit@1 |
+|---|---|---|
+| off: the shipped pipeline rerun under this code (reproduces the committed artifacts exactly) | 0.516 / 0.349 / 0.417 / 0.451 / 0.501 | 0.425 / 0.341 / 0.378 / 0.425 / 0.383 |
+| proposer: head on, shipped schema-3 model | 0.518 / 0.349 / 0.417 / 0.452 / 0.501 | 0.428 / 0.341 / 0.379 / 0.426 / 0.383 |
+| **head**: head on, schema-4 model (registered) | **0.553 / 0.398 / 0.463 / 0.500 / 0.556** | **0.553 / 0.463 / 0.504 / 0.564 / 0.509** |
+
+- **Headline (CTI-HAL, head minus off, paired case bootstrap, 1,000 resamples, seed 7):** F1
+  **+0.126 [+0.101, +0.149]**, precision +0.128 [+0.098, +0.156], recall +0.122 [+0.099, +0.146].
+  Public test: F1 +0.046 [+0.031, +0.061], precision +0.037 [+0.016, +0.057], recall +0.049
+  [+0.035, +0.063]; every dataset gains (tram 0.555 → 0.597, derived procedures 0.311 → 0.372,
+  expert 0.263 → 0.308). The precision constraints (no drop beyond 0.02) are met with precision
+  rising on both sets.
+- **Where it comes from (CTI-HAL).** Accepted techniques 840 → 877, of which right 357 → 485;
+  statements with nothing accepted 305 → 198. Of the 305 statements the shipped pipeline accepted
+  nothing for, 75 now get a right technique (92 a wrong one, 138 still nothing); of the 312 it
+  accepted only wrong techniques for, 73 now get a right one and 54 nothing; of the 351 it got
+  right, 330 stay right (15 slip to wrong only, 6 to nothing). Multi-technique acceptances fall
+  from 164 to 102 statements: the model trades spread for one confident answer. The head's own
+  proposals matter little: within the stored top-12 rows the head arm accepts 41 head-only
+  candidates on CTI-HAL, 16 of them right (33 / 15 on the public test); the gain is the
+  re-scoring of retrieved candidates with the head's opinion.
+- **The proposer arm** (head on, shipped model) changes almost nothing (+0.001 F1 on both sets):
+  the shipped model judges head-only candidates on no retrieval evidence, so they stay in review.
+  This is the arm a user gets by starting the service without the refit.
+- **Weights (standardised).** `th_family_p` +0.37, `th_technique_rank` +0.31, `th_technique_p`
+  +0.23, `th_top_p` −0.32 (a head confident about *its* family lowers every other candidate),
+  `th_proposed` +0.08, `th_only` +0.07; the exemplar vote features keep the largest weights.
+- **Runtime.** One request per statement: +0.17 s per public case (546 s against 316 s for 1,391)
+  and +0.07 s per CTI-HAL statement; the service holds about 3.6 GB of GPU memory. No API credit.
+- **Honesty.** The head's checkpoint was selected on public dev + AnnoCTR dev and the acceptance
+  model is fitted on public dev, so the dev operating point is flattering; the public test splits
+  and CTI-HAL were never used to train or choose anything on either side. 55% precision is still
+  the ceiling the CTI-HAL labels allow a one-answer gate (21.3.18 above).
+
+*Two models behind one gate (amendment 2).* The first clinic check ran the schema-4 model on
+every candidate, including those of log-derived observations the head never scores: with every
+`th_*` feature at 0, a value absent from the fit, it lost 0.12 F1 on the eCAR windows and 0.07 on
+the narrative mode (`clinic_head_schema4_only.json`). The registered arm therefore pairs the two
+models (`acceptance.HeadAwareAcceptance`, `ACCEPTANCE_MODEL_HEAD_PATH`, 8.2): the schema-4 model
+judges the observations the head scored, the shipped model the rest. Rerun under the pair, the
+public and CTI-HAL numbers above are unchanged to the last digit (every statement is prose) and
+the checks below are the pair's.
+
+*No-regression checks (head on vs off, same code, one run each).*
+
+| Check | Off | Head on | Reading |
+|---|---|---|---|
+| EvidenceForge clinic bundle, local pipeline (narrative / windows / eCAR F1) | 0.357 / 0.600 / 0.545 | identical, bit for bit | the head reads no log-derived observation and the pair leaves them to the shipped model |
+| `check-regression` against the committed public baseline | pass | pass (F1 0.225 → 0.463) | |
+| CTI-HAL attribution, anonymised headline (55 reports): top-1 / top-5 / MRR / named correct / wrong names / technique recall | 0.455 / 0.600 / 0.512 / 10 / 0 / 0.405 | 0.473 / 0.636 / 0.540 / 9 / 0 / 0.491 | one more report right, one fewer reaches the naming gate, no wrong name |
+| ATT&CK folds, seed 7 (178 cases, 153 known): top-1 / top-5 / named correct / wrong names / technique recall | 0.824 / 0.941 / 26 / 0 / 0.604 | 0.837 / 0.974 / 38 / 0 / 0.778 | **not evidence of a gain**: E2 trained on ATT&CK's procedure sentences, which are the fold cases (the fold hiding keeps them out of the indexes, not out of the head); read as "nothing broke, no wrong name" only. The off numbers are the leak-free baseline under this code, below the committed artifact of 2026-10-02 that predates the BM25 fold hiding (21.3.5) |
+| Elastic real reports, strict anonymisation (amendment 3; 8 attributed posts + 22-post open set): top-1 / named correct / wrong names / technique recall; open-set posts given a cluster name | 4/8 / 1 / 0 / 0.759; 1 of 22 | 4/8 / 1 / 0 / 0.833; **2 of 22** | the attributed posts are unchanged and clean, but the head's extra accepted techniques push a second commodity post (the GoSar RAT write-up) through the cluster gate as "Lazarus Group / APT38" at probability 0.99, next to the banking-extension post the shipped pipeline already names "Kimsuky / Lazarus Group"; the benchmark's combined named risk rises from 0.50 to 0.67 |
+
+**Outcome and decision.** The registered headline holds with room to spare (CTI-HAL accepted-set
+F1 +0.126, precision up), the public test gains, the clinic bundle and the regression check are
+clean, and real-report attribution ranks slightly better. The naming side is not clean: one more
+open-set post is named, and the fold naming check is uninformative because the head saw the fold
+sentences in training. Under the project's rule that a default flip needs a clean naming gate, the
+head stays **off by default**: everything is in place for an opt-in (`make technique-head-serve`,
+`TECHNIQUE_HEAD_ENABLED=true`, the pinned fingerprint and `ACCEPTANCE_MODEL_HEAD_PATH` with the
+shipped model as the partner), and the open-set naming is the one thing to settle before a default
+flip, for instance by holding the cluster gate to its own separation floor on head-boosted cases,
+measured on a fresh fold seed, never on the Elastic set. Artifacts: `data/audits/cribl_ft/
+integration/` (gitignored; `integration_report.py` composes `integration_report.json`).
+
+**Multi-answer acceptance (2026-10-19, rejected).** Pre-registered in
+`docs/preregistration/cribl_multi_answer_acceptance_2026-10-19.json`. Motivation: multi-technique
+statements are under-recovered (CTI-HAL: 68 statements with two or more labels, 45 get one right,
+6 get all; of the 96 missed labels 53 sit in the top-12 rows at a median acceptance probability of
+0.05, and for 40% of them the head gives the label's family at least a quarter of its top family's
+probability). Feature schema 5 adds the head's second answer as relative evidence
+(`th_rel_family`, `th_rel_technique`, a `th_second` flag for the head's second or third family at
+≥ 25% of the top one, the statement length and their product); one refit on public dev
+(`--feature-schema 5`; dev F1 0.489 against 0.488, threshold 0.25), one run per set through the
+head-aware pair. Result against the schema-4 pair (paired, 1,000 resamples): CTI-HAL F1 −0.004
+[−0.014, +0.005] with precision +0.014 and recall −0.016; public test F1 −0.006 [−0.012, −0.001];
+multi-label recall 0.351 → 0.338 (CTI-HAL) and 0.207 → 0.200 (public); the expert split is
+unchanged (0.308 → 0.306). The fit used the new features to raise the threshold, not to admit second
+answers: the relative family probability took a negative weight that offsets the absolute one. The
+headline rule (no loss) fails on the point estimate and the multi-label constraint fails, so
+schema 4 stays the `ACCEPTANCE_MODEL_HEAD_PATH` model; schema 5 remains loadable.
+
+What the breakdown says instead: acceptances beyond the first on a statement are almost always
+wrong. With the schema-4 pair, CTI-HAL has 102 statements with more than one accepted technique
+and the extra acceptances are 7 right / 100 wrong; on the public test 17 right / 235 wrong. From the
+stored rows, keeping only the most probable acceptance per statement would read as precision 0.553
+→ 0.62 and F1 0.504 → about 0.53 on CTI-HAL (0.463 → about 0.49 on the public test). That is an
+estimate from test rows, not a result: a single-answer cap (or a much higher threshold for a second
+acceptance) is the next pre-registrable change, with the choice made on public dev.
+
+**Single-answer cap (2026-10-19, declined on dev).** Pre-registered in
+`docs/preregistration/cribl_single_answer_cap_2026-10-19.json`: at most one probability-only
+acceptance per observation, a second one only above a bar, with the bar chosen on public dev by
+the fit's out-of-fold runtime rule from {none, 0.5 … 1.0} (`fit_acceptance_model.py
+--single-answer-cap`; the artifact carries the choice as `metadata.gate`, the runtime follows it
+through `TECHNIQUE_SINGLE_ANSWER_CAP=model`, `off` ignores it and a number forces a bar for an
+ablation). Both fits declined the cap: on dev the uncapped gate scores out-of-fold F1 0.435
+(shipped recipe) and 0.488 (head recipe), every bar 0.429–0.431 and 0.472–0.476, i.e. +2.5 points
+of precision for −4 of recall. The dev split's second acceptances are right often enough to keep;
+the CTI-HAL rows that motivated the cap (7 right / 100 wrong extras) are not representative of
+dev. The "cap" artifacts are therefore uncapped refits and serve as same-code controls: the
+head-free refit (threshold 0.23 against the shipped 0.21) reads F1 −0.003 [−0.008, +0.002] on the
+public test and +0.002 [−0.006, +0.008] on CTI-HAL against the shipped model; the head-recipe
+refit reproduces the schema-4 pair to the last digit. Forced-cap diagnostics (report only, since
+dev chose against them) are listed at the end of this subsection.
+
+**Agreement filter: keep only what both the head and the pipeline pick (2026-10-19).**
+Product owner's request; pre-registered in `docs/preregistration/cribl_head_agreement_2026-10-19.json`.
+A post-gate rule (`TECHNIQUE_HEAD_AGREEMENT`, off by default): an accepted technique of an
+observation the head scored stays accepted only when the head picks it too, at one of three
+levels (its most probable technique; its most probable family; one of its three most probable
+families); verifier verdicts and observations the head did not score are left alone. No refit.
+Arms on the shipped gate (the head present only for the filter) and on the schema-4 pair:
+
+| Arm | Public test: P / R / F1 | CTI-HAL: P / R / F1 | Paired F1 vs its baseline: public; CTI-HAL |
+|---|---|---|---|
+| off (shipped) | 0.516 / 0.349 / 0.417 | 0.425 / 0.341 / 0.378 | |
+| shipped gate ∩ head technique | 0.738 / 0.263 / 0.388 | 0.675 / 0.276 / 0.392 | −0.029 [−0.044, −0.015]; +0.013 [−0.006, +0.030] |
+| **shipped gate ∩ head family (registered)** | 0.677 / 0.277 / 0.393 | 0.640 / 0.299 / 0.407 | −0.024 [−0.038, −0.011]; **+0.029 [+0.014, +0.043]** |
+| shipped gate ∩ head top-3 families | 0.586 / 0.328 / 0.421 | 0.501 / 0.333 / 0.400 | +0.004 [−0.004, +0.011]; +0.022 [+0.015, +0.028] |
+| head pair (schema 4) | 0.553 / 0.398 / 0.463 | 0.553 / 0.463 / 0.504 | |
+| head pair ∩ head family | 0.603 / 0.344 / 0.438 | 0.601 / 0.435 / 0.505 | vs pair −0.025 [−0.035, −0.016]; +0.001 [−0.010, +0.010] |
+
+- The registered arm passes its CTI-HAL headline (+0.029) but fails the public-test constraint
+  (−0.024 beyond its interval): on the public sentences the shipped gate's acceptances that the
+  head disagrees with are right far more often than on CTI-HAL. It is a precision/recall trade
+  (precision +0.16 / +0.22, recall −0.07 / −0.04), not adopted.
+- Top-3 agreement is the one level that costs nothing on the public test (+0.004 n.s.) while
+  gaining +0.022 on CTI-HAL with +0.07 precision on both; it is a secondary arm here, so it is a
+  candidate for its own registration (as an opt-in precision setting), not an adoption.
+- Filtering the pair with the head's family adds precision (+0.05) at a recall cost that leaves
+  CTI-HAL flat and the public test lower: the head's evidence is already in the gate, and the
+  second vote only removes recall.
+- Against the shipped pipeline the pair alone remains the best extraction setting by F1 on both
+  sets; the filters are for a user who wants fewer, surer techniques.
+
+*Attribution with the filters (local pipeline, one run each).*
+
+| Arm | CTI-HAL (55): top-1 / top-5 / MRR / named correct / wrong / technique recall | Elastic strict (8 + 22): top-1 / named / wrong / technique recall; open-set named |
+|---|---|---|
+| off (shipped) | 0.455 / 0.600 / 0.512 / 10 / 0 / 0.405 | 4/8 / 1 / 0 / 0.759; 1 |
+| head-free refit control | 0.455 / 0.600 / 0.515 / 10 / 0 / 0.394 | 4/8 / 1 / 0 / 0.745; 1 |
+| head pair | 0.473 / 0.636 / 0.540 / 9 / 0 / 0.491 | 4/8 / 1 / 0 / 0.832; 2 |
+| shipped gate ∩ head family (registered) | 0.473 / 0.618 / 0.520 / **15** / 0 / 0.363 | 4/8 / 1 / 0 / 0.722; 2 |
+| head pair ∩ head family | 0.473 / 0.618 / 0.538 / **15** / 0 / 0.467 | 4/8 / 1 / 0 / 0.832; 2 |
+
+- Fewer, surer techniques help the naming gate more than more techniques do: with the family
+  filter 15 of the 55 CTI-HAL reports are named correctly (coverage 27%) against 10 shipped and 9
+  with the pair, with no wrong name, although technique recall falls to 0.36. The pair with the
+  filter keeps most of the recall (0.47) and the same 15 names.
+- The open-set finding of the parent registration repeats: every arm that cleans the accepted set
+  names the GoSar commodity post as "Lazarus Group / APT38" (cluster probability 0.99 with 51 to 60
+  accepted techniques), the shipped pipeline does not. It is not a head artifact but a cluster-gate
+  weakness on a cleaner technique set; the registered arm fails its open-set constraint on it, as
+  the pair did. The fix belongs in the cluster gate (8.2, 10.11), designed on the vendor set and the
+  campaigns, never on Elastic.
+- Decision: nothing adopted. The filters stay opt-in (`TECHNIQUE_HEAD_AGREEMENT`), the head stays
+  off by default, and the one lever both experiments point at is the cluster gate's behaviour on
+  commodity reports with clean technique sets.
+
+*Forced-cap diagnostics (report only; dev chose against the cap).* `TECHNIQUE_SINGLE_ANSWER_CAP=1.0`
+(strictly one probability-only acceptance per statement; cue-supported ones are never capped) on
+the shipped gate and on the head pair, one run per set:
+
+| Gate | Public test: P / R / F1 (statements with > 1 accepted) | CTI-HAL: P / R / F1 (statements with > 1 accepted) |
+|---|---|---|
+| shipped | 0.516 / 0.349 / 0.417 (256) | 0.425 / 0.341 / 0.378 (164) |
+| shipped, strict cap | 0.562 / 0.322 / 0.410 (73) | 0.467 / 0.307 / 0.371 (27) |
+| head pair | 0.553 / 0.398 / 0.463 (230) | 0.553 / 0.463 / 0.504 (102) |
+| head pair, strict cap | 0.585 / 0.369 / 0.452 (69) | 0.580 / 0.434 / 0.497 (19) |
+| head pair, second acceptance above 0.5 | 0.586 / 0.373 / 0.456 | 0.582 / 0.439 / 0.501 |
+
+The cap buys 3 to 4.5 points of precision for 2.7 to 3 points of recall and loses F1 everywhere,
+on test exactly as on dev. The earlier estimate from the stored rows (+2 to +3 F1) was wrong: it
+counted the extra acceptances on statements whose first acceptance was already wrong as pure
+noise, while the cap keeps that wrong first one and drops the right second one. The registered
+procedure (choose on dev) got this right; the lesson for the record is that a test-row estimate
+is not a dev result.
+
+**Cluster gate: the evidence-volume guard for commodity write-ups (2026-10-19).** Pre-registered
+in `docs/preregistration/cribl_cluster_volume_guard_2026-10-19.json`; the rule is in 10.11. The
+analysis behind it: the two wrongly named Elastic open-set posts carry 51 to 95 accepted
+techniques, every correctly named report in the design sets at most 20 (vendor set 7 to 18 among
+the 16 correct names, design fold seeds 41/53 up to 17); profile coverage of the named unit
+(0.68 to 0.76) and the number of rare matched techniques do not separate them (the long lists
+hold more rare matches, not fewer), evidence volume does. The bar of 30 accepted techniques was
+fixed from the design sets before any run. An offline replay over every existing artifact finds
+the guard inert on the design seeds, the vendor set, the seed-7 folds and CTI-HAL (no row above
+30 without decisive software) and holding exactly the two wrong clusters; applied to single
+names it would hold none anywhere. Confirmation runs, guard on against the existing arms:
+
+| Set | Head off: without → with the guard | Head on: without → with the guard |
+|---|---|---|
+| Elastic attributed (8): top-1 / named correct / wrong | 4/8 / 1 / 0 → unchanged | 4/8 / 1 / 0 → unchanged |
+| Elastic open set (22): cluster names | 1 → **0** | 2 → **0** |
+| CTI-HAL (55): top-1 / named correct / wrong | 0.455 / 10 / 0 → identical row for row | 0.473 / 9 / 0 → identical |
+| Vendor set (34, dev): top-1 / named correct / wrong | 0.706 / 16 / 2 → identical | not run |
+| ATT&CK folds, seed 7 (178): top-1 / named / wrong / cluster names | 0.824 / 26 / 0 / 1 correct → identical row for row | not run (the head saw the fold sentences) |
+
+The headline holds: no correct name is lost anywhere, the Elastic attributed posts are unchanged,
+and the open set names nothing with the head off or on. **Adopted**: `ATTRIBUTION_CLUSTER_MAX_TECHNIQUES`
+defaults to 30 (commit of 2026-10-19); the current attribution artifacts on the main branch
+predate it and are regenerated after the merge (they cannot change on the folds or CTI-HAL, only
+the Elastic open-set count). The guard holds, it never names; a long APT report with group-exclusive
+malware named passes as before, and a long one without it is shown as a shortlist, which is what
+the Elastic attributed posts above 30 techniques already were. The open set has 7 APT-like posts
+and 15 commodity ones; the guard does not look at that label, only at the evidence volume.
+
+**The head on by default: re-evaluation of 2026-10-20.** Product owner's decision after the
+cluster guard settled the open-set naming: `TECHNIQUE_HEAD_ENABLED=true`, pinned to the registered
+checkpoint, the head-aware acceptance pair, the cluster volume guard at 30. Every local benchmark
+was rerun under these defaults with the service up (the benchmarks refuse to write a run the head
+did not score throughout), and the four other technique sets were run head off and on:
+
+| Benchmark (local pipeline) | Before (committed artifact or the same-code off arm) | New default |
+|---|---|---|
+| Public held-out, pooled (1,391): P / R / F1 / parent-aware F1 / hit@1 / hit@10 | 0.516 / 0.349 / 0.417 / 0.451 / 0.501 / 0.805 | **0.553 / 0.398 / 0.463 / 0.500 / 0.556 / 0.851**; without cues 0.467 (the cues are now a hair net-negative); `check-regression` passes |
+| CTI-HAL statements (968): P / R / F1 / parent-aware F1 | 0.425 / 0.341 / 0.378 / 0.425 | **0.553 / 0.463 / 0.504 / 0.564** |
+| CTI-HAL attribution, anonymised (55): top-1 / top-5 / MRR / named correct / wrong / technique recall | 0.455 / 0.600 / 0.512 / 10 / 0 / 0.405 | 0.473 / 0.636 / 0.540 / 9 / 0 / 0.491 |
+| CTI-HAL attribution, as reported | 0.564 / 0.727 / 0.636 / 13 / 0 / 0.399 | 0.564 / 0.764 / 0.650 / 12 / 0 / 0.488 |
+| Elastic strict (8 + 22 open): top-1 / named / wrong / technique recall; open-set names | 4/8 / 1 / 0 / 0.759; 1 (same code) | 4/8 / 1 / 0 / 0.832; **0** |
+| Elastic names / tradecraft / as reported: top-1, top-5, named | 5/8, 0.75, 1 / 1/8, 0.25, 0 / 5/8, 0.75, 0 | 5/8, 0.75, 1 / 1/8, 0.375, 0 / 5/8, 0.75, 1 |
+| ATT&CK folds, seed 7 (178): top-1 / top-5 / named / wrong / technique recall | 0.824 / 0.941 / 26 / 0 / 0.604 (same code) | 0.837 / 0.974 / 38 / 0 / 0.778 (optimistic: the head trained on the procedure sentences; no wrong name is the only reading) |
+| EvidenceForge clinic (logs) | 0.357 / 0.600 / 0.545 | identical (logs are not scored) |
+| Curated retrieval diagnostic | 0.765 | identical (the script calls retrieval without the gate or the head) |
+
+The other technique sets (head off → on, same code; `scripts/cribl_finetune/export_eval_sets.py`
+puts them in the mapping benchmark's format under `data/benchmarks/extra/`):
+
+| Set | Rule | Off | Head on |
+|---|---|---|---|
+| AnnoCTR test (738 sentences, parent-level labels) | parent-aware F1 / exact F1 / hit@1 | 0.414 / 0.272 / 0.331 | **0.611** / 0.392 / 0.453 |
+| CTI-Rationale test (209) | exact P / R / F1, hit@1 | 0.394 / 0.287 / 0.332, 0.325 | 0.447 / 0.357 / **0.397**, 0.416 |
+| AthenaBench ATE (500 scenarios, parent labels; evaluation only) | top-ranked technique right at parent level / top-3 / accepted set holds the gold family / parent-aware F1 | 0.498 / 0.758 / 0.348 / 0.390 | **0.682** / 0.860 / 0.616 / 0.603 (the head alone 0.736; frontier models 0.76) |
+| CTIBench ATE (60 texts, accepted techniques pooled per text, parent level; evaluation only) | P / R / F1 | 0.533 / 0.385 / 0.447 | 0.644 / 0.506 / **0.567** (the head alone 0.575) |
+
+| CyberThreat-Eval TTP extraction (xse/CyberThreat-Eval, MIT; 186 expert-labelled CTI digests read as pasted reports, 7,612 sentences; prereg `cribl_cyberthreat_eval_2026-10-20.json`) | the authors' rule: article-level exact ids, micro P / R / F1; parent level beside | 0.119 / 0.244 / 0.160; parent 0.229 | 0.139 / 0.310 / **0.192** (+0.032 [+0.021, +0.043]); parent 0.261 |
+
+Every set moves the same way: precision and recall both up, hit@1 up 10 to 18 points, no wrong
+name anywhere, the open set clean. CyberThreat-Eval is the one set where both arms score low in
+absolute terms: its labels are a curated set of about 8 techniques per article (median 681 words,
+39 sentences), while the pipeline reads every sentence and accepts 17 to 19 techniques per
+article, so precision is the limit (0.14) and recall only reaches 0.31; the head adds three
+points of F1 at both levels. That is the task formulation (an analyst's digest set against an
+exhaustive statement-level read), not the per-statement quality measured above; a
+precision-oriented setting was tried on it: the family agreement filter on the head pair
+(`TECHNIQUE_HEAD_AGREEMENT=family`) scores 0.141 / 0.295 / 0.190, i.e. it removes about one
+accepted technique per article and changes nothing, because the surplus acceptances are
+techniques the head agrees the sentences describe; they are simply not in the curated article
+set. The paper's own LLM baselines are not in the dataset card and are not quoted. The gains are largest where the shipped pipeline was weakest
+(AnnoCTR, CTI-HAL) and smallest on CTI-Rationale, whose labels are rationale-level and partly
+sub-technique. The committed `*_current.json` artifacts on the main branch predate the default
+and are regenerated after the merge (the numbers here are the worktree's run of the same
+targets).
+
+**Head-first acceptance (2026-10-20, rejected).** Pre-registered in
+`docs/preregistration/cribl_head_first_2026-10-20.json`: a candidate the head gives at least a bar
+of joint probability is accepted outright, the calibrated gate judging the rest, the bar chosen on
+public dev by `fit_acceptance_model.py --head-first` (the rule competes with "no rule"; the
+artifact carries the choice in its gate record, `TECHNIQUE_HEAD_FIRST=model|off|<bar>` at run
+time). Dev chose 0.8, out-of-fold F1 0.491 against 0.488 without the rule. On test the rule is
+inert: it fires once on CTI-HAL (wrongly), 45 times on the 1,391 public cases and 0 to 7 times on
+the other sets, because the calibrated gate already accepts nearly everything the head gives 0.8
+or more. CTI-HAL F1 0.5039 → 0.5036 (paired −0.0003 [−0.0008, 0.0000]), public 0.4628 → 0.4627
+(recall +0.5 points, precision −1.0), parent-aware F1 unchanged, AnnoCTR / CTI-Rationale /
+AthenaBench / CTIBench / CyberThreat-Eval unchanged to the third decimal, attribution identical.
+The headline fails and the current pair stays. What it establishes: the 2 to 6 point gap between
+the pipeline and the head alone at the family level is not the gate holding back confident head
+answers; it sits in the medium-confidence region, where the gate sometimes prefers a retrieved
+sibling or holds the head's answer, and trusting the head there costs precision on dev (the 0.5 to
+0.7 bars score below "no rule").
+
+**Sibling replacement (2026-10-20, rejected).** Pre-registered in
+`docs/preregistration/cribl_sibling_replacement_2026-10-20.json`: after the gate, the head's
+preferred member of a family replaces an accepted sibling when the head prefers it by a ratio,
+the ratio chosen on public dev by `fit_acceptance_model.py --sibling` (the threshold rule swaps
+within (case, family) groups the same way; "no rule" competes; `TECHNIQUE_HEAD_SIBLING=model|off|
+<ratio>` at run time). Dev declined it: every ratio lowers out-of-fold F1 (1.5: 0.481, 2: 0.484,
+3: 0.485, 5: 0.486, none: 0.488), so the registered artifact carries no rule and the current pair
+stays. Forced on test as a report-only diagnostic (ratio 2 and 5 on the head pair):
+
+| Set | Ratio 2: P / R / F1, paired vs the pair | Ratio 5 | Swapped in (right) / out (right) at ratio 2 |
+|---|---|---|---|
+| CTI-HAL | 0.553 / 0.455 / 0.499, −0.005 [−0.010, −0.000] | 0.501, −0.003 n.s. | 3 (0) / 17 (8) |
+| Public test | 0.555 / 0.392 / 0.460, −0.003 [−0.007, +0.000] | 0.463, 0.000 | 4 (0) / 30 (11) |
+
+The rule rarely swaps a member in: in most cases the head's preferred member was already
+accepted, so the rule only removed the sibling, and on multi-label statements that sibling was
+right about half the time. The 65 same-family confusions of CTI-HAL are therefore not "the head
+knows the right member and retrieval picked another" cases; where the head's member is right it
+is already accepted, and where it is not, the head does not prefer it either. Together with the
+head-first null this closes the question: the remaining gap to the model alone is not recoverable
+by trusting the head more inside the current gate; the parent-aware number rises by 0.4 points
+under the rule only because removed siblings were sub-technique members of the right family.
+
+#### 21.3.19 Attribution on TTPs and behaviour: diagnosis and the behaviour-text member (2026-10-20/21)
+
+**Question.** The product owner wants actors caught on their TTPs and behaviour, not on tool names.
+Where does real-report attribution stand after the technique head (21.3.18), and why do technique sets
+not carry it? Diagnosis from the head-on default artifacts (`attribution_cti_hal_current.json`, 55
+anonymised CTI-HAL reports, 6 groups; `attribution_heldout_current.json`, seed 7; `attribution_elastic_current.json`).
+
+**Findings.**
+
+1. *Named software carries the result.* CTI-HAL top-1 26/55 (named correct 9). With at least one
+   ATT&CK software named in the report the ensemble is right first in 22 of 31; without, in 4 of 24.
+   Elastic strict: 4/8, all four with named software, 0/3 without.
+2. *The technique-set members do not separate the groups.* A report yields about 10 accepted
+   techniques (median), mostly at parent level, and the median accepted technique is documented for
+   29 groups. The four set members (Bernoulli, IDF cosine, weighted Jaccard, semantic centroid) put the
+   truth first in 0, 0, 0 and 1 of the 55 reports (73 of 153 on the ATT&CK folds, whose cases are
+   ATT&CK's own phrasing); the group forest and the group network reach 13-18%. Giant profiles absorb
+   any long list (Kimsuky 130 techniques, Lazarus 93); thin ones lose everything (Carbanak, 9 documented
+   techniques, 0 of 10 reports; its activity sits under FIN7 and Cobalt Group, which the cluster step
+   knows but the members do not).
+3. *The one behaviour member is precise and rarely fires.* `specific_behavior` (dense cosine >= 0.55 on
+   ATT&CK's per-group procedure sentences) is right first in 11 of the 24 reports where it fires and
+   silent on 31. The free-text member (21.3.16, one TF-IDF document per group) is right first on 49% of
+   CTI-HAL alone, above the 47% ensemble, and sits at weight 0 after failing the fold naming gate by one
+   case.
+4. *The fusion was fitted where set overlap works.* The combiner learned on the ATT&CK folds; the origin
+   family (right for 28 of 55 reports, but it votes for every group of a country and counts as an
+   independent evidence family) and the set members get trust they do not earn on real reports. An oracle
+   over the members has the truth first in 51 of 55; the ensemble in 26. The campaign member is at weight 0.
+5. *The naming gate holds correct leaders.* 15 of the 26 correct leaders are held by the separation bar
+   (< 0.5) while the combiner gives them 0.9-1.0; 9 are named.
+
+**Plan (approved 2026-10-20).** (1) A behaviour member that fires on every report, selected on the vendor
+set and gated as in 21.3.16; (2) a specificity-weighted, sub-technique-aware set member that scores
+same-activity pairs as one unit; (3) a combiner refit that includes real reports (advisories, vendor set,
+campaigns) with the ATT&CK folds kept as the naming check, and a calibrated-probability naming route.
+This section records step 1.
+
+**Behaviour-text member** (9.13, `apt_classifier/behavior_text.py`, pre-registered as
+`docs/preregistration/attribution_behavior_text_2026-10-20.json`): the free-text member's corpus indexed
+sentence by sentence; every statement votes for the groups of its 10 nearest corpus sentences with the
+cosine, one vote per group per statement; the case score is the mean over a group's five best statements,
+z-scored, no prominence prior. The grid (top_k 10/20/50 x mean/top5 x prior 0/0.25/0.5) was scored on the
+vendor set with the member alone (34 reports, actor and campaign names replaced):
+
+| Variant | top-1 | top-3 | top-5 | MRR |
+| --- | --- | --- | --- | --- |
+| top_k 10, top5, prior 0 (chosen: best MRR) | 0.676 | 0.912 | 0.941 | 0.809 |
+| top_k 10, mean, prior 0 | 0.706 | 0.794 | 0.912 | 0.784 |
+| top_k 20, top5, prior 0 | 0.676 | 0.912 | 0.941 | 0.798 |
+| top_k 50, top5, prior 0 | 0.676 | 0.882 | 0.941 | 0.795 |
+| top_k 50, mean, prior 0.5 (worst) | 0.294 | 0.559 | 0.559 | 0.464 |
+
+A prior never helped on the vendor set; the mean aggregate decays with top_k (a group reached by stray
+sentences in many statements overtakes one matched strongly in a few), the five-best aggregate does not. The member reads the statements as a
+runtime attribute of the classifier context; an earlier commit had added them as a dataclass field of
+`classifiers/base.py`, which is hashed into the combiner fingerprint and silently invalidated the
+production combiner on the branch (fixed before the gate ran).
+
+**Gate trial (2026-10-21, `data/audits/cribl_ft/behavior/`).** Weight 1.0 with a combiner refitted on
+seeds 11/23/37 with the member voting (`data/models/combiner/attribution_combiner_behavior_text.json`,
+l2 3.0, 2,791 lists; cross-validated clean top-1 0.871, randomised 0.750, leader AUC 0.866) against
+weight 0 with the shipped combiner, head on in both arms, same code. The combiner's per-member features
+cover the eleven fixed classifiers only (`combiner.CLASSIFIERS`), so this member, like the text model and
+the group network before it, reaches the combiner only through the fusion's RRF features; the refit moved
+the RRF weight from 0.91 to 1.72 and lowered the set members'.
+
+| Set | Off (default) | On (member, refit) | Member alone | Names |
+| --- | --- | --- | --- | --- |
+| ATT&CK folds seed 67: top-1 / top-5 / MRR / named | 0.869 (133/153) / 0.967 / 0.914 / 42 | 0.882 (135) / 0.954 / 0.916 / 42 | 0.418 / top-3 0.529 / 0.500, 25 unreached | wrong 0 -> 0; removed actors named 1 -> 1 (different cases) |
+| ATT&CK folds seed 71 | 0.895 (137/153) / 0.961 / 0.929 / 42 | 0.882 (135) / 0.974 / 0.920 / 42 | 0.346 / 0.490 / 0.450, 27 unreached | 0 -> 0; removed 0 -> 0 |
+| ATT&CK folds seed 7 (reference, off only) | 0.837 (128/153) / 0.974 / 0.887 / 38 | | | 0; removed 0 |
+| CTI-HAL anonymised: top-1 / top-3 / top-5 / MRR / named | 0.473 (26/55) / 0.582 / 0.636 / 0.540 / 9 | 0.455 (25) / 0.636 / 0.636 / 0.547 / 10 | 0.455 / 0.545 / - / 0.541, 5 unreached | 0 -> 0 |
+| CTI-HAL, the 24 reports without ATT&CK software: top-1 | 4 | 3 | | |
+| Elastic strict: top-1 / top-3 / MRR / named | 4/8 / 0.625 / 0.549 / 1 | 4/8 / 0.625 / 0.576 / 1 | 0/8 / 2/8 / 0.184 | 0 -> 0; open set named 0/22 -> 2/22 |
+
+Paired: seed 67 gains 8 and loses 6 at top-1, seed 71 gains 3 and loses 5 (the losses are mostly cases the
+member does not reach at all: a fold hides the group's own sentences from the corpus, and the member then
+votes for a rival); CTI-HAL moves 16 reports up and 4 down in rank, the one lost top-1 (a FIN6 report) has
+the behaviour, specific-behaviour and description members all ranking FIN6 first while the refitted
+combiner gives Silence 0.54 and FIN6 0.0. Member alone per CTI-HAL group: FIN6 9/11, OilRig 5/8, Sandworm
+4/5, FIN7 5/18, Carbanak 1/10, Wizard Spider 1/3.
+
+Three registered bars fail: the member alone is right first on 45.5% of CTI-HAL (bar 50%); the ensemble
+loses one CTI-HAL top-1; and the names move. On seed 67 each arm names one removed actor, but not the same
+one: the default names Threat Group-3390 for a removed Earth Lusca on decisive shared SysUpdate (the member
+arm holds that case at separation 0.477), the member arm names Chimera for a removed Turla (behaviour
+member rank 2, specific-behaviour rank 1, combiner 0.64, separation 0.51), an unrelated group. On the
+Elastic open set the member arm names Kimsuky twice (an APT-style post with 55 accepted techniques whose
+separation rises from 0.24 to 0.52, and a commodity stealer post whose leader changes and reaches 0.61);
+the member itself ranks Kimsuky 7th and 8th there, so the names come from the refitted fusion, not from a
+behaviour match. **Not adopted**: `BEHAVIOR_TEXT_WEIGHT` stays 0 and the trial combiner is not the
+default. The member is kept (it is the strongest statement-level signal on the vendor set and the
+second-strongest single member on CTI-HAL) for step 3 of the plan, where it needs its own combiner
+features (a feature-schema bump) and a combiner fitted with real-report lists; the two false names show
+that the separation bar of the naming gate is sensitive to the fusion mix, which argues for the
+calibrated-probability route of step 3 rather than for more members under the current fusion.
+The registered secondary "text member under the same seeds" was not run: its 2026-10-03 trial combiner no
+longer matches the pipeline fingerprint (classifier code changed since) and a second one-hour refit was
+not spent on a member already rejected.
+
+#### 21.3.20 ATT&CK 20.0 and the technique-conditioned procedure member (2026-10-21)
+
+**ATT&CK 20.0.** The knowledge base moved from 19.2 to 20.0 (released 2026-10-13) at the product
+owner's request: 9 new techniques (T1696-T1700 and three sub-techniques, five of them AI-related), 2
+groups (The Gentlemen, NIMBUS MANTICORE), 17 software, 1 campaign; nothing revoked or renamed; no new
+same-activity description links (`unreviewed_description_pairs` is empty). The 19.2 bundle, knowledge
+base, synthetic sentences and every pinned model were copied to `data/backup_attack_19.2/` first
+(rollback: `ATTACK_VERSION=19.2` ingest and restore). Refits, in order: text model, forest, network;
+synthetic sentences for the 9 new techniques only (a reduced knowledge base through `DATA_DIR`, $0.06;
+the shared file held a 50-technique pilot and a full run, about $2, was not spent); the base and
+no-exemplar acceptance models with the head *off* (a first fit with the service running produced a
+head-aware base that failed closed in tests and in any product without the service: the base pair
+must stay head-free), then the head-aware pair; the combiner (`attribution_combiner_1021_fsum.json`,
+feature schema 3, l2 1.0, cross-validated clean top-1 0.871); design seeds 41/53; every baseline. The
+technique head checkpoint reports 19.2; `/health` now lists its technique ids and the client accepts a
+newer knowledge base when all of them still exist (all 697 do), with the status saying so.
+
+| Set | 19.2 head-on baseline (21.3.18/19, where retained) | 20.0 |
+| --- | --- | --- |
+| Public test: hybrid micro-F1 / hit@1 | 0.463 / - | 0.463 / 0.559 |
+| CTI-HAL mapping: accepted-set micro-F1 / hit@1 | 0.504 / 0.509 | 0.506 / 0.509 |
+| Curated: hybrid accepted-set F1 (with / without cues) | - | 0.765 / 0.469 |
+| EvidenceForge clinic (local): narrative / windows / ecar micro-F1 | - | 0.370 / 0.600 / 0.545 |
+| ATT&CK folds seed 7: top-1 / top-5 / MRR / named / wrong / removed named | 0.837 (128/153) / 0.974 / 0.887 / 38 / 0 / 0 | 0.832 (129/155) / 0.961 / 0.886 / 42 / 0 / 0 |
+| Design seeds 41 / 53 (20.0): top-1, removed named | - | 0.877 (136/155), 0 / 0.871 (135/155), 1 |
+| CTI-HAL anonymised: top-1 / top-3 / MRR / named / wrong | 26/55 / 0.582 / 0.540 / 9 / 0 | 24/55 / 0.564 / 0.514 / 9 / 0 |
+| CTI-HAL as reported: top-1 / top-3 / MRR / named | - | 29/55 / 0.709 / 0.626 / 11 |
+| Elastic strict: top-1 / top-3 / MRR / named / wrong / open set named | 4/8 / 0.625 / 0.549 / 1 / 0 / 0 | 4/8 / 0.500 / 0.532 / 1 / 0 / 0 |
+
+The 19.2 head-on artifacts of the sets marked "-" were overwritten by the 20.0 runs before their numbers
+were recorded in this section; the public and CTI-HAL mapping numbers are unchanged to the third
+decimal (the index gained the new techniques and nothing a report mentions). Attribution moved by two
+reports on CTI-HAL (Sandworm's OlympicDestroyer and one FIN6
+report now rank 2-3 under the refitted combiner) and the fold numbers are within noise on 155 instead of
+153 folds; one design seed names a removed actor with the default, as seed 67 did on 19.2 (21.3.19). The
+calibrated confidence labels could not be refitted: the registered "one of these 2/3" rule (shown set
+misses the truth in at most 10% of the non-strong design rows with a one-sided 95% upper bound of 0.20)
+passed narrowly on 19.2 (24 rows, 1 miss, bound 0.183) and finds no threshold on the 20.0 design seeds
+(best point 12 rows, 1 miss, bound 0.339; the strong-answer rule still fits at 0.855 with 197 rows and 4
+errors). The labels are display-only and fail closed, so the Top-three view would have shown no label
+on 20.0 under the member-off combiner; with the procedure member's combiner adopted below, the same
+registered rule fits again (see the end of this section). The verification artifact's compose gate
+fails for a worktree reason (no `.env`), not for code.
+
+**Technique-conditioned procedure member: gate trial.** Pre-registered as
+`docs/preregistration/attribution_procedure_match_2026-10-21.json` (member in 9.13; dev choice on the
+vendor set and the ATT&CK campaigns, 55 reports, each scored against a corpus hiding its own statements:
+floor 0.30, exact technique, named-software link on, software-sentence route off, mean; MRR 0.820, top-1
+0.782). The gate's combiner was refitted with the member voting
+(`data/models/combiner/attribution_combiner_procedure_match.json`, l2 3.0; cross-validated clean top-1
+0.880 against 0.871 without it, randomised 0.722 against 0.697, mixed MRR 0.837 against 0.817). With the
+schema-3 columns this is the first optional member the combiner weighs on its own: it learned
+`procedure_match_present` -0.67, `_inv_rank` -0.33, `_score_rel` -0.14, the interaction with named rare
+software -0.62 and with long technique lists +0.60, and it lowered the RRF weight from 0.93 to 0.67. On the
+ATT&CK folds, where the group's own sentences are hidden and only the link route can reach it, a group
+the member reaches is more often a rival than the truth; the combiner uses that. Off arms are the 20.0
+baselines above, same code.
+
+| Set | Off (20.0 default) | On (member, its combiner) | Member alone |
+| --- | --- | --- | --- |
+| ATT&CK folds seed 73: top-1 / top-5 / MRR / named / wrong / removed named | 0.884 (137/155) / 0.968 / 0.922 / 38 / 0 / 2 | 0.877 (136) / 0.955 / 0.915 / 37 / 0 / 2 (the same two) | 0.219, 75 unreached |
+| ATT&CK folds seed 79 | 0.800 (124/155) / 0.935 / 0.862 / 47 / 0 / 0 | 0.800 (124) / 0.916 / 0.854 / 48 / 0 / 0 | 0.206, 73 unreached |
+| CTI-HAL anonymised: top-1 / top-3 / top-5 / MRR / named / wrong | 24/55 / 0.564 / 0.636 / 0.514 / 9 / 0 | 24/55 / 0.582 / 0.655 / 0.522 / 11 / 0 | 0.473 (26/55) / 0.564 / - / 0.528, 20 unreached |
+| CTI-HAL, the 24 reports without ATT&CK software: top-1 | 3 | 4 | |
+| Elastic strict: top-1 / top-3 / top-5 / MRR / named / wrong / open set named | 4/8 / 0.500 / 0.625 / 0.532 / 1 / 0 / 0 | 4/8 / 0.500 / 0.500 / 0.524 / 1 / 0 / 0 | 4/8, 4 unreached |
+
+Paired: seed 73 loses one top-1 (the member does not reach the truth there), seed 79 gains one and loses
+one; CTI-HAL gains a FIN7 report and loses another (rank 2), moves 6 reports up and 13 down in rank
+beyond the top, and names two FIN6 reports and a Sandworm report more (11 named, 0 wrong). The removed
+actors named on seed 73 are the default's own (Blue Mockingbird as APT41 at combiner probability 0.19,
+APT28 as Sandworm on shared BlackEnergy; the member ranks APT41 13th there), so the member adds no name;
+the registered clause "none of them an unrelated group" is read as "none added by the member", since
+the default names an unrelated group by itself. Member alone per CTI-HAL group: FIN7 7/18 (the
+ensemble 5), Sandworm 5/5, OilRig 5/8, Wizard Spider 3/3, FIN6 5/11, Carbanak 1/10. Every registered bar
+holds: **adopted**, `PROCEDURE_MATCH_WEIGHT` 1.0 and the member's combiner as the default. The gain is in
+names and ranks on real reports, not in top-1; top-5 and MRR drift down slightly on the folds and on
+Elastic, which the pre-registration did not bar. Three things the trial makes plain for the next step:
+the default names removed actors on fresh seeds with combiner probabilities of 0.19-0.44 (seeds 53 and
+73 on 20.0, seed 67 on 19.2), so the naming gate needs the calibrated-probability route of the plan; the
+member's strength on real reports is the named-software link conditioned on the accepted technique
+(the text routes alone reach MRR 0.64 on dev), which is a sharper form of the software member rather
+than behaviour matching; and the combiner can now weigh an optional member, which is what the behaviour
+member of 21.3.19 lacked.
+
+**Adopted baselines (member on, its combiner; the `*_current.json` artifacts).** ATT&CK folds seed 7:
+top-1 0.819 (127/155), top-5 0.942, MRR 0.874, 42 named, 0 wrong, 0 removed actors named (the member-off
+20.0 default: 129/155, 0.961, 0.886); CTI-HAL anonymised and Elastic strict as in the "On" column above.
+Design seeds 41/53 were regenerated with the adopted combiner and the confidence labels refitted on them
+under the registered rule, which now finds both thresholds: strong 0.985 (97 design rows, 1 error, upper
+bound 0.048) and set 0.76 (155 rows, 15 misses, upper bound 0.145; the member-off combiner had no set
+threshold, see above). Report-only evaluation of the refitted labels: seed 7 strong 44/44 right, set
+73/76, ECE 0.056; CTI-HAL anonymised strong 10/11, set 10/13; as reported strong 11/13, set 13/15. The
+labels artifact (`confidence_labels_fsum.json`) is pinned to the adopted combiner, so switching the
+combiner back disables them until a refit.
+
+#### 21.3.21 The combiner refitted with real-report lists (2026-10-22/25)
+
+**Why.** The diagnosis of 21.3.19 found the fusion to be the bottleneck on real reports: some member has
+the truth first in 51 of 55 CTI-HAL reports, the ensemble in 24-26, and every combiner had been fitted on
+ATT&CK fold lists only, where the technique-set members and the country vote earn a trust they do not
+earn on reports. Pre-registered as `docs/preregistration/attribution_real_report_combiner_2026-10-22.json`
+(method in 10.9).
+
+**Training lists.** The adopted combiner's 2,700 fold lists (seeds 11/23/37, 5 randomised variants, the
+unknown arm of seed 11) unchanged, plus 68 development reports read twice (names level with 30
+statements, strict level with all): the 34 vendor reports, the 21 ATT&CK campaign reports and 13 FBI/CISA
+joint advisories labelled by an automatic rule before any run (MuddyWater, Turla, TA505, BlackTech, Star
+Blizzard, Volt Typhoon, APT28 twice, Fox Kitten, Ember Bear, Play, Scattered Spider, Akira; a group name or
+alias at least 10 times and 3x any other, at least 5 technique tags, re-issues once, any advisory sharing a
+statement with CTI-HAL or Elastic dropped). 124 of the 136 known lists have the truth in the top 20 and
+train; 68 removed-actor lists. Leak control per report: the ATT&CK procedure examples that cite it or share
+a 10-token run with its statements, and its statements, hidden from every index and the text members
+(hidden hits counted per set: for the vendor set 678 dense, 443 behaviour and 364 BM25 hits at the names
+level), and a campaign report's campaign object hidden. Two machine incidents during the run (a GPU
+out-of-memory in the removed-actor arm, then the nightly NVIDIA library update) made the list generation
+resumable per set and condition; the technique head service now empties its GPU cache after each request
+(`serve.py --keep-cache` keeps it). Every gate arm ran on the GPU.
+
+**Selection on development lists.** Group-level 5-fold cross-validation (split seed 97) over real weights
+0/3/10/30 x l2 1/3/10. Reference: weight 0 at l2 3 (its best mixed fold MRR), fold clean top-1 0.880.
+Weights 0-10 are within 0.01 of it; weight 30 is not (0.867). Chosen: **weight 10, l2 1** (best real MRR
+among the eligible). Out of fold, real lists with the truth in the top 20:
+
+| Lists | RRF order top-1 / MRR | Combiner w 0 top-1 / MRR | Combiner w 10 top-1 / MRR |
+| --- | --- | --- | --- |
+| All real (124) | 0.524 / 0.659 | 0.685 / 0.766 | 0.806 / 0.850 |
+| Vendor (62) | 0.500 / 0.634 | 0.677 / 0.768 | 0.806 / 0.862 |
+| Campaigns (38) | 0.605 / 0.710 | 0.789 / 0.835 | 0.895 / 0.906 |
+| Advisories (24) | 0.458 / 0.643 | 0.542 / 0.650 | 0.667 / 0.729 |
+| Names level / strict level | 0.525 / 0.524 | 0.705 / 0.667 | 0.803 / 0.810 |
+| ATT&CK folds clean / randomised top-1 | - | 0.880 / 0.725 | 0.891 / 0.684 |
+
+The real null-option AUC (P(no documented group) on the removed-actor lists) rises from 0.83 to 0.89,
+while the folds' falls from 0.75 to 0.72. The randomised fold regimes lose 0.04 top-1; the registered rule bars
+only the clean folds. These are development numbers: the vendor set and the campaigns already served
+member choices (21.3.19-21.3.20). Weights that move most against the procedure member's combiner: the
+procedure member's rank in long technique lists +0.60 -> +1.83 (its plain rank -0.33 -> -1.27), the
+software member's rank +0.18 -> +1.23, the shortlist discrimination total +0.15 -> +1.08 (its rank in long
+lists -0.13 -> -1.43), the semantic centroid's relative score +1.32 -> +0.79 and the software relative
+score +0.80 -> +0.25. The combiner trusts the procedure member and the software rank more on long real
+reports and the technique-set centroid less.
+
+**Gate (frozen artifact, both arms on the same code).** Off = the procedure member's combiner (the
+default until then), on = `attribution_combiner_real_reports.json`.
+
+| Set | Off | On |
+| --- | --- | --- |
+| ATT&CK folds seed 83: top-1 / top-5 / MRR / named / wrong / removed named | 0.845 (131/155) / 0.955 / 0.897 / 40 / 0 / 1 | 0.858 (133/155) / 0.948 / 0.902 / 40 / 0 / 1 (the same) |
+| ATT&CK folds seed 89 | 0.858 (133/155) / 0.948 / 0.898 / 44 / 0 / 0 | 0.845 (131/155) / 0.935 / 0.886 / 44 / 0 / 0 |
+| CTI-HAL anonymised: top-1 / top-3 / top-5 / MRR / named / wrong | 24/55 / 0.582 / 0.655 / 0.522 / 11 / 0 | 25/55 / 0.618 / 0.655 / 0.538 / 12 / 0 |
+| CTI-HAL, the 24 reports without / 31 with ATT&CK software: top-1 | 4/24 / 20/31 | 4/24 / 21/31 |
+| Elastic strict: top-1 / top-3 / MRR / named / wrong / open set named | 4/8 / 0.500 / 0.524 / 1 / 0 / 0/22 | 4/8 / 0.500 / 0.524 / 1 / 0 / 0/22 |
+
+Paired: seed 83 gains 5 folds and loses 3, seed 89 gains 3 and loses 5 (within the 2-case margin);
+CTI-HAL gains one FIN7 report (DeepWatch) and loses none; Elastic is unchanged report by report. The one
+removed actor named (seed 83: GOLD SOUTHFIELD named as FIN7) is named by both arms, at combiner
+probability 0.75 off and 0.50 on; it is the default's own name, as in 21.3.20. Every registered bar
+holds.
+
+**After the gate: design seeds and the decision.** The registered adoption step reran the design seeds
+41/53 and every baseline with the new combiner as the default (artifacts in
+`data/audits/real_combiner/on_default/`). Against the default on the same seeds:
+
+| Set | Default (procedure member's combiner) | Real-report combiner |
+| --- | --- | --- |
+| ATT&CK folds seed 7: top-1 / top-5 / MRR / named / wrong / removed named | 127/155 / 0.942 / 0.874 / 42 / 0 / 0 | 126/155 / 0.929 / 0.867 / 42 / 0 / 0 |
+| Design seed 41 | 137/155 / 0.955 / 0.912 / 37 / 0 / 1 | 135/155 / 0.955 / 0.907 / 38 / **1** / 1 |
+| Design seed 53 | 131/155 / 0.955 / 0.896 / 36 / 0 / 1 | 130/155 / 0.935 / 0.887 / 36 / 0 / **2** |
+| CTI-HAL as reported: top-1 / top-3 / MRR / named / wrong | 27/55 / 0.727 / 0.612 / 12 / 0 | 31/55 / 0.727 / 0.654 / 13 / 0 |
+| Elastic names / tradecraft: top-1 | 5/8 / 1/8 | 5/8 / 1/8 |
+
+On seed 41 the new combiner moves Threat Group-3390 from rank 7 by RRF (outside the default's top three)
+to first on an Agrius fold that names Mimikatz and ASPXSpy (an ASPXSpy user), and the separation gate
+names it at combiner probability 0.19 with Agrius second; the default leaves the fold unnamed with
+Agrius third. On seed 53 it adds a removed-actor name (Cinnamon Tempest as APT41, 0.45) to the
+default's own (Leviathan as APT39, 0.39 off and 0.33 on; seed 41's Storm-0501 as Scattered Spider is also
+named by both, 0.95 and 0.49). Over the five fold seeds
+both combiners have run on (7, 41, 53, 83, 89) top-1 is 659 against 655 of 775. The confidence labels
+refitted on the new design seeds pass the registered rule (strong 0.885 with 4 errors in 181 rows, set
+0.925 with 14 rows; `confidence_labels_real_reports.json`), with the "one of these" label now rare.
+**Decision (2026-10-25, product owner): not adopted.** The project has rejected candidates for one
+wrong fold name before (21.3.16), and the gain on the anonymised headline is one report; the procedure
+member's combiner stays the default with its labels, and the previous baselines are kept (the gate's
+off arms reproduce them report by report on the current code). The refit and its labels remain an
+opt-in pair. (Superseded on 2026-10-26: adopted together with the naming probability floor, 21.3.22.) The next step is the probability route of the plan: a floor designed on the design seeds
+(a floor at 0.2 would have held the seed-41 name and costs no correct name on the gate sets, see
+below), registered before it is tried on fresh seeds.
+
+**Probability floor (measurement, not adopted).** Over the gate seeds and both real sets the on arm named
+98 correct leaders (combiner probability from 0.28 to 1.0), 0 wrong groups, 1 removed actor (0.50) and
+nothing on the open set. A floor at 0.2 changes nothing; 0.3-0.4 costs one correct name and holds nothing;
+0.5 costs two and still names the removed actor. On this combiner a probability floor alone would not
+have stopped the removed-actor name of seed 83.
+
+**Reading.** The real lists move the out-of-fold real numbers a lot (top-1 0.69 -> 0.81) and the tests
+little (CTI-HAL +1 top-1, +1 name, top-3 +2 reports; Elastic unchanged). The development lists are
+reports the members were tuned on and whose groups' technique lists ATT&CK partly built from them, so
+part of the development gain is optimism the gate removes; what survives is in ranks and names, not in a
+change of the CTI-HAL ceiling, which still sits with the 24 reports that name no ATT&CK software (4 of 24
+right first in either arm).
+
+#### 21.3.22 Naming probability floor (2026-10-25/26)
+
+**Why.** The separation gate names a leader on candidate-relative evidence alone; the combiner's
+probability for that leader was only displayed. The default named removed actors on fresh seeds at
+combiner probabilities of 0.16-0.44 (21.3.20), and the real-report combiner named a wrong group at
+0.19 (21.3.21). Pre-registered as `docs/preregistration/attribution_probability_floor_2026-10-25.json`
+(rule in 10.6).
+
+**Design (seeds 41/53 only).** The registered rule takes the smallest floor on a 0.05 grid that holds
+no correct single name and every bad single name below the lowest correct one
+(`scripts/probability_floor_replay.py --choose`). The default combiner: lowest correct name 0.640, bad
+names 0.387 (Leviathan as APT39, removed) and 0.948 (Storm-0501 as Scattered Spider, removed, above
+every correct name): floor **0.40**. The real-report combiner: lowest correct 0.661, bad names 0.190
+(Agrius as Threat Group-3390, wrong), 0.329, 0.455 and 0.488 (removed actors): floor **0.50**. Neither
+floor costs a design name or sends a held leader to a cluster.
+
+**Gate.** Arms: off (the default then: the procedure member's combiner, no floor), A (the default
+combiner with 0.40), B (the real-report combiner with its labels and 0.50); fresh fold seeds 101, 103
+and 107 (never used, now reserved in `fit_attribution_combiner.EVALUATION_SEEDS`), CTI-HAL anonymised
+and Elastic strict with the open set, one run per arm on the same code. "Correct names" count single and
+cluster names (a cluster is correct when the truth is a member), as the registration reads them.
+
+| Set | Off | A (default + 0.40) | B (real-report + 0.50) |
+| --- | --- | --- | --- |
+| Seed 101: top-1 / MRR / correct names / wrong / removed named | 136/155 / 0.904 / 42 / 0 / 2 | 136 / 0.904 / 42 / 0 / 2 | 136 / 0.905 / 42 / 0 / 2 |
+| Seed 103 | 134/155 / 0.905 / 36 / **1** / 0 | 134 / 0.905 / 36 / 0 / 0 | 134 / 0.901 / 35 / 0 / 0 |
+| Seed 107 | 133/155 / 0.902 / 34 / 0 / 0 | 133 / 0.902 / 33 / 0 / 0 | 131 / 0.893 / 33 / 0 / 0 |
+| Fresh seeds pooled: correct names / wrong / removed named | 112 / 1 / 2 | 111 / 0 / 2 | 110 / 0 / 2 |
+| CTI-HAL anonymised: top-1 / MRR / correct names / wrong | 24/55 / 0.522 / 11 / 0 | 24 / 0.522 / 10 / 0 | 25 / 0.538 / 10 / 0 |
+| Elastic strict: top-1 / MRR / named / wrong / open set named | 4/8 / 0.524 / 1 / 0 / 0/22 | 4/8 / 0.524 / 1 / 0 / 0/22 | 4/8 / 0.524 / 1 / 0 / 0/22 |
+
+The default itself named a wrong group on the fresh seed 103 (FIN5 as TA505, combiner probability
+0.06, separation 0.71); both floors hold it. What the floors hold: A, that name and one correct name
+(Ke3chang on seed 107, 0.18) and on CTI-HAL one correct FIN7 report (0.35); B, the same wrong name
+(0.28 under its combiner), Ke3chang (0.49), and on CTI-HAL two FIN7 reports, one of them the report its
+combiner moves to rank 1 (0.47). B also loses an APT41 name on seed 103 through its ranking, not the
+floor (separation 0.47 under the refit). Neither floor held a removed actor on the fresh seeds: the
+two named there (Storm-0501 as Scattered Spider at 0.94-1.00, Lazarus as Kimsuky at 0.57-0.65) are
+confident names a probability rule cannot reach. Arm A's runs equal the replay of the off runs under
+0.40 on every row of every set. Every bar holds for both arms (0 wrong names, open set 0/22, removed
+actors 2 = 2, correct fold names 99% and 98% of the off arm, CTI-HAL names 10 against 11, B's top-1
+within 2 per seed and not lower on CTI-HAL or Elastic), and the registered order adopts **B**: the
+real-report combiner, its labels and the floor 0.50 are the defaults since 2026-10-26.
+
+Secondary (replays over runs made before the registration, not a bar): the default with 0.40 on seeds
+7, 73, 79, 83 and 89 holds one removed actor (Blue Mockingbird as APT41 on seed 73, 0.16) and no
+correct fold name; the real-report combiner with 0.50 on seeds 7, 83 and 89 holds nothing (GOLD
+SOUTHFIELD as FIN7 on seed 83 sits at 0.504).
+
+**Reading.** The floor removes the low-probability names the separation gate gives on borrowed
+evidence (both wrong known names seen since 21.3.20 sat at 0.06-0.28) at a cost of about one correct
+name in a hundred on the folds and one or two FIN7 reports on CTI-HAL, whose FIN7 probabilities are
+low because Carbanak and Cobalt Group share its evidence. It does not touch confident removed-actor
+names (Storm-0501, whose documented activity overlaps Scattered Spider's, and Lazarus as Kimsuky); those
+need a different signal, such as the null option or the documented overlap of the named group.
+
+**Adopted baselines (the `*_current.json` artifacts, 2026-10-26; the previous ones in
+`data/audits/floor_gate/before/`).** Every one was rerun with the new defaults and checked for wrong
+names; none has one.
+
+| Set | Previous default | Real-report combiner + floor 0.50 |
+| --- | --- | --- |
+| ATT&CK folds seed 7: top-1 / top-5 / MRR / correct names / wrong / removed named | 127/155 / 0.942 / 0.874 / 42 / 0 / 0 | 126/155 / 0.929 / 0.867 / 42 / 0 / 0 |
+| Design seed 41 | 137/155 / 0.955 / 0.912 / 38 / 0 / 1 | 135/155 / 0.955 / 0.907 / 38 / 0 / 0 |
+| Design seed 53 | 131/155 / 0.955 / 0.896 / 36 / 0 / 1 | 130/155 / 0.935 / 0.887 / 36 / 0 / 0 |
+| CTI-HAL anonymised: top-1 / top-3 / MRR / correct names / wrong | 24/55 / 0.582 / 0.522 / 11 / 0 | 25/55 / 0.618 / 0.538 / 10 / 0 |
+| CTI-HAL as reported: top-1 / top-3 / MRR / single + cluster names / wrong | 27/55 / 0.727 / 0.612 / 12 + 5 / 0 | 31/55 / 0.727 / 0.654 / 11 + 5 / 0 |
+| Elastic strict / names / tradecraft: top-1, wrong, open set named | 4/8, 5/8, 1/8; 0; 0/22 | 4/8, 5/8, 1/8; 0; 0/22 |
+
+The design seeds equal the replay of their floor-off reruns (21.3.21) under 0.50 row for row. The
+confidence labels need no refit (the floor does not change their inputs); their report-only evaluation
+on the new baselines: seed 7 strong 84/84 right, set 8/8; CTI-HAL anonymised strong 15/16, as reported
+15/17. Verification: pytest, ruff and the public regression check pass; the compose gate fails for the
+worktree reason (no `.env`).
+
+#### 21.3.23 The null option against confident removed-actor names (2026-10-26, development only)
+
+**Question.** After the floor (21.3.22), the removed actors still named are confident names
+(Storm-0501 as Scattered Spider at 0.94, Lazarus as Kimsuky at 0.57-0.65). Can the combiner's null
+option (P(no documented group), 10.9) hold them? Development data only: the recorded runs of the
+design seeds 41/53 and the spent gate seeds 83/89/101/103/107 under the adopted default, and
+cross-validation on the combiner's own training lists. Nothing was registered, refitted or changed.
+
+**The null option as fitted.** On those runs the default names 269 correct leaders and 3 removed
+actors (0 wrong groups). The removed names' null probabilities are 0.037 (Storm-0501 as Scattered
+Spider), 0.068 (Lazarus as Kimsuky) and 0.144 (GOLD SOUTHFIELD as FIN7, leader probability 0.504),
+inside the range of the correct names (median 0.001, 90th percentile 0.024, maximum 0.42). A ceiling
+that holds all three holds 17 correct names; one that holds two holds 6. The null's share of the
+non-leader mass and its ratio to the runner-up separate nothing (they would hold 98-176 correct names).
+
+**A null option that sees the fit** (`scripts/null_option_study.py`). The null utility reads only the
+evidence-regime features, so it cannot see how well the best candidate fits. Group-level five-fold CV
+on the real-report combiner's training lists (its recipe: real lists at weight 10, l2 1), with the
+best candidate's absolute fit added to the null row (matched share, distinctive share, exclusive
+software; then also the runner-up gap, member support and the discrimination channels). Because the
+null sits in the softmax, a better null lowers the leader's probability and the floor holds the name:
+
+| Null row | Folds clean at floor 0.5: correct / wrong / removed named | Development real lists: correct / wrong / removed named |
+| --- | --- | --- |
+| regime only (as fitted) | 364/459 / 24 / 50/155 | 89/124 / 7 / 13/68 |
+| + best candidate's fit | 363 / 24 / 49 | 89 / 7 / 13 |
+| + gap, support, discrimination | 362 / 26 / 48 | 87 / 7 / 14 |
+
+Every other floor from 0.3 to 0.7 shows the same: no variant trades better than moving the floor.
+
+**Upper bound.** Among the lists the fitted combiner names (leader probability at least 0.5), a
+gradient-boosted classifier on the leader's and runner-up's full feature rows, the regime and the
+probabilities, out of fold, against a higher floor at the same cost in correct names:
+
+| Lists | AUC classifier / leader probability | Removed names held at 1% / 2% / 5% of correct names: classifier | higher floor |
+| --- | --- | --- | --- |
+| Folds (50 removed, 1,445 correct) | 0.822 / 0.806 | 16 / 20 / 23 | 1 / 3 / 15 |
+| Development real reports (13 removed, 89 correct) | 0.832 / 0.874 | 1 / 1 / 2 | 3 / 3 / 3 |
+
+The gain exists only on the fold lists. Its main input is the rarest named software
+(`software_rarity_max`, permutation importance 0.16, three times the next input): deleting an actor from
+ATT&CK leaves its own malware as ATT&CK software with no user, a situation an undocumented real actor
+seldom produces (its malware is usually not in ATT&CK at all) and that known reports produce too (PS1
+and LockBit 3.0 have no documented group user in ATT&CK 20.0). On the development real reports the
+classifier holds fewer removed names than a higher floor.
+
+**Reading.** The three cases show why. GOLD SOUTHFIELD's report names REvil, which ATT&CK documents
+for FIN7 as well; Storm-0501's names BlackCat, documented only for Scattered Spider (and Embargo,
+whose only documented user is the removed actor); Lazarus's case names only netsh and Forfiles, so
+its name rests on techniques, where Kimsuky's large profile matches. The evidence supports the named group in each case, so no
+probability computed from that evidence, the null's included, can tell them from a correct name. A
+removed actor named with confidence is the open-set limit of attribution against a catalogue: it is
+reduced only by evidence ATT&CK does not hold (an undocumented tool or infrastructure link), not by
+re-weighting the evidence it does hold. The null option stays as fitted: it feeds the leader
+probability (and so the floor) and the confidence labels, and no naming rule reads it directly.
+
+#### 21.3.24 What separates the groups (2026-10-26, development only)
+
+**Question.** Which kind of evidence puts the right group first, so that work goes where the
+separation is? Development data only: ATT&CK itself, and the 68 development reports (34 vendor, 21
+ATT&CK campaign, 13 FBI/CISA advisories; every statement read; the ATT&CK texts that cite or copy a
+report hidden as in 10.9) at the three anonymization levels of 21.3.4c. CTI-HAL and Elastic were not
+read. Code and commands: `scripts/separation_study/` (README); nothing in the product changed.
+
+**ATT&CK itself** (`atlas.py`, 174 groups with techniques). A group's median technique is documented
+for 28 groups. 54 groups have a technique no other group has (20 at parent level: two thirds of every
+profile are sub-techniques), 128 have software no other group uses, and 60 groups have 80% or more of
+their techniques inside another group's profile (30 of them inside one of the ten largest). Drawing
+techniques from a group's own profile identifies it easily (10 exact ids: first 97% of the time,
+parent level 90%), but that is the profile reading itself. ATT&CK's 21 single-group campaigns are
+real operations documented without extraction error; only a median 50% of a campaign's techniques
+are in its group's profile, and against all 174 profiles:
+
+| Campaign evidence | Group first | In the top 5 |
+| --- | --- | --- |
+| Technique list, exact ids (IDF cosine) | 2/21 | 5/21 |
+| Technique list, parent level | 3/21 | 5/21 |
+| Rare techniques only (documented for at most 5 groups) | 1/21 | 9/21 |
+| The campaign's software, by rarity | 15/21 | 15/21 |
+
+(69% of a campaign's software links are also documented for its group, so the software reading is
+partly built into ATT&CK.)
+
+**Members on the development reports** (`run_reports.sh`, `members.py`). Every member voting (the
+optional text, behaviour-text and group-network members at weight 1, so the learned combiner was
+inactive and the ensemble row is the plain RRF over all members, not the product's default), each
+member's rank of the actor recorded, plus three rankings computed from the extracted evidence alone.
+The actor first, of 68 reports:
+
+| Signal | Names | Strict | Tradecraft (ATT&CK malware names removed) | Tradecraft, the 27 reports with no ATT&CK software left |
+| --- | --- | --- | --- | --- |
+| Free-text model (`text_group`) | 53 | 51 | 43 | 14 |
+| Behaviour text, statement by statement (`behavior_text`) | 47 | 48 | 44 | 14 |
+| Technique-conditioned procedures (`procedure_match`) | 51 | 51 | 34 | 10 |
+| Named software by rarity (evidence alone) | 50 | 49 | 23 | 0 |
+| Software member (`software_tools`) | 47 | 46 | 20 | 0 |
+| Group network (techniques + software) | 45 | 43 | 21 | 5 |
+| Source country | 21 | 21 | 21 | 7 |
+| Technique list by IDF cosine (evidence alone) | 19 | 21 | 20 | 4 |
+| Technique-set members (weighted Jaccard / IDF-TF-IDF / naive Bayes / forest / centroid) | 8-16 | 7-16 | 7-16 | 1-3 |
+| Rare techniques only (evidence alone; fires on 30-31 reports) | 14 | 13 | 13 | 3 |
+| Campaign profile / group description / dense behaviour hits | 6-9 | 7-8 | 7-8 | 2-5 |
+| Plain RRF over every member | 44 | 43 | 19 | 4 |
+
+Source country has the actor in its top 5 for 65 of 68 reports at every level: it narrows, it does
+not pick. Together, software or any text member puts the actor first in 61 (names) and 54
+(tradecraft) of 68; software or the technique list in 54 and 32.
+
+**Statements** (`statements.py`). Each statement against ATT&CK's anonymised procedure sentences; the
+share whose nearest sentence is the actor's (a random other report's actor: 0-1.7%):
+
+| Statement contains | Statements (names) | Actor's (names) | Actor's (tradecraft) | Reports with such a hit (tradecraft) |
+| --- | --- | --- | --- | --- |
+| Registry key | 13 | 77% | 77% | 6/68 |
+| An ATT&CK software name | 655 | 28% | 25% (187 left) | 20/68 |
+| A command or living-off-the-land binary | 320 | 22% | 21% | 23/68 |
+| A file name or path | 363 | 22% | 21% | 24/68 |
+| None of these (a plain description) | 4,902 | 14% | 13% | 59/68 |
+| A network indicator | 217 | 11% | 11% | 15/68 |
+| A victim sector or region | 279 | 9% | 5% | 7/68 |
+
+**Reading.**
+
+1. **How the actor does things, in its own words, separates groups best**, and it survives the loss of
+   names: the statement-level text members keep 43-44 of 68 at tradecraft while everything else
+   halves. The concrete artefacts of a procedure (commands, file names and paths, registry keys)
+   point at the actor about twice as often as a plain description, and the many plain descriptions
+   add up (a hit in 59 of 68 reports).
+2. **Named software is the sharpest single cue when present** (50 of 68 at names; 15 of 21 ATT&CK
+   campaigns), but it is a lookup: without the malware names it falls to 23.
+3. **Technique ids barely separate real operations.** A perfectly documented ATT&CK campaign shares half
+   its techniques with its group's profile and its id list ranks the group first in 2 of 21; on the
+   reports the id-set members stay at 7-21 of 68 at every level and add little to software (50 -> 54).
+   The id throws away the procedure, which is where groups differ; rare techniques fire on half the
+   reports and are right on 13-14.
+4. **Victimology and country narrow, they do not decide** (country top-5 65/68, first 21/68; victim
+   statements point at the actor 5-9% of the time).
+5. **The plain fusion is outvoted by the id-set members**: eight members read technique sets, so the
+   RRF over all members drops from 44 to 19 when the malware names go while the text members stay at
+   43-44. The product's learned combiner weights the members differently (and its default leaves the
+   text and behaviour-text members off), so this row measures the members' votes, not the default.
+
+The direction matches the test sets already documented: the free-text model alone ranks CTI-HAL's
+actor first in 27 of 55 against the default's 25 (21.3.16, 21.3.22). Caveats: the vendor set and the
+campaigns served earlier member choices (21.3.19-21.3.20), so the text members' numbers here lean
+optimistic; the statement tags are regular expressions and overlap; the two text members that lead
+were both held back by naming, not ranking (21.3.16: one wrong fold name; 21.3.19: removed actors and
+Elastic open-set names), so the work this points to is procedure-level evidence that the naming gate
+can trust, not more technique-id members.
+
+#### 21.3.25 Procedure text as the core of attribution (2026-10-26/27)
+
+**Why.** 21.3.24: the statement-level text members separate the groups best and keep doing so when
+the malware names go, while the technique-id members do not. Both text members had been held back by
+naming, not ranking (21.3.16, 21.3.19), before the naming floor and the real-report lists existed.
+The product owner chose procedure text as the core (2026-10-26) and asked to keep the previous
+default for rollback. Pre-registered as `docs/preregistration/attribution_procedure_core_2026-10-26.json`.
+
+**Change.**
+
+- Members: `TEXT_GROUP_WEIGHT` and `BEHAVIOR_TEXT_WEIGHT` 0 -> 1.0, next to the procedure member
+  (1.0 since 21.3.20); every other member and weight unchanged.
+- Combiner: the real-report recipe of 10.9 unchanged, on lists rebuilt with the two members voting:
+  2,870 fold lists (seeds 11/23/37: clean, five randomised variants, the unknown arm for every seed-11
+  fold) and 204 real lists (the 68 development reports at names:30 and strict:all, plus one
+  removed-actor list each). Group-level CV chose real weight 10 and l2 10: out-of-fold clean fold
+  top-1 0.903 against 0.910 at weight 0, real-report top-1 / MRR 0.882 / 0.916 against 0.819 / 0.879.
+  Written to `data/models/combiner/attribution_combiner_procedure_core.json`. Of the fitted weights'
+  absolute sum (23.4), the three procedure-text members carry 5.7, the five technique-id set members
+  5.3, software 2.1 and the separation features 4.5.
+- Floor: the registered rule of 21.3.22 on the design seeds 41/53, run with the new combiner and no
+  floor. Lowest correct name 0.690; one bad name (Storm-0501 as Scattered Spider, removed, 0.18). The
+  floor is **0.20**, and it holds no correct design name.
+- Labels: the registered rule fits the strong label (0.76: 253 out-of-fold rows, 6 errors, bound
+  0.046), but no "one of these" threshold meets its bound (best: 20 rows, 4 misses, bound 0.40). The
+  product owner chose the strong label alone (2026-10-27). `scripts/fit_confidence_labels.py
+  --strong-only` writes `confidence_labels_procedure_core.json` with a null set threshold (10.11).
+  Out-of-fold on the design seeds: strong 244 of 250 right, leader calibration error 0.033.
+
+**Gate.** Two arms on the same code, one run each:
+
+- off: the default then (the real-report combiner, its labels, floor 0.50, both text members off);
+- core: the change.
+
+The sets were fresh fold seeds 109/113/127 (reserved by the registration), CTI-HAL anonymised and
+Elastic strict with the open set. The off run of seed 127 hung once: 48 min on one CPU core, with no
+GPU work and no memory activity. It was stopped. The identical command with a stack dumper finished
+in 17 min and is the off arm's run; the gate runner now stops a step after 60 min.
+
+| Set | Off | Core |
+| --- | --- | --- |
+| Seed 109: top-1 / top-5 / MRR / correct names / wrong / removed named | 136/155 / 0.948 / 0.911 / 36 / **1** / 1 | 141/155 / 0.974 / 0.938 / 37 / 0 / 0 |
+| Seed 113 | 135/155 / 0.916 / 0.900 / 41 / 0 / 1 | 139/155 / 0.948 / 0.923 / 40 / 0 / 1 |
+| Seed 127 | 135/155 / 0.948 / 0.910 / 38 / 0 / 1 | 141/155 / 0.974 / 0.935 / 38 / 0 / 1 |
+| Fresh seeds pooled: top-1 / correct names / wrong / removed named | 406/465 / 115 / 1 / 3 | 421/465 / 115 / 0 / 2 |
+| CTI-HAL anonymised: top-1 / top-3 / top-5 / MRR / correct names / wrong | 25/55 / 0.618 / 0.655 / 0.538 / 10 / 0 | 27/55 / 0.655 / 0.673 / 0.573 / 12 / 0 |
+| Elastic strict: top-1 / top-5 / MRR / named / wrong / open set named | 4/8 / 0.500 / 0.524 / 1 / 0 / 0/22 | 4/8 / 0.625 / 0.574 / 1 / 0 / 0/22 |
+
+The off arm's wrong name was The Gentlemen as ShinyHunters (0.95), also named when The Gentlemen was
+removed. The removed actor both arms name is GOLD SOUTHFIELD as FIN7, which shares REvil with it:
+off at 0.86 and 0.98, core at 0.60 and 0.89. Every bar holds:
+
+- 0 wrong names, and the open set names nothing;
+- removed actors named 2 against 3;
+- fold top-1 421 against 406 (bar: at least 400);
+- correct fold names 115 against 115;
+- CTI-HAL top-1 and MRR up, names 12 against 10;
+- Elastic top-1 4 against 4.
+
+The change is adopted.
+
+Secondary readings (not bars). "Names" counts single and cluster names; no reading names a wrong
+group.
+
+| Reading: top-1 / top-5 / MRR / names | Off | Core |
+| --- | --- | --- |
+| CTI-HAL tradecraft (ATT&CK malware names removed) | 11/55 / 0.382 / 0.299 / 1 | **20/55** / 0.564 / 0.458 / 1 |
+| CTI-HAL as reported | 31/55 / 0.764 / 0.654 / 16 | 31/55 / 0.782 / 0.668 / 18 |
+| Elastic names | 5/8 / 0.625 / 0.647 / 1 | 5/8 / 0.750 / 0.695 / 1 |
+| Elastic tradecraft | 1/8 / 0.250 / 0.192 / 0 | 2/8 / 0.375 / 0.308 / 0 |
+
+The actor sits inside the combiner's top-20 window about equally often in both arms: CTI-HAL 39 and
+39 (tradecraft 36 and 37), Elastic 5 and 6, folds 153-154 and 154.
+
+**Reading.** The gain lands where 21.3.24 pointed. Without the malware names the actor is first in
+20 of 55 CTI-HAL reports instead of 11, and in 2 of 8 Elastic posts instead of 1. With the names the
+gain is smaller (anonymised 25 -> 27, as reported 31 = 31), because named software already decides
+those cases. The folds gain as well (+15 of 465), with the text members refitted per fold so that
+the held-out sentences never reach them.
+
+Naming did not get worse. The off arm's one wrong fold name is gone, and the remaining removed-actor
+name rests on malware ATT&CK documents for both groups, at a lower probability than before. The
+floor of 0.20 sits below every correct design name, so it holds only what the combiner itself
+doubts.
+
+Caveats:
+
+- The development reports served the member choices and the study behind this, so the
+  cross-validated real-report numbers are development numbers.
+- The floor rests on one bad design name.
+- The "one of these" label is gone for this combiner.
+
+**Rollback.** Tag `rollback/pre-procedure-core-2026-10-26` (commit 5e51b7e), or the settings
+`TEXT_GROUP_WEIGHT=0`, `BEHAVIOR_TEXT_WEIGHT=0`,
+`ATTRIBUTION_COMBINER_PATH=data/models/combiner/attribution_combiner_real_reports.json`,
+`CONFIDENCE_LABELS_PATH=data/models/calibration/confidence_labels_real_reports.json` and
+`ATTRIBUTION_HYPOTHESIS_MIN_PROBABILITY=0.5`. Every earlier model file is unchanged; the earlier
+baselines are in `data/audits/procedure_core/before/`.
+
+**Adopted baselines (2026-10-27).** These are the `*_current.json` artifacts; the previous ones are
+in `data/audits/procedure_core/before/`. Every one was rerun with the new defaults and checked for
+wrong names; none has one. The CTI-HAL and Elastic runs equal the gate's core runs.
+
+| Set | Previous default | Procedure core |
+| --- | --- | --- |
+| ATT&CK folds seed 7: top-1 / top-5 / MRR / correct names / wrong / removed named | 126/155 / 0.929 / 0.867 / 42 / 0 / 0 | 137/155 / 0.942 / 0.913 / 44 / 0 / 0 |
+| Design seed 41 | 135/155 / 0.955 / 0.907 / 38 / 0 / 0 | 140/155 / 0.974 / 0.931 / 39 / 0 / 0 |
+| Design seed 53 | 130/155 / 0.935 / 0.887 / 36 / 0 / 0 | 139/155 / 0.987 / 0.936 / 39 / 0 / 0 |
+| CTI-HAL anonymised: top-1 / top-3 / MRR / names / wrong | 25/55 / 0.618 / 0.538 / 10 / 0 | 27/55 / 0.655 / 0.573 / 12 / 0 |
+| CTI-HAL as reported (names: single + cluster) | 31/55 / 0.727 / 0.654 / 16 / 0 | 31/55 / 0.764 / 0.668 / 18 / 0 |
+| Elastic strict / names / tradecraft: top-1, wrong, open set named | 4/8, 5/8, 1/8; 0; 0/22 | 4/8, 5/8, 2/8; 0; 0/22 |
+
+On the design seeds the floor holds the one removed actor that its no-floor run named. The
+strong-only labels on the new baselines (report-only): seed 7 strong 117 of 119 right (both misses
+are removed actors); CTI-HAL anonymised 22 of 24; CTI-HAL as reported 23 of 26.
+
+Verification:
+
+- pytest (whole suite) and ruff pass.
+- The public regression check passes against the main checkout's baseline; technique mapping is
+  unchanged.
+- The web type check passes.
+- The compose gate fails for the worktree reason (no `.env`).
+
+#### 21.3.26 The full pipeline on CTIBench and AthenaBench attribution (2026-10-27, evaluation only)
+
+21.3.18 scored single models (the actor head, the TF-IDF text model) on the two public
+threat-actor-attribution tasks. This run puts the whole product through them. Pre-registered as
+`docs/preregistration/product_external_taa_2026-10-27.json`; both benchmarks are non-commercial,
+so nothing is tuned on them.
+
+- Inputs: the texts of 21.3.18, anonymised and split. Every statement is read, at the names level,
+  with the gate's local protocol.
+- Gold: the ATT&CK groups alias-connected to the answer, through AthenaBench's alias list plus
+  ATT&CK's names.
+- Scoring: AthenaBench's rule on the top-ranked group (the product always has one, as the
+  published models always answer), and on the product's own names (a held report gives no answer).
+- Arms: the procedure-text core (the default) and the previous default (the rollback settings).
+- Harness: `scripts/cribl_finetune/external_product_taa.py` (prepare, score) and
+  `data/audits/external_product/run.sh`. About 30 min per arm on the laptop, no credit.
+
+| Correct (top-ranked group) | Core | Previous | Single models (21.3.18) | Published |
+| --- | --- | --- | --- | --- |
+| CTI-TAA (50; 48 answers in ATT&CK) | **0.54** (top-3 0.62, top-5 0.64) | 0.54 (0.64, 0.66) | text 0.38, actor head 0.38 | ChatGPT-4 52, Llama3-70B 52, ChatGPT-3.5 44, Gemini-1.5 38, Llama3-8B 28 |
+| AthenaBench TAA (100; 75 in ATT&CK) | **0.23** (0.31, 0.36) | 0.22 (0.30, 0.33) | text 0.23, actor head 0.16 | GPT-5 39, GPT-4o 35, GPT-4 31, Gemini-2.5-Pro 31, Llama 3.1-8B 24, Qwen3-14B 17, Qwen3-4B 15 |
+| AthenaBench, the 75 answers in ATT&CK | 0.31 | 0.29 | | |
+
+- Exact-group reading. The registered strict reading (the top group's own name or alias equals the
+  answer) gives 0.36 and 0.21, but it counts spelling variants as wrong. On CTI-TAA all 9
+  alias-only hits are the same actor under another spelling or vendor name: Lazarus as Lazarus
+  Group (4), Gamaredon as Gamaredon Group (2), CharmingCypress as Magic Hound, and CHRYSENE as
+  OilRig (2). On AthenaBench there are two: Lazarus as AppleJeus, and UNC4393 as Storm-1811. The
+  alias walk's loose links (APT28–APT29) gave the product no top-1 hit.
+- The plausible column (0.98 / 0.79) follows the authors' transitive walk and is not comparable
+  with the papers'.
+
+**Names.** The product's own answers are scored by the benchmarks' keys.
+
+| | Core: names / right | Previous: names / right |
+| --- | --- | --- |
+| CTI-TAA | 11 / 8 | 9 / 7 |
+| AthenaBench | 18 / 8 | 17 / 8 |
+
+Read case by case, the names the keys mark wrong fall into three groups.
+
+*Likely key errors* (both arms):
+- A Rapid7 email-bombing and Quick Assist campaign keyed UNC2452 was named Storm-1811. The report
+  names Cobalt Strike, ConnectWise and Quick Assist, and Rapid7 tied that campaign to the Black
+  Basta operators.
+- A Symantec PowerExchange report keyed MuddyWater was named OilRig. ATT&CK documents
+  PowerExchange for OilRig only, and Symantec's cluster there is Crambus/OilRig.
+
+*The fake-job-interview activity* (both arms): 8 AthenaBench profiles were named Contagious
+Interview, which ATT&CK keeps apart from Lazarus Group. The keys say Lazarus (4), WageMole (2),
+Famous Chollima and WaterPlum: vendor names for the same or overlapping North Korean activity that
+no alias list connects. BladedFeline was named OilRig; ESET describes it as a likely OilRig
+subgroup.
+
+*Genuine wrong names, core only:*
+- An APT41 profile (DodgeBox, MoonWalk; neither is in ATT&CK) was named Lazarus Group at 0.93, on
+  technique evidence alone.
+- A CTI-TAA report keyed Lazarus was named Storm-1811 at 0.36, because its text names Black Basta.
+
+Reading:
+
+- Always answering, the full product ties the best published models on CTI-TAA (0.54 against
+  ChatGPT-4's and Llama3-70B's 0.52) and sits with Llama 3.1-8B on AthenaBench (0.23 against 0.24),
+  under GPT-5 (0.39) and GPT-4o (0.35).
+- A quarter of AthenaBench's answers are not ATT&CK groups. Its profiles are short GPT-written
+  bullet lists, closer to an LLM's home ground than to a report.
+- The core and the previous default rank alike here. The core names three more reports and has
+  two more wrong names that are not label disputes.
+- The 0-wrong-name record of CTI-HAL, Elastic and the folds does not carry over to text this far
+  from ATT&CK's own sentences.
+
+Caveats:
+
+- ATT&CK procedure examples may cite the CTI-TAA reports, as for CTI-HAL (21.3.16), and nothing
+  here hides them.
+- The published numbers come from the papers' own runs, on CTI-TAA without our extra name
+  anonymisation.
+- One run per arm.
+
+#### 21.3.27 Independent inputs: the two external wrong names (2026-10-27)
+
+The product owner asked to fix the two genuine wrong names of 21.3.26. Pre-registered as
+`docs/preregistration/attribution_independent_inputs_2026-10-27.json`, after an exact replay of
+recorded runs. Both rules are on by default (10.6).
+
+**What went wrong.**
+- *APT41 profile named Lazarus Group at 0.93.* The profile names no ATT&CK software, and no report
+  sentence matched a Lazarus procedure closely enough for a behaviour match. The gate counted two
+  independent families: technique overlap (Naive Bayes rank 3, IDF cosine rank 7) and the country
+  model (rank 5). The country model reads the same accepted technique list, so one input passed as
+  two. The text members also ranked Lazarus first, but they never count as independent evidence.
+- *Lazarus report named Storm-1811 at 0.36.* The report's only ATT&CK-documented ransomware is
+  Black Basta. It appears where the report says the IP addresses also sit in community collections
+  that track Black Basta activity, which it does not attribute to the adversary. The extraction
+  read the mention as use, and the software channel made Black Basta decisive. The
+  combiner itself was unsure: its null probability (0.62) was above the leader's.
+
+**Rules.** Each comes from its mechanism, not from a threshold placed between cases.
+- *Technique list once.* Technique overlap, campaign, learned profiles and the country model count
+  as one family in the gate.
+- *Above null.* A single name needs the leader's combiner probability above the null probability.
+
+**Replay** (`scripts/naming_rules_replay.py`, exact; recorded procedure-core runs):
+
+| Run | Correct names | Technique list once | Above null | Wrong names held |
+| --- | --- | --- | --- | --- |
+| Design seeds 41 / 53 | 39 / 39 | −3 / −2 | 0 / 0 | – |
+| Seed 7 | 44 | −3 | 0 | – |
+| Gate seeds 109 / 113 / 127 | 37 / 40 / 38 | −2 / 0 / −1 | 0 | – |
+| CTI-HAL names / as reported / tradecraft | 12 / 18 / 1 | 0 | −1 / 0 / 0 | – |
+| Elastic strict / names / tradecraft | 1 / 1 / 0 | 0 | 0 | – |
+| CTI-TAA (11 names) | 8 | 0 | −1 | Lazarus → Storm-1811 |
+| AthenaBench (18 names) | 8 | 0 | 0 | APT41 → Lazarus Group |
+
+- The technique-list rule costs 11 of 237 correct fold names. Those cases are ATT&CK's own
+  phrasing, where technique lists work best. On the real reports no correct name rested on the
+  technique list alone.
+- The null rule costs one CTI-HAL name in the headline reading (FIN7, FIREEYE6: p 0.42 against
+  null 0.54; 12 → 11 named) and one correct CTI-TAA name (Lazarus, 0.34 against 0.54).
+- Neither rule changes a ranking, adds a name or falls through to a cluster name in any run. The
+  removed-actor names of seeds 113 and 127 (confident, 21.3.23) stay.
+
+**Confirmation.** Runs with both rules on: AthenaBench, CTI-TAA, the CTI-HAL headline and design
+seed 41 (`data/audits/naming_rules/run.sh`). The replay of the runs made without the rules
+matches all four row for row (stage and named members, `naming_rules_replay.py --on`): both wrong
+names are held, and design seed 41 loses its three technique-list names. The baselines were then
+rerun with the rules on (`data/audits/naming_rules/adopt.sh`; the earlier ones are in
+`data/audits/naming_rules/before/`).
+
+**Development report sets (2026-10-28).** The vendor (34), ATT&CK campaign (21) and FBI/CISA
+advisory (13) reports at names, strict and tradecraft, all statements, with both rules off and
+replayed (`data/audits/naming_rules/run_sets.sh`; the campaign readings also run with the rules
+on, 0 mismatches). The rules hold no name on any of the nine runs:
+
+| Set | Names: top-1 / named | Strict: top-1 / named | Tradecraft: top-1 / named |
+|---|---|---|---|
+| Campaigns (21) | 18 / 8 | 18 / 8 | 10 / 0 |
+| Advisories (13) | 9 / 3 | 9 / 3 | 6 / 0 |
+| Vendor (34) | 32 / 7 | 30 / 6 | 23 / 2 |
+
+Every name is correct. These are the procedure-core combiner's training reports (names:30 and
+strict:all lists, 21.3.25), so the top-1 is in-sample for the combiner; the runs show what the
+rules cost on report-style text, not accuracy on unseen reports.
+
+Caveats:
+- The rules were designed from the two cases they fix, so the external sets no longer measure them.
+- The Black Basta mention is an extraction problem. The null rule catches it only because the
+  combiner was unsure; a confidently misread mention would still name.
+- The remaining external "wrong" names are the likely key errors and the fake-job-interview label
+  disputes of 21.3.26.
+
+#### 21.3.28 Fresh reports, head to head: the product against frontier LLMs (2026-10-28/29, test set)
+
+The product owner asked whether a zero-shot frontier LLM makes the approach pointless: the product
+ties ChatGPT-4 on CTI-TAA but trails GPT-5 on AthenaBench (21.3.26), and public benchmark reports
+may be remembered by the models. Pre-registered as
+`docs/preregistration/fresh_reports_head_to_head_2026-10-28.json` (two amendments before any run;
+label review `fresh_reports_label_review_2026-10-29.json`). Test set: evaluation only, never tuned
+on, local only.
+
+**Set** (`scripts/prepare_fresh_reports.py`). Research posts and CISA advisories from 18 sources,
+published 2026-03-01 to 2026-10-27 (after GPT-5.6 Sol's stated cutoff), none cited by ATT&CK 20.0
+or in another report set. Labels by a pre-registered name-count rule over ATT&CK names and aliases
+plus the MISP threat-actor galaxy; every actor name and vendor cluster code masked as "the
+adversary"; the benchmark's strict anonymiser on top. 45 known reports on 25 groups (44 keep
+statements at strict) and 54 reports on actors ATT&CK does not document (open set: every name is
+wrong). 18 reports were excluded by the label review before any run.
+
+**Arms** (all read the same statements, strict reading):
+- *Product*: the defaults of 806269b, local pipeline, `data/audits/fresh_h2h/run_product.sh`.
+- *GPT-5.6 Sol* (main arm, every report) and *Claude Opus 5.5* (secondary, the 41 reports from
+  2026-07-01, after its June cutoff): `scripts/fresh_llm_attribution.py`, reasoning effort medium,
+  structured output (up to three groups with ATT&CK ids and a decision: name, open, not in ATT&CK),
+  `data/audits/fresh_h2h/run_llm.sh`.
+- *Combination* (no fitting): first choice = the LLM's first candidate when the product ranks it in
+  its top five, else the product's leader; a name only when both agree and the LLM decides to name.
+- Scoring: `scripts/fresh_h2h_score.py`; paired bootstrap (10,000, seed 7) and exact McNemar.
+
+**Main result (44 known, 54 open set):**
+
+| | Product | GPT-5.6 Sol | Combination |
+|---|---|---|---|
+| First choice right | 19 (0.432) | **24 (0.545)** | 18 (0.409) |
+| Per-group macro | 0.429 | **0.652** | 0.423 |
+| Top three | 21 | 25 | 21 |
+| Known: names / right / wrong | 8 / 7 / 1 | 32 / 24 / 8 | **13 / 13 / 0** |
+| Open set: names (all wrong) | 2 | 19 | **1** |
+
+- GPT minus product, first choice: +0.114, 95% CI [−0.068, +0.296], McNemar p 0.33. Under the
+  registered reading guide (clearly ahead = at least +0.10 with the interval above 0) the two are
+  **comparable**: the approach stands and the LLM is optional. The point estimate and the
+  per-group macro (+0.22) lean towards the LLM; 44 reports cannot separate them.
+- The combination keeps the product's first choice (−1 report, CI [−0.068, 0]) and its naming
+  discipline, and nearly doubles its correct names (7 → 13) with no wrong name on a known group
+  and one on the open set (product 1 and 2).
+- The product's names: Tropic Trooper named as Mustang Panda (known); a CISA advisory on Void
+  Blizzard named as the Kimsuky/Lazarus cluster and a Microsoft post on JadePuffer as Storm-0501
+  (open set). Names and tradecraft readings: first 22/45 and 10/44, 7 and 1 names, 2 open-set names
+  each.
+
+**Second reading: how the LLM's answers were matched.** The registered matching takes a
+candidate's ATT&CK id first and its name second. GPT-5.6 Sol often wrote a real actor name with an
+invented ATT&CK id (SloppyLemming as G1048, which is UNC3886; FIN11 as G0061, FIN8), so the
+registered score turns names of actors outside ATT&CK into names of unrelated ATT&CK groups.
+Matched by name (a name ATT&CK does not list counts as "not an ATT&CK group"), not registered:
+- first choice and top three unchanged (24, 25);
+- known: 28 ATT&CK names, 24 right, 4 wrong, plus 4 names of actors outside ATT&CK (FamousSparrow
+  for Salt Typhoon, Famous Chollima for Contagious Interview, KONNI for Patchwork, FIN11 for
+  ShinyHunters);
+- open set: 6 ATT&CK names (Scattered Spider for Storm-2949 and UNC6671, Winter Vivern for
+  CL-STA-1114 and Void Blizzard, Lazarus for Storm-3069, HAFNIUM for Storm-0940), all wrong, and 13
+  names of actors outside ATT&CK, of which 8 are the vendor's actor or a widely reported equivalent
+  despite the masking (SloppyLemming, Storm-1175, UAT-4356, DragonForce twice, UNC5221 for UTA0178,
+  UNC1151 for FrostyNeighbor, Laundry Bear for Void Blizzard). The product cannot name actors
+  outside ATT&CK at all.
+
+**Secondary arm: Claude Opus 5.5 on the July–October reports (11 known on 10 groups, 30 open set).**
+
+| | Product | Opus 5.5 | GPT-5.6 Sol (same reports) | Combination with Opus |
+|---|---|---|---|---|
+| First choice right | 4 | **8** | 7 | 4 |
+| Known: names / right / wrong | 2 / 2 / 0 | 8 / 7 / 1 | 10 / 7 / 3 | 4 / 4 / 0 |
+| Open set: names | 2 | 2 | 12 | **0** |
+
+- Opus minus product: +0.364, CI [+0.091, +0.636], McNemar p 0.125 (4 discordant reports against
+  0), on 11 reports. Opus is the more careful model: it said "not in ATT&CK" on 26 of 30
+  open-set reports (GPT-5.6 Sol named 12 of the same 30). Its one wrong known name is FamousSparrow
+  for Salt Typhoon; of its two open-set names, Laundry Bear is the right actor outside ATT&CK and
+  HAFNIUM (for Storm-0940) is wrong.
+
+Reading:
+- As a stand-alone attribution system the product is not better than a current frontier model:
+  both models put the right group first at least as often, name far more reports, and recognise
+  actors ATT&CK does not document. The registered verdict is "comparable" only because 44 reports
+  are too few.
+- The product's measurable value here is naming discipline (2 wrong open-set names against GPT's
+  6–19) and, as the second opinion in the combination, turning the model's recall into names
+  without its wrong ones. It also runs locally and free (GPT-5.6 Sol cost about $0.05 per report)
+  and shows its evidence.
+- Direction proposed to the product owner: the model proposes when a cloud key is allowed, the
+  product's evidence and naming gate decide whether to name; without a key the product runs alone.
+  Making that a default needs its own pre-registered test on a new set; this one is spent.
+
+Caveats:
+- Labels are the vendors' attribution under a name-count rule; several model "errors" are label
+  disputes (FamousSparrow / Salt Typhoon, Famous Chollima / Contagious Interview).
+- Posts in the window may retell research from before the cutoff; one sample per report;
+  reasoning effort medium only.
+- The registered id-first matching was not designed for invented ids; the second reading is
+  post hoc and reported beside, not instead of, the registered numbers.
+- Masking gap (found 2026-10-29, after scoring): the set's name pattern skipped a name joined to a
+  word by a hyphen, so three names survived in three known reports: "BlueDelta-related" (an APT28
+  report the model got and the product missed; the model cites it), "FamousSparrow-exclusive" (a
+  Salt Typhoon report, where Opus named FamousSparrow) and "handoff-to-Sandworm" (both right).
+  Without the first, GPT-5.6 Sol is at most 23 of 44; the reading does not change. The pattern now
+  masks such compounds for later sets (`scripts/prepare_fresh_reports.py`). The benchmark's own
+  masking leaves no truth name on CTI-HAL (55) or Elastic (8).
+
+**Cost.** OpenRouter $6.87 (GPT-5.6 Sol $5.32 on 98 reports, Opus 5.5 $1.55 on 41); product runs
+about 85 minutes on the laptop. Downloads about 2,300 pages (714 MB raw HTML, local only).
+
+#### 21.3.29 Knowledge beyond ATT&CK: what the open sources hold (2026-10-29, diagnosis)
+
+Question: the fresh head-to-head (21.3.28) showed where the models win. Can open data close that
+gap locally?
+
+Where the gap is (fresh set, aggregate, evaluation only; nothing was fitted on it):
+- On the 11 known reports GPT-5.6 Sol got and the product missed, the right group was never in
+  the product's top 5 (ranks 6–59), and no software that ATT&CK documents for that group alone was
+  found. On 11 of the 13 reports both got right, such software was found.
+- The model's rationales cite knowledge ATT&CK does not hold: new malware tied to the actor in
+  about 8 of the 11 (HOOKEDGE evolved from HEADLACE for APT28; the Ptero tools for Gamaredon;
+  NotDoor; TomBerBil; TOSHIS and EntryShell for Tropic Trooper; Stagecomp and Darkcomp), vendor
+  operation names (Operation RoundPress, Olalampo) and in one report a vendor actor name the
+  masking missed (BlueDelta, see 21.3.28).
+- So the product loses on current knowledge, not on gating or reasoning.
+
+What the open sources hold (MISP galaxy at commit 24877de2 of 2026-10-29, downloaded to
+`data/raw/misp_galaxy_24877de2/` with `SOURCE.json`; JSON metadata only, no samples):
+- Licences: the MISP galaxy JSON files are CC0 1.0 or BSD-2-Clause, so they can ship. Malpedia
+  is CC BY-NC-SA 3.0 (non-commercial). MISP's `malpedia.json` derives from it, so it is
+  evaluation only.
+- MISP's actor lists hold 165 distinct malware-to-group links; 86 are for actors ATT&CK does not
+  document, 21 ATT&CK already has, 58 are new for an ATT&CK group. That is 5% on top of ATT&CK's
+  1,166 group-software links, and the new ones are concentrated (most are Kimsuky, from one report).
+- Malpedia's 3,683 families carry no structured actor link in MISP's copy; 113 descriptions name an
+  ATT&CK group, 83 of them not already linked in ATT&CK (noisy: "Play" matches the verb).
+- The vendor names are covered: the MISP threat-actor list (1,113 actors) maps BlueDelta,
+  COLDRIVER, Sednit and similar names to their groups.
+- On the 11 misses, with a copy taken after the reports were published (an upper bound): the
+  shippable lists cover one malware link (HOOKEDGE to APT28, used in two of the reports); with
+  Malpedia at most three reports (EntryShell's description names KeyBoy; Headlace and NotDoor are
+  listed by name only, without an actor).
+  None of the Ptero tools, TomBerBil, Umbrij, TOSHIS, Stagecomp, Darkcomp, COLDCOPY or MiniDoor is
+  in any of the lists.
+
+Reading: the knowledge the models use comes from reading vendor reports, and the open structured
+lists hold little of it. Importing them is cheap but would recover at most one or two of the 11
+reports. Closing the gap locally needs the product to read the reports itself: extract the facts
+(this malware is attributed to that actor by this vendor on this date, with a link) from the
+public reports an organisation chooses to follow, and keep them as a local, dated knowledge
+store. That is a larger build and needs a time-split test (knowledge from reports before a date,
+test on reports after it); the fresh set cannot be that test.
+
+#### 21.3.30 Fresh reports, behaviour only: does the model's lead survive without names? (2026-10-29, post hoc)
+
+Question (product owner): the model's wins in 21.3.29 cite malware lineage; when attribution
+has to come from behaviour, does its lead remain? A post hoc secondary arm on the fresh set,
+logged in the pre-registration before it ran (last amendment); evaluation only.
+
+Masking: a new level `behavior` (`scripts/report_anonymizer.py`): tradecraft (strict plus ATT&CK
+malware), plus malware and tool names ATT&CK does not list (MISP galaxy malware lists and
+Malpedia family names, code-name shapes such as HOOKEDGE or PteroSand, names the report gives a
+malware noun, masked everywhere in that report) and operation names. English words, ATT&CK
+technique and data-component text and ATT&CK tools stay (PowerShell, rundll32, LSASS, PsExec).
+Audit before the run: about 1,100 distinct names masked in 11,462 statements; some product, API
+and vendor names go too (PeopleSoft, VirtualAlloc, ESET), the same text for both systems.
+
+Result (44 known reports, 54 open set; product with the defaults, GPT-5.6 Sol with the same
+prompt; `data/audits/fresh_h2h/score_gpt56sol_behavior.json`):
+
+| | Product strict | Product behaviour | GPT strict | GPT behaviour |
+|---|---|---|---|---|
+| right group first (registered, id-first) | 19 | 10 | 24 | 18 |
+| right group first (name-first reading) | 19 | 10 | 24 | 23 |
+| names on known reports (right / wrong, registered) | 8 (7/1) | 0 | 32 (24/8) | 34 (18/16) |
+| names on open-set reports | 2 | 1 | 19 | 13 |
+
+- GPT minus product at behaviour: +0.182, CI [−0.045, +0.409], McNemar p 0.17 (17 reports only
+  the model got, 9 only the product got, 1 both). The combination puts 14 first and names 1
+  report (right).
+- Removing every malware name costs the product half its first places (19 to 10: its hits came
+  from software only one group uses, 21.3.29) and the model almost nothing under the name-first
+  reading (24 to 23). In the registered reading the model's drop to 18 is mostly matching: it
+  wrote the right name with an invented id on five more reports than at strict.
+- What the model still uses: behaviour and target patterns it knows from years of vendor
+  reporting (Gamaredon's HTA and removable-drive habits, SideCopy's LNK-mshta-HTA chain, ToddyCat's
+  Gmail OAuth collector, Star Blizzard's rapport-building phishing), and in about five reports
+  history the masking leaves: actor-history paragraphs ("behind the 2016 DNC compromise",
+  TV5Monde, the anti-doping leaks; BMW, Hyundai and Wuhan for APT32; Korean code page 949),
+  NotDoor in two mentions the code-name rule missed, and the frozen set's "handoff-to-Sandworm"
+  (21.3.28). Discounting those five, the model is still ahead (about 13 against 10).
+- Naming without names: the model keeps naming (34 known reports, 16 wrong in the registered
+  reading; 6 wrong ATT&CK names and 5 non-ATT&CK names name-first) and names 13 of 54 open-set
+  reports; the product names none of the known reports and one open-set report.
+
+Reading: the model's lead is not a malware-name lookup; it is broad knowledge of how each actor
+operates and what it targets, which survives the masking better than the product's evidence does.
+The product's attribution from behaviour alone (10 of 44) is well below the model's. The product
+and the model are partly complementary (9 reports only the product got), which the combination
+rule does not yet exploit (14). Without names the product's naming gate stays silent, the safe
+outcome, while the model's wrong names double.
+
+Cost: OpenRouter $5.79 (the head-to-head total is now $12.66); product 29 minutes.
+
+#### 21.3.31 The model's own confidence as the naming rule (2026-11-02)
+
+Question (product owner): after 21.3.30, GPT-5.6 Sol's names at a stated probability of at least
+0.99 were all right on the fresh set (17 of 17 at strict, 8 of 8 at behaviour). That cut-off was
+picked after seeing the results, so the fresh set is now development data for it and the test runs
+once on new reports (prereg `llm_confidence_cutoff_2026-11-02.json`).
+
+Chosen on the fresh set (`scripts/fresh_h2h_score.py --matching name --llm-min-probability 0.99
+--switch-probability 0.5`; the model's answers matched by name, a name ATT&CK does not list is no
+ATT&CK name):
+
+| fresh set (development) | strict: first / names right / wrong | behaviour: first / right / wrong |
+|---|---|---|
+| product | 19 / 7 / 3 | 10 / 0 / 1 |
+| model, every name | 24 / 24 / 10 | 23 / 23 / 12 |
+| model, names at >= 0.99 | 24 / 17 / 0 | 23 / 8 / 0 |
+| registered combination (product must agree) | 18 / 13 / 1 | 14 / 5 / 3 |
+| switch: model's first at >= 0.5, else the product's leader; names at >= 0.99 | **29** / 17 / 0 | **28** / 8 / 0 |
+
+(Wrong names include every ATT&CK name on the 54 open-set reports.) The naming cut-off is the
+lowest on a fixed grid with no wrong name at either reading; the switch cut-off the best first
+choice over both readings. The switch uses the complementarity of 21.3.30: where the model is
+unsure, the product's leader is often right (switch − model +0.114, CI [+0.023, +0.205] at strict,
+in-sample). Adding the product's names where the model is unsure added 1 right and 3 wrong names.
+
+Test set (`data/benchmarks/fresh2/`, the same builder with `--window`, `--sources`,
+`--exclude-listed` and `--twin-sets`): reports published from 2026-03-01 to the listing date that
+the first set's listing never considered, from the first set's sources and new sources the product
+owner approves, minus retellings of first-set reports; same labels, masking and label review.
+The product owner chose the behaviour reading only (malware, tool and operation names hidden as
+well) for both systems, logged before any listing; the development choices hold at that reading
+alone. Primary readings: names of the confident model against the product's (wrong names in
+total, right names), and the switch's first choice against the model's.
+
+**The set.** Ten of the twenty approved new sources could be listed with a plain request (Group-IB,
+StrikeReady, Kaspersky ICS CERT, JPCERT/CC, Gen Digital, Resecurity, Intrinsec, Infoblox,
+ThreatBook, Sekoia); the others refused automated listing or had no listable posts and were dropped,
+not worked around. 600 candidate posts (26 new posts of the first set's sources) gave 29 labelled
+reports; the label review excluded 8 (two "Alibaba" MISP-synonym errors, overviews and roundups of
+several actors, an open-set post the vendor ties to INC Ransomware). Final: 12 known reports on 10
+groups and 9 open-set reports, below the registered 30 known reports, so every reading below is
+descriptive only. One ShinyHunters report keeps a member handle ("Shiny", @shinycorp).
+
+**Result** (`data/audits/fresh2_h2h/score_gpt56sol_behavior.json`, behaviour reading, matching by
+name):
+
+| new fresh set (12 known, 9 open set) | first right | names right / wrong (incl. open set) |
+|---|---|---|
+| product | 4 | 0 / 0 |
+| model, every name | 8 | 8 / 2 |
+| model, names at >= 0.99 | 8 | **6 / 0** (exact 95% interval of the share right [0.54, 1.00]) |
+| registered combination | 7 | 2 / 0 |
+| switch (model's first at >= 0.5, else the product's leader) | **10** | 6 / 0 |
+
+- Naming: the confident model named 6 known reports, all right, and no open-set report with an
+  ATT&CK name; the product named nothing. Under the guide "at least as safe" holds, but with 6
+  names the share is descriptive, and the 6 are not independent: three are one vendor's
+  three-part series on one actor (Gamaredon) and one is the ShinyHunters report with the handle.
+  The model's two wrong ATT&CK names (CURIUM as MuddyWater, an open-set Russian actor as APT28)
+  were at 0.97 and 0.86, below the cut-off. At 0.99 it also named two open-set actors outside
+  ATT&CK correctly (Luna Moth, TA558), names the product cannot give.
+- First choice: the switch put 10 of 12 first against the model's 8 (+0.167, CI [0.0, +0.42],
+  "comparable" under the guide): the product's leader was right on the two reports where the model
+  was unsure (The Gentlemen, TeamPCP) and wrong on one (VOID MANTICORE). Same direction as on the
+  development set (29 against 24 of 44).
+
+Reading: the new reports agree with what the development set suggested, the model's confident
+names were right and the switch ranked best, but 12 known reports and 6 confident names cannot
+establish either rule. Nothing changes in the product. A test that can decide needs about 100
+reports, for example posts collected from November on under the same rules.
+
+Cost: OpenRouter $1.11 (the head-to-head total is now $13.77); product 9 minutes; downloads 600
+pages (146 MB, local only).
+
+Follow-up (2026-11-11): the product owner chose to show the model's answer in the product as an
+opt-in, display-only second opinion (16.6) and to test it on the confirmation set
+(`model_second_opinion_2026-11-11.json`). The ranking, the naming gate and every default stay as
+they are.
+
+#### 21.3.32 Exact procedure artefacts (2026-11-03, development only)
+
+Question: the literature's strongest attribution signal after malware family is the exact
+artefact an operator leaves behind: a registry key, a file path or name, a named pipe, a mutex, a
+service or task name, a PDB path, a user agent, a DLL export name. Do these put the right group
+first where the text members miss, and is the knowledge to weigh them there? Development data only
+(the 68 vendor, campaign and advisory reports of 21.3.24); CTI-HAL, Elastic and the fresh sets
+are not read.
+
+Method: `apt_classifier/evidence/artefacts.py` extracts and normalises the artefacts (hive
+spellings unified, user and environment folders folded into `%appdata%`-style variables, GUIDs,
+SIDs, long hex and digit runs replaced by placeholders, case folded; system binaries, LOLBins,
+generic folders and prose words dropped). Nothing in the pipeline imports it. The same extractor
+runs over the text member's ATT&CK corpus with each report's cited and copied texts and its own
+statements hidden (`TextGroupModel.without`). Each artefact is credited to the groups of the
+records that carry it and weighted by rarity, log(178 / groups). An artefact credited to more than
+8 groups never scores. Groups are ranked by the summed weight of what they share with the report,
+with ties counted against the actor (`scripts/separation_study/artefacts.py`, CPU, minutes).
+
+ATT&CK holds few exact artefacts: 435 file names, 176 paths, 114 registry keys, 26 task names,
+25 service names, 4 mutexes, 5 user agents, 2 PDB paths, 1 export name and no pipes (at most 8
+groups each).
+
+| 68 development reports (names / strict / tradecraft alike) | result |
+|---|---|
+| reports with any artefact | 43 / 42 / 42 |
+| reports sharing an artefact with ATT&CK (at most 8 groups) | 24 |
+| actor first / top-5 / MRR | 14 / 17 / 0.225 |
+| of the 14 firsts, a text member also first | **14 (0 new)** |
+| artefacts lead with another group | **10** |
+| text members (any) put the actor first, for comparison | 52 |
+
+Per matched artefact, the actor's share against a random other group: file names 51 matches,
+68.6% against 0%; paths 18, 88.9% against 5.6%; registry keys 8, 100%; service names 2, 100%.
+Dropping file names that are ATT&CK software names changes nothing (one match).
+
+- Every first place the artefacts give, a text member already gives: the text members read the
+  same tokens in the same sentences.
+- The 10 wrong leads are commodity tools and system files that ATT&CK happens to record for only
+  one or two groups: `wsmprovhost.exe`, `vlc.exe` (a side-loading host), `taskmgr.exe`,
+  `wmiprvse.exe`, `wmiexec.py`, `secretsdump.py`, `netscan.exe`, `/etc/passwd`, `info.txt`, and
+  one tie. ATT&CK's sparse coverage makes them look rare. Rarity needs many reports per artefact,
+  and ATT&CK has one or two.
+- An earlier extractor version gave 13 wrong leads; three came from extractor noise (prose such
+  as "in.zip", "and.log", an unquoted "exports the requests ...", `/dev/null`, `c:\temp`) and were
+  fixed as general hygiene. The same version backtracked exponentially on lines full of slashes
+  (the PDB pattern); it is now linear and tested.
+
+Where the knowledge could come from: the dated knowledge store outside its decisive window
+(2025-01-01 to 2026-02-28, never inspected; counts only, no text read). Of 757 posts with an
+actor reading (497 known, 260 open set), 521 carry an artefact (median 3 per post). Of 4,371
+distinct artefacts, 261 appear at two or more sources, and only 45 of those belong to one actor
+(35 file names, 7 paths, 1 registry key, 1 export, 1 user agent), spread over 232 actors. The
+store does see commodity tools as shared (`rar.exe` 8 actors, `secretsdump.py` 3, `/etc/passwd`
+3), which ATT&CK cannot.
+
+Reading: no artefact member over ATT&CK. It adds no first place and leads wrongly on 10 of 68
+reports. The store weighs artefacts better than ATT&CK does, but 45 single-actor artefacts that
+recur across sources are too few to build a member on. The extractor is kept so the store can
+record each post's artefacts as it grows. The question returns only in the store's own time-split
+test, when far more reports per actor exist. Nothing changes in the product.
+
+Cost: CPU only, about 10 minutes in total; no credit.
+
+#### 21.3.33 Profile-size bias of the technique-list members (2026-11-04, development only)
+
+Question: when the product ranks a similar group above the true one, what makes it pick that
+group, and can it be corrected?
+
+Diagnosis, from the recorded runs of the current defaults: 652 known-actor cases (fold seeds
+109/113/127, CTI-HAL, Elastic, the vendor, campaign and advisory sets, both fresh sets), 120 not
+ranked first. The evaluation sets were read as totals only: who led and how long each group's
+ATT&CK technique list is. Documented siblings explain little. The leader is a same-activity pair
+of the reviewed table in 7 misses, linked only by rarely used shared software in 5, a reviewed
+distinct pair in 2, and from the same country without a link in 18. The length of the leader's
+technique list explains more, in opposite directions:
+
+- Short inputs (at most 10 accepted techniques) are led by short lists. On the folds the wrong
+  leaders have a median of 7 documented techniques against 9 for the truth. APT30, documented
+  with only spearphishing attachment and user execution, led 12 fold misses and is never a fold
+  truth.
+- Long real reports (more than 10 accepted) are led by long lists: median 67 against 48 for the
+  truth. Kimsuky (130 techniques) led 10 real-report misses and was the truth in 2. Naive Bayes
+  ranked it first in 9 of the 10.
+
+Cause: Naive Bayes (`classifiers/naive_bayes.py`) scores the observed techniques only. A
+documented one adds log(alpha), an undocumented one log(beta), and a documented technique the
+report lacks costs nothing, so a long list covers most of a long report. IDF cosine and Jaccard
+divide by the whole list, so a two-technique list matches two observed techniques perfectly.
+
+The ATT&CK folds cannot judge this. A known fold keeps the true group's technique list, so every
+observed technique is in it, and any scorer that rewards "all observed techniques documented"
+wins (the "self-consistency over the technique table" of 10.3). The members were therefore
+replayed on the 68 development reports (vendor, campaigns, advisories): each report's accepted
+techniques from its recorded run, every group rescored on the CPU, strict ranks (ties count
+against the actor).
+
+| member alone, 68 development reports | top-1 | top-5 | MRR |
+|---|---|---|---|
+| Naive Bayes as shipped | 10 | 29 | 0.298 |
+| **Naive Bayes, case z-score, then each group's z-score on the design folds** | **23** | **34** | **0.415** |
+| Naive Bayes, multinomial likelihood with Dirichlet smoothing (mu 80) | 21 | 26 | 0.369 |
+| IDF cosine as shipped / with length norm 0.5 | 13 / 17 | 23 / 33 | 0.288 / 0.367 |
+| Jaccard as shipped | 16 | 27 | 0.316 |
+
+The chosen correction asks how unusual a group's score is for that group. It z-scores the scores
+across the groups of the case, so short and long inputs share one scale. It then z-scores each
+group against the mean and spread of its own case-level scores on the design folds, seeds 41 and
+53, which are ATT&CK-only cases. Against the shipped member it gains 14 reports and loses 1, top-1
++0.19 with a paired bootstrap 95% interval of +0.09 to +0.29. Kimsuky as wrong leader goes from 18
+to 0. With the other report sets as reference instead of the folds it reaches 21 to 22.
+The same per-group correction lowers IDF cosine (13 to 10) and Jaccard (16 to 11), whose bias runs
+the other way, so it applies to Naive Bayes only.
+
+Implementation, off by default (`NAIVE_BAYES_BACKGROUND_ENABLED=false`):
+
+- `apt_classifier/nb_background.py` wraps the Naive Bayes member under its own name, so fusion
+  weights, families and combiner columns treat it as that member. It lives outside
+  `classifiers/` so the combiner fingerprint is unchanged while it is off. On, the fingerprint
+  binds the module and the reference, so it needs its own combiner.
+- `scripts/fit_nb_background.py` writes the reference
+  (`data/models/nb_background/nb_background_design.json`: 360 design-fold cases, every group
+  with 358 to 360 reference cases, fingerprint 8023fdd904d99af5). It accepts only fold runs of
+  the design seeds, and its `--evaluate` reproduces the table above.
+- The reference pins the ATT&CK version, each group's technique list, the parent links and the
+  member's parameters. It also loads on a knowledge base with groups removed (the
+  removed-actor folds); any other change fails closed to the shipped member. The attribution
+  benchmark and the combiner fit refuse to run when the setting is on and the reference did not
+  load.
+
+Reading: a member-level result on development data. The product effect depends on the combiner,
+where the procedure-text members dominate. The gate is registered in
+`docs/preregistration/attribution_nb_background_2026-11-04.json` (2026-11-04, code commit
+eab270e, before any run):
+- a combiner fitted with the corrected member under its own file name;
+- the probability floor re-chosen on design seeds 41/53;
+- the bars on fresh fold seeds 149/151/157, CTI-HAL and Elastic.
+
+Fold seeds 131/137/139 are reserved for the knowledge-store test.
+
+The runners are in `data/audits/nb_background/`.
+`supervise.sh` starts only when no other process holds the GPU and nothing listens on port 8102,
+and it stops only the head service it started.
+
+Cost: the study CPU only, minutes; the gate about 8 to 9 hours of laptop GPU; no credit.
+
+#### 21.3.34 Google's decision model, Gemini Decision 1, on Jev's questions and on whole reports (2026-11-13, descriptive)
+
+Google released `google/gemini-decision-1` on 2026-11-11 (OpenRouter decisions endpoint, served
+`google/gemini-decision-1-20261111`, $0.10 per 1M input tokens, output free). Like TypeSafe Jev it
+answers typed questions with probabilities and writes no text. Registration
+`gemini_decision_2026-11-12.json`, written before any answer was seen; descriptive only, nothing in
+the product changes. Tests A-C ask the questions Jev answered (docs 16.4b on the Jev branches),
+rebuilt from the stored artifacts on ATT&CK 19.2 and proven byte-identical by replaying every one
+from Jev's cache with 0 misses. Test D is a new question. The scripts, logs and results are local
+(`data/audits/gemini_decision/`, `code/` holds the scripts; they run against the Jev harness
+worktree). Every answer was valid (0 errors, 0 invalid); billing came to about 0.6-0.7 of the
+chars/3 estimate. Total spend $1.22.
+
+Gemini sorts a choice question's options by the bytes of their ids before reading them, so it never
+sees the pipeline's order and Jev's three option orders become one question. The pilot (30 dev
+sentences, 3 orders) confirmed it: 27 answers bit-identical, 3 differing by at most 2e-8 (float
+noise; the registered rule asked for exactly 0, read here as held), so the full runs asked each
+question once. The verifier's 1,559 retest questions came back identical: Gemini is deterministic
+(Jev's retest noise p95 0.02).
+
+A. Technique pick (C1: the pipeline's top 10 + none_of_these; C1r adds the whole anonymized report).
+
+| Set | Gemini exact | Jev exact | Gemini - Jev | Union F1 Gemini / Jev / pipeline | ECE Gemini / Jev | No pick Gemini / Jev |
+|---|---|---|---|---|---|---|
+| Public dev 659, C1 | 0.492 | 0.514 | -0.023 [-0.046, +0.002] | 0.538 / 0.540 / 0.549 | 0.19 / 0.23 | 69 / 35 |
+| CTI-HAL 968, C1 | 0.436 | 0.460 | -0.024 [-0.043, -0.004] | 0.448 / 0.451 / 0.378 | 0.18 / 0.24 | 163 / 108 |
+| CTI-HAL 968, C1r | 0.486 | 0.482 | +0.003 [-0.014, +0.023] | 0.467 / 0.465 / 0.378 | 0.15 / 0.23 | 132 / 95 |
+
+Jev's level, better calibrated, and it says "none of these" more often; with C1r it beats the
+pipeline's first choice on CTI-HAL by +0.102 [+0.074, +0.133] exact, as Jev did.
+
+B. Verifier (yes/no per candidate, public dev, 9,546 questions, 202 right): AUC 0.808 vs Jev 0.818
+(-0.010 [-0.028, +0.007]), ECE 0.067 vs 0.085, Brier 0.042 vs 0.049 (-0.007 [-0.009, -0.006]). Its
+high answers are more often right (P >= 0.90: 17/46 = 0.37 vs 9/46; >= 0.93: 9/15 vs 3/15) but
+still far below the precision of the accepted sets (0.59), so the registered rule again finds no
+accept bar. Because its answers do not vary, the reject bar 0.01 now survives the noise check
+(drops 598 candidates, 3 of them right); exploratory, nothing written.
+
+C. Group pick among the product's top 5 (G3, ATT&CK names only, CTI-HAL 55 + Elastic 8): 27/63 first
+vs Jev 28/63 and the product's own order 29/63 (Gemini - product -0.032 [-0.127, +0.048]). The
+per-group score framing G0 stays poor (9/63; Jev 13/63) and named 1 group, right (Jev 4, 2 wrong).
+
+D. Whole report, one choice over all 178 ATT&CK 20.0 groups + none_of_these (option = name and id,
+criterion = the ATT&CK description cut at 400 characters), reading the statements the product reads:
+
+| Set | Gemini first | Product first | GPT-5.6 Sol first (id-first / name-first) | Gemini names at P >= 0.9 (wrong) | Open set named at P >= 0.9 |
+|---|---|---|---|---|---|
+| CTI-HAL 55, anonymized headline | 13 | 27 (sign p 0.004) | - | 5 (0) | - |
+| Elastic 8 + 22 open set, strict | 2 | 4 | - | 1 (0) | 0 of 22 |
+| Fresh 44 + 54 open set, strict | 22 | 19 (p 0.63) | 24 / 24 | 11 (0) | 1 of 54 |
+| Fresh, behaviour reading | 21 | 10 (p 0.007) | 18 / 23 | 9 (0) | 1 of 54 |
+
+At P >= 0.9 it gave 26 names on known reports (18 distinct reports; the two fresh readings share
+their reports) and none was wrong; the two open-set names were Storm-1175
+as Medusa Group (Microsoft's name for an actor that deploys Medusa ransomware) and Storm-2570 as
+Storm-0501. At P >= 0.5 it is much less safe (CTI-HAL 16 names, 8 wrong; fresh 23, 5 wrong). On
+the fresh set GPT-5.6 Sol gave 32-34 names with 8-16 wrong and 13-19 open-set names; the product
+gave 8 (1 wrong) and 2. A whole-report call costs about $0.0016 (GPT-5.6 Sol about $0.05-0.06).
+
+Reading: on Jev's questions Gemini Decision is Jev's equal with better calibration and no answer
+noise, not an improvement in accuracy. On whole reports it is far behind the product on CTI-HAL
+(old reports that ATT&CK's procedure examples were written from) and level with or ahead of it on
+the fresh 2025-26 reports, about where GPT-5.6 Sol is, at about a thirtieth of the cost and with
+fewer wrong confident names. Limits: the fresh set is development data, the P >= 0.9 cut-off and every
+count here are in-sample, the confident names cluster in a few recent groups (TeamPCP 5, Mustard
+Tempest 2, Contagious Interview 3), and Gemini read ATT&CK 20.0's descriptions of those groups,
+which may draw on the same months' reports (the product reads them too; GPT-5.6 Sol did not).
+Any product use needs its own registration and a test on reports it has not seen, such as the
+confirmation set.
+
 ## 22. Failure modes and troubleshooting
 
 ### 22.1 “ATT&CK knowledge base has not been ingested”
@@ -3745,6 +7930,7 @@ The current ATT&CK self-consistency benchmarks are not sufficient for this purpo
 | `apt_classifier/fusion.py` | `reciprocal_rank_fusion`, effective family weights, Kendall tau |
 | `apt_classifier/origin.py` | `assess_origin_and_threat_type` |
 | `apt_classifier/threat_intel.py` | public feed client, parsers, matching, verification states |
+| `apt_classifier/knowledge_store/` | `KnowledgeStore`, `StoreView` (dated reads, `links_view`), `PoliteFetcher`, `list_posts`, `page_date`, `parse_page`; `extract.py` (labels, uses links, claims, 12.7); collector `scripts/knowledge_store.py` (12.6) |
 | `apt_classifier/elastic_mcp.py` | `ElasticMCPClient`, `StreamableHTTPMCPTransport`, ES|QL flow, search fallback, bounded query planning, staged evidence normalization |
 | `apt_classifier/canvas.py` | `build_analyst_canvas`, `build_candidate_dossier` |
 | `apt_classifier/questions.py` | information gain, chat answer parsing, stopping rule |
@@ -3758,6 +7944,7 @@ The current ATT&CK self-consistency benchmarks are not sufficient for this purpo
 | `tests/test_presets.py` | mapping preset tests |
 | `tests/test_reranker.py` | local reranker adapter tests |
 | `tests/test_benchmarks.py` | benchmark case structure validation tests |
+| `scripts/cribl_finetune/` | cribl-decision experiment (21.3.18): `common.py` (Jev C1 question, `forced_pick`, metrics), `decision_model.py` (`Readout`), `train.py`, `evaluate.py`, `rescore.py`, `prepare_annoctr.py`, `family_head.py` (family head without retrieval), `multi_family.py`, `export_attack_procedures.py`, `runpod/` |
 
 ---
 

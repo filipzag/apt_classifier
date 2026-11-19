@@ -257,7 +257,14 @@ def _neutral_evidence(ledger: Any) -> dict[str, Any]:
             answers.append(
                 {
                     key: item.get(key)
-                    for key in ("question_id", "question", "status", "technique_id", "answer_text")
+                    for key in (
+                        "question_id",
+                        "question",
+                        "status",
+                        "technique_id",
+                        "software_id",
+                        "answer_text",
+                    )
                     if item.get(key) not in (None, "", [])
                 }
             )

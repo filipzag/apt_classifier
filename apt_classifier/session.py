@@ -1,4 +1,7 @@
+import copy
+from collections import Counter
 from dataclasses import dataclass, field, replace
+from datetime import UTC, datetime
 from typing import Any
 
 from pydantic import ValidationError
@@ -9,6 +12,13 @@ from apt_classifier.attribution import (
     AttributionDecision,
     MaturityThresholds,
     assess_attribution,
+)
+from apt_classifier.behavior_text import (
+    BEHAVIOR_TEXT_NAME,
+    BehaviorTextClassifier,
+    behavior_text_bound_fingerprint,
+    behavior_text_votes,
+    load_behavior_text_for,
 )
 from apt_classifier.classifiers.base import ClassifierContext, ClassifierResult
 from apt_classifier.classifiers.naive_bayes import posterior
@@ -33,11 +43,12 @@ from apt_classifier.evidence.models import (
     EvidenceLedger,
     EvidenceStatus,
     Observation,
+    Provenance,
     QuestionAnswer,
     TechniqueVerification,
     TechniqueVerificationVerdict,
 )
-from apt_classifier.exemplars import exemplar_kwargs, load_exemplar_index
+from apt_classifier.exemplars import load_exemplar_index
 from apt_classifier.fusion import FusionResult, reciprocal_rank_fusion
 from apt_classifier.group_mlp import (
     GROUP_MLP_NAME,
@@ -45,29 +56,56 @@ from apt_classifier.group_mlp import (
     group_mlp_votes,
     load_group_mlp_for,
 )
+from apt_classifier.knowledge_store.members import (
+    STORE_SOFTWARE_NAME,
+    STORE_TEXT_NAME,
+    StoreSoftwareClassifier,
+    StoreState,
+    StoreTextClassifier,
+    load_store_members_for,
+    store_bound_fingerprint,
+    store_software_votes,
+    store_text_votes,
+)
 from apt_classifier.llm import OpenRouterClient
+from apt_classifier.nb_background import (
+    load_nb_background_for,
+    nb_background_bound_fingerprint,
+    with_nb_background,
+)
 from apt_classifier.origin import OriginAndThreatAssessment, assess_origin_and_threat_type
+from apt_classifier.overlap_cluster import cluster_candidate
 from apt_classifier.platforms import ledger_platforms
 from apt_classifier.presets import apply_preset
+from apt_classifier.procedure_match import (
+    PROCEDURE_MATCH_NAME,
+    ProcedureMatchClassifier,
+    load_procedure_match_for,
+    procedure_match_bound_fingerprint,
+    procedure_match_votes,
+)
 from apt_classifier.profile_forest import load_profile_forest
 from apt_classifier.questions import (
     INTERVIEW_REVISION,
     QuestionCandidate,
     SelectedQuestion,
     interview_stop_reason,
+    parse_interview_answer,
     select_question_locally,
     select_question_with_llm,
     shortlist_questions,
 )
 from apt_classifier.reranker import LocalReranker, RerankerConfig
 from apt_classifier.retrieve import (
-    LEXICAL_DEFAULT_FIELDS,
     LexicalTechniqueIndex,
     RetrievalResult,
     apply_candidate_decisions,
     build_classifier_context,
     finalize_retrieval_candidates,
+    lexical_fields,
     refresh_context_answers,
+    retrieval_contract_for,
+    retrieval_kwargs,
     retrieve_techniques,
 )
 from apt_classifier.review.pipeline import ReviewOutcome, run_review_pipeline
@@ -75,6 +113,24 @@ from apt_classifier.separation import (
     DiscriminationWeights,
     apply_discriminative_rerank,
     discriminate,
+)
+from apt_classifier.software_questions import (
+    ANSWER_LABELS,
+    SoftwareLead,
+    cluster_window_separation,
+    is_named,
+    rank_software_leads,
+    replay_window,
+    software_question_pool,
+    software_selected_question,
+)
+from apt_classifier.technique_head import load_technique_head
+from apt_classifier.text_group import (
+    TEXT_GROUP_NAME,
+    TextGroupClassifier,
+    load_text_group_for,
+    text_group_bound_fingerprint,
+    text_group_votes,
 )
 from apt_classifier.threat_intel import (
     ThreatIntelMatch,
@@ -108,6 +164,17 @@ _CLASSIFIER_FAMILIES = {
     SOURCE_COUNTRY_NAME: "origin",
     # a learned profile model like the group forest: no new independent family for the gate
     GROUP_MLP_NAME: "learned_profile",
+    # free text scored against ATT&CK-derived group documents: also a learned profile
+    TEXT_GROUP_NAME: "learned_profile",
+    # statements scored against the same corpus sentence by sentence: also a learned profile
+    BEHAVIOR_TEXT_NAME: "learned_profile",
+    # accepted techniques' statements against the procedure sentences documented under each
+    # technique, with the software links: re-reads counted evidence, so also no new family
+    PROCEDURE_MATCH_NAME: "learned_profile",
+    # the knowledge store's members: its text documents are a learned profile like the text
+    # member's; its uses links share the software family with ATT&CK's (knowledge_store/members.py)
+    STORE_TEXT_NAME: "learned_profile",
+    STORE_SOFTWARE_NAME: "software",
 }
 
 
@@ -139,6 +206,26 @@ class AnalysisState:
     telemetry_profile: Any = None
     attribution_decision: AttributionDecision | None = None
 
+
+# pilot records of software answers (docs 21.3.15 C): the settings they were asked under
+PILOT_SCHEMA = 1
+PILOT_SETTINGS = (
+    "interview_software_questions",
+    "interview_software_per_group",
+    "interview_software_max_questions",
+    "interview_software_max_users",
+    "interview_software_when_named",
+    "interview_software_negative_weight",
+    "interview_software_found_requires_lead",
+    "software_decisive_boost",
+    "attribution_gate_mode",
+    "attribution_hypothesis_separation",
+    "attribution_hypothesis_min_discriminative",
+    "attribution_cluster_naming",
+    "attribution_cluster_scope",
+    "attribution_combiner_enabled",
+    "max_questions",
+)
 
 _FINAL_VERDICTS = frozenset(
     {
@@ -227,14 +314,8 @@ class AttributionEngine:
         self.kb = knowledge_base
         self.store = vector_store
         self.llm = llm
-        include_synthetic = bool(getattr(self.settings, "technique_include_synthetic", False))
         self.lexical_index = LexicalTechniqueIndex.from_kb(
-            knowledge_base,
-            fields=tuple(
-                field
-                for field in LEXICAL_DEFAULT_FIELDS
-                if include_synthetic or field != "synthetic"
-            ),
+            knowledge_base, fields=lexical_fields(self.settings)
         )
         self.reranker = LocalReranker(
             RerankerConfig(
@@ -264,19 +345,103 @@ class AttributionEngine:
             software_idf=bool(getattr(self.settings, "software_idf_enabled", True)),
             profile_forest=self.profile_forest,
         )
+        # the Naive Bayes member's group-background correction (off by default; fail closed to
+        # the shipped member)
+        self.nb_background, self.nb_background_status = load_nb_background_for(
+            self.settings, knowledge_base
+        )
+        self.classifiers = with_nb_background(self.classifiers, self.nb_background)
         self.group_mlp, self.group_mlp_status = load_group_mlp_for(self.settings, knowledge_base)
         if self.group_mlp is not None:
             self.classifiers = (*self.classifiers, GroupMLPClassifier(self.group_mlp))
+        self.text_group, self.text_group_status = load_text_group_for(self.settings, knowledge_base)
+        if self.text_group is not None:
+            self.classifiers = (*self.classifiers, TextGroupClassifier(self.text_group))
+        # the behaviour-text member shares the text member's artifact (loaded once when both vote)
+        self.behavior_text, self.behavior_text_status = load_behavior_text_for(
+            self.settings, knowledge_base, self.text_group
+        )
+        if self.behavior_text is not None:
+            self.classifiers = (*self.classifiers, BehaviorTextClassifier(self.behavior_text))
+        # the procedure member reads the same artifact (loaded once when several vote)
+        self.procedure_match, self.procedure_match_status = load_procedure_match_for(
+            self.settings,
+            knowledge_base,
+            self.text_group
+            or (self.behavior_text.base if self.behavior_text is not None else None),
+        )
+        if self.procedure_match is not None:
+            self.classifiers = (
+                *self.classifiers,
+                ProcedureMatchClassifier(self.procedure_match),
+            )
+        # the knowledge store's members read one shared case state (set_store_case)
+        self.store_members, self.store_members_status = load_store_members_for(
+            self.settings, knowledge_base
+        )
+        self.store_state = StoreState(self.store_members)
+        if self.store_members is not None:
+            if store_text_votes(self.settings):
+                self.classifiers = (*self.classifiers, StoreTextClassifier(self.store_state))
+            if store_software_votes(self.settings):
+                self.classifiers = (
+                    *self.classifiers,
+                    StoreSoftwareClassifier(
+                        self.store_state,
+                        tool_weight_cap=float(
+                            getattr(self.settings, "software_tool_weight_cap", 1.5)
+                        ),
+                    ),
+                )
         self.telemetry_profile: Any = None
-        self.exemplar_index, self.exemplar_status = load_exemplar_index(self.settings)
+        # the store's Chroma client serves a Chroma exemplar backend (never a client of its own)
+        self.exemplar_index, self.exemplar_status = load_exemplar_index(
+            self.settings, client=getattr(vector_store, "client", None)
+        )
+        # the fine-tuned technique head's local service (off by default; fail closed)
+        self.technique_head, self.technique_head_status = load_technique_head(
+            self.settings, knowledge_base
+        )
+        # refused (fallback, else the rule-based gate) unless these settings meet the retrieval
+        # contract the model was fitted under (acceptance.legacy_contract for older artifacts)
         self.acceptance_model, self.acceptance_model_status = load_acceptance_model(
-            self.settings, knowledge_base, self.exemplar_index
+            self.settings,
+            knowledge_base,
+            self.exemplar_index,
+            contract=retrieval_contract_for(
+                self.settings,
+                self.exemplar_index,
+                store=vector_store,
+                technique_head=self.technique_head,
+            ),
         )
         self.combiner_fingerprint = pipeline_fingerprint(
             rrf_k=int(self.settings.rrf_k),
             weights=self.default_weights(),
             family_weights=self.family_weights(),
         )
+        if self.nb_background is not None:
+            # a combiner fitted with the corrected Naive Bayes is bound to its reference
+            self.combiner_fingerprint = nb_background_bound_fingerprint(
+                self.combiner_fingerprint, self.nb_background
+            )
+        if self.text_group is not None:
+            # a combiner fitted with the text model voting is bound to that model and code
+            self.combiner_fingerprint = text_group_bound_fingerprint(
+                self.combiner_fingerprint, self.text_group
+            )
+        if self.behavior_text is not None:
+            self.combiner_fingerprint = behavior_text_bound_fingerprint(
+                self.combiner_fingerprint, self.behavior_text
+            )
+        if self.procedure_match is not None:
+            self.combiner_fingerprint = procedure_match_bound_fingerprint(
+                self.combiner_fingerprint, self.procedure_match
+            )
+        if self.store_members is not None:
+            self.combiner_fingerprint = store_bound_fingerprint(
+                self.combiner_fingerprint, self.store_members, self._store_weights()
+            )
         self.combiner, self.combiner_status = load_attribution_combiner(
             self.settings, knowledge_base, fingerprint=self.combiner_fingerprint
         )
@@ -299,6 +464,26 @@ class AttributionEngine:
             ),
             hypothesis_specificity=float(
                 getattr(self.settings, "attribution_hypothesis_specificity", 0.0)
+            ),
+            hypothesis_min_probability=float(
+                getattr(self.settings, "attribution_hypothesis_min_probability", 0.0) or 0.0
+            ),
+            technique_list_one_family=bool(
+                getattr(self.settings, "attribution_technique_list_one_family", False)
+            ),
+            hypothesis_above_null=bool(
+                getattr(self.settings, "attribution_hypothesis_above_null", False)
+            ),
+            cluster_naming=bool(getattr(self.settings, "attribution_cluster_naming", False)),
+            cluster_min_probability=float(
+                getattr(self.settings, "attribution_cluster_min_probability", 0.8)
+            ),
+            cluster_min_discriminative=float(
+                getattr(self.settings, "attribution_cluster_min_discriminative", 3.5)
+            ),
+            cluster_scope=str(getattr(self.settings, "attribution_cluster_scope", "documented")),
+            cluster_max_techniques=int(
+                getattr(self.settings, "attribution_cluster_max_techniques", 0) or 0
             ),
         )
 
@@ -332,40 +517,21 @@ class AttributionEngine:
             )
         if mode == "local" and verify:
             raise ValueError("local mapping mode cannot enable OpenRouter verification")
+        # the settings-driven arguments are shared with the benchmarks and the acceptance fit
+        # (retrieval_kwargs), so the model judges the candidates it was fitted on
         retrieval = retrieve_techniques(
             ledger,
             self.store,
             self.kb,
-            threshold=self.settings.similarity_threshold,
-            top_k=self.settings.retrieval_top_k,
-            behavior_threshold=self.settings.behavior_similarity_threshold,
-            behavior_top_k=self.settings.behavior_retrieval_top_k,
-            retrieval_mode=getattr(self.settings, "technique_retrieval_mode", "hybrid"),
-            candidate_pool=getattr(self.settings, "technique_candidate_pool", 12),
-            include_detection=getattr(self.settings, "technique_include_detection", False),
-            parent_policy=getattr(self.settings, "technique_parent_policy", "ancestor_compatible"),
-            lexical_index=self.lexical_index,
-            acceptance_threshold=getattr(self.settings, "technique_acceptance_threshold", 0.75),
-            relative_margin=getattr(self.settings, "technique_relative_margin", 0.08),
+            **retrieval_kwargs(
+                self.settings,
+                exemplar_index=self.exemplar_index,
+                lexical_index=self.lexical_index,
+                technique_head=self.technique_head,
+            ),
             reranker=self.reranker if self.reranker.available else None,
             finalize=False,
             acceptance_model=self.acceptance_model,
-            rank_by_acceptance=bool(getattr(self.settings, "technique_rank_by_acceptance", False)),
-            corroboration_accept_observations=int(
-                getattr(self.settings, "technique_corroboration_accept_observations", 0)
-            ),
-            corroboration_accept_min_probability=float(
-                getattr(self.settings, "technique_corroboration_accept_min_probability", 0.2)
-            ),
-            rrf_k=int(getattr(self.settings, "technique_rrf_k", 60)),
-            corroboration_bonus=float(getattr(self.settings, "technique_corroboration_bonus", 0.0)),
-            segment_acceptance=bool(getattr(self.settings, "technique_segment_acceptance", False)),
-            hierarchy_parent_mode=str(
-                getattr(self.settings, "technique_hierarchy_parent_mode", "off")
-            ),
-            include_synthetic=bool(getattr(self.settings, "technique_include_synthetic", False)),
-            platform_from_text=bool(getattr(self.settings, "technique_platform_from_text", False)),
-            **exemplar_kwargs(self.settings, self.exemplar_index),
         )
         verifications: dict[str, TechniqueCandidateVerificationResult] = {}
         # Local gating runs first so that the verifier's ``ambiguous`` scope means what it
@@ -412,6 +578,18 @@ class AttributionEngine:
             segment_acceptance=bool(getattr(self.settings, "technique_segment_acceptance", False)),
             hierarchy_parent_mode=str(
                 getattr(self.settings, "technique_hierarchy_parent_mode", "off")
+            ),
+            single_answer_cap=str(
+                getattr(self.settings, "technique_single_answer_cap", "model") or "model"
+            ),
+            technique_head_agreement=str(
+                getattr(self.settings, "technique_head_agreement", "off") or "off"
+            ),
+            technique_head_first=str(
+                getattr(self.settings, "technique_head_first", "model") or "model"
+            ),
+            technique_head_sibling=str(
+                getattr(self.settings, "technique_head_sibling", "model") or "model"
             ),
         )
 
@@ -461,16 +639,103 @@ class AttributionEngine:
 
     def _assess_stage(self, state: AnalysisState) -> AttributionDecision:
         """Stage decision from the deterministic fusion only (LLM votes never raise it). The
-        discrimination and combiner read here are the ones that fusion left on the context."""
+        discrimination and combiner read here are the ones that fusion left on the context.
+
+        Software interview answers (software_questions.py): "not found" ids go to the gate's
+        last step only; with a "found" the gate also gets the separation without the interview
+        software (recorded by ``_fuse``) and whether the case would be named without it."""
+        context = state.context
+        guard = getattr(context, "interview_software_guard", None)
+        if guard:
+            guard = {
+                **guard,
+                "requires_lead": bool(
+                    getattr(self.settings, "interview_software_found_requires_lead", True)
+                ),
+                "named_without": self._named_without_interview_software(state),
+            }
         return assess_attribution(
             self.kb,
             state.deterministic_fusion or state.fusion,
-            state.context,
+            context,
             thresholds=self.attribution_thresholds,
             classifier_families=_CLASSIFIER_FAMILIES,
-            discrimination=getattr(state.context, "discrimination", None),
-            combiner=getattr(state.context, "combiner", None),
+            discrimination=getattr(context, "discrimination", None),
+            combiner=getattr(context, "combiner", None),
+            negative_software=sorted(getattr(context, "negative_software_ids", ()) or ()),
+            negative_software_weight=float(
+                getattr(self.settings, "interview_software_negative_weight", 0.3)
+            ),
+            software_guard=guard,
         )
+
+    def _named_without_interview_software(self, state: AnalysisState) -> bool:
+        """Whether the case would be named (group or cluster) with only the software its text
+        names: the same scoring and gate on a copy of the context without any software answer."""
+        base = copy.copy(state.context)
+        base.software_ids = set(getattr(state.context, "document_software_ids", ()) or ())
+        base.interview_found_software = set()
+        base.negative_software_ids = set()
+        base.interview_software_guard = None
+        weights = self.default_weights()
+        weights.update(state.weights or {})
+        _, _, deterministic, _ = self._score(base, weights)
+        decision = assess_attribution(
+            self.kb,
+            deterministic,
+            base,
+            thresholds=self.attribution_thresholds,
+            classifier_families=_CLASSIFIER_FAMILIES,
+            discrimination=getattr(base, "discrimination", None),
+            combiner=getattr(base, "combiner", None),
+        )
+        return is_named(decision)
+
+    def _replay_options(self) -> dict[str, Any]:
+        return {
+            "tool_weight_cap": float(getattr(self.settings, "software_tool_weight_cap", 1.5)),
+            "behavior_threshold": float(self.settings.behavior_similarity_threshold),
+        }
+
+    def _found_guard(self, context: ClassifierContext, candidate: Any) -> dict[str, Any] | None:
+        """With a "found" software answer: the gate leader's separation (and the documented
+        cluster's, when there is a candidate) in the recorded gate window with only the software
+        the case text names. None without a "found"."""
+        found = set(getattr(context, "interview_found_software", ()) or ())
+        discrimination = getattr(context, "discrimination", None)
+        if not found or discrimination is None or not discrimination.scores:
+            return None
+        document = set(getattr(context, "document_software_ids", ()) or ())
+        boost = float(getattr(self.settings, "software_decisive_boost", 0.0))
+        without = replay_window(
+            self.kb,
+            discrimination,
+            context,
+            software_ids=document,
+            decisive_boost=boost,
+            **self._replay_options(),
+        )
+        cluster_without = (
+            cluster_window_separation(
+                self.kb,
+                discrimination,
+                context,
+                candidate.members,
+                software_ids=document,
+                decisive_boost=boost,
+                **self._replay_options(),
+            )
+            if candidate is not None
+            else None
+        )
+        return {
+            "found": sorted(found),
+            "document_software_ids": sorted(document),
+            "separation_without": round(float(without.separation), 4),
+            "cluster_separation_without": (
+                round(float(cluster_without), 4) if cluster_without is not None else None
+            ),
+        }
 
     def set_telemetry_profile(self, profile: Any) -> None:
         """Set the per-case telemetry profile used for negative-answer validation.
@@ -519,6 +784,9 @@ class AttributionEngine:
                 ),
                 effort=getattr(self.settings, "technique_verifier_effort", "low"),
                 scope=scope,
+                min_confidence=float(
+                    getattr(self.settings, "local_llm_verifier_min_confidence", 0.0) or 0.0
+                ),
             )
             results[observation_id] = result
             for candidate in result.candidates:
@@ -634,9 +902,91 @@ class AttributionEngine:
             platforms=ledger_platforms(state.ledger),
         )
 
+    def software_leads(self, state: AnalysisState) -> list[SoftwareLead]:
+        """Malware only one of the decision's first three candidates documents, ranked as the
+        software questions ask about it (software_questions.py); the Distinguish view shows the
+        same rows."""
+        context = state.context
+        discrimination = getattr(context, "discrimination", None)
+        if discrimination is None or not discrimination.scores:
+            return []
+        fusion = state.deterministic_fusion or state.fusion
+        answered = {
+            answer.software_id
+            for answer in state.ledger.question_answers
+            if getattr(answer, "software_id", None)
+        }
+        pool = software_question_pool(
+            self.kb,
+            [item.group_id for item in discrimination.scores],
+            [entry.group_id for entry in fusion.entries[:3]],
+            set(getattr(context, "software_ids", ()) or ()),
+            answered,
+            max_users=int(getattr(self.settings, "interview_software_max_users", 1)),
+        )
+        # the per-group cap holds over the whole interview, not per selection
+        asked: Counter[str] = Counter()
+        software_groups = getattr(self.kb, "software_groups", {}) or {}
+        for answer in state.ledger.question_answers:
+            if getattr(answer, "kind", "") != "software":
+                continue
+            target = answer.metadata.get("target_group_id")
+            users = list(software_groups.get(answer.software_id or "", ()) or ())
+            if target is None and len(users) == 1:
+                target = users[0]
+            if target:
+                asked[str(target)] += 1
+        return rank_software_leads(
+            self.kb,
+            discrimination,
+            context,
+            pool,
+            per_group=int(getattr(self.settings, "interview_software_per_group", 1)),
+            decisive_boost=float(getattr(self.settings, "software_decisive_boost", 0.0)),
+            negative_weight=float(
+                getattr(self.settings, "interview_software_negative_weight", 0.3)
+            ),
+            asked=dict(asked),
+            **self._replay_options(),
+        )
+
+    def software_question(self, state: AnalysisState) -> SelectedQuestion | None:
+        """The next software question, or None: only with INTERVIEW_SOFTWARE_QUESTIONS, while
+        the case is not named (unless INTERVIEW_SOFTWARE_WHEN_NAMED), below both question caps
+        (software questions count toward MAX_QUESTIONS) and while a lead remains."""
+        settings = self.settings
+        if not bool(getattr(settings, "interview_software_questions", False)):
+            return None
+        if not bool(getattr(settings, "interview_software_when_named", False)) and is_named(
+            state.attribution_decision
+        ):
+            return None
+        answers = state.ledger.question_answers
+        asked = sum(1 for answer in answers if getattr(answer, "kind", "") == "software")
+        if asked >= int(getattr(settings, "interview_software_max_questions", 3)):
+            return None
+        if len(answers) >= int(settings.max_questions):
+            return None
+        leads = self.software_leads(state)
+        if not leads:
+            return None
+        discrimination = getattr(state.context, "discrimination", None)
+        return software_selected_question(
+            self.kb,
+            leads[0],
+            platforms=ledger_platforms(state.ledger),
+            window_size=len(discrimination.scores) if discrimination is not None else 0,
+        )
+
     def next_question(self, state: AnalysisState) -> SelectedQuestion | None:
         if state.interview_complete:
             return None
+        # software questions first (fixed wording, never rephrased by the LLM)
+        software = self.software_question(state)
+        if software is not None:
+            state.current_question = software
+            state.interview_stop_reason = None
+            return software
         candidates = self.question_shortlist(state)
         stop_reason = interview_stop_reason(
             self.interview_hypothesis_weights(state),
@@ -674,6 +1024,8 @@ class AttributionEngine:
         question = state.current_question
         if question is None:
             raise ValueError("No current question to answer")
+        if getattr(question, "kind", "technique") == "software":
+            return self._answer_software_question(state, question, status, answer_text)
         state.ledger.add_question_answer(
             QuestionAnswer(
                 question=question.question,
@@ -693,6 +1045,85 @@ class AttributionEngine:
             )
         )
         return self.rescore(state)
+
+    def _answer_software_question(
+        self,
+        state: AnalysisState,
+        question: SelectedQuestion,
+        status: EvidenceStatus | str,
+        answer_text: str | None,
+    ) -> AnalysisState:
+        """Found / not found / not checked for one malware entry, with the pilot record
+        (``metadata["pilot"]``, schema 1: no owner, user, e-mail, address or note text)."""
+        if isinstance(status, str) and not isinstance(status, EvidenceStatus):
+            status = parse_interview_answer(status) or status
+        answer = QuestionAnswer(
+            question=question.question,
+            technique_id=None,
+            kind="software",
+            software_id=question.software_id,
+            status=status,
+            answer_text=answer_text,
+            provenance=Provenance(source="analyst_interview"),
+            metadata={
+                "target_rank": question.target_rank,
+                "target_group_id": question.target_group_id,
+                "delta_found": question.delta_found,
+                "hypothesis": question.hypothesis,
+                "investigation_steps": list(question.investigation_steps),
+            },
+        )
+        if answer.status is EvidenceStatus.NOT_VISIBLE:
+            raise ValueError("a software question takes found, not found or not checked")
+        discrimination = getattr(state.context, "discrimination", None)
+        window_size = len(discrimination.scores) if discrimination is not None else 0
+        before = self._pilot_snapshot(state)
+        state.ledger.add_question_answer(answer)
+        self.rescore(state)
+        software = getattr(self.kb, "software", {}) or {}
+        record = {
+            "schema": PILOT_SCHEMA,
+            "case_id": state.ledger.case_id,
+            "question_id": answer.question_id,
+            "software_id": answer.software_id,
+            "software_name": str(
+                getattr(software.get(answer.software_id or ""), "name", answer.software_id)
+            ),
+            "target_rank": question.target_rank,
+            "window_size": window_size,
+            "asked_at": question.asked_at,
+            "answered_at": datetime.now(UTC).isoformat(timespec="seconds"),
+            "answer": ANSWER_LABELS.get(answer.status.value, answer.status.value),
+            "note_present": bool(answer.answer_text),
+            "before": before,
+            "after": self._pilot_snapshot(state),
+            "predicted_delta_found": question.delta_found,
+            "attack_version": str(getattr(self.kb, "version", "") or ""),
+            "pipeline_fingerprint": self.combiner_fingerprint,
+            "settings": self._pilot_settings(),
+        }
+        answer.metadata = {**answer.metadata, "pilot": record}
+        return state
+
+    @staticmethod
+    def _pilot_snapshot(state: AnalysisState) -> dict[str, Any]:
+        decision = state.attribution_decision
+        combiner = state.context.combiner if isinstance(state.context.combiner, dict) else {}
+        return {
+            "stage": decision.stage.value if decision is not None else None,
+            "leader": decision.leading_group_id if decision is not None else None,
+            "named_cluster": list(getattr(decision, "named_cluster", ()) or ()),
+            "separation": (round(float(decision.separation), 4) if decision is not None else None),
+            "combiner_probability": combiner.get("leader_probability"),
+        }
+
+    def _pilot_settings(self) -> dict[str, Any]:
+        settings = self.settings
+        return {
+            name: getattr(settings, name, None)
+            for name in PILOT_SETTINGS
+            if hasattr(settings, name)
+        }
 
     def run_cyberre(
         self,
@@ -913,6 +1344,26 @@ class AttributionEngine:
                 behavior_threshold=float(self.settings.behavior_similarity_threshold),
                 soft_techniques=getattr(context, "contrast_techniques", None) or None,
             )
+            # the leader's documented-overlap twin in the gate window and the merged pair's
+            # evidence (overlap_cluster.py); recorded always, used by the stage only when
+            # ATTRIBUTION_CLUSTER_NAMING is on
+            candidate = cluster_candidate(
+                self.kb,
+                context.discrimination,
+                context,
+                probabilities=probabilities,
+                floor=float(getattr(self.settings, "attribution_separation_floor", 1.0)),
+                tool_weight_cap=float(getattr(self.settings, "software_tool_weight_cap", 1.5)),
+                behavior_threshold=float(self.settings.behavior_similarity_threshold),
+                soft_techniques=getattr(context, "contrast_techniques", None) or None,
+                scope=str(getattr(self.settings, "attribution_cluster_scope", "documented")),
+            )
+            context.combiner["cluster"] = candidate.to_dict() if candidate is not None else None
+            # the scope the twin was selected under, for the surfaces that explain the links
+            context.combiner["cluster_scope"] = str(
+                getattr(self.settings, "attribution_cluster_scope", "documented")
+            )
+            context.interview_software_guard = self._found_guard(context, candidate)
             return fusion
         context.combiner = None
         blend = float(getattr(self.settings, "attribution_rerank_blend", 0.5))
@@ -939,6 +1390,7 @@ class AttributionEngine:
                 blend,
                 float(getattr(self.settings, "attribution_separation_floor", 1.0)),
             )
+        context.interview_software_guard = self._found_guard(context, None)
         return fusion
 
     @property
@@ -994,6 +1446,64 @@ class AttributionEngine:
             if getattr(classifier, "name", None) == GROUP_MLP_NAME:
                 classifier.model = model
 
+    def set_behavior_text(self, model: Any, status: str | None = None) -> None:
+        """Swap the behaviour-text member (the benchmarks refit it without a fold's held-out
+        behaviour or a removed actor, as the text member)."""
+        self.behavior_text = model
+        self.behavior_text_status = status or (
+            "active (injected)" if model is not None else "disabled"
+        )
+        for classifier in self.classifiers:
+            if getattr(classifier, "name", None) == BEHAVIOR_TEXT_NAME:
+                classifier.model = model
+
+    def set_procedure_match(self, model: Any, status: str | None = None) -> None:
+        """Swap the procedure member (the benchmarks refit it without a fold's held-out
+        behaviour or a removed actor, as the text member)."""
+        self.procedure_match = model
+        self.procedure_match_status = status or (
+            "active (injected)" if model is not None else "disabled"
+        )
+        for classifier in self.classifiers:
+            if getattr(classifier, "name", None) == PROCEDURE_MATCH_NAME:
+                classifier.model = model
+
+    def set_store_case(self, **case: Any) -> Any:
+        """The case the knowledge store's members read (``StoreState.set_case``: its date, its own
+        post keys and statements, removed actors, extra hidden posts); the benchmarks set it per
+        report and per fold. ``clear_store_case`` returns to the whole store."""
+        return self.store_state.set_case(
+            pinned=bool(getattr(self.settings, "knowledge_store_pinned", False)), **case
+        )
+
+    def clear_store_case(self) -> None:
+        self.store_state.clear()
+
+    def _store_weights(self) -> dict[str, float]:
+        return {
+            **(
+                {STORE_TEXT_NAME: float(self.settings.store_text_weight)}
+                if store_text_votes(self.settings)
+                else {}
+            ),
+            **(
+                {STORE_SOFTWARE_NAME: float(self.settings.store_software_weight)}
+                if store_software_votes(self.settings)
+                else {}
+            ),
+        }
+
+    def set_text_group(self, model: Any, status: str | None = None) -> None:
+        """Swap the free-text model; the benchmarks refit it without a fold's held-out
+        behaviour or a removed actor (and restore the loaded one with its status)."""
+        self.text_group = model
+        self.text_group_status = status or (
+            "active (injected)" if model is not None else "disabled"
+        )
+        for classifier in self.classifiers:
+            if getattr(classifier, "name", None) == TEXT_GROUP_NAME:
+                classifier.model = model
+
     def family_weights(self) -> dict[str, float]:
         """Per-family RRF budgets from settings (single definition for every fusion call)."""
         return {
@@ -1029,6 +1539,23 @@ class AttributionEngine:
                 if group_mlp_votes(self.settings)
                 else {}
             ),
+            **(
+                {TEXT_GROUP_NAME: float(self.settings.text_group_weight)}
+                if text_group_votes(self.settings)
+                else {}
+            ),
+            **(
+                {BEHAVIOR_TEXT_NAME: float(self.settings.behavior_text_weight)}
+                if behavior_text_votes(self.settings)
+                else {}
+            ),
+            **(
+                {PROCEDURE_MATCH_NAME: float(self.settings.procedure_match_weight)}
+                if procedure_match_votes(self.settings)
+                else {}
+            ),
+            # only when the members loaded and vote (weight 0 adds no key)
+            **(self._store_weights() if self.store_members is not None else {}),
         }
 
     def _score(

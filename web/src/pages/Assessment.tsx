@@ -7,6 +7,7 @@ import type { CasePayload } from '../api/types'
 import { CaseFrame, PageHeader, useCaseId } from '../components/CaseFrame'
 import { GateMetric, RankedBars, RankHeatmap } from '../components/charts'
 import { DossierPanel } from '../components/Dossier'
+import { ModelOpinionCard } from '../components/ModelOpinion'
 import { STAGE_META, StageBadge, stageIcon } from '../components/StageBadge'
 import { Top3StateBadge } from '../components/TopThree'
 import { Badge, Button, Callout, Card, DataTable, Label, Metric, SectionTitle, Segmented, Tabs } from '../components/ui'
@@ -26,13 +27,16 @@ function AssessmentView({ caseId, data }: { caseId: string; data: CasePayload })
   const gateMode = decision?.thresholds.gate_mode ?? 'maturity'
   const usesMaturity = gateMode === 'maturity' || gateMode === 'both'
   const usesSeparation = gateMode === 'separation' || gateMode === 'both'
+  // only a link that may be read as one cluster under the gate's scope (docs 10.11)
+  const sameActivity = decision?.related_groups.filter((g) => g.link === 'same_activity') ?? []
+  const otherLinks = decision?.related_groups.filter((g) => g.link !== 'same_activity') ?? []
 
   return (
     <div className="space-y-6">
       <PageHeader
         step="Step 5 · Assessment"
         title="Attribution assessment"
-        lead="The stage decision, the deterministic ranking and the evidence behind it. Nothing here is a probability; the relative index compares candidates within this case only."
+        lead="The stage decision, the deterministic ranking and the evidence behind it. The relative index compares candidates within this case only; the leader probability is the learned combiner's estimate that the leader is the true group."
         action={
           !data.interview.answered && !data.interview.complete ? (
             <Button variant="outline" onClick={() => navigate(`/cases/${caseId}/interview`)}>
@@ -47,7 +51,7 @@ function AssessmentView({ caseId, data }: { caseId: string; data: CasePayload })
           <div
             className={cn(
               'pointer-events-none absolute -right-20 -top-20 size-64 rounded-full blur-3xl',
-              decision.named ? 'bg-emerald/15' : 'bg-accent/10',
+              decision.named || decision.named_cluster ? 'bg-emerald/15' : 'bg-accent/10',
             )}
           />
           <div className="relative grid gap-6 lg:grid-cols-[minmax(0,1.3fr)_minmax(0,1fr)]">
@@ -70,19 +74,40 @@ function AssessmentView({ caseId, data }: { caseId: string; data: CasePayload })
                 <span
                   className={cn(
                     'grid size-11 shrink-0 place-items-center rounded-xl',
-                    decision.named ? 'bg-emerald-soft text-emerald' : 'bg-surface-3 text-muted',
+                    decision.named || decision.named_cluster ? 'bg-emerald-soft text-emerald' : 'bg-surface-3 text-muted',
                   )}
                 >
                   {stageIcon(decision.stage, 'size-5')}
                 </span>
                 <div className="min-w-0">
-                  <Label>{decision.named ? 'Named hypothesis' : 'Closest documented group (not an attribution)'}</Label>
-                  <div className="mt-0.5 text-2xl font-semibold tracking-tight">
-                    {decision.leading_group_name || 'No candidate'}
-                    {decision.leading_group_id ? (
-                      <span className="mono ml-2 text-sm font-normal text-faint">{decision.leading_group_id}</span>
-                    ) : null}
-                  </div>
+                  <Label>
+                    {decision.named_cluster
+                      ? 'Named cluster hypothesis (documented overlap)'
+                      : decision.named
+                        ? 'Named hypothesis'
+                        : 'Closest documented group (not an attribution)'}
+                  </Label>
+                  {decision.named_cluster ? (
+                    <>
+                      <div className="mt-0.5 text-2xl font-semibold tracking-tight">{decision.named_cluster.label}</div>
+                      <div className="mt-1 text-xs text-muted">
+                        ATT&CK link: {decision.named_cluster.reason}. The pair separates from{' '}
+                        {decision.named_cluster.runner_up_name ?? 'the rest of the shortlist'} (cluster separation{' '}
+                        {fmt(decision.named_cluster.separation, 2)}, mass {fmt(decision.named_cluster.discriminative, 2)}
+                        {decision.named_cluster.probability !== null
+                          ? `, combined probability ${fmt(decision.named_cluster.probability, 2)}`
+                          : ''}
+                        ), but the evidence does not separate the two. Report the cluster, not either member.
+                      </div>
+                    </>
+                  ) : (
+                    <div className="mt-0.5 text-2xl font-semibold tracking-tight">
+                      {decision.leading_group_name || 'No candidate'}
+                      {decision.leading_group_id ? (
+                        <span className="mono ml-2 text-sm font-normal text-faint">{decision.leading_group_id}</span>
+                      ) : null}
+                    </div>
+                  )}
                   {decision.runner_up_name ? (
                     <div className="mt-1 text-xs text-muted">
                       Best-supported alternative:{' '}
@@ -100,16 +125,34 @@ function AssessmentView({ caseId, data }: { caseId: string; data: CasePayload })
               </div>
               <p className="mt-4 text-sm leading-relaxed text-muted">{decision.rationale}</p>
               <div className="mt-4 space-y-2">
-                {decision.related_groups.length ? (
+                {sameActivity.length ? (
                   <Callout tone="warning" icon={<Link2 className="size-4" />} title="Documented overlap">
-                    ATT&CK itself links the leader to{' '}
-                    {decision.related_groups.map((g, i) => (
+                    ATT&CK documents the leader and{' '}
+                    {sameActivity.map((g, i) => (
+                      <span key={g.group_id}>
+                        {i ? '; ' : ''}
+                        <span className="text-text">{g.name}</span> ({g.reason})
+                      </span>
+                    ))}{' '}
+                    as the same or overlapping activity.{' '}
+                    {decision.stage === 'known_group_hypothesis'
+                      ? 'Here the evidence separates the leader from them, so the leader is named alone.'
+                      : decision.stage === 'known_cluster_hypothesis'
+                        ? 'The named cluster above reports them together.'
+                        : 'When the evidence cannot separate them, report the cluster rather than one name.'}
+                  </Callout>
+                ) : null}
+                {otherLinks.length ? (
+                  <Callout tone="info" icon={<Link2 className="size-4" />} title="ATT&CK-linked groups">
+                    ATT&CK links the leader to{' '}
+                    {otherLinks.map((g, i) => (
                       <span key={g.group_id}>
                         {i ? '; ' : ''}
                         <span className="text-text">{g.name}</span> ({g.reason})
                       </span>
                     ))}
-                    . This evidence usually cannot separate them; report the cluster, not one name.
+                    , but does not document them as the same actor. Keep them apart: look for evidence only one of
+                    them documents.
                   </Callout>
                 ) : null}
                 {decision.decisive_software ? (
@@ -125,7 +168,7 @@ function AssessmentView({ caseId, data }: { caseId: string; data: CasePayload })
                     {fmt(decision.decisive_software.factor, 1)}.
                   </Callout>
                 ) : null}
-                {!decision.named ? (
+                {!decision.named && !decision.named_cluster ? (
                   <Callout tone="info" title="No named group meets the evidence bar">
                     {meta.advice} The ranking below is a shortlist of the closest documented groups.
                   </Callout>
@@ -198,6 +241,9 @@ function AssessmentView({ caseId, data }: { caseId: string; data: CasePayload })
       ) : (
         <Callout tone="info">No attribution decision is available for this case.</Callout>
       )}
+
+      {/* opt-in second opinion of a language model: beside the decision, never part of it */}
+      <ModelOpinionCard caseId={caseId} opinion={data.model_opinion} />
 
       <Card>
         <SectionTitle

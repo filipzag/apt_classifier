@@ -19,9 +19,11 @@ from types import SimpleNamespace
 from typing import Any
 from uuid import uuid4
 
+from apt_classifier import model_opinion as second_opinion
 from apt_classifier.attack.kb import AttackKnowledgeBase
 from apt_classifier.canvas import build_analyst_canvas, build_candidate_dossier
 from apt_classifier.cases import CaseRecord, CaseStore
+from apt_classifier.confidence_labels import confidence_label, load_confidence_labels
 from apt_classifier.config import Settings, get_settings
 from apt_classifier.diamond import build_diamond_model
 from apt_classifier.embeddings import SentenceTransformerEmbedder
@@ -34,7 +36,9 @@ from apt_classifier.evidence.models import (
     TechniqueReviewAction,
     TechniqueReviewDecision,
 )
-from apt_classifier.llm import OpenRouterClient
+from apt_classifier.evidence.standardise import standardise_observations
+from apt_classifier.llm import OpenRouterClient, is_local_model, prose_normalisation
+from apt_classifier.llm import llm_available as _llm_available
 from apt_classifier.platforms import ledger_platforms, normalize_platforms, set_ledger_platforms
 from apt_classifier.questions import parse_interview_answer
 from apt_classifier.report import export_document
@@ -51,6 +55,8 @@ from apt_classifier.vectorstore import ChromaVectorStore
 
 SAMPLE_PATH = Path(__file__).resolve().parents[1] / "data" / "samples" / "case_observation.txt"
 INTEL_CACHE_SECONDS = 1800.0
+# shown beside the button before the analyst pays for a call
+MODEL_OPINION_COST_NOTE = "about $0.05-0.06 a call (measured on 119 reports)"
 
 
 class UploadedBlob:
@@ -121,6 +127,21 @@ class IntakePayload:
         return bool(self.free_text() or self.alerts.strip() or self.iocs.strip() or self.files)
 
 
+def _group_label(kb: Any, group_id: str) -> str:
+    group = getattr(kb, "groups", {}).get(group_id)
+    return str(getattr(group, "name", group_id)) if group else group_id
+
+
+def pilot_records(ledger: EvidenceLedger) -> list[dict[str, Any]]:
+    """The ``metadata["pilot"]`` records of a ledger's software answers, in answer order."""
+    return [
+        dict(answer.metadata["pilot"])
+        for answer in ledger.question_answers
+        if getattr(answer, "kind", "technique") == "software"
+        and isinstance(answer.metadata.get("pilot"), dict)
+    ]
+
+
 class CaseNotFound(KeyError):
     pass
 
@@ -130,11 +151,17 @@ class ServiceUnavailable(RuntimeError):
 
 
 def llm_available(settings: Settings) -> bool:
-    try:
-        settings.require_api_key()
-    except RuntimeError:
-        return False
-    return True
+    """An OpenRouter key, or LOCAL_LLM_ENABLED with a reachable Ollama server."""
+    return _llm_available(settings)
+
+
+def _exemplar_backend(index: Any) -> str:
+    """Where the exemplar library is served from: "npz", "chroma (exact)", "chroma (hnsw)" or
+    "off" when none is loaded."""
+    if index is None:
+        return "off"
+    backend = str(getattr(index, "backend", "npz") or "npz")
+    return f"{backend} ({getattr(index, 'search', 'exact')})" if backend == "chroma" else backend
 
 
 class CaseService:
@@ -154,6 +181,14 @@ class CaseService:
             client = OpenRouterClient(self.settings) if llm_available(self.settings) else None
             engine = AttributionEngine(self.settings, kb, store, client)  # type: ignore[arg-type]
         self.engine = engine
+        # Calibrated confidence labels for the Top-three view (display only): pinned to the
+        # combiner the engine loaded, so they read exactly the probabilities it records.
+        self.confidence_labels, self.confidence_labels_status = load_confidence_labels(
+            self.settings,
+            getattr(engine, "kb", None),
+            getattr(engine, "combiner", None),
+            getattr(getattr(engine, "settings", None), "attribution_combiner_path", None),
+        )
         self.store = CaseStore(cases_dir or (self.settings.data_dir / "cases"))
         self._states: dict[str, AnalysisState] = {}
         self._meta: dict[str, CaseMeta] = {}
@@ -163,6 +198,12 @@ class CaseService:
         self._engine_lock = threading.RLock()
         self._intel_cache: dict[tuple[int, bool], tuple[float, ThreatIntelSnapshot]] = {}
         self._elastic_batches: dict[str, Any] = {}
+        # The model's second opinion per case (display only): in memory like the AI review,
+        # never on the state and never in the case file. It survives a re-analysis; its
+        # payload says when the case text has changed since.
+        self._model_opinions: dict[str, second_opinion.ModelOpinion] = {}
+        # cases the model is answering for right now: a second request would pay twice
+        self._model_opinions_pending: set[str] = set()
 
     # ----- system -----
     @property
@@ -205,15 +246,55 @@ class CaseService:
             if isinstance(status, str | dict | type(None))
             else str(status),
             "combiner": str(getattr(self.engine, "combiner_status", "unavailable")),
+            "confidence_labels": str(self.confidence_labels_status),
             "exemplars": str(getattr(self.engine, "exemplar_status", "unavailable")),
+            "exemplar_backend": _exemplar_backend(getattr(self.engine, "exemplar_index", None)),
+            "technique_head": str(getattr(self.engine, "technique_head_status", "disabled")),
             "profile_forest": forest_status,
             "group_mlp": str(getattr(self.engine, "group_mlp_status", "unavailable")),
+            "text_group": str(getattr(self.engine, "text_group_status", "unavailable")),
             "index": index,
             "llm_spend_usd": round(float(getattr(usage, "cost_usd", 0.0) or 0.0), 4),
+            **self._llm_routing(),
+            "model_opinion": self.model_opinion_status(),
             "cases": len(self.store.list()),
             "elastic_mcp": bool(getattr(settings, "elastic_mcp_url", None)),
             "classifier_weights": self.engine.default_weights(),
         }
+
+    def _llm_routing(self) -> dict[str, Any]:
+        """Which model answers each LLM task (OpenRouter, the local server, or nothing)."""
+        client = getattr(self.engine, "llm", None)
+        settings = self.engine.settings
+        tasks = {
+            "extraction": settings.extract_model,
+            "verifier": settings.technique_verifier_model,
+            "cyberre": settings.cyberre_model,
+            "review": settings.review_model,
+        }
+        resolve = getattr(client, "resolve_model", None)
+        models: dict[str, str | None] = {}
+        for task, model in tasks.items():
+            if client is None:
+                models[task] = None
+                continue
+            try:
+                models[task] = resolve(model) if callable(resolve) else model
+            except RuntimeError:
+                models[task] = None
+        prose_mode, prose_model = prose_normalisation(client, settings)
+        models["extraction"] = prose_model  # None: prose is split into sentences
+        used = {model for model in models.values() if model}
+        local = {model for model in used if is_local_model(model)}
+        if not used:
+            provider = "none"
+        elif not local:
+            provider = "openrouter"
+        elif local == used:
+            provider = "local"
+        else:
+            provider = "hybrid"
+        return {"llm_provider": provider, "llm_models": models, "prose_normalisation": prose_mode}
 
     def sample_text(self) -> str:
         return SAMPLE_PATH.read_text(encoding="utf-8") if SAMPLE_PATH.is_file() else ""
@@ -237,7 +318,8 @@ class CaseService:
     def _build_ledger(self, payload: IntakePayload, diagnostics: dict[str, Any]) -> EvidenceLedger:
         context = payload.context()
         files = list(payload.files) or None
-        if self.local_mode:
+        prose_mode, prose_model = prose_normalisation(self.engine.llm, self.engine.settings)
+        if prose_mode != "extract":
             ledger = extract_evidence(
                 None,
                 iocs=payload.iocs or None,
@@ -246,9 +328,17 @@ class CaseService:
                 kb=self.engine.kb,
                 strategic_context=context,
             )
-            ledger.observations.extend(local_observations(payload.free_text()))
+            prose = local_observations(payload.free_text())
+            if prose_mode == "sentences":
+                # local model: split first, then each sentence rewritten 1:1 (docs 16.4a)
+                prose = standardise_observations(
+                    prose, self.engine.llm, model=str(prose_model), diagnostics=diagnostics
+                )
+            ledger.observations.extend(prose)
             ledger.observations.extend(local_observations(payload.alerts, source="alerts"))
-            diagnostics["normalization"] = "local_sentence_split"
+            diagnostics["normalization"] = (
+                "local_llm_sentences" if prose_mode == "sentences" else "local_sentence_split"
+            )
             return ledger
         return extract_evidence(
             self.engine.llm,
@@ -303,6 +393,7 @@ class CaseService:
             "observations": len(state.ledger.observations),
             "stage": decision.stage.value if decision else None,
             "leading_group": decision.leading_group_id if decision else leader,
+            "named_cluster": list(getattr(decision, "named_cluster", ()) or ()) if decision else [],
             "accepted_techniques": len(getattr(state.retrieval, "observed_techniques", {}) or {}),
             "answers": len(state.ledger.question_answers),
         }
@@ -396,6 +487,7 @@ class CaseService:
         with self._lock(case_id):
             self._states.pop(case_id, None)
             self._meta.pop(case_id, None)
+            self._model_opinions.pop(case_id, None)
             return self.store.delete(case_id)
 
     def rescore(self, case_id: str, weights: dict[str, float]) -> AnalysisState:
@@ -490,6 +582,8 @@ class CaseService:
                         "technique_id": a.technique_id,
                         "status": a.status.value,
                         "text": a.answer_text,
+                        "kind": a.kind,
+                        "software_id": a.software_id,
                     }
                     for a in state.ledger.question_answers
                 ],
@@ -506,6 +600,10 @@ class CaseService:
                         "probability_yes": question.probability_yes,
                         "information_gain": question.information_gain,
                         "investigation_priority": question.investigation_priority,
+                        "kind": question.kind,
+                        "software_id": question.software_id,
+                        "target_rank": question.target_rank,
+                        "delta_found": question.delta_found,
                     }
                     if question is not None
                     else None
@@ -537,7 +635,10 @@ class CaseService:
             try:
                 parsed = EvidenceStatus(status)
             except ValueError:
-                raise ValueError("answer must be yes, no, unknown or not visible") from None
+                raise ValueError(
+                    "answer must be yes, no, unknown or not visible (software questions: found, "
+                    "not found or not checked)"
+                ) from None
         with self._lock(case_id), self._engine_lock:
             if state.current_question is None:
                 raise ValueError("there is no open question to answer")
@@ -559,7 +660,8 @@ class CaseService:
     def _require_llm(self, what: str) -> None:
         if self.local_mode:
             raise ServiceUnavailable(
-                f"{what} needs an OpenRouter key; the service runs in local mode"
+                f"{what} needs an LLM (an OpenRouter key or LOCAL_LLM_ENABLED with Ollama); "
+                "the service runs in local mode"
             )
 
     def run_review(self, case_id: str) -> AnalysisState:
@@ -581,6 +683,114 @@ class CaseService:
                 self.engine.run_cyberre_batch(state, use_prefilter=use_prefilter)
             self._save(case_id)
         return state
+
+    # ----- the model's second opinion (display only) -----
+    def model_opinion_status(self) -> dict[str, Any]:
+        """Whether the second opinion can be asked here and by which model. Never raises."""
+        model, effort = second_opinion.REGISTERED_MODEL, second_opinion.REGISTERED_EFFORT
+        enabled = has_key = False
+        try:
+            settings = self.settings
+            enabled = bool(getattr(settings, "model_opinion_enabled", False))
+            model = str(getattr(settings, "model_opinion_model", None) or model)
+            effort = str(getattr(settings, "model_opinion_effort", None) or effort)
+            # an OpenRouter key, not just any LLM: without one the client lets its local
+            # fallback model answer in the cloud model's name
+            has_key = bool(getattr(getattr(self.engine, "llm", None), "api_key", None))
+        except Exception:  # noqa: BLE001 - a status line must not break the system page
+            enabled = False
+        if not enabled:
+            status = "disabled"
+        elif not has_key:
+            status = "needs an OpenRouter key"
+        elif is_local_model(model):
+            status = "needs a cloud model"
+        else:
+            status = "ready"
+        return {
+            "enabled": enabled,
+            "available": status == "ready",
+            "model": model,
+            "effort": effort,
+            "status": status,
+            "confident_probability": second_opinion.CONFIDENT_PROBABILITY,
+            "registered_model": second_opinion.REGISTERED_MODEL,
+            "registered_effort": second_opinion.REGISTERED_EFFORT,
+            "cost_note": MODEL_OPINION_COST_NOTE,
+        }
+
+    def ask_model_opinion(self, case_id: str) -> AnalysisState:
+        """One paid call: the configured cloud model's answer for this case, kept beside the
+        case for display. Nothing of it reaches the engine, the state or the case file. A case
+        that is already loaded is not analysed again; a case that is on disk only is loaded
+        first (one analysis), as for every other route."""
+        status = self.model_opinion_status()
+        if not status["available"]:
+            reasons = {
+                "disabled": "it is switched off (MODEL_OPINION_ENABLED)",
+                "needs an OpenRouter key": "it needs an OpenRouter key (OPENROUTER_API_KEY)",
+                "needs a cloud model": (
+                    f"it needs a cloud model and {status['model']} is a local model "
+                    "(MODEL_OPINION_MODEL)"
+                ),
+            }
+            raise ServiceUnavailable(
+                f"the model's second opinion cannot be asked: {reasons[status['status']]}"
+            )
+        with self._global_lock:
+            if case_id in self._model_opinions_pending:
+                raise ServiceUnavailable(
+                    "the model is already answering for this case; its answer appears on the "
+                    "case when it arrives"
+                )
+            self._model_opinions_pending.add(case_id)
+        try:
+            with self._lock(case_id):
+                state, _ = self.get(case_id)
+                # what the case says now, copied so the call needs no lock
+                asked = SimpleNamespace(
+                    observations=[
+                        SimpleNamespace(
+                            text=getattr(item, "text", ""), status=getattr(item, "status", None)
+                        )
+                        for item in state.ledger.observations
+                    ]
+                )
+            # No case lock and no engine lock while the model answers (20-60 s): other
+            # analyses and this case's own views carry on.
+            try:
+                opinion = second_opinion.ask(
+                    self.engine.llm,
+                    self.engine.kb,
+                    asked,
+                    model=status["model"],
+                    effort=status["effort"],
+                )
+            except second_opinion.ModelOpinionUnavailable as exc:
+                raise ServiceUnavailable(str(exc)) from exc
+            with self._lock(case_id):
+                current = self._states.get(case_id)
+                if current is None:  # deleted while the model answered
+                    raise CaseNotFound(case_id)
+                self._model_opinions[case_id] = opinion
+                return current
+        finally:
+            with self._global_lock:
+                self._model_opinions_pending.discard(case_id)
+
+    def model_opinion(self, case_id: str, state: Any) -> dict[str, Any] | None:
+        """The stored second opinion as the API shows it, compared with the state's own
+        answer; None when none was asked. Never fails a case view."""
+        try:
+            thresholds = getattr(self.engine, "attribution_thresholds", None)
+            return second_opinion.payload(
+                self._model_opinions.get(case_id),
+                self.engine.kb,
+                state,
+                scope=str(getattr(thresholds, "cluster_scope", "documented")),
+            )
+        except Exception:  # noqa: BLE001 - a secondary block must not break a case view
+            return None
 
     # ----- live threat intelligence -----
     def fetch_intel(
@@ -623,6 +833,10 @@ class CaseService:
         question = state.current_question
         if question is None:
             raise ValueError("the interview has no open question to search for")
+        if getattr(question, "kind", "technique") == "software":
+            raise ValueError(
+                "Elasticsearch gathering is for technique leads, not software questions"
+            )
         hours = int(lookback_hours or self.engine.settings.elastic_mcp_lookback_hours)
         batch = ElasticMCPClient.from_settings(self.engine.settings).gather(
             question, lookback_hours=hours
@@ -822,6 +1036,17 @@ class CaseService:
             )
         leads.sort(key=lambda item: -max(abs(item["delta_yes"]), abs(item["delta_no"])))
 
+        # software questions: the same rows the interview asks from (gate window, recorded order)
+        with self._lock(case_id), self._engine_lock:
+            software_leads = self.engine.software_leads(state) if fusion.entries else []
+        software = [
+            {
+                **lead.to_dict(),
+                "group_name": names.get(lead.group_id) or _group_label(kb, lead.group_id),
+            }
+            for lead in software_leads
+        ]
+
         by_group = base.by_group()
         return {
             "top_k": k,
@@ -875,20 +1100,31 @@ class CaseService:
             ],
             "pending": pending[: max(1, limit)],
             "leads": leads[:8],
+            "software": software,
         }
 
     def top3_view(self, state: Any) -> dict[str, Any]:
         """Head-to-head of the decision's first three candidates (display only, docs 10.10)."""
         settings = self.engine.settings
         thresholds = self.engine.attribution_thresholds
-        return build_top3_view(
+        view = build_top3_view(
             self.engine.kb,
             state,
             floor=float(getattr(settings, "attribution_separation_floor", 1.0)),
             separation_bar=float(getattr(thresholds, "hypothesis_separation", 0.5)),
             min_discriminative=float(getattr(thresholds, "hypothesis_min_discriminative", 3.0)),
             behavior_threshold=float(settings.behavior_similarity_threshold),
+            cluster_scope=str(getattr(thresholds, "cluster_scope", "documented")),
         )
+        view["confidence"] = self.confidence(state)
+        return view
+
+    def confidence(self, state: Any) -> dict[str, Any] | None:
+        """Calibrated confidence label (display only, never a decision); None when off."""
+        try:
+            return confidence_label(self.confidence_labels, state, kb=self.engine.kb)
+        except Exception:  # noqa: BLE001 - a secondary chip must not break the view
+            return None
 
     def top3(self, case_id: str) -> dict[str, Any]:
         state, _ = self.get(case_id)
@@ -937,3 +1173,21 @@ class CaseService:
     def export(self, case_id: str, kind: str) -> tuple[str, str, str]:
         state, meta = self.get(case_id)
         return export_document(self.engine.kb, state, kind, case_name=meta.name)
+
+    # ----- software-question pilot log -----
+    def pilot_log(self, case_id: str) -> list[dict[str, Any]]:
+        """The pilot records of one case's software answers (docs 21.3.15 C)."""
+        state, _ = self.get(case_id)
+        return pilot_records(state.ledger)
+
+    def pilot_log_all(self) -> list[dict[str, Any]]:
+        """Every case's pilot records, read from the saved ledgers (no re-analysis)."""
+        records: list[dict[str, Any]] = []
+        for item in self.store.list():
+            try:
+                payload = self.store.load(item.case_id)
+            except (OSError, ValueError):
+                continue
+            records.extend(pilot_records(payload["ledger"]))
+        records.sort(key=lambda row: (str(row.get("answered_at") or ""), str(row["question_id"])))
+        return records

@@ -254,3 +254,36 @@ def test_synthetic_sentences_become_an_indexed_field(tmp_path):
     synthetic_docs = [d for d in documents if d.metadata["field"] == "synthetic"]
     assert len(synthetic_docs) == 1 and synthetic_docs[0].id == "T1059.001:synthetic:0000"
     assert all(d.metadata["field"] != "synthetic" for d in technique_documents(kb))
+
+
+class _QueryCollection(_FakeCollection):
+    def __init__(self, count: int) -> None:
+        super().__init__({}, count)
+        self.calls: list[int] = []
+
+    def query(self, *, query_embeddings, n_results, where, include):
+        self.calls.append(len(query_embeddings))
+        rows = [[f"{vector[0]}-{rank}" for rank in range(n_results)] for vector in query_embeddings]
+        return {
+            "ids": rows,
+            "documents": [[f"doc {item}" for item in ids] for ids in rows],
+            "metadatas": [[{} for _ in ids] for ids in rows],
+            "distances": [[0.1 for _ in ids] for ids in rows],
+        }
+
+
+def test_long_reports_query_the_store_in_batches_under_the_server_limit():
+    from apt_classifier import vectorstore
+
+    collection = _QueryCollection(count=1000)
+    store = _store(collection)
+    embeddings = [[float(index), 0.0] for index in range(700)]
+    hits = store._query(collection, embeddings, n_results=48)
+    batch = vectorstore._MAX_QUERY_RESULT_ROWS // 48
+    assert collection.calls == [batch, batch, 700 - 2 * batch]  # 333, 333, 34
+    assert max(collection.calls) * 48 <= vectorstore._MAX_QUERY_RESULT_ROWS
+    # one result list per query, in query order, as a single call returned them
+    assert [row[0].id for row in hits] == [f"{float(index)}-0" for index in range(700)]
+    collection.calls.clear()
+    store._query(collection, embeddings[:30], n_results=48)
+    assert collection.calls == [30]  # short reports still make one call

@@ -128,6 +128,40 @@ def test_documented_overlap_pair_is_reported_as_one_cluster():
         assert candidate["channels"]["total"] == round(recorded[candidate["group_id"]], 4)
 
 
+def test_a_pair_that_only_shares_rare_malware_is_shown_but_not_called_one_cluster():
+    kb = _kb()
+    kb.software["S0099"] = Software(id="S0099", name="KillDisk", software_type="malware")
+    kb.groups["G0046"].software_ids.append("S0099")
+    kb.groups["G0016"].software_ids.append("S0099")
+    kb.recompute_statistics()
+    # APT29 and FIN7 hold nearly the same exclusive mass: inside the overlap bar, so the full
+    # scope calls the pair one cluster and the default scope must not
+    state = _state(
+        kb,
+        ["G0016", "G0046", "G0008"],
+        discrimination=_manual(("G0016", 2.0, 0.0), ("G0046", 1.9, 0.0), ("G0008", 0.4, 0.0)),
+    )
+
+    def pair_of(view, a, b):
+        return next(p for p in view["pairs"] if {p["a"], p["b"]} == {a, b})
+
+    documented_view = build_top3_view(kb, state)
+    full_view = build_top3_view(kb, state, cluster_scope="full")
+    documented = pair_of(documented_view, "G0016", "G0046")
+    full = pair_of(full_view, "G0016", "G0046")
+    assert abs(documented["separation"]) < 0.5
+    assert documented["link"] == "shared_software" and "KillDisk" in documented["related_reason"]
+    assert documented["overlap_cluster"] is False and full["overlap_cluster"] is True
+    # the banner follows the pair: "treat them as one cluster" only under the full scope
+    assert full_view["state"] == "overlap" and documented_view["state"] != "overlap"
+    # the reason does not change with the scope
+    assert full["related_reason"] == documented["related_reason"]
+    # FIN7 / Carbanak: reviewed same activity (ATT&CK ids), one cluster in every scope
+    nested = pair_of(documented_view, "G0046", "G0008")
+    assert nested["link"] == "same_activity" and nested["overlap_cluster"]
+    assert nested["related_reason"].startswith("ATT&CK: FIN7 may be linked")
+
+
 def view_state_totals(kb):
     return _state(kb, ["G0046", "G0008", "G0016"]).context.discrimination.scores
 
@@ -167,7 +201,14 @@ def test_states_for_split_evidence_and_thin_evidence():
         kb, _state(kb, ["G0046", "G0008", "G0016"], stage="known_group_hypothesis")
     )
     assert named["state"] == "named"
-    assert set(top3_summary(named)) == {"state", "label", "summary", "leader", "other"}
+    assert set(top3_summary(named)) == {
+        "state",
+        "label",
+        "summary",
+        "leader",
+        "other",
+        "confidence",
+    }
 
 
 def test_view_never_changes_the_state_it_reads():
@@ -193,3 +234,20 @@ def test_each_candidate_lists_its_documented_overlap_with_rank():
     assert fin7["related"][0]["reason"]
     apt29 = next(c for c in view["candidates"] if c["group_id"] == "G0016")
     assert apt29["related"] == []
+
+
+def test_named_cluster_state():
+    kb = _kb()
+    state = _state(kb, ["G0046", "G0008", "G0016"])
+    state.attribution_decision = SimpleNamespace(
+        stage=AttributionStage("known_cluster_hypothesis"),
+        named_cluster=("G0046", "G0008"),
+        cluster_runner_up_id="G0016",
+        cluster_separation=0.67,
+        runner_up_group_id="G0016",
+        separation=0.1,
+    )
+    view = build_top3_view(kb, state)
+    assert view["state"] == "named_cluster"
+    assert view["other"]["group_id"] == "G0008"
+    assert "FIN7 / Carbanak (documented overlap)" in view["summary"]
