@@ -9,7 +9,7 @@ description = "Vestige: evidence-first APT attribution using MITRE ATT&CK"
 requires-python = ">=3.11,<3.14"
 
 [tool.setuptools.packages.find]
-include = ["apt_classifier*"]
+include = ["apt_classifier*", "vestige_core*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

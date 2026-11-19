@@ -1,0 +1,3 @@
+#!/usr/bin/env bash
+# Lean-core runner: lowest priority, one thread, no GPU (the core does not use it), project venv.
+exec nice -n 19 env PYTHONDONTWRITEBYTECODE=1 OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 CUDA_VISIBLE_DEVICES= /home/fzagar/apt_classifier/.venv/bin/python "$@"
