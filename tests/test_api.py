@@ -50,6 +50,9 @@ class StubService:
     def run_review(self, case_id: str) -> Any:
         raise ServiceUnavailable("needs a key")
 
+    def ask_model_opinion(self, case_id: str) -> Any:
+        raise ServiceUnavailable("the model's second opinion is switched off")
+
     def apply_decisions(self, case_id: str, decisions: list[dict[str, Any]]) -> Any:
         raise ValueError("bad replacement")
 
@@ -82,6 +85,8 @@ def test_error_mapping(client: TestClient) -> None:
     assert client.get("/api/cases/missing").status_code == 404
     assert client.delete("/api/cases/missing").status_code == 404
     assert client.post("/api/cases/x/review").status_code == 409
+    refused = client.post("/api/cases/x/model-opinion")
+    assert refused.status_code == 409 and "switched off" in refused.json()["detail"]
     response = client.post(
         "/api/cases/x/decisions",
         json={"decisions": [{"observation_id": "o", "technique_id": "T1", "action": "replace"}]},

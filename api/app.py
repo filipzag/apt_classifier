@@ -173,6 +173,7 @@ def create_app(
             svc.engine.attribution_thresholds,
             svc.summary_for(state),
             top3=svc.top3_summary(state),
+            model_opinion=svc.model_opinion(case_id, state),
         )
 
     @app.get("/api/cases")
@@ -361,6 +362,13 @@ def create_app(
     @app.post("/api/cases/{case_id}/review")
     def run_review(case_id: str, svc: CaseService = Depends(get_service)) -> dict[str, Any]:
         svc.run_review(case_id)
+        return _case(svc, case_id)
+
+    @app.post("/api/cases/{case_id}/model-opinion")
+    def ask_model_opinion(case_id: str, svc: CaseService = Depends(get_service)) -> dict[str, Any]:
+        # one paid request to a cloud model, only when the analyst asks; the answer is shown
+        # beside the product's own and changes nothing else in the case
+        svc.ask_model_opinion(case_id)
         return _case(svc, case_id)
 
     @app.post("/api/cases/{case_id}/cyberre")

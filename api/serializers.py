@@ -562,6 +562,7 @@ def case_payload(
     thresholds: Any,
     summary: dict[str, Any],
     top3: dict[str, Any] | None = None,
+    model_opinion: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     context = state.ledger.strategic_context
     return {
@@ -610,6 +611,9 @@ def case_payload(
             "has_question": state.current_question is not None,
         },
         "review": review(kb, state),
+        # a cloud model's second opinion as the service built it (display only); always
+        # present, null when none was asked
+        "model_opinion": model_opinion,
         "cyberre": cyberre(state),
         "intel": intel(state),
         "group_label": group_name(kb, state.fusion.entries[0].group_id)

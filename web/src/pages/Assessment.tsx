@@ -7,6 +7,7 @@ import type { CasePayload } from '../api/types'
 import { CaseFrame, PageHeader, useCaseId } from '../components/CaseFrame'
 import { GateMetric, RankedBars, RankHeatmap } from '../components/charts'
 import { DossierPanel } from '../components/Dossier'
+import { ModelOpinionCard } from '../components/ModelOpinion'
 import { STAGE_META, StageBadge, stageIcon } from '../components/StageBadge'
 import { Top3StateBadge } from '../components/TopThree'
 import { Badge, Button, Callout, Card, DataTable, Label, Metric, SectionTitle, Segmented, Tabs } from '../components/ui'
@@ -240,6 +241,9 @@ function AssessmentView({ caseId, data }: { caseId: string; data: CasePayload })
       ) : (
         <Callout tone="info">No attribution decision is available for this case.</Callout>
       )}
+
+      {/* opt-in second opinion of a language model: beside the decision, never part of it */}
+      <ModelOpinionCard caseId={caseId} opinion={data.model_opinion} />
 
       <Card>
         <SectionTitle

@@ -52,6 +52,17 @@ class Settings(BaseSettings):
     extract_effort: str = "low"
     question_effort: str = "medium"
     review_effort: str = "max"
+    # A cloud model's answer as a second opinion beside the product's own
+    # (apt_classifier/model_opinion.py, prereg model_second_opinion_2026-11-11): display only,
+    # never part of the ranking, the combiner, the naming gate, a confidence label or an export.
+    # Off by default. When on, the analyst asks with a button and every click is one paid
+    # OpenRouter request (about $0.05-0.06 measured; sent and paid once more when the answer cannot
+    # be read); nothing is asked during an analysis. It needs
+    # an OpenRouter key and a local/ model id is refused. The "confident name" mark (a stated
+    # probability of at least 0.99) was measured for this model at this effort only.
+    model_opinion_enabled: bool = False
+    model_opinion_model: str = "openai/gpt-5.6-sol"
+    model_opinion_effort: str = "medium"
     attack_version: str = "latest"
     similarity_threshold: float = 0.45
     retrieval_top_k: int = 30

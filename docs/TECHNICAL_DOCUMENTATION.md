@@ -304,7 +304,7 @@ Streamlit-only revision is preserved on the `streamlit-stable` branch.
   CyberRE, live-intel matches, and the "next step" hint. Group ids always carry the ATT&CK name.
 - Endpoints: `GET /api/health`, `/api/system`, `/api/sample`, `/api/techniques?q=`; `GET|POST /api/cases`,
   `GET|PATCH|DELETE /api/cases/{id}`; `POST …/decisions`, `…/weights`, `…/platforms`; `GET …/interview`,
-  `POST …/interview/answer`, `…/interview/restart`; `POST …/review`, `…/cyberre`;
+  `POST …/interview/answer`, `…/interview/restart`; `POST …/review`, `…/cyberre`, `…/model-opinion`;
   `POST …/elastic/search`, `…/elastic/import`; `GET …/dossier/{group}`, `…/distinguish`, `…/top3`, `…/canvas`, `…/diamond`,
   `…/intel`, `…/export/{markdown|json|navigator|attack-flow}`.
 - Web app: routes `/` (cases), `/new` (intake), `/cases/:id` (assessment), `…/evidence`,
@@ -3151,6 +3151,76 @@ their production pipeline is run with a key. The system endpoint reports `llm_pr
 ### 16.5 Review limitations
 
 The review can critique evidence and ranking but cannot add reliable evidence. A reviewer’s confidence is not an attribution probability. The deterministic RRF ranking remains authoritative; reconciliation stores any alternative ordering under `advisory_ranking` and records differences under `rank_changes` without applying them. The report retains the counter-case, limitations, disconfirmation tests, and fame-bias measurements.
+
+### 16.6 Model second opinion (2026-11-11, opt-in, display only)
+
+A cloud model's own answer to "which ATT&CK group did this?", shown beside the product's answer
+on the Assessment page. It is off by default (`MODEL_OPINION_ENABLED=false`) and is asked only
+when the analyst presses the button: one OpenRouter request, about $0.05-0.06 (measured on the
+fresh-report runs of 21.3.28-21.3.31, maximum $0.11), repeated once (and paid again) when the
+answer cannot be read. Module `apt_classifier/model_opinion.py`;
+settings `MODEL_OPINION_ENABLED`, `MODEL_OPINION_MODEL` (`openai/gpt-5.6-sol`),
+`MODEL_OPINION_EFFORT` (`medium`); route `POST /api/cases/{id}/model-opinion`; payload key
+`model_opinion` (always present, null when nothing was asked); status under `model_opinion` in
+`/api/system`.
+
+What it never does. The answer does not reach classifier results, the fusion, the combiner (its
+fingerprint is unchanged), the naming gate, a confidence label, the case file or an export. No
+engine module imports the module (only `service.py` does), and nothing is asked during an
+analysis, a rescore or a case open. This is not the LLM zero-shot vote removed on 2026-09-30
+(9.11): that one voted in the fusion on every analysis.
+
+The call.
+
+- The question, the answer schema, the model and the effort are those of the offline test
+  (`scripts/fresh_llm_attribution.py`); a test keeps the prompt and schema equal to that script's.
+- The model reads the case's positive observations in ledger order, the statements the product's
+  own members read, at most 400 of them.
+- Before the call every ATT&CK group name and alias is replaced by "the adversary", with the
+  short forms reports write ("Lazarus", "Sandworm") and spellings with or without a space or
+  hyphen ("APT 28", "Fancy-Bear"), and group ids G0001-G1099 are removed. That is less than the
+  tested text had hidden: vendor names ATT&CK does not list, most malware names, camel-case names
+  written as two words ("Muddy Water") and a report's own attribution sentences stay, and so does
+  a group name written as one lower-case word; a capitalised ordinary word that is also an ATT&CK
+  name ("Google Play") is hidden too. With a cloud key the case statements are the extractor's rewritten
+  actions, not report sentences. The offline numbers therefore do not carry over to a product
+  case as they stand.
+- It needs an OpenRouter key and refuses a `local/` model id, so the local fallback model can
+  never answer in the cloud model's name.
+- The model answers for one case at a time; a second request for the same case while the first is
+  under way is refused. The call holds no engine lock, so other analyses carry on.
+
+Reading the answer.
+
+- Each candidate is matched to ATT&CK by its name only (case and punctuation ignored; a name two
+  groups share matches neither). The model's own group id is ignored: it writes real actors that
+  ATT&CK does not list under invented ids (21.3.28).
+- The block shows the model's first choice as written, its stated probability, its decision
+  (name / no single group / not in ATT&CK), up to two more candidates, its reasoning, and how the
+  first choice relates to the product's answer: the same group, one of a named pair, a group
+  ATT&CK documents as overlapping activity, among the product's first five, or different.
+- "Confident name" is the rule of 21.3.31 and nothing more: the model decides to name its first
+  candidate, that candidate is an ATT&CK group and the model states at least 0.99 for it. The
+  cut-off was chosen for GPT-5.6 Sol's own numbers at effort medium, so the mark is not used for
+  another model or effort.
+- The stated probability is the model's own number. It is not calibrated and is not comparable
+  with the combiner's probability.
+
+Limits. The answer is kept in memory only: it is lost on a restart, kept across a re-analysis
+(marked "the case text changed" when it has) and dropped with the case. Each click is a new,
+unseeded sample, so asking again can give a different answer. When the model's first answer cannot
+be read, the client asks once more; both attempts are charged, and the cost shown is the last
+one's. The evidence for the confident mark is small: 17 of 17 and 8 of 8 right on the
+development set, 6 of 6 on 12 new reports.
+
+Its test is registered in `docs/preregistration/model_second_opinion_2026-11-11.json`: on the
+confirmation set (vendor posts from 2026-11-03 on, `docs/KNOWLEDGE_STORE_DESIGN.md`), the
+model's confident names against the product's names, and the model's first choice where it
+states at least 0.5 (else the product's leader) against the model's first choice alone. It is
+read once at 30 known reports (descriptive) and once at 60, at the behaviour reading of 21.3.31
+and for the call the button makes. The result may only change the display: a wrong confident
+name that the product does not also give, at either look, removes the mark. Nothing has run; the
+set does not exist yet.
 
 ---
 

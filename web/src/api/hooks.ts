@@ -1,4 +1,4 @@
-import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+import { useIsMutating, useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { toast } from 'sonner'
 
 import { api, ApiError } from './client'
@@ -15,6 +15,8 @@ export const keys = {
   canvas: (id: string, g: number, e: number) => ['canvas', id, g, e] as const,
   diamond: (id: string, g: number, c: number, i: number) => ['diamond', id, g, c, i] as const,
   intel: (id: string, d: number, c: boolean) => ['intel', id, d, c] as const,
+  /** mutation key: lets the page see a call that is still under way */
+  modelOpinion: (id: string) => ['model-opinion', id] as const,
 }
 
 export function describe(error: unknown): string {
@@ -167,6 +169,34 @@ export function useReview(id: string) {
     },
     onError: (error) => toast.error('Review failed', { description: describe(error) }),
   })
+}
+
+/** Asks the language model for its second opinion (one paid call, only on the analyst's click). */
+export function useModelOpinion(id: string) {
+  const write = useCaseWriter(id)
+  return useMutation({
+    mutationKey: keys.modelOpinion(id),
+    mutationFn: () => api.modelOpinion(id),
+    onSuccess: (payload) => {
+      write(payload)
+      toast.success('The model answered', {
+        description: "Its second opinion is shown below the decision. The product's answer is unchanged.",
+      })
+    },
+    onError: (error) => {
+      // 400 and 409 are refusals before any call; anything else can follow a paid one
+      const refused = error instanceof ApiError && (error.status === 400 || error.status === 409)
+      toast.error(refused ? 'The model could not be asked' : 'No answer from the model', {
+        description: refused ? describe(error) : `${describe(error)} The call may still have been charged.`,
+      })
+    },
+  })
+}
+
+/** True while a second-opinion call for this case is under way, also after leaving the page
+ * and coming back: the button stays busy, because a second click is a second paid call. */
+export function useModelOpinionPending(id: string): boolean {
+  return useIsMutating({ mutationKey: keys.modelOpinion(id) }) > 0
 }
 
 export function useCyberRE(id: string) {

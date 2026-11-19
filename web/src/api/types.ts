@@ -50,6 +50,8 @@ export interface SystemInfo {
   cases: number
   elastic_mcp: boolean
   classifier_weights: Record<string, number>
+  /** opt-in second opinion from a language model (display only); absent on an older API */
+  model_opinion?: ModelOpinionStatus
 }
 
 export interface CaseSummary {
@@ -270,6 +272,79 @@ export interface ReviewInfo {
   audit_path: string | null
 }
 
+/** One group the model put forward; matched to ATT&CK by its name only (model_opinion.py) */
+export interface ModelOpinionCandidate {
+  /** the model's own text */
+  name: string
+  /** ATT&CK group with that name or alias; null when the name is not an ATT&CK group */
+  group_id: string | null
+  attack_name: string | null
+  /** the model's own stated number, never calibrated; null when it gave none */
+  probability: number | null
+}
+
+export type ModelOpinionDecision = 'name' | 'open' | 'not_in_attack'
+
+/** how the model's first choice relates to the product's answer */
+export type ModelOpinionAgreementKind =
+  | 'no_candidate'
+  | 'outside_attack'
+  | 'no_product_leader'
+  | 'same'
+  | 'named_pair'
+  | 'same_activity'
+  | 'shortlist'
+  | 'different'
+
+/** The analyst-requested second opinion of a language model: shown beside the product's
+ * answer, never part of it (no ranking, gate, label or export reads it). */
+export interface ModelOpinion {
+  /** ISO 8601, UTC */
+  asked_at: string
+  /** the model that answered */
+  model: string
+  effort: string
+  prompt_version: number
+  decision: ModelOpinionDecision
+  /** null when the model gave no candidate */
+  first: ModelOpinionCandidate | null
+  /** at most three, the first choice included */
+  candidates: ModelOpinionCandidate[]
+  /** the model would name an ATT&CK group and states at least `confident_rule.probability` */
+  confident_name: boolean
+  /** applies is false when the answering model or effort is not the tested one */
+  confident_rule: { probability: number; applies: boolean }
+  rationale: string
+  agreement: { kind: ModelOpinionAgreementKind; text: string }
+  statements_sent: number
+  /** more than statements_sent when the case was cut to the first statements */
+  statements_total: number
+  /** ATT&CK group names and aliases replaced before the text was sent */
+  names_masked: number
+  cost_usd: number
+  prompt_tokens: number
+  completion_tokens: number
+  /** the case statements changed after this answer */
+  stale: boolean
+  note: string
+}
+
+/** `system.model_opinion`: whether the second opinion can be asked (service.py) */
+export interface ModelOpinionStatus {
+  /** MODEL_OPINION_ENABLED; the block is not shown at all when false */
+  enabled: boolean
+  /** enabled, an OpenRouter key is set and the model is not a local one */
+  available: boolean
+  model: string
+  effort: string
+  status: 'disabled' | 'needs an OpenRouter key' | 'needs a cloud model' | 'ready'
+  confident_probability: number
+  /** the only model the confident-name cut-off was tested for */
+  registered_model: string
+  registered_effort: string
+  cost_note: string
+}
+
 export interface CyberREResult {
   observation_id: string
   observation_text: string
@@ -362,6 +437,8 @@ export interface CasePayload {
   retrieval_diagnostics: Record<string, unknown>
   interview: { complete: boolean; stop_reason: string | null; answered: number; has_question: boolean }
   review: ReviewInfo | null
+  /** the model's second opinion, when the analyst asked for one (display only) */
+  model_opinion: ModelOpinion | null
   cyberre: { results: Record<string, CyberREResult> }
   intel: { snapshot: IntelSnapshotSummary | null; matches: IntelMatch[] }
   group_label: string | null

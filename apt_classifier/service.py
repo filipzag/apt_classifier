@@ -19,6 +19,7 @@ from types import SimpleNamespace
 from typing import Any
 from uuid import uuid4
 
+from apt_classifier import model_opinion as second_opinion
 from apt_classifier.attack.kb import AttackKnowledgeBase
 from apt_classifier.canvas import build_analyst_canvas, build_candidate_dossier
 from apt_classifier.cases import CaseRecord, CaseStore
@@ -54,6 +55,8 @@ from apt_classifier.vectorstore import ChromaVectorStore
 
 SAMPLE_PATH = Path(__file__).resolve().parents[1] / "data" / "samples" / "case_observation.txt"
 INTEL_CACHE_SECONDS = 1800.0
+# shown beside the button before the analyst pays for a call
+MODEL_OPINION_COST_NOTE = "about $0.05-0.06 a call (measured on 119 reports)"
 
 
 class UploadedBlob:
@@ -195,6 +198,12 @@ class CaseService:
         self._engine_lock = threading.RLock()
         self._intel_cache: dict[tuple[int, bool], tuple[float, ThreatIntelSnapshot]] = {}
         self._elastic_batches: dict[str, Any] = {}
+        # The model's second opinion per case (display only): in memory like the AI review,
+        # never on the state and never in the case file. It survives a re-analysis; its
+        # payload says when the case text has changed since.
+        self._model_opinions: dict[str, second_opinion.ModelOpinion] = {}
+        # cases the model is answering for right now: a second request would pay twice
+        self._model_opinions_pending: set[str] = set()
 
     # ----- system -----
     @property
@@ -247,6 +256,7 @@ class CaseService:
             "index": index,
             "llm_spend_usd": round(float(getattr(usage, "cost_usd", 0.0) or 0.0), 4),
             **self._llm_routing(),
+            "model_opinion": self.model_opinion_status(),
             "cases": len(self.store.list()),
             "elastic_mcp": bool(getattr(settings, "elastic_mcp_url", None)),
             "classifier_weights": self.engine.default_weights(),
@@ -477,6 +487,7 @@ class CaseService:
         with self._lock(case_id):
             self._states.pop(case_id, None)
             self._meta.pop(case_id, None)
+            self._model_opinions.pop(case_id, None)
             return self.store.delete(case_id)
 
     def rescore(self, case_id: str, weights: dict[str, float]) -> AnalysisState:
@@ -672,6 +683,114 @@ class CaseService:
                 self.engine.run_cyberre_batch(state, use_prefilter=use_prefilter)
             self._save(case_id)
         return state
+
+    # ----- the model's second opinion (display only) -----
+    def model_opinion_status(self) -> dict[str, Any]:
+        """Whether the second opinion can be asked here and by which model. Never raises."""
+        model, effort = second_opinion.REGISTERED_MODEL, second_opinion.REGISTERED_EFFORT
+        enabled = has_key = False
+        try:
+            settings = self.settings
+            enabled = bool(getattr(settings, "model_opinion_enabled", False))
+            model = str(getattr(settings, "model_opinion_model", None) or model)
+            effort = str(getattr(settings, "model_opinion_effort", None) or effort)
+            # an OpenRouter key, not just any LLM: without one the client lets its local
+            # fallback model answer in the cloud model's name
+            has_key = bool(getattr(getattr(self.engine, "llm", None), "api_key", None))
+        except Exception:  # noqa: BLE001 - a status line must not break the system page
+            enabled = False
+        if not enabled:
+            status = "disabled"
+        elif not has_key:
+            status = "needs an OpenRouter key"
+        elif is_local_model(model):
+            status = "needs a cloud model"
+        else:
+            status = "ready"
+        return {
+            "enabled": enabled,
+            "available": status == "ready",
+            "model": model,
+            "effort": effort,
+            "status": status,
+            "confident_probability": second_opinion.CONFIDENT_PROBABILITY,
+            "registered_model": second_opinion.REGISTERED_MODEL,
+            "registered_effort": second_opinion.REGISTERED_EFFORT,
+            "cost_note": MODEL_OPINION_COST_NOTE,
+        }
+
+    def ask_model_opinion(self, case_id: str) -> AnalysisState:
+        """One paid call: the configured cloud model's answer for this case, kept beside the
+        case for display. Nothing of it reaches the engine, the state or the case file. A case
+        that is already loaded is not analysed again; a case that is on disk only is loaded
+        first (one analysis), as for every other route."""
+        status = self.model_opinion_status()
+        if not status["available"]:
+            reasons = {
+                "disabled": "it is switched off (MODEL_OPINION_ENABLED)",
+                "needs an OpenRouter key": "it needs an OpenRouter key (OPENROUTER_API_KEY)",
+                "needs a cloud model": (
+                    f"it needs a cloud model and {status['model']} is a local model "
+                    "(MODEL_OPINION_MODEL)"
+                ),
+            }
+            raise ServiceUnavailable(
+                f"the model's second opinion cannot be asked: {reasons[status['status']]}"
+            )
+        with self._global_lock:
+            if case_id in self._model_opinions_pending:
+                raise ServiceUnavailable(
+                    "the model is already answering for this case; its answer appears on the "
+                    "case when it arrives"
+                )
+            self._model_opinions_pending.add(case_id)
+        try:
+            with self._lock(case_id):
+                state, _ = self.get(case_id)
+                # what the case says now, copied so the call needs no lock
+                asked = SimpleNamespace(
+                    observations=[
+                        SimpleNamespace(
+                            text=getattr(item, "text", ""), status=getattr(item, "status", None)
+                        )
+                        for item in state.ledger.observations
+                    ]
+                )
+            # No case lock and no engine lock while the model answers (20-60 s): other
+            # analyses and this case's own views carry on.
+            try:
+                opinion = second_opinion.ask(
+                    self.engine.llm,
+                    self.engine.kb,
+                    asked,
+                    model=status["model"],
+                    effort=status["effort"],
+                )
+            except second_opinion.ModelOpinionUnavailable as exc:
+                raise ServiceUnavailable(str(exc)) from exc
+            with self._lock(case_id):
+                current = self._states.get(case_id)
+                if current is None:  # deleted while the model answered
+                    raise CaseNotFound(case_id)
+                self._model_opinions[case_id] = opinion
+                return current
+        finally:
+            with self._global_lock:
+                self._model_opinions_pending.discard(case_id)
+
+    def model_opinion(self, case_id: str, state: Any) -> dict[str, Any] | None:
+        """The stored second opinion as the API shows it, compared with the state's own
+        answer; None when none was asked. Never fails a case view."""
+        try:
+            thresholds = getattr(self.engine, "attribution_thresholds", None)
+            return second_opinion.payload(
+                self._model_opinions.get(case_id),
+                self.engine.kb,
+                state,
+                scope=str(getattr(thresholds, "cluster_scope", "documented")),
+            )
+        except Exception:  # noqa: BLE001 - a secondary block must not break a case view
+            return None
 
     # ----- live threat intelligence -----
     def fetch_intel(

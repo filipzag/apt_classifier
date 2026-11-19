@@ -89,6 +89,9 @@ export const api = {
   restart: (id: string) =>
     request<InterviewState>(`/api/cases/${id}/interview/restart`, { method: 'POST' }),
   review: (id: string) => request<CasePayload>(`/api/cases/${id}/review`, { method: 'POST' }),
+  /** one paid model call; the answer comes back in the case payload (`model_opinion`) */
+  modelOpinion: (id: string) =>
+    request<CasePayload>(`/api/cases/${id}/model-opinion`, { method: 'POST' }),
   cyberre: (id: string, observationId: string | null, usePrefilter: boolean) =>
     request<CasePayload>(
       `/api/cases/${id}/cyberre`,
