@@ -609,7 +609,8 @@ def assess_attribution(
         calibrated_probability = float(leader_probability)
         calibration_note = (
             "Combiner probability that the leading candidate is the true group "
-            "(pipeline-bound, fitted on ATT&CK folds with group-level cross-validation)."
+            "(pipeline-bound, fitted on held-out ATT&CK folds and development real reports with "
+            "group-level cross-validation)."
         )
     elif calibration_artifact is not None:
         valid, note = _validate_calibration_artifact(calibration_artifact, kb, fusion)
@@ -852,7 +853,8 @@ def _combiner_calibration(combiner: Any) -> dict[str, Any]:
         "calibrated_probability": float(combiner["leader_probability"]),
         "calibration_note": (
             "Combiner probability that the leading candidate is the true group "
-            "(pipeline-bound, fitted on ATT&CK folds with group-level cross-validation)."
+            "(pipeline-bound, fitted on held-out ATT&CK folds and development real reports with "
+            "group-level cross-validation)."
         ),
     }
 

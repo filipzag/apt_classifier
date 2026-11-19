@@ -198,7 +198,7 @@ function CandidateCard({ candidate, view, max }: { candidate: Top3Candidate; vie
 
       <div className="mt-3 flex flex-wrap gap-1.5 text-[11px]">
         {candidate.combiner_probability !== null ? (
-          <Tip content={view.combiner_note ?? 'Learned combiner probability (fitted on ATT&CK folds).'}>
+          <Tip content={view.combiner_note ?? 'Learned combiner probability (fitted on held-out ATT&CK folds and development real reports).'}>
             <span>
               <Badge>combiner p {fmt(candidate.combiner_probability, 2)}</Badge>
             </span>

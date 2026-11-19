@@ -354,7 +354,8 @@ def build_top3_view(
             else None
         ),
         "combiner_note": (
-            "Learned combiner probability (fitted on ATT&CK folds): how often a leader with these "
+            "Learned combiner probability (fitted on held-out ATT&CK folds and development real "
+            "reports): how often a leader with these "
             "features was right there. Not a probability that the true group is one of these "
             "three."
         ),

@@ -36,7 +36,7 @@ function AssessmentView({ caseId, data }: { caseId: string; data: CasePayload })
       <PageHeader
         step="Step 5 · Assessment"
         title="Attribution assessment"
-        lead="The stage decision, the deterministic ranking and the evidence behind it. Nothing here is a probability; the relative index compares candidates within this case only."
+        lead="The stage decision, the deterministic ranking and the evidence behind it. The relative index compares candidates within this case only; the leader probability is the learned combiner's estimate that the leader is the true group."
         action={
           !data.interview.answered && !data.interview.complete ? (
             <Button variant="outline" onClick={() => navigate(`/cases/${caseId}/interview`)}>

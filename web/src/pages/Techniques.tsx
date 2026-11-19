@@ -1,5 +1,5 @@
 import { ArrowRight, Check, HelpCircle, Search, X } from 'lucide-react'
-import { useMemo, useState } from 'react'
+import { Fragment, useMemo, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 
 import { api } from '../api/client'
@@ -202,7 +202,6 @@ function TechniquesView({ caseId, data }: { caseId: string; data: CasePayload })
                     <th className="min-w-[150px]">Status</th>
                     <th>Evidence</th>
                     <th>Decision</th>
-                    <th className="w-[280px]">Replacement / rationale</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -265,8 +264,15 @@ function TechniquesView({ caseId, data }: { caseId: string; data: CasePayload })
                             </div>
                           ) : null}
                         </td>
-                        <td className="whitespace-nowrap text-xs text-muted">
-                          {evidenceSummary(c).join(' · ') || '–'}
+                        <td className="min-w-[180px] max-w-[300px] text-xs text-muted">
+                          {evidenceSummary(c).length
+                            ? evidenceSummary(c).map((item, i) => (
+                                <Fragment key={i}>
+                                  {i ? ' · ' : ''}
+                                  <span className="whitespace-nowrap">{item}</span>
+                                </Fragment>
+                              ))
+                            : '–'}
                         </td>
                         <td>
                           <Segmented<Action>
@@ -279,8 +285,6 @@ function TechniquesView({ caseId, data }: { caseId: string; data: CasePayload })
                               { value: 'replace', label: 'Replace' },
                             ]}
                           />
-                        </td>
-                        <td>
                           {draft.action === 'replace' ? (
                             <TechniquePicker
                               value={draft.replacement}
@@ -292,7 +296,7 @@ function TechniquesView({ caseId, data }: { caseId: string; data: CasePayload })
                               value={draft.rationale}
                               onChange={(e) => setDraft(c.key, { rationale: e.target.value })}
                               placeholder="Rationale (optional)"
-                              className="mt-1 h-8 text-xs"
+                              className="mt-1 h-8 max-w-[300px] text-xs"
                             />
                           ) : null}
                         </td>
