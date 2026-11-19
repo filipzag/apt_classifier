@@ -12,43 +12,32 @@ See [`docs/TECHNICAL_DOCUMENTATION.md`](docs/TECHNICAL_DOCUMENTATION.md) for the
 
 ## Pipeline
 
-1. Normalize prose and alerts into atomic attack-action sentences with `openai/gpt-5.6-sol` through OpenRouter.
-2. Parse supported Windows/Sysmon events deterministically without sending bulk logs to an LLM.
-3. Embed observations with `basel/ATTACK-BERT` and retrieve sentence-level ATT&CK techniques plus actor-specific behavior sentences from local ChromaDB (ATT&CK Enterprise 20.0). When the local technique head service runs, a fine-tuned 4B model scores every candidate and may propose techniques retrieval missed (on by default since 2026-10-20, see [Optional technique head service](#optional-technique-head-service)). With a Target OS set for the case (Windows, Linux, macOS, ESXi), techniques documented only for other operating systems are not mapped (docs 5.7).
-4. Capture optional strategic context: target geography, industry, motivation, intended objective, and independently supported sponsor/origin.
-5. Rank groups with deterministic classifiers plus the analyst-requested CyberRE-LLM vote (the LLM zero-shot vote was removed; the LLM extraction, technique verifier and independent review in steps 1 and 7 remain). Since 2026-10-27 procedure text is the core of attribution (docs 21.3.24–21.3.25): what the report says the attacker did separates groups far better than its list of technique ids, and keeps doing so when malware names are removed. Three members read that text:
-   - free-text group model: a TF-IDF word document per group (ATT&CK procedure examples and descriptions, actor names removed) scored against the case text
-   - behaviour-text member: each observation votes for the groups of its nearest ATT&CK procedure sentences
-   - technique-conditioned procedure member: each accepted technique's statements against the procedure sentences ATT&CK documents for that exact technique, plus the software the report names for it
+1. **Evidence in.** Paste report prose or analyst notes, add alerts, IOCs, named tools and Windows/Sysmon logs. Prose is
+   split into atomic attack-action sentences (by `openai/gpt-5.6-sol` with an OpenRouter key, the local LLM, or a
+   plain sentence split); logs are parsed locally and never sent to an LLM.
+2. **Technique mapping.** Each observation is matched to ATT&CK Enterprise 20.0 techniques by dense (ATTACK-BERT)
+   plus lexical retrieval. A fine-tuned local technique head (optional service, on by default) scores the candidates
+   and may add ones retrieval missed, and an acceptance model decides which mappings count. The analyst can
+   confirm, reject or replace any mapping, and a case Target OS keeps techniques of other operating systems out.
+3. **Group ranking.** The core is procedure text: the case's statements are compared with how ATT&CK's procedure
+   examples describe each group's actions, by three text members (free-text group model, behaviour text, and
+   procedure text per accepted technique). Supporting members read the accepted technique list, named software
+   (weighted by rarity), and strategic context and motivation. Members that are off by default, and why, are
+   listed under [Configuration](#configuration).
+4. **Learned combiner.** A model fitted on ATT&CK folds and 68 development real reports orders the shortlist and
+   gives the leader a calibrated probability (see [Learned attribution combiner](#learned-attribution-combiner)).
+5. **Naming gate.** A single group is named only when it is clearly separated from the alternatives, its probability
+   is at least 0.20 and above "none of these", and the members that all read the technique list count once.
+   Otherwise the result is a group pair ATT&CK documents as the same activity, or no name with the closest
+   documented group shown as such.
+6. **Analyst tools.** Distinguish (top three side by side and what separates the shortlist), a hypothesis-driven
+   interview, origin and intrusion-type assessment from ATT&CK's documented sponsors, a non-voting live-intelligence
+   layer (CISA KEV, CISA advisories, labelled ransomware claims), the Canvas and Diamond Model views, optional
+   Elasticsearch search via Elastic Agent Builder MCP, an optional independent AI review, the opt-in model second
+   opinion, and exports (Markdown, JSON audit, Navigator, Attack Flow).
 
-   The other members read the accepted technique list, named software and context:
-   - Bernoulli Naive Bayes
-   - TF-IDF cosine
-   - weighted Jaccard
-   - actor-specific behavior similarity
-   - semantic technique-profile centroid
-   - group-description similarity
-   - strategic-context profile matching
-   - motivation alignment
-   - campaign-profile overlap
-   - software/tool links
-   - source-country random forest: predicts the source-country class (China, Russia, Iran, North Korea,
-     another state, no documented state origin) from the mapped techniques, motivation and target, and votes
-     for each group through the group's documented country (default since 2026-10-01: real reports improve, the
-     ATT&CK folds lose one case; docs 9.13, 21.3.11). Trained on the GPU from ATT&CK profiles.
-   - group random forest over the same features (wired at weight 0: it helped the ATT&CK folds but hurt real reports)
-   - PyTorch group network over the accepted techniques and named software (`GROUP_MLP_WEIGHT=0`, not loaded:
-     at weight 1.0 it named one wrong group on the ATT&CK folds on 2026-10-01)
-   - opt-in CyberRE-LLM technique filtering and ranking
-
-   Off by default after failing their gates: the two dated knowledge-store members (docs 12.9) and the Naive Bayes
-   size correction (docs 21.3.33).
-6. Fuse applicable classifiers with family-aware Reciprocal Rank Fusion. Naive Bayes, TF-IDF, Jaccard, and the technique centroid share one technique-overlap budget instead of casting four full correlated votes. Actor-specific behavior, software, and campaign classifiers have their own family budgets. Context, motivation, and description signals may rerank only candidates with documented technical support; the analyst-requested CyberRE vote has its own low family budget and cannot introduce a candidate. Abstaining classifiers cast no vote. Groups with zero technical overlap are excluded from authoritative RRF. A learned combiner then orders the shortlist (see [Learned attribution combiner](#learned-attribution-combiner)). A single group is named only when it is clearly separated from the alternatives, its combiner probability is at least 0.20 and above the probability of "none of these", and the members that all read the technique list count as one source of evidence rather than four (docs 10.6, 21.3.22, 21.3.27); otherwise the result is a documented same-activity cluster or no name.
-7. Aggregate documented sponsor/origin evidence across the ranked candidates and classify the profile as APT-like state/espionage activity, financially motivated criminal intrusion, mixed, or indeterminate.
-8. Fetch a cached, non-voting live-intelligence layer from CISA KEV, CISA Alerts & Advisories, and explicitly labeled ransomware.live extortion claims; match only explicit case overlaps and add them to the Canvas.
-9. Run a hypothesis-driven chat interview that predicts unobserved behaviors from the current ensemble candidates, recommends ATT&CK-informed telemetry, Windows channels and Event IDs to inspect, and automatically asks the next prioritized question after each analyst response.
-10. Optionally search API-key-scoped Elasticsearch security data through Elastic Agent Builder MCP for the current lead; normalize results locally, stage them for analyst approval, and reanalyze only accepted events.
-11. Run isolated `anthropic/claude-sonnet-5` reviews: blinded ACH, named ACH, fame-bias measurement, devil's advocate, then advisory reconciliation. The deterministic RRF ranking remains authoritative; review-proposed rank changes are recorded but not applied.
+The full member list, fusion rules and gate bars are in the [technical documentation](docs/TECHNICAL_DOCUMENTATION.md)
+(sections 8–10; the procedure-text members in 21.3.20 and 21.3.25, the naming rules in 21.3.22 and 21.3.27).
 
 ### Technique mapping pipeline
 
