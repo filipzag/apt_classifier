@@ -78,7 +78,7 @@ BASES = {
         r".*language_model\.layers\.\d+\.self_attn\.(q_proj|k_proj|v_proj|o_proj)",
         ("lm_head", "vision_tower", "audio_tower", "embed_vision", "embed_audio"),
         "gemma",
-        ("model.language_model.embed_tokens_per_layer",),
+        cpu_modules=("model.language_model.embed_tokens_per_layer",),
     ),
     # Cisco's Foundation-Sec-8B (Llama 3.1 8B continued on 5.1B tokens of security text, Apache
     # 2.0; prereg cribl_recipe_base_2026-10-15.json amendment 1): every layer's attention projections

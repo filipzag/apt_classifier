@@ -38,5 +38,16 @@
   ],
   "confirmation_runs": "the selected checkpoint once on CTI-HAL, Elastic and the vendor set; the TF-IDF baseline once on each; nothing chosen, refit or rerun because of a result",
   "adoption": "none: an experiment; the attribution stage is unchanged",
-  "informed_by": "the group-head and refit results, the free-text study; a laptop pilot (mechanics only). No actor head exists."
+  "informed_by": "the group-head and refit results, the free-text study; a laptop pilot (mechanics only). No actor head exists.",
+  "amendments": [
+    {
+      "number": 1,
+      "date": "2026-10-29",
+      "change": "adds T2: the same actor head on a second base, Gemma 4 E4B (google/gemma-4-E4B, the G1 base of cribl_recipe_base_2026-10-15.json, gemma prompt template), owner's request. Registered after T1's result was known (T1 0.255 vs TF-IDF 0.491 on CTI-HAL), so T2 is a separate question with the same bar, not a re-run of T1.",
+      "recipe": "identical to T1 except the base: fresh LoRA r 16, LoRA lr 1e-4, head lr 1e-3, 16 per step, 2 epochs, a checkpoint every half epoch, seed 7, cases_actor_train.jsonl (12,675 rows), selection on cases_actor_vendor_dev.jsonl by statement-level group top-1 (the earlier checkpoint on ties); runpod/remote_sweep.sh T2 with TRAIN_ARGS as for T1 and --base gemma-4-e4b; one RTX 4090 pod (24 GB; G1 peaked at 17 GB), estimated ~1 h, ~$1",
+      "success": "headline unchanged: CTI-HAL report-level group top-1, T2 minus the TF-IDF text-group model (the existing TFIDF_group_text_cti_hal.jsonl), paired 95% CI lower bound above 0. Secondary: T2 minus T1 on CTI-HAL (top-1, top-5, MRR, paired CI); Elastic and vendor against TF-IDF and T1, with counts.",
+      "confirmation_runs": "the selected T2 checkpoint once on CTI-HAL, Elastic and the vendor set, scored on the laptop (evaluate --top-kept 160, then group_text_eval.py aggregate); nothing chosen, refit or rerun because of a result",
+      "adoption": "none: an experiment"
+    }
+  ]
 }

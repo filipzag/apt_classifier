@@ -6038,6 +6038,35 @@ product (weight 0, docs 21.3.16). No adoption.
 
 **Cost.** One pod, about $0.45 (30 minutes at $0.89/h). Scoring on the laptop. No OpenRouter credit.
 
+**A second base: Gemma 4 E4B (T2, 2026-10-29, amendment 1 of the same prereg).** The owner asked
+whether a Gemma-based actor classifier does better. T2 is T1's recipe and data with only the base
+changed to Gemma 4 E4B (the G1 base of the recipe sweep), registered after T1's result. Training
+took 22 minutes on one RTX 4090 (10.8 GB peak). The dev curve stayed below T1's at every
+checkpoint (statement top-1 0.076 vs 0.134 at the end), and the last checkpoint was selected.
+
+| Group top-1 (top-3 / top-5), 153 groups | CTI-HAL (55, headline) | Elastic (8) | vendor (34, dev) |
+|---|---|---|---|
+| TF-IDF text-group model | **0.491** (0.618 / 0.691) | 0.125 (0.500 / 0.625) | **0.853** (0.882 / 0.912) |
+| T1, Qwen3.5-4B | 0.255 (0.436 / 0.491) | **0.375** (0.500 / 0.625) | 0.353 (0.441 / 0.500) |
+| T2, Gemma 4 E4B | 0.200 (0.291 / 0.345) | 0.250 (0.375 / 0.500) | 0.118 (0.176 / 0.353) |
+| T2 − TF-IDF, paired 95% CI | top-1 −0.291 [−0.418, −0.164]; MRR −0.294 [−0.411, −0.189] | +0.125 [−0.25, +0.50] | −0.735 [−0.882, −0.559] |
+| T2 − T1, paired 95% CI | top-1 −0.055 [−0.127, 0.000]; top-5 −0.145 [−0.255, −0.055]; MRR −0.083 [−0.132, −0.038] | −0.125 [−0.375, 0] | −0.235 [−0.382, −0.118] |
+
+- **Headline fails:** TF-IDF is 29 points ahead on CTI-HAL. Gemma is also below Qwen on every
+  set, significantly on CTI-HAL top-5/MRR and the vendor set. Per group on CTI-HAL (T2 / T1 /
+  TF-IDF right): Carbanak 0/0/2 of 10, FIN6 2/3/6 of 11, FIN7 2/2/8 of 18, OilRig 1/2/4 of 8,
+  Sandworm 3/4/4 of 5, Wizard Spider 3/3/3 of 3.
+- Statement-level top-1 7–14%, below T1's 11–13% on CTI-HAL and vendor.
+- Unlike the technique task (G1 tied E2), the second base does not catch up here. The actor
+  head stays an experiment and the TF-IDF model stays the text member.
+- A fix came out of this run: when `BaseSpec.loader` was added for Foundation-Sec-8B, Gemma's
+  CPU-table argument shifted into `loader`, so the `gemma-4-e4b` base had not loaded since
+  2026-10-15. It is now a keyword argument and pinned by a test.
+
+**Cost.** One pod, about $1.55 (1.7 h at $0.89/h; about 1 h went on setup, because PyPI downloads
+crawl from the EUR-IS-1 data center). Scoring on the laptop. No OpenRouter credit. Model
+`data/models/cribl_ft/T2/step_25350`, comparison `data/audits/cribl_ft/T2_actor_head_comparison.json`.
+
 **CTIBench and AthenaBench (2026-10-19, prereg `cribl_external_bench_2026-10-19.json`, evaluation
 only).** The owner asked for the public CTI benchmarks. Both are non-commercial (CTIBench CC BY-NC-SA
 4.0; AthenaBench's academic research licence): local evaluation, nothing trained on them, raw files

@@ -647,6 +647,8 @@ def test_lora_shape_and_base_registry():
         lora_shape(0)
     assert base_spec(DEFAULT_BASE).prompt_template == "qwen"
     assert base_spec("gemma-4-e4b").prompt_template == "gemma"
+    assert base_spec("gemma-4-e4b").loader == "image_text_to_text"
+    assert base_spec("gemma-4-e4b").cpu_modules == ("model.language_model.embed_tokens_per_layer",)
     assert {spec.repo for spec in BASES.values()} == {
         "Qwen/Qwen3.5-4B-Base",
         "google/gemma-4-E4B",
